@@ -18,6 +18,7 @@
     "rekey": "tsx src/scripts/rekey-cli.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-rekognition": "^3.1139.0",
     "@aws-sdk/client-s3": "^3.1139.0",
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^11.1.0",

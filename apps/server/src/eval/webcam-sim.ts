@@ -213,8 +213,19 @@ function gaussFactory(rnd: () => number): () => number {
   };
 }
 
+const GAUSS_BITS = 16;
+const GAUSS_MASK = (1 << GAUSS_BITS) - 1;
+let gaussTableCache: Float32Array | null = null;
+/** 65,536 standard-normal samples (fixed seed), indexed by a per-frame PRNG. */
+function gaussTable(): Float32Array {
+  if (gaussTableCache) return gaussTableCache;
+  const g = gaussFactory(mulberry32(0x5eed));
+  const t = new Float32Array(1 << GAUSS_BITS);
+  for (let i = 0; i < t.length; i++) t[i] = g();
+  return (gaussTableCache = t);
+}
+
 const lerp = (r: Range, t: number) => r[0] + (r[1] - r[0]) * t;
-const clamp255 = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v);
 
 /* ------------------------------------------------------------------------------------ source cache */
 
@@ -324,17 +335,22 @@ export async function simulateWebcamFrame(src: Buffer, face: SourceFace, opts: W
   const wallLin = Math.pow(p.wall[0] / 255, 2.2) * 1.4;
   const winX0 = p.windowX * W;
   const winX1 = winX0 + 0.55 * W;
+  const colSin = new Float32Array(W);
+  for (let x = 0; x < W; x++) colSin[x] = Math.sin((x / W) * 5.3 + p.wallTint[0] * 7);
+  const [tr, tg, tb] = p.wallTint;
+  const win = p.window;
+  const deskY = H * 0.82;
+  const winY = H * 0.75;
   for (let y = 0; y < H; y++) {
-    const vgrad = 0.8 + 0.4 * (1 - y / H);
-    for (let x = 0; x < W; x++) {
-      const o = (y * W + x) * 3;
-      let v = wallLin * vgrad * (0.9 + 0.2 * Math.sin((x / W) * 5.3 + p.wallTint[0] * 7) * Math.cos((y / H) * 3.1));
-      if (y > H * 0.82) v *= 0.45; // desk / lower frame
-      const isWin = p.window > 0 && x >= winX0 && x < winX1 && y < H * 0.75;
-      if (isWin) v = p.window;
-      lin[o] = v * p.wallTint[0];
-      lin[o + 1] = v * p.wallTint[1];
-      lin[o + 2] = v * p.wallTint[2];
+    const base = wallLin * (0.8 + 0.4 * (1 - y / H)) * (y > deskY ? 0.45 : 1);
+    const rowCos = 0.2 * Math.cos((y / H) * 3.1);
+    const rowWin = win > 0 && y < winY;
+    let o = y * W * 3;
+    for (let x = 0; x < W; x++, o += 3) {
+      const v = rowWin && x >= winX0 && x < winX1 ? win : base * (0.9 + colSin[x] * rowCos);
+      lin[o] = v * tr;
+      lin[o + 1] = v * tg;
+      lin[o + 2] = v * tb;
     }
   }
 
@@ -349,6 +365,7 @@ export async function simulateWebcamFrame(src: Buffer, face: SourceFace, opts: W
   const neckTop = 1.6 * ieD;
   const neckBottom = 3.6 * ieD;
   const feather = 0.35 * ieD;
+  const borderFade = Math.max(2, 0.12 * ieD);
   const toLin = new Float32Array(256);
   for (let i = 0; i < 256; i++) toLin[i] = Math.pow(i / 255, 2.2);
   for (let y = 0; y < H; y++) {
@@ -370,7 +387,7 @@ export async function simulateWebcamFrame(src: Buffer, face: SourceFace, opts: W
       }
       // Fade near the source image border.
       const edge = Math.min(sx, sy, sw - 1 - sx, sh - 1 - sy);
-      if (edge < 3) m *= edge / 3;
+      if (edge < borderFade) m *= edge / borderFade;
       if (m <= 0) continue;
       const x0 = Math.floor(sx);
       const y0 = Math.floor(sy);
@@ -429,17 +446,27 @@ export async function simulateWebcamFrame(src: Buffer, face: SourceFace, opts: W
   const kExp = Math.pow(target / 255, 1 / gammaEnc) / Math.max(1e-6, faceLin);
 
   // Encode (tone curve + colour gains), flare lift and contrast loss about the face mean.
-  const enc = new Float32Array(W * H * 3);
-  const gains = [p.red, 1, p.blue];
+  const enc = new Uint8ClampedArray(W * H * 3);
   const mf = p.faceLuma;
-  for (let i = 0, n = W * H * 3; i < n; i++) {
-    const v = 255 * Math.pow(Math.min(1, lin[i] * kExp * gains[i % 3]), gammaEnc);
-    const lifted = p.lift + v * ((255 - p.lift) / 255);
-    enc[i] = mf + (lifted - mf) * p.contrast;
+  const LUT_N = 16384;
+  const tone = new Float32Array(LUT_N + 1);
+  const liftScale = (255 - p.lift) / 255;
+  for (let i = 0; i <= LUT_N; i++) tone[i] = mf + (p.lift + 255 * Math.pow(i / LUT_N, gammaEnc) * liftScale - mf) * p.contrast;
+  const top = tone[LUT_N];
+  const kr = kExp * p.red * LUT_N;
+  const kg = kExp * LUT_N;
+  const kb = kExp * p.blue * LUT_N;
+  for (let i = 0, n = W * H * 3; i < n; i += 3) {
+    const r = lin[i] * kr;
+    const g = lin[i + 1] * kg;
+    const b = lin[i + 2] * kb;
+    enc[i] = r >= LUT_N ? top : tone[r | 0];
+    enc[i + 1] = g >= LUT_N ? top : tone[g | 0];
+    enc[i + 2] = b >= LUT_N ? top : tone[b | 0];
   }
 
   // Optics blur + motion blur (sharp), then noise, then NR.
-  let img = sharp(Buffer.from(Uint8ClampedArray.from(enc).buffer), { raw: { width: W, height: H, channels: 3 } });
+  let img = sharp(Buffer.from(enc.buffer, enc.byteOffset, enc.byteLength), { raw: { width: W, height: H, channels: 3 } });
   if (p.blur >= 0.3) img = img.blur(p.blur);
   let blurred = await img.raw().toBuffer();
   if (p.motion >= 1) {
@@ -469,7 +496,12 @@ export async function simulateWebcamFrame(src: Buffer, face: SourceFace, opts: W
     chromaR[i] = fgauss() * p.chromaNoise;
     chromaB[i] = fgauss() * p.chromaNoise;
   }
-  const noisy = Buffer.alloc(W * H * 3);
+  const noisy = new Uint8ClampedArray(W * H * 3);
+  const normals = gaussTable();
+  let st = (frame() * 4294967296) >>> 0 || 1;
+  const ln = p.lumaNoise;
+  const rowR = new Float32Array(W);
+  const rowB = new Float32Array(W);
   for (let y = 0; y < H; y++) {
     const cy = y / 4;
     const cy0 = Math.floor(cy);
@@ -479,19 +511,25 @@ export async function simulateWebcamFrame(src: Buffer, face: SourceFace, opts: W
       const cx0 = Math.floor(cx);
       const fx = cx - cx0;
       const ci = cy0 * cw + cx0;
-      const cR = (1 - fy) * ((1 - fx) * chromaR[ci] + fx * chromaR[ci + 1]) + fy * ((1 - fx) * chromaR[ci + cw] + fx * chromaR[ci + cw + 1]);
-      const cB = (1 - fy) * ((1 - fx) * chromaB[ci] + fx * chromaB[ci + 1]) + fy * ((1 - fx) * chromaB[ci + cw] + fx * chromaB[ci + cw + 1]);
-      const o = (y * W + x) * 3;
-      // Shot noise grows with signal in linear light but the tone curve compresses highlights: roughly flat
-      // in 8-bit, slightly lower in clipped highlights.
-      const lum = blurred[o + 1];
-      const nl = fgauss() * p.lumaNoise * (lum > 240 ? 0.3 : 1);
-      noisy[o] = clamp255(Math.round(blurred[o] + nl + cR));
-      noisy[o + 1] = clamp255(Math.round(blurred[o + 1] + nl - 0.3 * (cR + cB)));
-      noisy[o + 2] = clamp255(Math.round(blurred[o + 2] + nl + cB));
+      rowR[x] = (1 - fy) * ((1 - fx) * chromaR[ci] + fx * chromaR[ci + 1]) + fy * ((1 - fx) * chromaR[ci + cw] + fx * chromaR[ci + cw + 1]);
+      rowB[x] = (1 - fy) * ((1 - fx) * chromaB[ci] + fx * chromaB[ci + 1]) + fy * ((1 - fx) * chromaB[ci + cw] + fx * chromaB[ci + cw + 1]);
+    }
+    let o = y * W * 3;
+    for (let x = 0; x < W; x++, o += 3) {
+      // xorshift32 index into a table of standard normals (deterministic, fast).
+      st ^= st << 13;
+      st ^= st >>> 17;
+      st ^= st << 5;
+      // Roughly flat noise in 8-bit (shot noise vs tone-curve compression), lower in clipped highlights.
+      const nl = normals[(st >>> 0) & GAUSS_MASK] * ln * (blurred[o + 1] > 240 ? 0.3 : 1);
+      const cR = rowR[x];
+      const cB = rowB[x];
+      noisy[o] = blurred[o] + nl + cR;
+      noisy[o + 1] = blurred[o + 1] + nl - 0.3 * (cR + cB);
+      noisy[o + 2] = blurred[o + 2] + nl + cB;
     }
   }
-  let out = sharp(noisy, { raw: { width: W, height: H, channels: 3 } });
+  let out = sharp(Buffer.from(noisy.buffer, noisy.byteOffset, noisy.byteLength), { raw: { width: W, height: H, channels: 3 } });
   if (p.nr >= 0.3) out = out.blur(p.nr);
   const jpeg = await out.jpeg({ quality: p.jpeg, chromaSubsampling: '4:2:0' }).toBuffer();
   return {
