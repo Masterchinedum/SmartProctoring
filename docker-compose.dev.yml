@@ -1,0 +1,38 @@
+# Local development services: Postgres + Redis for `pnpm dev`, `pnpm test` and `pnpm test:e2e`.
+#   docker compose -f docker-compose.dev.yml up -d --wait     (or: pnpm services:up)
+#   source scripts/dev-env.sh                                 (once per terminal: points app + tests here)
+# Host ports default to 5434 / 6380 so they don't clash with a native Postgres (5432) or another Redis (6379).
+# Override with SP_DEV_PG_PORT / SP_DEV_REDIS_PORT, exported before both commands.
+# Reset everything: docker compose -f docker-compose.dev.yml down -v
+name: smartproctoring-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: proctor
+      # Passwordless like the test suites expect (postgres@127.0.0.1). Development only; bound to localhost.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:${SP_DEV_PG_PORT:-5434}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d proctor"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:${SP_DEV_REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:

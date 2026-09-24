@@ -124,6 +124,18 @@ Prefer your own database role? Skip `createuser` and run with
 Camera access works on `http://localhost` in Chrome, Edge, Firefox and Safari (allow the camera
 prompt; on macOS also allow the browser under System Settings → Privacy & Security → Camera).
 
+### Postgres and Redis in Docker (instead of a native Postgres)
+
+```bash
+pnpm services:up                  # docker-compose.dev.yml: Postgres 16 on 127.0.0.1:5434, Redis 7 on :6380
+source scripts/dev-env.sh         # once per terminal: DATABASE_URL, TEST_DATABASE_ADMIN_URL, E2E_DATABASE_URL, TEST_REDIS_URL
+pnpm --filter @sp/server seed && pnpm dev
+pnpm test                         # server tests use the same Postgres; the Redis tests use :6380
+```
+The side ports avoid a native Postgres on 5432 or another project's Redis on 6379; change them with
+`SP_DEV_PG_PORT` / `SP_DEV_REDIS_PORT` (export before both commands). `pnpm services:down` stops the
+containers; `docker compose -f docker-compose.dev.yml down -v` also deletes the data.
+
 ## Production
 
 `docker compose up -d --build` (see [docs/OPERATIONS.md](docs/OPERATIONS.md)) — single container

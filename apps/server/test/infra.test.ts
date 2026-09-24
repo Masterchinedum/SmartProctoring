@@ -17,6 +17,8 @@ import { isAnswerCorrect } from '../src/services/grading.js';
 import { FakeVisionService } from '../src/vision/fake.js';
 import { createTestEnv, type TestEnv } from './helpers.js';
 
+const REDIS_URL = process.env.TEST_REDIS_URL ?? 'redis://127.0.0.1:6379';
+
 describe('crypto', () => {
   it('AES-GCM keyring: round trip, AAD binding, tamper detection, key rotation', () => {
     const k1 = randomBytes(32);
@@ -129,8 +131,8 @@ describe('realtime bus', () => {
     let a: RedisBus;
     let b: RedisBus;
     try {
-      a = await Promise.race([RedisBus.connect('redis://127.0.0.1:6379'), new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))]);
-      b = await RedisBus.connect('redis://127.0.0.1:6379');
+      a = await Promise.race([RedisBus.connect(REDIS_URL), new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))]);
+      b = await RedisBus.connect(REDIS_URL);
     } catch {
       console.warn('Redis not reachable; skipping RedisBus test');
       return;

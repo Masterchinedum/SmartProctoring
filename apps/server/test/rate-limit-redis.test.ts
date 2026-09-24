@@ -1,6 +1,6 @@
 /**
  * Security review #11: with REDIS_URL the rate-limit counters are shared by every server instance (Redis store),
- * instead of each process counting on its own. Needs the local Redis at 127.0.0.1:6379 (skipped otherwise).
+ * instead of each process counting on its own. Needs a Redis at TEST_REDIS_URL (default 127.0.0.1:6379; skipped otherwise).
  */
 import { randomBytes } from 'node:crypto';
 import { Redis } from 'ioredis';
