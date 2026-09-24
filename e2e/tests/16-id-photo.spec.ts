@@ -128,7 +128,7 @@ test('advisory: same person matches, a different person is flagged against the I
     await sp.getByRole('link', { name: 'Compare images' }).first().click();
     await expect(sp).toHaveURL(new RegExp(`/compare/${mm!.id}`));
     await expect(sp.getByRole('heading', { name: /Identity comparison — Possible different person/ })).toBeVisible();
-    const refSection = sp.locator('section', { has: sp.getByRole('heading', { name: 'Original reference' }) });
+    const refSection = sp.locator('section', { has: sp.getByRole('heading', { name: 'Approved ID photo' }) });
     const laterSection = sp.locator('section', { has: sp.getByRole('heading', { name: 'Later images' }) });
     await expect(refSection).toContainText('approved ID photo');
     for (const img of [refSection.locator('img').first(), laterSection.locator('img').first()]) {
@@ -186,7 +186,7 @@ test('required: same person proceeds, a different person is held (id_photo_misma
     await sp.goto(`/admin/sessions/${other.sessionId}`);
     await expect(sp.getByText('Live image may not match the approved ID photo').first()).toBeVisible();
     await sp.goto(`/admin/sessions/${other.sessionId}/compare/${mm.id}`);
-    const refSection = sp.locator('section', { has: sp.getByRole('heading', { name: 'Original reference' }) });
+    const refSection = sp.locator('section', { has: sp.getByRole('heading', { name: 'Approved ID photo' }) });
     await expect(refSection).toContainText('approved ID photo');
     await expect.poll(() => refSection.locator('img').first().evaluate((i: HTMLImageElement) => i.complete && i.naturalWidth)).toBeGreaterThan(0);
     await b.c.close();

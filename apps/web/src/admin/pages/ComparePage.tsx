@@ -110,12 +110,14 @@ function ReviewerGuidance({ type }: { type: string }) {
 
 function ReferenceColumn({ c }: { c: IdentityComparisonDTO }) {
   const [open, setOpen] = useState<number | null>(null);
-  const items: LightboxItem[] = c.reference.images.map((img) => ({ evidence: img, caption: `Reference (${c.reference.purpose}) — captured ${formatDateTime(img.capturedAt)}` }));
+  const isIdPhoto = c.reference.purpose.startsWith('approved ID photo');
+  const label = isIdPhoto ? 'Approved ID photo' : 'Identity reference';
+  const items: LightboxItem[] = c.reference.images.map((img) => ({ evidence: img, caption: `${label} (${c.reference.purpose}) — captured ${formatDateTime(img.capturedAt)}` }));
   return (
     <section className="card compare-col">
-      <h2>Original reference</h2>
+      <h2>{isIdPhoto ? 'Approved ID photo' : 'Original reference'}</h2>
       <div className="small muted">
-        Established {formatDateTime(c.reference.createdAt)} · {c.reference.purpose}
+        {isIdPhoto ? 'Photo on file' : 'Established'} {formatDateTime(c.reference.createdAt)} · {c.reference.purpose}
       </div>
       {c.reference.images.length === 0 ? (
         <div className="muted">No reference images available.</div>
