@@ -167,3 +167,17 @@ describe('settings validation', () => {
     expect(validateSettingsDraft({ ...ok, name: ' ' }).name).toBe('Required');
   });
 });
+
+describe('offline evaluation helpers', async () => {
+  const { reportKindLabel, offlineEntries, isIdentityReport } = await import('../pages/OfflineEvaluation');
+  it('labels report kinds and normalises stored values', () => {
+    expect(reportKindLabel('apps/server/src/eval/identity-eval.ts')).toBe('Identity verification accuracy');
+    expect(reportKindLabel('detection-eval')).toBe('Behaviour detector accuracy');
+    expect(reportKindLabel('custom_report')).toBe('Custom report');
+    expect(offlineEntries(null)).toEqual([]);
+    expect(offlineEntries({ reports: [{ kind: 'x', report: { a: 1 } }] })).toHaveLength(1);
+    expect(offlineEntries({ a: 1 })).toEqual([{ report: { a: 1 } }]);
+    expect(isIdentityReport({ groups: [{ group: 'all', genuine: {}, impostor: {} }] })).toBe(true);
+    expect(isIdentityReport({ groups: [] })).toBe(false);
+  });
+});

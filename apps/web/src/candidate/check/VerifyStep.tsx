@@ -17,9 +17,28 @@ import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrame
  */
 
 export const FRAMES_PER_STEP = 2;
-/** Client-side "frontal" gate, a margin inside the server's quality gate (|yaw| ≤ 25°, −35° ≤ pitch ≤ 25°). */
+/**
+ * Client-side "frontal" gate. Relative to the candidate's calibrated centre pose when known (the
+ * browser's mesh-based pitch reads differently from the server's detector, so absolute pitch is only
+ * a loose sanity bound); the server's quality gate (|yaw| ≤ 25°) is authoritative.
+ */
 const FRONTAL_MAX_YAW = 18;
-const FRONTAL_PITCH_RANGE = [-28, 18] as const;
+const FRONTAL_REL_DEG = 15;
+const FRONTAL_PITCH_RANGE_ABS = [-42, 14] as const;
+
+type Pose = { yaw: number; pitch: number };
+
+export function isFrontal(face: Pose, centre: Pose | null): boolean {
+  if (Math.abs(face.yaw) > 25) return false;
+  if (centre) return Math.abs(face.yaw - centre.yaw) <= FRONTAL_REL_DEG && Math.abs(face.pitch - centre.pitch) <= FRONTAL_REL_DEG;
+  return Math.abs(face.yaw) <= FRONTAL_MAX_YAW && face.pitch >= FRONTAL_PITCH_RANGE_ABS[0] && face.pitch <= FRONTAL_PITCH_RANGE_ABS[1];
+}
+
+function median(v: number[]): number {
+  const a = [...v].sort((x, y) => x - y);
+  const m = a.length >> 1;
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
 const MIN_CAPTURE_SPACING_MS = 350;
 const JPEG_QUALITY = 0.85;
 
@@ -81,6 +100,9 @@ export function VerifyStep({
     tracker: null as ReturnType<typeof createLivenessTracker> | null,
     completing: false,
     cancelled: false,
+    /** The candidate's own straight-ahead pose (calibration baseline, else accepted frontal frames). */
+    centre: null as Pose | null,
+    frontalPoses: [] as Pose[],
   });
 
   const setPhaseBoth = (p: Phase) => {
@@ -114,6 +136,9 @@ export function VerifyStep({
       r.perStep = new Map();
       r.tracker = null;
       r.completing = false;
+      const b = ctrl.currentBaseline();
+      r.centre = b && b.samples > 0 ? { yaw: b.yaw, pitch: b.pitch } : null;
+      r.frontalPoses = [];
       setFrontalCount(0);
       setStepsDone(0);
       setStepView(null);
@@ -272,7 +297,7 @@ export function VerifyStep({
           setGuidance([faces.length > 1 ? 'Make sure only you are in view of the camera.' : 'We can’t see your face. Sit in front of the camera.']);
           return;
         }
-        if (Math.abs(face.yaw) > FRONTAL_MAX_YAW || face.pitch < FRONTAL_PITCH_RANGE[0] || face.pitch > FRONTAL_PITCH_RANGE[1]) {
+        if (!isFrontal(face, r.centre)) {
           setGuidance(['Look straight at the screen.']);
           return;
         }
@@ -281,6 +306,7 @@ export function VerifyStep({
           upload('frontal', face, ctrl.api, (res) => {
             if (res.accepted) {
               r.frontalAccepted++;
+              r.frontalPoses.push({ yaw: face.yaw, pitch: face.pitch });
               setFrontalCount(r.frontalAccepted);
               setGuidance([]);
               if (r.frontalAccepted >= c.frontalFramesRequired) {
@@ -299,7 +325,10 @@ export function VerifyStep({
       }
 
       if (r.phase === 'liveness' && r.tracker) {
-        const prog = r.tracker.update(face, faces.length, a.t);
+        if (!r.centre && r.frontalPoses.length) r.centre = { yaw: median(r.frontalPoses.map((p) => p.yaw)), pitch: median(r.frontalPoses.map((p) => p.pitch)) };
+        // Guide relative to the candidate's own straight-ahead pose (camera placement and estimator bias cancel out).
+        const rel = face && r.centre ? { ...face, yaw: face.yaw - r.centre.yaw, pitch: face.pitch - r.centre.pitch } : face;
+        const prog = r.tracker.update(rel, faces.length, a.t);
         const steps: LivenessStep[] = c.liveness?.steps ?? [];
         const step = steps.find((s) => s.index === prog.stepIndex) ?? steps[Math.min(steps.length - 1, Math.max(0, prog.stepIndex))];
         setStepView({ index: prog.stepIndex, action: String(prog.action ?? step?.action ?? 'center'), message: prog.message || step?.instruction || '', progress: prog.progress ?? 0, problem: prog.problem ?? null });

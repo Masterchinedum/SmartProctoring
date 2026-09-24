@@ -9,7 +9,9 @@ import { plausibleFaces } from '../engine/context';
  *  - only frames with the camera live, a frame available and exactly ONE plausible, uncut, visible face;
  *  - frames while the candidate moves a lot are rejected (pose differs from the recent running median by
  *    more than maxSpreadDeg, or the face centre jumped);
- *  - extreme poses (|yaw| > 35°, |pitch| > 30°) are rejected — the candidate is not looking at the screen.
+ *  - only a generous absolute sanity window is applied (|yaw| ≤ 40°, |pitch| ≤ 45°): absolute landmark
+ *    pose carries per-person / per-camera offsets (a laptop camera below the eyes reads a pitch of
+ *    −20° or more for a candidate looking at the screen), so acceptance relies on stability and spread.
  * result() = medians of yaw / pitch / centre / width / frame luma and a bitwise-majority dHash.
  * ready() once minSamples frames are accepted and their spread (MAD) is within maxSpreadDeg / 2.
  */
@@ -36,6 +38,9 @@ interface Sample {
 /** Keep the most recent accepted samples (bounded memory for long calibrations). */
 const MAX_SAMPLES = 60;
 const RECENT = 5;
+/** Absolute sanity window (deg); see the header comment. */
+const MAX_ABS_YAW = 40;
+const MAX_ABS_PITCH = 45;
 
 export function createBaselineCalibrator(opts?: { minSamples?: number; maxSpreadDeg?: number }): BaselineCalibrator {
   const minSamples = Math.max(1, Math.floor(opts?.minSamples ?? 10));
@@ -46,7 +51,7 @@ export function createBaselineCalibrator(opts?: { minSamples?: number; maxSpread
   function accept(face: FaceObservation): boolean {
     if (face.cutOff) return false;
     if (Number.isFinite(face.visibility) && face.visibility < 0.6) return false;
-    if (Math.abs(face.yaw) > 35 || Math.abs(face.pitch) > 30) return false;
+    if (Math.abs(face.yaw) > MAX_ABS_YAW || Math.abs(face.pitch) > MAX_ABS_PITCH) return false;
     return true;
   }
 

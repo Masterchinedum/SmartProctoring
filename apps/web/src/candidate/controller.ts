@@ -351,7 +351,8 @@ export class CandidateController {
     if (sid && baseline) lsSet(BASELINE_KEY(sid), baseline);
   }
 
-  private currentBaseline(): Baseline | null {
+  /** Baseline of the current period (latest calibration, else the one stored for this session). */
+  currentBaseline(): Baseline | null {
     if (this.baseline) return this.baseline;
     const sid = this.snap.state?.session.id;
     return sid ? lsGet<Baseline>(BASELINE_KEY(sid)) : null;

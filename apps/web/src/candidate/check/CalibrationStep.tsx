@@ -22,20 +22,34 @@ export function CalibrationStep({ onDone }: { onDone: (b: Baseline | null) => vo
   const [progress, setProgress] = useState(0);
   const [hint, setHint] = useState<string | null>(null);
 
+  // The calibrator rejects extreme absolute poses; centre its input on the candidate's median pose so
+  // that filter is relative (camera placement / estimator bias), and shift the result back.
+  const recentPitch = useRef<number[]>([]);
+  const shift = useRef<number | null>(null);
+
   const vs = useFrameAnalysis(!done.current, (a) => {
     if (done.current) return;
-    cal.current.add(a.obs);
+    const single = plausibleFaces(a.faces);
+    if (single.length === 1 && shift.current === null) {
+      recentPitch.current.push(single[0].pitch);
+      if (recentPitch.current.length >= 5) {
+        const sorted = [...recentPitch.current].sort((x, y) => x - y);
+        shift.current = Math.max(-30, Math.min(30, sorted[sorted.length >> 1]));
+      }
+      return;
+    }
+    const s = shift.current ?? 0;
+    cal.current.add(s ? { ...a.obs, faces: a.obs.faces.map((f) => ({ ...f, pitch: f.pitch - s })) } : a.obs);
     const n = plausibleFaces(a.faces).length;
     setHint(n === 0 ? 'We can’t see your face — sit in front of the camera.' : n > 1 ? 'Make sure only you are in view of the camera.' : null);
     const elapsed = performance.now() - started.current;
     setProgress(Math.min(cal.current.progress(), elapsed / MIN_MS));
-    if (cal.current.ready() && elapsed >= MIN_MS) {
+    const finish = () => {
       done.current = true;
-      onDone(cal.current.result());
-    } else if (elapsed > GIVE_UP_MS) {
-      done.current = true;
-      onDone(cal.current.result());
-    }
+      const r = cal.current.result();
+      onDone(r ? { ...r, pitch: Math.round((r.pitch + s) * 100) / 100 } : null);
+    };
+    if ((cal.current.ready() && elapsed >= MIN_MS) || elapsed > GIVE_UP_MS) finish();
   });
 
   // Without camera analysis there is nothing to calibrate.

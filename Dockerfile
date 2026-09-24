@@ -15,7 +15,9 @@ COPY packages ./packages
 COPY apps ./apps
 RUN pnpm --filter @sp/web build \
  && pnpm --filter @sp/server build \
- && pnpm --filter @sp/server deploy --prod --legacy /out
+ && pnpm --filter @sp/server deploy --prod --legacy /out \
+ && rm -rf /out/node_modules/.pnpm/onnxruntime-node@*/node_modules/onnxruntime-node/bin/napi-v*/darwin \
+           /out/node_modules/.pnpm/onnxruntime-node@*/node_modules/onnxruntime-node/bin/napi-v*/win32
 
 # ---------- runtime ----------
 FROM node:22-bookworm-slim AS runtime

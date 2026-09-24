@@ -156,7 +156,7 @@ export interface CandidateSessionState {
   };
   candidate: { id: string; name: string; hasIdPhoto: boolean };
   consent: { accepted: boolean; acceptedAt: number | null; notice: PrivacyNoticeDTO };
-  /** Only present when status is active/paused/on_hold AND this instance is verified (or status is submitted, for review). */
+  /** Only present while the exam is active on the verified browser instance, or after submission. Never served while paused/on hold (unmonitored). */
   questions: CandidateQuestionDTO[] | null;
   answers: CandidateAnswerDTO[] | null;
 }

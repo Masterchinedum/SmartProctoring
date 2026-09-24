@@ -7,9 +7,11 @@ import { clamp01 } from '../util/math';
  * tells the host when the pose is right to capture a frame for the current step.
  *
  * Poses are measured RELATIVE TO THE CANDIDATE'S CENTRE pose (so a camera mounted to the side works):
- *  - if the challenge starts with a 'center' step, the centre is taken from the frames captured for it;
- *  - otherwise the centre is established implicitly before the first action, from a steady (±2.5°) pose
- *    held for holdMs within ±25° of frontal ("Look straight at the screen").
+ *  - a 'center' step is satisfied by a steady pose (spread ≤ 5° over holdMs) inside a generous absolute
+ *    window (|yaw| ≤ 25°, |pitch| ≤ 35°); the frames captured for it define the centre;
+ *  - without a 'center' step the centre is established implicitly before the first action the same way
+ *    ("Look straight at the screen").
+ *  - once a centre is known, a later 'center' step must return within ±8° of it.
  * For an action step the offset toward the requested direction (turn_left: yaw − centre, yaw+ =
  * subject-left per POSE_CONVENTION; turn_right: centre − yaw; look_up: pitch − centre; look_down:
  * centre − pitch) must reach the target and be held for holdMs (with the other axis roughly level) →
@@ -34,12 +36,17 @@ export interface LivenessTracker {
   reset(): void;
 }
 
-/** Tolerance of the implicit centre: pose spread over the hold window. */
+/** Centre pose: steady (max − min over the hold window) within this many degrees … */
 const CENTRE_STEADY_DEG = 5;
-const CENTRE_MAX_DEG = 25;
-/** 'center' step target tolerance (deg) relative to the known centre / to frontal when unknown. */
+/**
+ * … and inside a generous ABSOLUTE sanity window. Absolute pose from landmarks carries a per-person /
+ * per-camera offset (camera above or beside the screen, face shape), so the centre is never required to
+ * be (0, 0); the server verifies each step relative to the frontal frames anyway.
+ */
+const CENTRE_MAX_YAW = 25;
+const CENTRE_MAX_PITCH = 35;
+/** A later 'center' step (centre already known) must come back within this many degrees of it. */
 const CENTER_TOL_KNOWN = 8;
-const CENTER_TOL_UNKNOWN = 15;
 
 export function createLivenessTracker(opts: {
   steps: LivenessStep[];
@@ -107,30 +114,30 @@ export function createLivenessTracker(opts: {
     lastPose = { yaw, pitch };
 
     if (s.action === 'center') {
-      const ref = centre ?? { yaw: 0, pitch: 0 };
-      const tol = centre ? CENTER_TOL_KNOWN : CENTER_TOL_UNKNOWN;
-      const dev = Math.max(Math.abs(yaw - ref.yaw), Math.abs(pitch - ref.pitch));
-      const ok = dev <= tol;
-      const progress = ok ? 1 : clamp01(1 - (dev - tol) / (2 * tol));
-      return (last = hold(ok, t, progress, s, ok ? '' : instruction(s)));
+      if (centre) {
+        const dev = Math.max(Math.abs(yaw - centre.yaw), Math.abs(pitch - centre.pitch));
+        const ok = dev <= CENTER_TOL_KNOWN;
+        const progress = ok ? 1 : clamp01(1 - (dev - CENTER_TOL_KNOWN) / (2 * CENTER_TOL_KNOWN));
+        return (last = hold(ok, t, progress, s, ok ? '' : instruction(s)));
+      }
+      // No centre yet: any steady pose inside the absolute sanity window.
+      const st = steadiness(t, yaw, pitch);
+      const plausible = Math.abs(yaw) <= CENTRE_MAX_YAW && Math.abs(pitch) <= CENTRE_MAX_PITCH;
+      const ok = plausible && st.steady;
+      const progress = ok ? 1 : plausible ? clamp01(st.spanMs / Math.max(1, holdMs)) * 0.99 : 0;
+      return (last = hold(ok, t, progress, s, plausible ? `${instruction(s)} and hold still` : instruction(s)));
     }
 
     // Implicit centre before the first action step.
     if (!centre) {
-      buf.push({ t, yaw, pitch });
-      while (buf.length > 0 && buf[0].t < t - holdMs) buf.shift();
-      const ys = buf.map((b) => b.yaw);
-      const ps = buf.map((b) => b.pitch);
-      const steady = Math.max(...ys) - Math.min(...ys) <= CENTRE_STEADY_DEG && Math.max(...ps) - Math.min(...ps) <= CENTRE_STEADY_DEG;
-      const plausible = Math.abs(yaw) <= CENTRE_MAX_DEG && Math.abs(pitch) <= CENTRE_MAX_DEG;
-      const spanMs = buf.length ? t - buf[0].t : 0;
-      if (steady && plausible && spanMs >= holdMs * 0.9 && buf.length >= 2) {
-        centre = { yaw: ys.reduce((a, b) => a + b, 0) / ys.length, pitch: ps.reduce((a, b) => a + b, 0) / ps.length };
+      const st = steadiness(t, yaw, pitch);
+      const plausible = Math.abs(yaw) <= CENTRE_MAX_YAW && Math.abs(pitch) <= CENTRE_MAX_PITCH;
+      if (plausible && st.steady && st.spanMs >= holdMs * 0.9 && buf.length >= 2) {
+        centre = st.mean;
         buf = [];
         holdStart = null;
       } else {
-        if (!steady || !plausible) buf = plausible ? buf.slice(-1) : [];
-        const progress = plausible ? clamp01(spanMs / Math.max(1, holdMs)) * 0.99 : 0;
+        const progress = plausible ? clamp01(st.spanMs / Math.max(1, holdMs)) * 0.99 : 0;
         return (last = { stepIndex: stepNo(idx), action: 'center', message: `${LIVENESS_INSTRUCTIONS.center} and hold still`, progress, readyToCapture: false, done: false, problem: null });
       }
     }
@@ -148,6 +155,22 @@ export function createLivenessTracker(opts: {
     else if (!ok && progress >= 0.6) hint = `${instruction(s)} — a little further`;
     else if (!ok && off < -target * 0.5) hint = `${instruction(s)} — the other way`;
     return (last = hold(ok, t, progress, s, hint));
+  }
+
+  /** Track the recent pose window; steady when the spread over ≥ holdMs stays within CENTRE_STEADY_DEG. */
+  function steadiness(t: number, yaw: number, pitch: number): { steady: boolean; spanMs: number; mean: { yaw: number; pitch: number } } {
+    buf.push({ t, yaw, pitch });
+    while (buf.length > 0 && buf[0].t < t - holdMs) buf.shift();
+    const ys = buf.map((b) => b.yaw);
+    const ps = buf.map((b) => b.pitch);
+    let steady = Math.max(...ys) - Math.min(...ys) <= CENTRE_STEADY_DEG && Math.max(...ps) - Math.min(...ps) <= CENTRE_STEADY_DEG;
+    if (!steady) {
+      buf = buf.slice(-1);
+      steady = true;
+    }
+    const spanMs = buf.length ? t - buf[0].t : 0;
+    const mean = { yaw: buf.reduce((a, b) => a + b.yaw, 0) / buf.length, pitch: buf.reduce((a, b) => a + b.pitch, 0) / buf.length };
+    return { steady: steady && spanMs >= holdMs * 0.9 && buf.length >= 2, spanMs, mean };
   }
 
   function hold(ok: boolean, t: number, progress: number, s: LivenessStep, hint: string): LivenessProgress {

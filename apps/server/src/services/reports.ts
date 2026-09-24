@@ -26,6 +26,7 @@ import {
   type PeriodKind,
   type ProctoringPolicy,
   type SessionReportDTO,
+  type TimelineItemDTO,
 } from '@sp/shared';
 import { and, asc, eq } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
@@ -257,12 +258,12 @@ interface IdentitySummaryInput {
   checks: IdentityCheckDTO[];
   events: EventDTO[];
   idPhoto: { decision: string; similarity: number | null } | null;
-  items: import('@sp/shared').TimelineItemDTO[];
+  items: TimelineItemDTO[];
   endAt: number;
 }
 
 /** What happened just before `at` that makes a swap more plausible (factual phrase, or null). */
-export function precedingContext(items: import('@sp/shared').TimelineItemDTO[], at: number, clock: Clock, windowMs = 15 * 60_000): string | null {
+export function precedingContext(items: TimelineItemDTO[], at: number, clock: Clock, windowMs = 15 * 60_000): string | null {
   let best: { at: number; phrase: string } | null = null;
   const consider = (t: number | null | undefined, phrase: string) => {
     if (t == null || t > at + 1000 || t < at - windowMs) return;
@@ -354,10 +355,15 @@ interface ObservationInput {
   notableTruncated: number;
 }
 
+/** Confidence is meaningful for camera/identity analysis, not for browser signals or technical states. */
+function showsConfidence(e: EventDTO): boolean {
+  return (e.source === 'client_vision' || e.source === 'server_identity') && (e.category === 'integrity' || e.category === 'uncertain');
+}
+
 function describeEvent(e: EventDTO, clock: Clock, endAt: number): string {
   const title = EVENT_CATALOG[e.type]?.title ?? e.title;
   const dur = eventDuration(e, endAt);
-  const conf = pct(e.confidence);
+  const conf = showsConfidence(e) ? pct(e.confidence) : null;
   const span = EVENT_CATALOG[e.type]?.span !== false && dur > 0;
   const ongoing = e.status === 'open' ? ' (still ongoing)' : '';
   return `${title} at ${clock.time(e.startedAt)}${span ? ` for ${formatDuration(dur)}${ongoing}` : ''}${conf ? ` (confidence ${conf})` : ''}.`;
@@ -529,7 +535,7 @@ function behaviourLines(evs: EventDTO[], clock: Clock, endAt: number): string[] 
     const title = EVENT_CATALOG[g.type]?.title ?? g.list[0].title;
     const longest = [...g.list].sort((a, b) => eventDuration(b, endAt) - eventDuration(a, endAt))[0];
     const span = EVENT_CATALOG[g.type]?.span !== false && g.total > 0;
-    const conf = g.list.map((e) => e.confidence).filter((c): c is number => c != null);
+    const conf = g.list.filter(showsConfidence).map((e) => e.confidence).filter((c): c is number => c != null);
     const confText = conf.length ? `, confidence up to ${pct(Math.max(...conf))}` : '';
     lines.push(
       span

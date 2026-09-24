@@ -35,7 +35,15 @@ const RIGHT_EYE_OUTER = 33;
 const RIGHT_EYE_INNER = 133;
 const LEFT_EYE_INNER = 362;
 const LEFT_EYE_OUTER = 263;
-const NOSE_TIP = 1;
+/**
+ * Nose point: landmark 4 (pronasale — the most anterior point of the nose on the canonical mesh), which is
+ * what 5-point face annotations, and therefore YuNet on the server, call the "nose tip". Landmark 1 sits
+ * ≈ 0.7 cm lower on the canonical mesh (y −1.13 vs −0.46, eye-to-mouth span 6.96); with it the shared
+ * five-point formula reads pitch ≈ 20° lower than the server on the same frame (real-browser e2e:
+ * frontal frames −27…−28° via landmark 1 vs −5…−9° from YuNet). With landmark 4 client and server
+ * measure the same anatomical points, so client guidance and server liveness verification agree.
+ */
+const NOSE_TIP = 4;
 const MOUTH_RIGHT = 61; // subject's right mouth corner
 const MOUTH_LEFT = 291;
 
@@ -52,8 +60,9 @@ function mid(a: MpLandmark, b: MpLandmark): Pt {
 
 /**
  * Five points [subject-right eye, subject-left eye, nose tip, subject-right mouth corner,
- * subject-left mouth corner] in normalized image coordinates. Iris centres 468/473 are used when the
- * mesh has iris refinement (478 points); otherwise eye-corner midpoints 33/133 and 362/263.
+ * subject-left mouth corner] in normalized image coordinates — the same anatomical points YuNet
+ * returns. Eyes: iris centres 468/473 when the mesh has iris refinement (478 points), otherwise
+ * eye-corner midpoints 33/133 and 362/263. Nose: landmark 4 (pronasale, see NOSE_TIP). Mouth: 61/291.
  */
 export function fivePointsFromMesh(landmarks: MpLandmark[]): Pt[] {
   const rEye =

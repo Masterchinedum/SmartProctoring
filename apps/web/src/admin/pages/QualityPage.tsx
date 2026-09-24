@@ -6,7 +6,8 @@ import { qk } from '../api/queries';
 import { formatDate, formatPercent, humanizeKey } from '../lib/format';
 import { DECISION_LABELS, eventTypeTitle, TRIGGER_LABELS } from '../lib/labels';
 import { CategoryBadge, DecisionBadge } from '../components/Badges';
-import { EmptyState, ErrorState, KeyValueTable, Loading, PageHeader } from '../components/Common';
+import { EmptyState, ErrorState, Loading, PageHeader } from '../components/Common';
+import { OfflineEvaluationSection } from './OfflineEvaluation';
 
 const RANGES = [
   { id: '7', label: 'Last 7 days', days: 7 },
@@ -126,7 +127,7 @@ function QualityBody({ d }: { d: DetectionQualityDTO }) {
             </table>
           </div>
         )}
-        <div className="muted small">Neutral session changes ({CATEGORY_LABELS.neutral.toLowerCase()}s) are not reviewed and have no precision.</div>
+        <div className="muted small">Neutral session changes (pauses, resumes, camera changes…) are not reviewed and have no precision.</div>
       </section>
 
       <div className="grid-2">
@@ -201,77 +202,7 @@ function QualityBody({ d }: { d: DetectionQualityDTO }) {
         )}
       </section>
 
-      <section className="card stack">
-        <h2>Offline evaluation</h2>
-        {d.offlineEvaluation == null ? (
-          <div className="muted">
-            No offline evaluation report has been stored yet. Run <code>pnpm --filter @sp/server eval:identity</code> against a consented, labelled dataset to measure
-            false match / false non-match rates per condition before launch.
-          </div>
-        ) : (
-          <OfflineEvaluation value={d.offlineEvaluation} />
-        )}
-      </section>
+      <OfflineEvaluationSection value={d.offlineEvaluation} />
     </>
   );
-}
-
-/** Renders an arbitrary evaluation report: scalars as key/values, arrays of objects as tables. */
-function OfflineEvaluation({ value }: { value: unknown }) {
-  if (value == null || typeof value !== 'object') return <div>{String(value)}</div>;
-  const entries = Object.entries(value as Record<string, unknown>);
-  const scalars = Object.fromEntries(entries.filter(([, v]) => v === null || typeof v !== 'object' || (Array.isArray(v) && v.every((x) => typeof x !== 'object'))));
-  const tables = entries.filter(([, v]) => Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === 'object' && !Array.isArray(x))) as [string, Record<string, unknown>[]][];
-  const objects = entries.filter(([, v]) => v && typeof v === 'object' && !Array.isArray(v)) as [string, Record<string, unknown>][];
-  return (
-    <div className="stack">
-      {Object.keys(scalars).length ? <KeyValueTable data={scalars} /> : null}
-      {objects.map(([k, v]) => (
-        <div key={k}>
-          <h4>{humanizeKey(k)}</h4>
-          <OfflineEvaluation value={v} />
-        </div>
-      ))}
-      {tables.map(([k, rows]) => {
-        const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))];
-        return (
-          <div key={k} className="table-wrap">
-            <h4>{humanizeKey(k)}</h4>
-            <table className="table compact">
-              <thead>
-                <tr>
-                  {cols.map((c) => (
-                    <th key={c}>{humanizeKey(c)}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i}>
-                    {cols.map((c) => (
-                      <td key={c}>{formatCell(c, r[c])}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        );
-      })}
-      <details>
-        <summary className="small">Raw report</summary>
-        <pre className="kv-json">{JSON.stringify(value, null, 2)}</pre>
-      </details>
-    </div>
-  );
-}
-
-function formatCell(key: string, v: unknown): string {
-  if (typeof v === 'number') {
-    if (/(rate|fmr|fnmr|precision|recall|share)/i.test(key) && v >= 0 && v <= 1) return formatPercent(v, 1);
-    return Number.isInteger(v) ? String(v) : v.toFixed(3);
-  }
-  if (v == null) return '—';
-  if (typeof v === 'object') return JSON.stringify(v);
-  return String(v);
 }
