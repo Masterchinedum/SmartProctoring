@@ -118,8 +118,8 @@ out.push(
   }
   const sig = scen('swap', 'family-swap').filter((r) => r.minimum === 'signal');
   for (const [label, rs] of [
-    ['Swap in a dim room (no gap, 480p): held, or a staff-visible identity signal within 30 s', sig.filter((r) => r.scenario === 'swap')],
-    ['Family member (father replaces son) mid-exam: held, or a staff-visible signal within 30 s', sig.filter((r) => r.scenario === 'family-swap')],
+    ['Swap in a dim room (no gap, 480p): held, or staff-visible suspect / inconclusive (non-matching identity check or identity event) within ~30 s', sig.filter((r) => r.scenario === 'swap')],
+    ['Family member (father replaces son) mid-exam: held, or staff-visible suspect / inconclusive within ~30 s', sig.filter((r) => r.scenario === 'family-swap')],
   ] as const) {
     if (!rs.length) continue;
     rows.push([

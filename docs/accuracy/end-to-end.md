@@ -1,7 +1,7 @@
 # End-to-end identity under realistic webcam conditions
 
 This report measures the whole product — candidate app in a real browser, server, identity engine v2 and the
-webcam-v2.0 vision calibration — on **webcam-realistic video** instead of the sharp studio photos the earlier
+webcam-v2.1 vision calibration — on **webcam-realistic video** instead of the sharp studio photos the earlier
 end-to-end suite used. It reproduces the two failures the product owner saw with a real laptop webcam and says,
 per scenario and condition, how often the system now does what it should, how long it takes, and where it still
 falls short.
@@ -20,7 +20,7 @@ __OWNER_SUMMARY__
 
 **System under test.** The real product end to end: the built candidate and staff apps in Chromium, the server
 started from source (`NODE_ENV=production`) with a fresh Postgres database, the server's YuNet / SFace identity
-pipeline (calibration `webcam-v2.0`, embedding model id 2) and the in-browser MediaPipe monitoring and liveness
+pipeline (calibration `webcam-v2.1`, embedding model id 2) and the in-browser MediaPipe monitoring and liveness
 guidance. Nothing is mocked except the camera. The identity policy is the **product default**: bursts of 3 frames;
 a sample every 6 s for the first 3 minutes after a start or resume, then every 15 s; hold for review on a confirmed
 mismatch; 5 attempts; 2 random head-turn steps when liveness is on. Fullscreen is off (headless browser). Liveness is
