@@ -5,3 +5,4 @@ export * from './identity';
 export * from './observation';
 export * from './api';
 export * from './privacy';
+export * from './pose';

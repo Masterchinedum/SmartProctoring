@@ -1,0 +1,17 @@
+{
+  "name": "@sp/e2e",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "fixtures": "tsx scripts/make-y4m.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "@types/node": "^22.18.0",
+    "sharp": "^0.34.3",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
