@@ -145,24 +145,38 @@ export const BUCKET_THRESHOLDS: Readonly<BucketThresholds> = Object.freeze({
   poorDetectionScore: 0.8,
 });
 
-/** Similarity distributions per bucket (single probe frame vs the reference template). */
+/**
+ * Similarity (`scoreAgainst`: probe or burst template vs gallery template) of the same person and of different
+ * people, per bucket. Fitted on 9,080 simulated webcam frames (34 enrolled identities, 5 conditions, 640x480 and
+ * 1280x720; bursts of 3 against 5-frame galleries enrolled in good / typical light): genuine = OTHER photos of the
+ * person (another day / room / camera — the pessimistic, cross-session case; per-session normalisation narrows it
+ * for mid-exam samples), impostor = everyone else incl. family members. Fitted sds are inflated by 15 %
+ * (conservative tails). Fit (n): good genuine 0.666 ± 0.114 (1,518), impostor 0.098 ± 0.090 (74,656);
+ * fair 0.647 ± 0.105 (764) / 0.095 ± 0.090 (35,184); poor 0.464 ± 0.175 (948) / 0.065 ± 0.096 (43,250).
+ */
 export const BUCKET_MODELS: Readonly<Record<QualityBucket, Readonly<BucketModel>>> = Object.freeze({
-  good: { genuine: { mean: 0.72, sd: 0.1 }, impostor: { mean: 0.1, sd: 0.1 } },
-  fair: { genuine: { mean: 0.66, sd: 0.11 }, impostor: { mean: 0.1, sd: 0.1 } },
-  poor: { genuine: { mean: 0.58, sd: 0.13 }, impostor: { mean: 0.1, sd: 0.11 } },
+  good: { genuine: { mean: 0.67, sd: 0.13 }, impostor: { mean: 0.1, sd: 0.1 } },
+  fair: { genuine: { mean: 0.65, sd: 0.12 }, impostor: { mean: 0.1, sd: 0.1 } },
+  poor: { genuine: { mean: 0.46, sd: 0.2 }, impostor: { mean: 0.07, sd: 0.11 } },
 });
 
+/**
+ * Calibration v2 (webcam simulator, docs/accuracy/identity-v2.md). SPRT thresholds chosen by Monte-Carlo over
+ * 754 same-session and 2,132 cross-session genuine sessions and 100k+ impostor sessions at the default cadence
+ * (6 s for 3 min, then 15 s; bursts of 3): 0 false confirmed swaps in same-session monitoring, median 2 samples
+ * to confirm a swap in good / typical / side light (family members: 77-83 % within 3 samples).
+ */
 export const CALIBRATION: Readonly<Calibration> = Object.freeze({
-  version: 'webcam-v2-placeholder',
+  version: 'webcam-v2.0',
   match: 0.45,
   mismatch: 0.3,
   idPhotoMatch: 0.42,
   idPhotoMismatch: 0.24,
   prior: 0.001,
-  sprt: Object.freeze({ suspect: 4, confirm: 9, clear: -6, maxSamples: 8 }),
-  llrClamp: 6,
+  sprt: Object.freeze({ suspect: 3, confirm: 7, clear: -6, maxSamples: 8, maxPoorEvidence: 4 }),
+  llrClamp: 5,
   minFramesForDecision: 3,
-}) as Readonly<Calibration>;
+});
 
 /** Quality bucket of a USABLE frame (callers treat quality.usable === false as 'unusable' separately). */
 export function qualityBucket(q: FaceQuality, t: Readonly<BucketThresholds> = BUCKET_THRESHOLDS): QualityBucket {

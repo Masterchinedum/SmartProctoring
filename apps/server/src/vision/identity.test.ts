@@ -11,6 +11,8 @@ import {
   INCONCLUSIVE_GUIDANCE,
   maxSimilarity,
   REFERENCE_INCONSISTENT_REASON,
+  scoreAgainst,
+  templateFrom,
 } from './identity';
 import type { ImageAnalysis } from './types';
 
@@ -37,11 +39,38 @@ describe('similarity', () => {
 });
 
 describe('decideIdentity', () => {
+  it('a low score on a poor-quality (dim / flat / small) frame is inconclusive with lighting guidance, never mismatch', () => {
+    const dim = good({ brightness: 45, contrast: 9 });
+    const r = decideIdentity(0.05, dim, T);
+    expect(r.decision).toBe('inconclusive');
+    expect(r.guidance).toContain(QUALITY_GUIDANCE.too_dark);
+    expect(r.guidance).toContain(INCONCLUSIVE_GUIDANCE);
+    // The same score on a good frame is strong evidence.
+    expect(decideIdentity(0.05, good(), T).decision).toBe('mismatch');
+    // A poor frame can still match.
+    expect(decideIdentity(0.7, dim, T).decision).toBe('match');
+  });
+
+  it('templates: mean of unit embeddings; scoreAgainst compares burst template with gallery template', () => {
+    const a = fakeEmbedding('a');
+    const a2 = fakeEmbedding('a', 0.8);
+    const t = templateFrom([a, a2]);
+    let n = 0;
+    for (const v of t) n += v * v;
+    expect(Math.sqrt(n)).toBeCloseTo(1, 6);
+    expect(cosineSimilarity(t, a)).toBeGreaterThan(cosineSimilarity(a2, a));
+    expect(scoreAgainst(a, [a])).toBeCloseTo(1, 6);
+    expect(scoreAgainst([a, a2], [a, a2])).toBeCloseTo(1, 6);
+    expect(scoreAgainst(fakeEmbedding('b'), [a, a2])).toBeCloseTo(0, 6);
+    expect(() => scoreAgainst(a, [])).toThrow();
+    expect(() => templateFrom([])).toThrow();
+  });
+
   it('match / inconclusive / mismatch at the configured thresholds', () => {
     expect(decideIdentity(T.match, good(), T).decision).toBe('match');
     expect(decideIdentity(T.match - 0.01, good(), T).decision).toBe('inconclusive');
-    expect(decideIdentity(0.28, good(), T).decision).toBe('inconclusive');
-    expect(decideIdentity(0.2799, good(), T).decision).toBe('mismatch');
+    expect(decideIdentity(T.mismatch, good(), T).decision).toBe('inconclusive');
+    expect(decideIdentity(T.mismatch - 0.0001, good(), T).decision).toBe('mismatch');
   });
 
   it('never says mismatch for an unusable image; guidance comes from QUALITY_GUIDANCE', () => {

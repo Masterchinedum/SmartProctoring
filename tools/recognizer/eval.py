@@ -176,7 +176,7 @@ def embed_all(d: dict, model_path: str, recipe: str, cache_dir: Path) -> np.ndar
     f = cache_dir / f"emb_{key}.npy"
     if f.exists():
         return np.load(f)
-    emb = OrtEmbedder(model_path, threads=4)
+    emb = OrtEmbedder(model_path, threads=2)
     out = np.zeros((len(d["crops"]), 128), np.float32)
     bs = 256
     for i in range(0, len(out), bs):

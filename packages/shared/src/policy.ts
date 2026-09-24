@@ -144,12 +144,17 @@ export function resolvePolicy(input: unknown): ProctoringPolicy {
 
 export const DEFAULT_POLICY: ProctoringPolicy = resolvePolicy({});
 
-/** Server-side identity decision thresholds (cosine similarity, SFace 128-d). Org-configurable. */
+/**
+ * Server-side identity decision thresholds (cosine similarity, SFace 128-d with flip TTA, probe/burst template vs
+ * gallery template). Org-configurable. Defaults = CALIBRATION in apps/server/src/vision/calibration.ts
+ * (webcam-v2.0, docs/accuracy/identity-v2.md): at 0.45 / 0.30 no non-family impostor burst matched, 1.6 % of
+ * family-member bursts did, and 0.04 % of good/fair genuine bursts from another day were labelled mismatch.
+ */
 export const identityThresholdsSchema = z.object({
   /** >= match => same person. */
   match: z.number().default(0.45),
-  /** < mismatch => evidence of a different person (only if quality gate passed). Between = inconclusive. */
-  mismatch: z.number().default(0.28),
+  /** < mismatch => evidence of a different person (only if quality gate passed and the evidence is strong). Between = inconclusive. */
+  mismatch: z.number().default(0.3),
   /** ID photos are older / different capture; slightly more lenient. */
   idPhotoMatch: z.number().default(0.42),
   idPhotoMismatch: z.number().default(0.24),

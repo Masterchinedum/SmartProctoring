@@ -266,13 +266,11 @@ export async function buildWebcamData(vision: VisionService, opts: WebcamDataOpt
   const jobs = planFrames(sources, opts).filter((_, i) => !opts.shard || i % opts.shard.count === opts.shard.index);
   const key = opts.cacheKey ?? pipelineKey(opts);
   const cacheFile = join(framesDir, `analysis-${key}${opts.shard ? `-shard${opts.shard.index}` : ''}.jsonl`);
-  const cache = loadCache(cacheFile);
-  if (!opts.shard) {
-    // Merge shard caches of a parallel prerender.
-    for (let i = 0; i < 16; i++) {
-      const f = join(framesDir, `analysis-${key}-shard${i}.jsonl`);
-      if (existsSync(f)) for (const [k, v] of loadCache(f)) if (!cache.has(k)) cache.set(k, v);
-    }
+  // Analyses already cached by any earlier run (unsharded file and every shard file of this configuration).
+  const cache = loadCache(join(framesDir, `analysis-${key}.jsonl`));
+  for (let i = 0; i < 16; i++) {
+    const f = join(framesDir, `analysis-${key}-shard${i}.jsonl`);
+    if (existsSync(f)) for (const [k, v] of loadCache(f)) if (!cache.has(k)) cache.set(k, v);
   }
   const recipes = opts.recipes ?? [];
   const todo = opts.cachedOnly ? [] : jobs.filter((j) => !cache.has(j.id));

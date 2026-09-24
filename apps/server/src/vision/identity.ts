@@ -4,8 +4,10 @@
  * Decision rule (per sample):
  *   quality gate failed (or no embedding)   => unable_to_verify  (+ guidance; NEVER mismatch)
  *   similarity >= match threshold           => match
- *   similarity <  mismatch threshold        => mismatch, if the calibrated evidence for the frame's quality
- *                                              bucket is strong (sampleLLR >= MISMATCH_MIN_LLR), else inconclusive
+ *   similarity <  mismatch threshold        => mismatch, if the frame is not in the 'poor' quality bucket and the
+ *                                              calibrated evidence is strong (sampleLLR >= MISMATCH_MIN_LLR);
+ *                                              otherwise inconclusive with lighting guidance (poor light alone is
+ *                                              never "a different person", as in the evidence window)
  *   otherwise                               => inconclusive
  *
  * Confidence (0..1) grows with the distance from the threshold that was crossed, saturating at
@@ -25,7 +27,7 @@ export type ComparisonTarget = 'reference' | 'id_photo';
 export const CONFIDENCE_MARGIN = 0.25;
 /**
  * A per-sample "mismatch" label needs at least this calibrated evidence (natural-log likelihood ratio, i.e.
- * ~7:1 for a different person); weaker low scores — typically poor-quality frames — are "inconclusive".
+ * ~7:1 for a different person) on a frame that is not 'poor'; weaker low scores are "inconclusive".
  */
 export const MISMATCH_MIN_LLR = 2;
 export const INCONCLUSIVE_GUIDANCE = 'We could not confirm the match. Face the camera directly, with even light on your face, and hold still.';
@@ -147,7 +149,7 @@ export function decideIdentity(
     // A low score on a poor-quality frame (dim room, backlight, small face) is weak evidence: say "mismatch" only
     // when the calibrated per-sample evidence is strong, otherwise "inconclusive" (with lighting guidance).
     const bucket = qualityBucket(quality);
-    if (sampleLLR(sim, bucket) < MISMATCH_MIN_LLR) {
+    if (bucket === 'poor' || sampleLLR(sim, bucket) < MISMATCH_MIN_LLR) {
       return { decision: 'inconclusive', similarity: sim, confidence: 0.5, guidance: advisoryGuidance(quality).concat(INCONCLUSIVE_GUIDANCE) };
     }
     return { decision: 'mismatch', similarity: sim, confidence: round4(0.5 + 0.5 * clamp01((t.mismatch - sim) / CONFIDENCE_MARGIN)), guidance: [] };

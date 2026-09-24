@@ -303,7 +303,7 @@ def l2n(x: np.ndarray, axis: int = -1) -> np.ndarray:
 class OrtEmbedder:
     """Embeds planar RGB crops (N, 3, 112, 112) float 0..255 with an SFace-compatible ONNX model."""
 
-    def __init__(self, path: Path | str = SFACE_ONNX, threads: int = 4):
+    def __init__(self, path: Path | str = SFACE_ONNX, threads: int = 2):
         import onnx
 
         self.path = str(path)
@@ -322,7 +322,9 @@ class OrtEmbedder:
 
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads
+        so.inter_op_num_threads = 1
         so.log_severity_level = 3
+        so.add_session_config_entry("session.intra_op.allow_spinning", "0")  # shared CPU: never spin-wait
         self.sess = ort.InferenceSession(model.SerializeToString(), sess_options=so, providers=["CPUExecutionProvider"])
         self.input = inp.name
         self.output = model.graph.output[0].name
