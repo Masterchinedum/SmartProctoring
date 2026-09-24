@@ -43,6 +43,8 @@ export interface ImageAnalysis {
 export interface AnalyzeOptions {
   embed?: boolean;
   faceCrop?: boolean;
+  /** Override (part of) the quality gate used to compute `quality.issues` / `quality.usable`. */
+  gate?: Partial<QualityGate>;
 }
 
 export interface VisionService {
