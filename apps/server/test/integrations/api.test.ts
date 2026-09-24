@@ -228,6 +228,7 @@ describe('integration API endpoints', () => {
   });
 
   it('rate-limits per API key (429 rate_limited)', async () => {
+    admin = await staffApi(env, 'admin'); // earlier tests moved the clock past the staff idle timeout
     const extra = json<CreatedApiKeyDTO>(await admin.post('/api-keys', { name: 'burst' })).secret;
     const results = [];
     for (let i = 0; i < 45; i++) results.push((await v1(extra, 'GET', '/exams')).statusCode);

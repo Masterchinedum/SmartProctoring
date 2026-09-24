@@ -124,3 +124,43 @@ test('resume in a dim room: unable to verify, guidance and retry — never a dif
     await browserDim.close();
   }
 });
+
+/**
+ * 5c — the room goes dark DURING the exam (camera: A for 50 s, then too dark for a dependable comparison).
+ * Routine identity samples become "unable to verify": after repeated ones an UNCERTAIN observation
+ * (identity_unverifiable) is recorded and the candidate is guided — never a mismatch, never a hold.
+ */
+test('room goes dark mid-exam: unable to verify is uncertain, with guidance — never a different person', async ({ staff }) => {
+  skipUnlessFixtures('lightThenDark');
+  test.setTimeout(4 * 60_000);
+  const s = await staff.createSession({ policy: { identity: { periodicCheckIntervalSec: 10 } } });
+  const browser = await launchCamera('lightThenDark');
+  try {
+    const c = await CandidatePage.open(browser, s.link);
+    await c.consent();
+    const t0 = Date.now();
+    await c.runCheck();
+    await c.startExam();
+    await c.answerStandardQuestions();
+
+    const ev = await staff.waitForEventType(s.sessionId, 'identity_unverifiable', { timeout: 120_000 });
+    console.log(`identity_unverifiable +${Math.round((ev.startedAt - t0) / 1000)} s`);
+    expect(ev.category).toBe('uncertain');
+    expect(ev.startedAt - t0).toBeGreaterThan(45_000);
+    await expect(c.tid('candidate-prompt').filter({ hasText: 'couldn’t confirm your identity' })).toBeVisible({ timeout: 30_000 });
+    await expect(c.tid('candidate-prompt').filter({ hasText: /light/i }).first()).toBeVisible();
+
+    const d = await staff.session(s.sessionId);
+    const late = d.identityChecks.filter((ch) => ch.at > t0 + 52_000);
+    console.log(`checks after dark: ${late.map((ch) => `${ch.trigger}:${ch.decision}`).join(', ')}; events: ${[...new Set((await staff.events(s.sessionId)).map((e) => e.type))].join(', ')}`);
+    expect(late.length).toBeGreaterThanOrEqual(3);
+    expect(late.every((ch) => ch.decision === 'unable_to_verify' || ch.decision === 'inconclusive')).toBe(true);
+    expect(d.identityChecks.some((ch) => ch.decision === 'mismatch')).toBe(false);
+    expect(d.summary.status).toBe('active');
+    const events = await staff.events(s.sessionId);
+    expect(events.some((e) => e.type === 'identity_mismatch' || e.type === 'session_held')).toBe(false);
+    await expect(c.tid('exam-screen')).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});

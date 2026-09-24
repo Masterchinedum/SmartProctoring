@@ -1,6 +1,8 @@
 import { CandidatePage, launchCamera, since, skipUnlessFixtures } from '../lib/candidate';
 import { expect, test } from '../lib/test';
 
+const DEBUG = process.env.E2E_DEBUG === '1';
+
 /**
  * Scenario 3 — active liveness with a still photo in front of the camera (the fake camera is a still
  * image with sensor noise and a few pixels of jitter: it cannot turn its head).
@@ -90,7 +92,7 @@ test('active liveness: a turning head passes at check-in and at resume', async (
       const phase = await c.tid('verify-step').getAttribute('data-phase', { timeout: 1000 }).catch(() => null);
       const instr = (await c.tid('verify-instruction').innerText({ timeout: 1000 }).catch(() => '')).replace(/\s+/g, ' ');
       const line = `${phase} | ${instr}`;
-      if (line !== last) console.log(`[${label}] +${((Date.now() - t0) / 1000).toFixed(1)} s ${line}`);
+      if (line !== last && DEBUG) console.log(`[${label}] +${((Date.now() - t0) / 1000).toFixed(1)} s ${line}`);
       last = line;
       await c.page.waitForTimeout(500);
     }
@@ -102,7 +104,7 @@ test('active liveness: a turning head passes at check-in and at resume', async (
         if (/\/checks\/[^/]+\/(complete|frames)/.test(r.url())) {
           const b = await r.json().catch(() => null);
           if (r.url().includes('/complete')) console.log(`complete: ${b?.outcome} liveness=${JSON.stringify(b?.liveness)} guidance=${JSON.stringify(b?.guidance)}`);
-          else console.log(`frame ${new URL(r.url()).searchParams.get('step')}: accepted=${b?.accepted} satisfied=${b?.stepSatisfied} measured=${JSON.stringify(b?.measured)} client=${new URL(r.url()).searchParams.get('clientYaw')}`);
+          else if (DEBUG) console.log(`frame ${new URL(r.url()).searchParams.get('step')}: accepted=${b?.accepted} satisfied=${b?.stepSatisfied} measured=${JSON.stringify(b?.measured)} client=${new URL(r.url()).searchParams.get('clientYaw')}`);
         }
       });
     logVerdicts(c.page);

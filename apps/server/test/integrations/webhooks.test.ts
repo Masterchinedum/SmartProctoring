@@ -345,6 +345,7 @@ describe('failures, auto-disable, test ping and redelivery', () => {
       env.clock.advance(60 * MIN);
       expect((await deliverDueWebhooks(env.ctx)).attempted).toBe(0);
       expect(r.received.length).toBe(sent);
+      admin = await staffApi(env, 'admin'); // an hour later: past the staff idle timeout (60 min)
 
       // Re-enable: counters reset, pending deliveries are sent right away.
       r.plan.length = 0;

@@ -4,9 +4,13 @@
  * A still photo cannot pass the live-person check because rotating a flat picture produces no parallax
  * between the nose and the eyes. To exercise the passing path end-to-end we synthesise that parallax: a
  * smooth local warp shifts the nose region (and, less, the face centre) sideways relative to the eyes,
- * which is what a real head turn looks like to both MediaPipe (browser) and YuNet (server). Identity is
- * preserved (SFace similarity to the original ≈ 0.75–0.9), so the resulting video models "the same
- * person, turning left and right".
+ * which is what a real head turn looks like to both MediaPipe (browser) and YuNet (server). The warped
+ * frame is then translated sideways by up to HEAD_SHIFT (≈ a quarter of the inter-ocular distance), as a
+ * real turning head also moves in the frame: without it the whole-image dHash of the turned frames stays
+ * within 2 bits of the frontal one and the server's anti-replay rule ("frames of different steps must not
+ * be identical", minFrameHamming) rejects the attempt. Measured on the server: yaw ≈ −19° / +21°, dHash
+ * distance 9–24 bits between steps. Identity is preserved (SFace similarity to the original ≈ 0.75–0.9),
+ * so the resulting video models "the same person, turning left and right".
  *
  * Timeline (looped by Chrome): frontal hold, then repeated cycles of turn-left → hold → centre → turn-right
  * → hold → centre, so whichever order the server's randomised challenge asks for appears within one cycle.
@@ -22,6 +26,8 @@ const W = 640;
 const H = 480;
 /** Nose-shift amplitude in inter-ocular distances; ±0.35 ≈ ±20° measured yaw change on the server. */
 const TURN_AMP = 0.35;
+/** Sideways translation of the whole (warped) frame at full turn, in inter-ocular distances. */
+const HEAD_SHIFT = 0.25;
 
 async function main() {
   const [src, out, fpsArg, frontalArg, cyclesArg] = process.argv.slice(2);
@@ -47,13 +53,16 @@ async function main() {
     const res = Buffer.alloc(W * H * 3);
     const r = iod * 0.9;
     const faceR = iod * 1.8;
+    // Translation applied AFTER the local warp (so the warp stays centred on the nose).
+    const shift = (key / TURN_AMP) * HEAD_SHIFT * iod;
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
-        const dx = x - nose.x;
+        const xw = x - shift;
+        const dx = xw - nose.x;
         const dy = y - nose.y;
         const noseShift = key * iod * Math.exp((-(dx * dx + dy * dy * 0.6) / (r * r)) * 1.5);
         const faceShift = key * iod * 0.35 * Math.exp((-(dx * dx + dy * dy) / (faceR * faceR)) * 1.2);
-        const sx = x - noseShift - faceShift;
+        const sx = xw - noseShift - faceShift;
         const x0 = Math.floor(sx);
         const fx = sx - x0;
         const xa = Math.min(W - 1, Math.max(0, x0));

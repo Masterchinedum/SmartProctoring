@@ -129,6 +129,10 @@ export async function purgeEvidenceRows(ctx: EvidenceCtx, db: DbOrTx, rows: Evid
       .update(evidence)
       .set({ purgedAt: new Date(ctx.now()), purgeReason: reason })
       .where(and(eq(evidence.id, row.id), isNull(evidence.purgedAt)));
+    // Delete once more after the tombstone: a concurrent re-encryption (services/rekey.ts) that read the blob
+    // before the first delete may have written it back; it re-checks purgedAt after writing, and this covers the
+    // other order. Idempotent.
+    await ctx.storage.delete(row.storageKey).catch((err) => ctx.log.error({ err, evidenceId: row.id }, 'failed to delete evidence blob after purge'));
     n++;
   }
   return n;

@@ -34,7 +34,7 @@ export interface Api {
   inject(opts: InjectOptions): Promise<Res>;
 }
 
-/** A signed staff-session cookie for `user` (valid for the next 8 h of test-clock time). */
+/** A signed staff-session cookie for `user` (valid for the staff idle timeout — 60 min by default — of test-clock time). */
 export async function mintCookie(env: TestEnv, user: StaffUser): Promise<string> {
   const token = randomToken(32);
   const now = env.clock.t;
