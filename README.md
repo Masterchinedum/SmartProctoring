@@ -98,6 +98,32 @@ Open http://localhost:5173/admin and sign in with the seeded account printed by 
 (dev default `admin@example.com` / `ChangeMe123!`). Candidate links (`/take/<token>`) are printed by
 the seed script and can be created from Exams → Assign.
 
+### First-time setup on macOS (Homebrew)
+
+```bash
+# 1. Node 22 + pnpm
+brew install node@22
+echo 'export PATH="$(brew --prefix node@22)/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+corepack enable && corepack prepare pnpm@10.33.0 --activate     # or: npm install -g pnpm@10
+node -v && pnpm -v                                               # expect v22.x and 10.x
+
+# 2. Postgres 16 (the app connects as role "postgres" on 127.0.0.1:5432 by default)
+brew install postgresql@16
+echo 'export PATH="$(brew --prefix postgresql@16)/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+brew services start postgresql@16
+createuser -s postgres                                           # Homebrew only creates a role named after you
+createdb -U postgres proctor
+
+# 3. The app (from the repository root)
+pnpm install
+pnpm --filter @sp/server seed
+pnpm dev
+```
+Prefer your own database role? Skip `createuser` and run with
+`DATABASE_URL=postgres://$USER@127.0.0.1:5432/proctor` in front of the `seed` and `dev` commands.
+Camera access works on `http://localhost` in Chrome, Edge, Firefox and Safari (allow the camera
+prompt; on macOS also allow the browser under System Settings → Privacy & Security → Camera).
+
 ## Production
 
 `docker compose up -d --build` (see [docs/OPERATIONS.md](docs/OPERATIONS.md)) — single container
