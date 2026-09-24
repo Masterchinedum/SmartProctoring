@@ -8,6 +8,7 @@ import type {
   ExamDTO,
   ExamInput,
   IdentityComparisonDTO,
+  IdPhotoUploadResponse,
   NoteDTO,
   SessionDetailDTO,
   SessionReportDTO,
@@ -72,8 +73,9 @@ export class StaffApi {
     readonly user: StaffUserDTO,
   ) {}
 
-  static async login(email = ADMIN_EMAIL, password = ADMIN_PASSWORD): Promise<StaffApi> {
-    const api = await request.newContext({ baseURL: BASE_URL });
+  /** `baseURL`: another server instance (dedicated servers of the integrations / key-rotation specs). */
+  static async login(email = ADMIN_EMAIL, password = ADMIN_PASSWORD, baseURL = BASE_URL): Promise<StaffApi> {
+    const api = await request.newContext({ baseURL });
     const res = await api.post('/api/auth/login', { data: { email, password } });
     if (!res.ok()) throw new Error(`staff login failed for ${email}: ${res.status()} ${await res.text()}`);
     const body = (await res.json()) as { user: StaffUserDTO };
@@ -182,6 +184,18 @@ export class StaffApi {
   addNote(sessionId: string, text: string): Promise<NoteDTO> {
     return this.json('post', `/api/admin/sessions/${sessionId}/notes`, { text });
   }
+  hold(sessionId: string, note?: string): Promise<SessionSummaryDTO> {
+    return this.json('post', `/api/admin/sessions/${sessionId}/hold`, { note });
+  }
+  legalHold(sessionId: string, enabled: boolean): Promise<SessionSummaryDTO> {
+    return this.json('post', `/api/admin/sessions/${sessionId}/legal-hold`, { enabled });
+  }
+  /** Approved ID photo (the staff API behind the candidate page's upload; the UI converts to JPEG first). */
+  async uploadIdPhoto(candidateId: string, jpeg: Buffer): Promise<IdPhotoUploadResponse> {
+    const res = await this.api.put(`/api/admin/candidates/${candidateId}/id-photo`, { data: jpeg, headers: { 'Content-Type': 'image/jpeg' } });
+    if (!res.ok()) throw new Error(`PUT id-photo -> ${res.status()} ${await res.text()}`);
+    return (await res.json()) as IdPhotoUploadResponse;
+  }
 
   /* ---------------------------------------------------------------- waiting */
 
@@ -225,8 +239,8 @@ export class StaffApi {
 }
 
 /** Candidate-side read of the session (read-only observer instance, not affected by page offline emulation). */
-export async function candidateState(token: string): Promise<CandidateSessionState> {
-  const api = await request.newContext({ baseURL: BASE_URL });
+export async function candidateState(token: string, baseURL = BASE_URL): Promise<CandidateSessionState> {
+  const api = await request.newContext({ baseURL });
   try {
     const res = await api.get('/api/candidate/session', { headers: { Authorization: `Bearer ${token}`, 'X-Client-Instance': 'e2e-observer-0001' } });
     if (!res.ok()) throw new Error(`candidate state ${res.status()} ${await res.text()}`);

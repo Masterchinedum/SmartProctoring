@@ -40,6 +40,24 @@ const STILLS = {
 } as const;
 export type StillName = keyof typeof STILLS;
 
+/**
+ * Approved ID photos (what staff upload on the candidate page), derived from the face images like the
+ * stills. `crop` = passport-style framing; `thumb` = re-encode as a tiny, heavily compressed JPEG and scale
+ * it back up (a poor scan / low-resolution record photo that still passes the upload's relaxed gate).
+ */
+const ID_PHOTOS = {
+  /** Candidate A on another photo (other day, place and expression): head-and-shoulders crop of obama2.jpg. */
+  'id-a.jpg': { src: 'obama2.jpg', crop: { left: 120, top: 100, width: 460, height: 600 } },
+  /** Someone who appears in no camera fixture (SFace similarity to A ~0.10, far below the 0.24 ID-photo mismatch threshold). */
+  'id-other.jpg': { src: 'deepface/img13.jpg', crop: null, maxSide: 1280 },
+  /**
+   * A's photo as a 100 px wide JPEG at quality 5, scaled back to 460 px: accepted at upload, but the
+   * comparison with the live candidate lands in the inconclusive band (~0.3, between 0.24 and 0.42).
+   */
+  'id-a-poor.jpg': { src: 'obama2.jpg', crop: { left: 120, top: 100, width: 460, height: 600 }, thumb: { width: 100, quality: 5 } },
+} as const;
+export type IdPhotoName = keyof typeof ID_PHOTOS;
+
 export const FIXTURE_SPECS = {
   /** Candidate A, steady (loops). */
   a: [{ src: 'a.jpg', seconds: 30 }],
@@ -113,6 +131,28 @@ export function stillPath(name: StillName): string {
   return join(FIXTURES_DIR, 'stills', name);
 }
 
+export function idPhotoPath(name: IdPhotoName): string {
+  return join(FIXTURES_DIR, 'id-photos', name);
+}
+
+export function idPhotoAvailable(name: IdPhotoName): boolean {
+  return facesAvailable(ID_PHOTOS[name].src);
+}
+
+async function makeIdPhoto(name: IdPhotoName): Promise<void> {
+  const def = ID_PHOTOS[name] as { src: string; crop: { left: number; top: number; width: number; height: number } | null; maxSide?: number; thumb?: { width: number; quality: number } };
+  let img = sharp(faceImage(def.src)).rotate();
+  if (def.crop) img = img.extract(def.crop);
+  if (def.maxSide) img = img.resize(def.maxSide, def.maxSide, { fit: 'inside', withoutEnlargement: true });
+  let buf = await img.jpeg({ quality: 90 }).toBuffer();
+  if (def.thumb) {
+    const width = (await sharp(buf).metadata()).width!;
+    const small = await sharp(buf).resize(def.thumb.width).jpeg({ quality: def.thumb.quality }).toBuffer();
+    buf = await sharp(small).resize(width).jpeg({ quality: 95 }).toBuffer();
+  }
+  writeFileSync(idPhotoPath(name), buf);
+}
+
 async function makeStill(name: StillName): Promise<void> {
   const def = STILLS[name];
   let img = sharp(faceImage(def.src)).rotate().extract(def.crop).resize(640, 480, { fit: 'contain', background: { r: 118, g: 112, b: 104 } });
@@ -145,6 +185,15 @@ export async function ensureFixtures(log: (m: string) => void = () => undefined)
     const hash = createHash('sha256').update(JSON.stringify(STILLS[name])).update(String(statSync(faceImage(STILLS[name].src)).mtimeMs)).digest('hex').slice(0, 16);
     if (manifest[key] === hash && existsSync(stillPath(name))) continue;
     await makeStill(name);
+    manifest[key] = hash;
+  }
+  mkdirSync(join(FIXTURES_DIR, 'id-photos'), { recursive: true });
+  for (const name of Object.keys(ID_PHOTOS) as IdPhotoName[]) {
+    if (!idPhotoAvailable(name)) continue;
+    const key = `idphoto:${name}`;
+    const hash = createHash('sha256').update(JSON.stringify(ID_PHOTOS[name])).update(String(statSync(faceImage(ID_PHOTOS[name].src)).mtimeMs)).digest('hex').slice(0, 16);
+    if (manifest[key] === hash && existsSync(idPhotoPath(name))) continue;
+    await makeIdPhoto(name);
     manifest[key] = hash;
   }
   for (const name of Object.keys(SYNTH_SPECS) as (keyof typeof SYNTH_SPECS)[]) {
