@@ -79,11 +79,21 @@ rendered as laptop-webcam frames:
 __E2E_SUMMARY__
 
 **Recogniser research** (`docs/accuracy/recognizer.md`, `tools/recognizer/`). SFace was fine-tuned for dim and
-backlit webcams with label-free self-distillation on public-domain portraits. Poor-light verification error halved
-(EER 7.3 → 3.7 % pooled; dim 12.5 → 7.6 %; backlit 12.5 → 6.1 %). But look-alike family members passed checks more
-often (1.1 → 2.6 %), and dim impostors enrolled in the same dim room scored higher on the out-of-domain test set.
-Those are security regressions, so **production keeps SFace**. The tooling is in the repository and can retrain
-once consented real webcam captures exist (§4, item 1).
+backlit webcams with label-free self-distillation on public-domain portraits, keeping the same architecture and
+speed. Two ways of using it were evaluated against the shipped v2.1 pipeline on held-out identities:
+
+* **Replacing SFace.** Poor-light verification error halved (EER 7.3 → 3.7 %). But look-alike family members passed
+  checks more often (1.1 → 2.6 %), and clean ID-photo comparison got slightly worse.
+* **Using it only for poor-light frames (hybrid).**
+  - Poor-light EER 5.7 → 3.1 %.
+  - First-attempt resume passes rose in dim (28 → 36 %) and backlit (36 → 46 %) light.
+  - Family results and ID photos were unchanged.
+  - But in dim light, with the reference enrolled in the same room, impostor false-match estimates leaned worse. With
+    only 16 dim-enrolled test identities that could be neither confirmed nor ruled out.
+
+A higher chance of accepting an impostor outweighs a usability gain, so **production keeps SFace** for now. The
+tooling is in the repository. With consented real webcam captures (§4, item 1), the hybrid can be re-validated and
+shipped.
 
 ## 4. Known limitations / before launch
 
