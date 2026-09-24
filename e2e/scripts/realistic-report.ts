@@ -59,8 +59,10 @@ if (scen('resume').length) {
     rows.push([
       cs!,
       lv!,
+      rs[0]!.target ?? '–',
       rs[0]!.camera ?? '–',
       String(rs.length),
+      frac(rs.filter((r) => r.pass).length, rs.length),
       frac(first, rs.length),
       frac(eventually, rs.length),
       `${f1(med(rs.map((r) => r.attempts)))} / ${f1(max(rs.map((r) => r.attempts)))}`,
@@ -70,7 +72,7 @@ if (scen('resume').length) {
       String(rs.reduce((a, r) => a + (r.mismatchEvents ?? 0), 0)),
     ]);
   }
-  out.push(table(['condition', 'liveness', 'camera', 'runs', '1st-attempt pass', 'passed', 'attempts med/max', 'time to pass s med/max', 're-prompts', 'resume check decisions@similarity', 'false mismatch'], rows), '');
+  out.push(table(['condition', 'liveness', 'target', 'camera', 'runs', 'target met', '1st-attempt pass', 'passed', 'attempts med/max', 'time to outcome s med/max', 're-prompts', 'resume check decisions@similarity', 'false mismatch'], rows), '');
 }
 
 /* ------------------------------------------------ resume (impostor) */
@@ -107,11 +109,13 @@ for (const s of ['swap', 'family-swap']) {
       `${f1(med(det.map((r) => r.delayFromNewPersonS)))} / ${f1(max(det.map((r) => r.delayFromNewPersonS)))}`,
       f1(med(rs.map((r) => r.startBeforeSwapS))),
       frac(rs.filter((r) => r.suspectSeen).length, rs.length),
+      `${f1(med(rs.map((r) => r.staffSignalDelayS)))} / ${f1(max(rs.map((r) => r.staffSignalDelayS)))}`,
       frac(rs.filter((r) => r.falseAlarmBeforeSwap).length, rs.length),
+      `${rs[0]!.minimum ?? 'hold'}: ${frac(rs.filter((r) => r.pass).length, rs.length)}`,
       rs.map((r) => (r.checksAfterSwap ?? []).slice(0, 4).join(' ')).join('; '),
     ]);
   }
-  out.push(table(['variant', 'camera', 'runs', 'detected (held)', 'delay s med/max (new person in view → hold)', 'exam start → swap s', 'suspect seen', 'false alarm before swap', 'first checks after swap'], rows), '');
+  out.push(table(['variant', 'camera', 'runs', 'detected (held)', 'delay s med/max (new person in view → hold)', 'exam start → swap s', 'suspect seen', 'first staff-visible signal s med/max', 'false alarm before swap', 'requirement met', 'first checks after swap'], rows), '');
 }
 
 /* ------------------------------------------------ genuine long */
