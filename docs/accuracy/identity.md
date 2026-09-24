@@ -24,8 +24,13 @@ protocol customers should follow to measure accuracy on their own population.
 | Genuine vs impostor similarity (clean) | genuine min 0.53, median 0.79; impostor median 0.13, max 0.37 |
 | Time per `analyze()` (640×480 JPEG, detection + embedding, 4-core Xeon 2.1 GHz) | ≈ 30–32 ms sequential, ≈ 27–30 ms/image at concurrency 2 |
 
-**Threshold recommendation** (§6): raise the default **match** threshold from 0.40 to **0.45**, and the
-**ID-photo match** threshold from 0.36 to **≥ 0.42**. Keep mismatch at 0.28 and ID-photo mismatch at 0.24.
+**Threshold decision** (§6): the shipped defaults (`DEFAULT_IDENTITY_THRESHOLDS`) were raised after this
+study to **match ≥ 0.45** (was 0.40) and **ID-photo match ≥ 0.42** (was 0.36); mismatch stays **< 0.28**
+and ID-photo mismatch **< 0.24**, with 2 confirmations. At 0.45 on the pairs set: false identity mismatch
+0 % (clean and all 18 perturbations), false match 0 % (clean and all perturbations), swap raised within
+1 / 2 min 85.8 % / 98.0 %, resume check genuine→mismatch 0 % / impostor→match 0 %. The only cost is that
+7.9 % of masked genuine probes become *inconclusive* (never *mismatch*). Tables in §4–§5 were produced at
+the earlier 0.40 setting; §6 has the 0.45 comparison.
 
 ## 2. Models and licensing
 

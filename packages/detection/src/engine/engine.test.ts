@@ -590,6 +590,46 @@ describe('camera feed', () => {
   });
 });
 
+describe('baseline recalibration and policy switches', () => {
+  it('after a camera change the engine re-calibrates the normal position from steady frames', () => {
+    const d = new Driver();
+    d.cameraInfo(0, 'Integrated Camera', 'a');
+    d.run(0, 5);
+    d.cameraInfo(5, 'USB Camera', 'b');
+    // New camera is mounted to the side: the candidate's normal yaw is now ~30°.
+    d.run(5, 40, () => ({ faces: [face({ yaw: 30 })] }));
+    expect(d.engine.getBaseline()!.yaw).toBeCloseTo(30, 0);
+    const noRecal = new Driver({ recalibrateOnCameraChange: false });
+    noRecal.cameraInfo(0, 'Integrated Camera', 'a');
+    noRecal.cameraInfo(5, 'USB Camera', 'b');
+    noRecal.run(5, 40, () => ({ faces: [face({ yaw: 30 })] }));
+    expect(noRecal.engine.getBaseline()!.yaw).toBe(BASELINE.yaw);
+    expect(noRecal.final('looking_away')).toHaveLength(1);
+  });
+
+  it('respects enabled.* switches', () => {
+    const p = policy({ enabled: { absence: false, multiplePeople: false, lookingAway: false, movement: true, obstruction: true, objects: true, cameraIntegrity: false } });
+    const d = new Driver({ policy: p });
+    d.run(0, 5);
+    d.run(5, 20, () => ({ faces: [] }));
+    d.run(20, 30, () => ({ faces: [face({ yaw: 45 }), secondFace()] }));
+    d.run(30, 45, () => ({ frame: frame({ luma: 8, contrast: 2 }), faces: [] }));
+    for (const t of ['candidate_absent', 'multiple_people', 'looking_away', 'camera_covered'] as const) expect(d.of(t)).toHaveLength(0);
+    expect(d.cameraInfo(50, 'OBS Virtual Camera', 'x').episodes.filter((u) => u.type === 'camera_feed_suspect')).toHaveLength(0);
+  });
+
+  it('respects policy thresholds (absenceSec, multiplePeopleSec)', () => {
+    const d = new Driver({ policy: policy({ absenceSec: 4, multiplePeopleSec: 3 }) });
+    d.run(0, 5);
+    d.run(5, 10, () => ({ faces: [] }));
+    d.run(10, 15);
+    d.run(15, 17, () => ({ faces: [face(), secondFace()] }));
+    d.run(17, 20);
+    expect(d.final('candidate_absent')).toHaveLength(1);
+    expect(d.of('multiple_people')).toHaveLength(0);
+  });
+});
+
 describe('identity sampling', () => {
   it('periodic samples every identityIntervalSec while exactly one usable face is visible', () => {
     const d = new Driver({ identityIntervalSec: 20 });
