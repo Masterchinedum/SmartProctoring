@@ -47,13 +47,18 @@ time extensions, printable final report covering every active period, pause and 
 Exams, questions, per-exam proctoring policy, candidates, ID photos, invite links, users & roles,
 retention settings, audit log, detection-quality metrics.
 
+**Integrations** — organisation API keys and a REST integration API (`/api/v1`) to create candidates,
+issue invite links and pull reports from an LMS/HR system; signed webhooks (HMAC-SHA256, durable
+outbox with retries) for flags, holds, pause requests and submissions; optional SMTP email alerts
+with per-session throttling. See [docs/INTEGRATION_API.md](docs/INTEGRATION_API.md).
+
 **Privacy** — explicit notice + consent, no continuous video, encrypted evidence, role-based access
 with audit logging, automatic retention purge with legal hold. See [docs/PRIVACY.md](docs/PRIVACY.md).
 
 **Accuracy** — per-detection evaluation harnesses (identity: false-mismatch / missed-swap /
 unable-to-verify rates across lighting, blur, low-res cameras, occlusion, etc.; behaviour: precision,
 recall, false alerts per hour, onset latency, duplicate events) plus production precision from
-reviewer decisions. See [docs/accuracy/](docs/accuracy/).
+reviewer decisions. See [docs/accuracy/](docs/accuracy/README.md).
 
 ## Architecture
 
