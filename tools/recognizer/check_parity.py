@@ -1,7 +1,7 @@
 """
 Parity check: Python decode -> YuNet -> align -> SFace (common.py) versus the production TypeScript engine.
 
-  apps/server/node_modules/.bin/tsx tools/recognizer/ts/dump_embeddings.mts list.txt > ts.jsonl
+  apps/server/node_modules/.bin/tsx tools/recognizer/ts/dump_embeddings.mts --raw list.txt > ts.jsonl
   python tools/recognizer/check_parity.py ts.jsonl [--model <onnx>]
 
 For every image both paths embed, reports

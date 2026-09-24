@@ -1,4 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
+import { cpus, loadavg } from 'node:os';
 import { join } from 'node:path';
 import { expect, test, type Browser, type TestInfo } from '@playwright/test';
 import type { ProctoringPolicyInput } from '../../packages/shared/src/policy';
@@ -54,10 +56,36 @@ export interface MetricRecord {
   [k: string]: unknown;
 }
 
-/** Append one measurement (JSON line) for the report. */
+let commit: string | null | undefined;
+function gitCommit(): string | null {
+  if (commit === undefined) {
+    try {
+      commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() + (execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim() ? '+dirty' : '');
+    } catch {
+      commit = null;
+    }
+  }
+  return commit;
+}
+
+/**
+ * Append one measurement (JSON line) for the report, with the machine's load (1 / 5 min load average, CPUs) —
+ * timings (time to pass, detection delay, liveness within the challenge window) depend on it.
+ */
 export function recordMetric(info: TestInfo, rec: MetricRecord): void {
   mkdirSync(ARTIFACTS_DIR, { recursive: true });
-  const line = { runId: process.env.E2E_RUN_ID ?? null, at: new Date().toISOString(), test: info.title, workers: info.config.workers, ...rec };
+  const [load1, load5] = loadavg();
+  const line = {
+    runId: process.env.E2E_RUN_ID ?? null,
+    at: new Date().toISOString(),
+    test: info.title,
+    workers: info.config.workers,
+    load1: Math.round(load1! * 10) / 10,
+    load5: Math.round(load5! * 10) / 10,
+    cpus: cpus().length,
+    commit: gitCommit(),
+    ...rec,
+  };
   appendFileSync(METRICS_FILE, `${JSON.stringify(line)}\n`);
   console.log(`[metric] ${JSON.stringify(line)}`);
 }

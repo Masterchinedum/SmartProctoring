@@ -102,7 +102,8 @@ Fixtures (`lib/fixtures.ts`; times are seconds since the camera started):
 | `swap` | A 0–60, then B |
 | `two` | A 0–50, A + second person 50–70, then A |
 | `absence` | A 0–50, empty room 50–66, A 66–91, covered lens (black) 91–105, then A |
-| `dimThenLight` | A in a dim room 0–30 (passes the browser checklist, fails the server's contrast gate), then lit |
+| `aDim` | A in a dim room (×0.44: brightness ~65, contrast ~17 — refused by identity v1, usable since webcam-v2.0) |
+| `darkThenLight` | A in a dark room 0–30 (×0.25: below the server gate's minimum brightness), then lit |
 | `darkPeriod` | A 0–50, dark room 50–90, then A |
 | `headturn` | A frontal 0–10, then cycles of turning left / right (`scripts/synth-headturn.ts`: synthetic nose-vs-eyes parallax + head translation) for the *passing* active-liveness path |
 
@@ -176,7 +177,7 @@ the run id); `pnpm --filter @sp/e2e rw:report [-- --run <id> | --all]` prints th
 | 2 | `02-pause-rules` | reason required; approval required (request shown live on the dashboard, **denied** then **approved in the admin UI**), `timerBehavior: 'continue'` (clock runs during the pause) |
 | 3 | `03-liveness-photo` | active liveness with a still photo: stuck at the head-turn step → attempt handed to the server → retry guidance → second attempt → held as *identity unverifiable* (never "different person"); failed attempts visible to staff. **3b:** a (synthetically) turning head passes active liveness at check-in and at resume. **3c:** a tampered client submitting the photo for every step and lying about its pose is rejected by the server's own pose measurement |
 | 4 | `04-person-swap` | A→B mid-exam: `identity_mismatch` after confirmation, hold screen; flag arrives live on the dashboard; comparison view (reference vs later images); release with fresh check (camera restarts → A → passes); terminate in the UI |
-| 5 | `05-resume-identity` | **a:** resume by B → held with before/after evidence, pause in context, evidence JPEGs; **b:** resume in a dim room → server guidance → retry screen → light on → passes, never a mismatch; **c:** dark room mid-exam → uncertain `lighting_unusable` + candidate guidance, identity matches again when lit |
+| 5 | `05-resume-identity` | **a:** resume by B → held with before/after evidence, pause in context, evidence JPEGs; **b:** resume in a dim room (refused by identity v1) → passes at the first attempt, never a mismatch; **b2:** resume in a dark room → server guidance → retry screen → light on → passes, never a mismatch; **c:** dark room mid-exam → uncertain `lighting_unusable` + candidate guidance, identity matches again when lit |
 | 6 | `06-multiple-people` | one `multiple_people` event (start/end) with a screenshot from that moment; evidence JPEG for staff (audit-logged), 401 without staff auth; identity re-check afterwards |
 | 7 | `07-absence-covered` | one `candidate_absent` with start/end + `face_return` identity check (match); one `camera_covered` |
 | 8 | `08-browser-events` | two tab switches → two `tab_hidden` events with start/end (the preceding blur is not a separate event); fullscreen exit → one `fullscreen_exited`, closed when the candidate returns via the overlay |

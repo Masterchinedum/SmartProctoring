@@ -42,6 +42,15 @@ export interface VisionEngineOptions {
    * face; statistics, alignment and the embedding use the original pixels.
    */
   enhanceLowLight?: boolean;
+  /**
+   * Head pose from the landmarks of the frame AND of its mirror image, averaged (default true). YuNet does not place
+   * landmarks mirror-symmetrically: the same turned face measured +30.6 deg, its mirror image -18.4 deg (e2e head-turn
+   * fixture; turned frames: yaw(I) + yaw(mirror I) = +8.8 +- 4.2 deg, frontal +4 +- 3.5 deg), so turns to one side
+   * read ~1.5x larger than to the other — liveness steps, the |yaw| gate and the pose bucket penalised one side.
+   * Averaging with the mirrored detection makes pose(mirror I) = -pose(I) by construction. Costs one detector pass
+   * (~6-15 ms) on frames with a face. Alignment and embeddings keep the frame's own landmarks.
+   */
+  symmetricPose?: boolean;
 }
 
 /** Faces this small (inter-ocular px in the sampled image) are re-sampled from the full-resolution original. */
@@ -78,12 +87,68 @@ function capEnhancedScores(faces: DetectedFace[]): DetectedFace[] {
   return faces.map((f) => (f.score > ENHANCED_DETECTION_MAX_SCORE ? { ...f, score: ENHANCED_DETECTION_MAX_SCORE } : f));
 }
 
+/** Horizontal mirror image. */
+export function flopRgb(img: RgbImage): RgbImage {
+  const { width: w, height: h, data } = img;
+  const out = new Uint8Array(data.length);
+  for (let y = 0; y < h; y++) {
+    const row = y * w * 3;
+    for (let x = 0; x < w; x++) {
+      const i = row + x * 3;
+      const j = row + (w - 1 - x) * 3;
+      out[j] = data[i];
+      out[j + 1] = data[i + 1];
+      out[j + 2] = data[i + 2];
+    }
+  }
+  return { width: w, height: h, data: out };
+}
+
+type Pt = { x: number; y: number };
+
+/**
+ * The face of a mirrored detection pass (`faces` in mirrored coordinates) that is `primary` seen in the mirror, with
+ * its landmarks mapped back to original coordinates; null when the mirrored pass did not find it.
+ */
+export function matchMirrored(primary: DetectedFace, faces: readonly DetectedFace[], width: number): { landmarks: Pt[] } | null {
+  const cx = primary.box.x + primary.box.w / 2;
+  const cy = primary.box.y + primary.box.h / 2;
+  let best: DetectedFace | null = null;
+  let bestD = Infinity;
+  for (const f of faces) {
+    const fx = width - (f.box.x + f.box.w / 2);
+    const fy = f.box.y + f.box.h / 2;
+    const d = Math.hypot(fx - cx, fy - cy);
+    if (d < bestD) {
+      bestD = d;
+      best = f;
+    }
+  }
+  if (!best || bestD > 0.3 * Math.max(primary.box.w, primary.box.h)) return null;
+  return { landmarks: best.landmarks.map((p) => ({ x: width - p.x, y: p.y })) };
+}
+
+/**
+ * Average of the frame's landmarks and the mirrored detection's (mapped back): eyes and mouth corners paired by
+ * image x, as `poseFromFivePoints` reads them.
+ */
+export function symmetricLandmarks(own: readonly Pt[], mirrored: readonly Pt[]): Pt[] {
+  const byX = (a: Pt, b: Pt): [Pt, Pt] => (a.x <= b.x ? [a, b] : [b, a]);
+  const [e1, e2] = byX(own[0], own[1]);
+  const [f1, f2] = byX(mirrored[0], mirrored[1]);
+  const [m1, m2] = byX(own[3], own[4]);
+  const [n1, n2] = byX(mirrored[3], mirrored[4]);
+  const avg = (a: Pt, b: Pt): Pt => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  return [avg(e1, f1), avg(e2, f2), avg(own[2], mirrored[2]), avg(m1, n1), avg(m2, n2)];
+}
+
 export class VisionEngine {
   private readonly gate: QualityGate;
   private readonly detectThreshold: number;
   private readonly maxDecodeSide: number;
   private readonly recipe: EmbeddingRecipe;
   private readonly enhanceLowLight: boolean;
+  private readonly symmetricPose: boolean;
   /** Reusable detector input buffers (4.9 MB each), one per concurrent analysis (in-process mode). */
   private readonly tensorPool: Float32Array[] = [];
 
@@ -97,6 +162,7 @@ export class VisionEngine {
     this.maxDecodeSide = opts.maxDecodeSide ?? DEFAULT_MAX_DECODE_SIDE;
     this.recipe = opts.embedding ?? DEFAULT_EMBEDDING_RECIPE;
     this.enhanceLowLight = opts.enhanceLowLight ?? true;
+    this.symmetricPose = opts.symmetricPose ?? true;
   }
 
   static async create(opts: VisionEngineOptions): Promise<VisionEngine> {
@@ -137,13 +203,18 @@ export class VisionEngine {
     const img = await decodeImage(image, this.maxDecodeSide);
     const whole = wholeImageStats(img);
     let faces = await this.detectDecoded(img);
-    if (faces.length === 0 && (opts.enhanceLowLight ?? this.enhanceLowLight)) faces = capEnhancedScores(await this.detectDecoded(img, true));
+    let enhanced = false;
+    if (faces.length === 0 && (opts.enhanceLowLight ?? this.enhanceLowLight)) {
+      faces = capEnhancedScores(await this.detectDecoded(img, true));
+      enhanced = true;
+    }
     const primary = faces[0] ?? null;
 
     let aligned: AlignedFace | null = null;
     let pose: HeadPose | null = null;
     if (primary) {
-      const p = poseFromFivePoints(primary.landmarks);
+      const mirrored = this.symmetricPose ? matchMirrored(primary, await this.detectDecoded(img, enhanced, true), img.origWidth) : null;
+      const p = poseFromFivePoints(mirrored ? symmetricLandmarks(primary.landmarks, mirrored.landmarks) : primary.landmarks);
       pose = { yawDeg: p.yawDeg, pitchDeg: p.pitchDeg, rollDeg: p.rollDeg };
       aligned = await this.alignPrimary(image, img, primary.landmarks, interEyeDistance(primary));
     }
@@ -174,10 +245,12 @@ export class VisionEngine {
     };
   }
 
-  private async detectDecoded(img: RgbImage & { origWidth: number; origHeight: number }, enhanced = false): Promise<DetectedFace[]> {
+  /** `mirror`: detect on the horizontal mirror image; faces are returned in MIRRORED original coordinates. */
+  private async detectDecoded(img: RgbImage & { origWidth: number; origHeight: number }, enhanced = false, mirror = false): Promise<DetectedFace[]> {
     const plan = planDetectorInput(img.width, img.height);
     let detImg = plan.resize ? await resizeRgb(img, plan.width, plan.height) : img;
     if (enhanced) detImg = enhanceForDetection(await blurRgb(detImg, DETECT_ENHANCE_BLUR_SIGMA), 6, 3);
+    if (mirror) detImg = flopRgb(detImg);
     const tensor = packBgrPlanar(detImg, YUNET_INPUT_SIZE, this.tensorPool.pop());
     let outputs: ort.InferenceSession.ReturnType;
     try {

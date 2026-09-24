@@ -7,22 +7,27 @@
  *
  * --models: directory holding face_detection_yunet_2023mar.onnx and face_recognition_sface_2021dec.onnx (a
  * candidate model can be tested by placing it there under the SFace file name). Default: apps/server/models.
+ * --raw: embed with RECIPE_V1 (single raw view) instead of the engine's default recipe (v2: flip TTA / denoise),
+ * which is what check_parity.py compares against.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VisionEngine } from '../../../apps/server/src/vision/engine.ts';
+import { RECIPE_V1 } from '../../../apps/server/src/vision/embed-prep.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 let modelsDir = resolve(here, '../../../apps/server/models');
+let raw = false;
 const files: string[] = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--models') modelsDir = resolve(args[++i]);
+  else if (args[i] === '--raw') raw = true;
   else if (args[i].endsWith('.txt')) files.push(...readFileSync(args[i], 'utf8').split(/\r?\n/).filter(Boolean));
   else files.push(args[i]);
 }
-const engine = await VisionEngine.create({ modelsDir, threads: 2 });
+const engine = await VisionEngine.create({ modelsDir, threads: 2, ...(raw ? { embedding: RECIPE_V1 } : {}) });
 for (const file of files) {
   try {
     const a = await engine.analyze(readFileSync(file), { embed: true });

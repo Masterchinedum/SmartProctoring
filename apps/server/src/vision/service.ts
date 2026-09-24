@@ -51,6 +51,8 @@ export interface VisionServiceOptions {
   embedding?: EmbeddingRecipe;
   /** Second, low-light-enhanced detection pass when no face is found (default true). */
   enhanceLowLight?: boolean;
+  /** Mirror-symmetric head pose (one extra detector pass on frames with a face; default true). */
+  symmetricPose?: boolean;
   /**
    * Linux: nice increment for the vision threads (env VISION_NICE, default 0). A positive value lets request
    * handling win when the CPU is saturated, but on a shared host other processes then win over vision too.
@@ -195,6 +197,7 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
       gate: options.gate,
       ...(options.embedding ? { embedding: options.embedding } : {}),
       ...(options.enhanceLowLight != null ? { enhanceLowLight: options.enhanceLowLight } : {}),
+      ...(options.symmetricPose != null ? { symmetricPose: options.symmetricPose } : {}),
     };
     const maxQueue = options.maxQueue ?? 256;
     let backend: Backend;

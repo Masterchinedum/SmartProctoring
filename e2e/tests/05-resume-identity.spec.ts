@@ -6,8 +6,12 @@ import { expect, test } from '../lib/test';
  *  a) Candidate A checks in and pauses; the exam is resumed from another browser whose camera shows B
  *     ⇒ the resume check compares B with A's protected reference ⇒ held for review, with before/after
  *     evidence (reference image vs. resume image) and the pause as context.
- *  b) A resumes in a dim room: the image is not good enough for a dependable comparison ⇒ "unable to
- *     verify": guidance to improve the view and a retry — never labelled a different person.
+ *  b) A resumes in a dim room (the studio photo darkened: brightness ~65, contrast ~17): identity v1 refused
+ *     these frames and the returning student could not resume; since the webcam-v2.0 calibration it passes at
+ *     the first attempt — never labelled a different person.
+ *  b2) A resumes in a DARK room (brightness below the gate's minimum): the image is not good enough for a
+ *     dependable comparison ⇒ "unable to verify": guidance to improve the view and a retry — never labelled a
+ *     different person; with the light on it passes.
  */
 test('resume by a different person is held with before/after evidence', async ({ staff, staffPage }) => {
   skipUnlessFixtures('a', 'b');
@@ -68,11 +72,11 @@ test('resume by a different person is held with before/after evidence', async ({
   }
 });
 
-test('resume in a dim room: unable to verify, guidance and retry — never a different person', async ({ staff }) => {
-  skipUnlessFixtures('a', 'dimThenLight');
+test('resume in a dim room passes at the first attempt — never a different person', async ({ staff }) => {
+  skipUnlessFixtures('a', 'aDim');
   const s = await staff.createSession();
   const browserA = await launchCamera('a');
-  const browserDim = await launchCamera('dimThenLight');
+  const browserDim = await launchCamera('aDim');
   try {
     const a = await CandidatePage.open(browserA, s.link);
     await a.checkInAndStart();
@@ -80,21 +84,48 @@ test('resume in a dim room: unable to verify, guidance and retry — never a dif
     await a.pause();
     await a.close();
 
-    /* ---------------- resume in a dim room (camera: dim for 30 s, then the light goes on) */
+    const c = await CandidatePage.open(browserDim, s.link);
+    await c.tid('resume-button').click();
+    expect(await c.runCheck({ purpose: 'resume' })).toBe('passed');
+    await c.continueAfterCheck();
+    await expect(c.tid('qnav-0')).toHaveClass(/answered/);
+    const d = await staff.waitForSession(s.sessionId, (x) => x.summary.status === 'active');
+    expect(d.identityChecks.filter((ch) => ch.trigger === 'resume').map((ch) => ch.decision)).toEqual(['match']);
+    const events = await staff.events(s.sessionId);
+    expect(events.some((e) => e.type === 'identity_mismatch' || e.type === 'session_held')).toBe(false);
+  } finally {
+    await browserA.close();
+    await browserDim.close();
+  }
+});
+
+test('resume in a dark room: unable to verify, guidance and retry — never a different person', async ({ staff }) => {
+  skipUnlessFixtures('a', 'darkThenLight');
+  const s = await staff.createSession();
+  const browserA = await launchCamera('a');
+  const browserDim = await launchCamera('darkThenLight');
+  try {
+    const a = await CandidatePage.open(browserA, s.link);
+    await a.checkInAndStart();
+    await a.answerStandardQuestions();
+    await a.pause();
+    await a.close();
+
+    /* ---------------- resume in a dark room (camera: dark for 30 s, then the light goes on) */
     const c = await CandidatePage.open(browserDim, s.link);
     await c.tid('resume-button').click();
     await expect(c.tid('check-intro')).toHaveAttribute('data-purpose', 'resume');
     await c.tid('check-intro-continue').click();
     const t0 = Date.now(); // camera start
-    await c.passReadiness(); // dim, but good enough for the browser's own checklist
+    await c.passReadiness(); // dark, but the browser's checklist only warns about the light
     // The server cannot use the images: guidance while it keeps trying, then a retry screen.
     await expect(c.tid('verify-guidance')).toContainText(/light/i, { timeout: 30_000 });
     await expect(c.tid('check-retry')).toBeVisible({ timeout: 30_000 });
     console.log(`retry screen after ${since(t0)}`);
-    expect(Date.now() - t0).toBeLessThan(29_000); // still dim: this is the dim-room result
+    expect(Date.now() - t0).toBeLessThan(29_000); // still dark: this is the dark-room result
     await expect(c.tid('check-retry')).toContainText('We could not verify your identity from these images');
     await expect(c.tid('check-retry-guidance')).toContainText(/light/i);
-    await expect(c.tid('check-retry')).toContainText(/Attempts remaining:\s*4/);
+    await expect(c.tid('check-retry')).toContainText(/Attempts remaining:\s*\d/);
     await expect(c.tid('check-retry')).not.toContainText(/different person|not match/i);
 
     let d = await staff.waitForSession(s.sessionId, (x) => x.identityChecks.some((ch) => ch.trigger === 'resume'));

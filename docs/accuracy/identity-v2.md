@@ -576,11 +576,22 @@ different dim or backlit room and camera (cross-scene, same bucket; a camera cha
 engine, so this is a stress test) — false suspects 20 → 128 (dim) and 14 → 86 (backlit) per 1,000 h, confirms 0 → 0;
 good-light swap detection unchanged (confirmed ≤ 3 samples 96 / 94 / 93 % good / typical / side-lit).
 
-**E2e replica** (the fixture's people and scene, rendered offline): A enrolled in the dim room (baseline 0.72 at
-640×480, 0.87 at 1280×720). B's per-sample LLR in that room: v2.0 −3.9 … +0.7 (never *suspect*); v2.1 +1.9 … +5
-per sample at 640×480 (frames 0.3–0.45) and +3.8 … +5 at 1280×720 — *suspect* after one or two samples. A in the
-same room (dim, and after the window light changes it to backlit): −2.8 … −3.2 per sample. A with the lamp on
-(typical): −5.
+**E2e replay.** The realistic e2e videos themselves (`e2e/.fixtures/realistic`), decoded as Chromium does (limited-range
+YUV) and cropped like the candidate client (2.4× the face box, JPEG 0.92), through the engine's own `buildGallery`,
+`aggregateBurst` and `accumulate` in the 'continuous' context:
+
+| fixture | reference (gallery baseline) | v2.0 | **v2.1** |
+|---|---|---|---|
+| `rwSwapDimBlend480`: A, then B in the same dim room, 640×480 | A dim, 0.79 | B's bursts 0.34–0.56 (the e2e run measured 0.46–0.59) labelled *match*, evidence *consistent* | B: *monitoring* at the 1st sample, ***suspect* at the 2nd**; A's bursts 0.78–0.94 → LLR −2.9 … −3.2 |
+| `rwB_dim` vs A enrolled at home, dim, 1280×720 | A dim, 0.88 | *match* / *consistent* | ***suspect* at the 1st sample** (LLR +4.1 … +5 per burst) |
+| `rwGenuineDim`: A for 60 s — dim → lamp on → dim → window light (backlit) → dim | A dim, 0.88 | *consistent* | **0 suspects**: every burst ≤ −3 (lamp on: good frames, 'relaxed' normalisation, −5) |
+
+Sensitivity to what the e2e measured (B's bursts 0.52–0.59 in one run, 0.46–0.58 in another; the gallery baseline is
+not in the run's metrics): with the burst's frame count passed to `comparisonLLR` (§11), *suspect* by the 1st–3rd
+sample for baselines ≥ 0.75 (the 0.46–0.58 run: 1st sample for baselines ≥ 0.66); without it (templates judged by
+the single-frame drift) the 0.52–0.59 run never reaches *suspect* and the other only for baselines ≥ 0.8. With the
+frame count and the sample's LLR passed to `sampleLabel`, B's bursts are labelled *inconclusive* (LLR > −1) —
+staff-visible — for baselines ≥ 0.7, while A's stay *match*.
 
 ## 9. Limitations
 
@@ -687,5 +698,15 @@ These are the calibration contracts the identity engine codes against, all expor
 * `AnalyzeOptions.enhanceLowLight` (default on) and `embeddingVariants` (evaluation only) are new.
   `ImageAnalysis.embeddingVariants` and the optional `FaceQuality.noise`, `.detail` and `.clipped` fields are
   additive.
+* **Mirror-symmetric head pose (v2.1, `VisionEngineOptions.symmetricPose` / service option, default on).** YuNet
+  does not place landmarks mirror-symmetrically: the same turned face measured +30.6°, its mirror image −18.4° (e2e
+  head-turn fixture; turned frames yaw(I) + yaw(mirror I) = +8.8 ± 4.2°, frontal +4 ± 3.5°; `biden.jpg` +12.7 / −23.2°),
+  so turns to one side read ~1.5× larger — liveness steps, the |yaw| gate and the pose bucket favoured one side. The
+  engine now also detects on the mirror image and averages the two landmark sets (alignment and embeddings keep the
+  frame's own landmarks): pose(mirror I) = −pose(I) by construction (measured residual ±1°, from JPEG re-encoding).
+  Cost: one detector pass per frame with a face (+~25 % analysis time measured on a loaded 4-core box). The liveness
+  thresholds are mirror-symmetric (`stepDelta`); tests: `liveness.test.ts` (mirrored pairs at and around the
+  thresholds), `service.test.ts` (real images and their mirror), `engine.test.ts`. Simulator caches keep the pose
+  they were analysed with.
 * Liveness adds `LIVENESS_DEFAULTS.minFramesAgreeing` / `agreeingFractionOfTarget` and the per-bucket consistency
   floors. `checkStepFrame` → `StepFrameFeedback` with `progress`. Send 2–3 frames per step.

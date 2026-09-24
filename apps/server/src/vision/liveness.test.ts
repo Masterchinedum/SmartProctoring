@@ -52,6 +52,41 @@ describe('verifyLiveness', () => {
     expect(Math.abs(frames[2].analysis.pose!.yawDeg)).toBeLessThan(12);
   });
 
+  it('judges left and right turns alike (mirror-symmetric thresholds and feedback)', () => {
+    // Mirrored pairs: turn_left at +d and turn_right at -d around the candidate's own frontal pose must give the same
+    // outcome, measurement magnitude and progress, whichever side the challenge asks first. (The server's pose is
+    // mirror-symmetric too: VisionEngineOptions.symmetricPose, tested on real images in service.test.ts.)
+    const leftFirst: LivenessChallengeSpec = { ...SPEC, steps: [{ index: 0, action: 'turn_left' }, { index: 1, action: 'turn_right' }] };
+    // Centre 0: exact mirror images, including turns right at the thresholds (12 deg single frame, 10 deg agreeing).
+    // Centre 6 (candidate sits slightly turned): the 3-D pose -> five-point yaw mapping is not exactly linear, so
+    // the two sides differ by < 1 deg; turns away from the thresholds.
+    for (const [centre, ds, tol] of [
+      [0, [6, 9, 10, 11, 12, 13, 16, 20, 28], 0.2],
+      [6, [6, 9, 16, 20, 28], 1.5],
+    ] as const) {
+      const c = frontal(0, { yawDeg: centre }).analysis.pose!;
+      for (const d of ds) {
+        const frames = (spec: LivenessChallengeSpec, sign: 1 | -1) => [
+          frontal(1000, { yawDeg: centre }),
+          frontal(1300, { yawDeg: centre }),
+          f(0, spec.steps[0].action, 5000, { yawDeg: centre + (spec.steps[0].action === 'turn_left' ? sign * d : -sign * d) }),
+          f(1, spec.steps[1].action, 9000, { yawDeg: centre + (spec.steps[1].action === 'turn_left' ? sign * d : -sign * d) }),
+        ];
+        const a = verifyLiveness(SPEC, frames(SPEC, 1));
+        const b = verifyLiveness(leftFirst, frames(leftFirst, 1));
+        expect(a.passed).toBe(b.passed);
+        const right = a.steps[0];
+        const left = a.steps[1];
+        expect(right.passed).toBe(left.passed);
+        expect(Math.abs(right.measured! + left.measured!)).toBeLessThan(tol);
+        const fl = checkStepFrame('turn_left', f(0, 'turn_left', 1, { yawDeg: centre + d }).analysis, SPEC, c);
+        const fr = checkStepFrame('turn_right', f(0, 'turn_right', 1, { yawDeg: centre - d }).analysis, SPEC, c);
+        expect(fl.satisfied).toBe(fr.satisfied);
+        expect(Math.abs(fl.progress - fr.progress)).toBeLessThanOrEqual(tol / 10);
+      }
+    }
+  });
+
   it('fails a flat photograph rotated in front of the camera (no parallax)', () => {
     // Flat photo: every frame keeps the frontal nose/eye geometry; rotation only foreshortens.
     const flat = (step: LivenessFrame['step'], action: LivenessFrame['action'], at: number, rot: number): LivenessFrame => {

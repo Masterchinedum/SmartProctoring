@@ -82,9 +82,14 @@ export const FIXTURE_SPECS = {
     { src: 'black', seconds: 14 },
     { src: 'a.jpg', seconds: 90 },
   ],
-  /** A in a dim room for 30 s, then the light is switched on. */
-  dimThenLight: [
-    { src: 'a-dim.jpg', seconds: 30 },
+  /**
+   * A in a dim room (face brightness ~65, contrast ~17). Identity v1 refused such frames (contrast < 18); the
+   * webcam-v2.0 gate uses them, so a resume here passes.
+   */
+  aDim: [{ src: 'a-dim.jpg', seconds: 10 }],
+  /** A in a DARK room for 30 s (face brightness below the gate's 40: really unusable), then the light is switched on. */
+  darkThenLight: [
+    { src: 'a-dark.jpg', seconds: 30 },
     { src: 'a.jpg', seconds: 90 },
   ],
   /** A sitting elsewhere: smaller in the frame and further to the side (another seat / camera position). */
