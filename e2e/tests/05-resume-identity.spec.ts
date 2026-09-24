@@ -1,4 +1,4 @@
-import { CandidatePage, launchCamera, skipUnlessFixtures } from '../lib/candidate';
+import { CandidatePage, launchCamera, since, skipUnlessFixtures } from '../lib/candidate';
 import { expect, test } from '../lib/test';
 
 /**
@@ -76,31 +76,49 @@ test('resume in a dim room: unable to verify, guidance and retry — never a dif
   try {
     const a = await CandidatePage.open(browserA, s.link);
     await a.checkInAndStart();
+    await a.answerStandardQuestions();
     await a.pause();
     await a.close();
 
+    /* ---------------- resume in a dim room (camera: dim for 30 s, then the light goes on) */
     const c = await CandidatePage.open(browserDim, s.link);
     await c.tid('resume-button').click();
     await expect(c.tid('check-intro')).toHaveAttribute('data-purpose', 'resume');
-    const t0 = Date.now();
     await c.tid('check-intro-continue').click();
+    const t0 = Date.now(); // camera start
     await c.passReadiness(); // dim, but good enough for the browser's own checklist
-    const seen = new Set<string>();
-    while (Date.now() - t0 < 70_000) {
-      const vis = async (id: string) => (await c.tid(id).isVisible().catch(() => false)) ? id : null;
-      const state = (await Promise.all(['verify-step', 'verify-problem', 'check-retry', 'check-passed', 'hold-screen', 'check-failed'].map(vis))).filter(Boolean).join(',');
-      const g = (await c.tid('verify-guidance').isVisible().catch(() => false)) ? await c.tid('verify-guidance').innerText() : '';
-      const p = (await c.tid('verify-problem').isVisible().catch(() => false)) ? await c.tid('verify-problem').innerText() : '';
-      const r = (await c.tid('check-retry').isVisible().catch(() => false)) ? await c.tid('check-retry').innerText() : '';
-      const line = `${state} | ${g.replace(/\n/g, ' / ')} | ${p.replace(/\n/g, ' / ')} | ${r.replace(/\n/g, ' / ')}`;
-      if (!seen.has(line)) console.log(`${((Date.now() - t0) / 1000).toFixed(1)} s: ${line}`);
-      seen.add(line);
-      if (state.includes('check-passed')) break;
-      await c.page.waitForTimeout(500);
-    }
-    const d = await staff.session(s.sessionId);
-    console.log(JSON.stringify(d.identityChecks.map((x) => [x.trigger, x.decision, x.quality?.issues])));
-    console.log(c.httpErrors.join('\n'));
+    // The server cannot use the images: guidance while it keeps trying, then a retry screen.
+    await expect(c.tid('verify-guidance')).toContainText(/light/i, { timeout: 30_000 });
+    await expect(c.tid('check-retry')).toBeVisible({ timeout: 30_000 });
+    console.log(`retry screen after ${since(t0)}`);
+    expect(Date.now() - t0).toBeLessThan(29_000); // still dim: this is the dim-room result
+    await expect(c.tid('check-retry')).toContainText('We could not verify your identity from these images');
+    await expect(c.tid('check-retry-guidance')).toContainText(/light/i);
+    await expect(c.tid('check-retry')).toContainText(/Attempts remaining:\s*4/);
+    await expect(c.tid('check-retry')).not.toContainText(/different person|not match/i);
+
+    let d = await staff.waitForSession(s.sessionId, (x) => x.identityChecks.some((ch) => ch.trigger === 'resume'));
+    expect(d.summary.status).toBe('paused');
+    const first = d.identityChecks.find((ch) => ch.trigger === 'resume')!;
+    expect(first.decision).toBe('unable_to_verify');
+    expect(first.quality?.issues.length).toBeGreaterThan(0);
+
+    /* ---------------- the candidate improves the light and tries again */
+    const wait = 33_000 - (Date.now() - t0);
+    if (wait > 0) await c.page.waitForTimeout(wait);
+    await c.tid('check-try-again').click();
+    expect(await c.waitForCheckOutcome(60_000)).toBe('passed');
+    await c.continueAfterCheck();
+    await expect(c.tid('question')).toContainText('bell-shaped');
+    await expect(c.tid('qnav-0')).toHaveClass(/answered/);
+
+    d = await staff.waitForSession(s.sessionId, (x) => x.summary.status === 'active');
+    const resumes = d.identityChecks.filter((ch) => ch.trigger === 'resume').map((ch) => ch.decision);
+    expect(resumes).toEqual(['unable_to_verify', 'match']);
+    expect(d.identityChecks.some((ch) => ch.decision === 'mismatch')).toBe(false);
+    const events = await staff.events(s.sessionId);
+    expect(events.some((e) => e.type === 'identity_mismatch')).toBe(false);
+    expect(events.some((e) => e.type === 'session_held')).toBe(false);
   } finally {
     await browserA.close();
     await browserDim.close();
