@@ -56,7 +56,9 @@ export async function loadOrg(db: DbOrTx, orgId: string): Promise<Organization |
 export async function createOrganization(db: DbOrTx, name: string, settings: Partial<OrgSettings> = {}, now = Date.now()): Promise<Organization> {
   const [org] = await db
     .insert(organizations)
-    .values({ name, settings: { ...DEFAULT_ORG_SETTINGS, ...settings }, createdAt: new Date(now), updatedAt: new Date(now) })
+    // Only explicit overrides are stored; defaults (e.g. identity thresholds) are filled in by orgSettings()
+    // so improved defaults reach organisations that never customised them.
+    .values({ name, settings: { ...settings }, createdAt: new Date(now), updatedAt: new Date(now) })
     .returning();
   return org;
 }

@@ -74,7 +74,10 @@ import { effectivePolicy, holdNow, identityState, requiredCheckFor, withSession,
 export const CHECK_TTL_MS = 3 * 60_000;
 export const TARGET_YAW_DEG = 20;
 export const TARGET_PITCH_DEG = 12;
-export const MAX_FRAMES_PER_CHECK = 60;
+export const MAX_FRAMES_PER_CHECK = 40;
+/** Upload caps per liveness step / for frontal frames (only the first frames of a step count anyway). */
+export const MAX_FRAMES_PER_STEP = 4;
+export const MAX_FRONTAL_FRAMES = 10;
 const BRIGHTNESS_CHANGE = 45;
 
 const TRIGGER_FOR: Record<CheckPurpose, IdentityCheckTrigger> = { initial: 'check_in', resume: 'resume', reconnect: 'reconnect', reverify: 'reverify' };
@@ -264,8 +267,17 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
     step = String(idx);
     action = st.action;
   }
-  const [{ n }] = await ctx.db.select({ n: sql<number>`count(*)::int` }).from(checkFrames).where(eq(checkFrames.checkId, check.id));
-  if (n >= MAX_FRAMES_PER_CHECK) throw new HttpError(429, 'too_many_frames', 'Too many frames for this check. Start a new check.');
+  const counts = await ctx.db
+    .select({ step: checkFrames.step, n: sql<number>`count(*)::int` })
+    .from(checkFrames)
+    .where(eq(checkFrames.checkId, check.id))
+    .groupBy(checkFrames.step);
+  const total = counts.reduce((a, c) => a + c.n, 0);
+  const forStep = counts.find((c) => c.step === step)?.n ?? 0;
+  if (total >= MAX_FRAMES_PER_CHECK) throw new HttpError(429, 'too_many_frames', 'Too many frames for this check. Start a new check.');
+  if (forStep >= (step === 'frontal' ? MAX_FRONTAL_FRAMES : MAX_FRAMES_PER_STEP)) {
+    throw new HttpError(429, 'too_many_frames', 'Enough frames were received for this step. Continue with the next step or start a new check.');
+  }
 
   const capturedAt = q.capturedAt != null && Number.isFinite(q.capturedAt) ? q.capturedAt : now;
   const wantCrop = step === 'frontal' || action === 'center';
@@ -309,13 +321,14 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
     return { accepted, quality, guidance: accepted ? [] : guidanceFor(quality.issues), measured: analysis.pose ? { yawDeg: r1(analysis.pose.yawDeg), pitchDeg: r1(analysis.pose.pitchDeg) } : undefined };
   }
   // Liveness step frame: feedback relative to the candidate's own frontal pose.
+  // The candidate's own frontal pose (YuNet pitch has an offset for frontal faces, so never use absolute pose).
   const prior = await ctx.db
     .select({ analysis: checkFrames.analysis })
     .from(checkFrames)
-    .where(and(eq(checkFrames.checkId, check.id), inArray(checkFrames.action, ['center'])));
-  const poses = prior.map((p) => p.analysis.pose).filter((p): p is NonNullable<typeof p> => p != null && Math.abs(p.yawDeg) <= 25 && Math.abs(p.pitchDeg) <= 25);
+    .where(and(eq(checkFrames.checkId, check.id), eq(checkFrames.step, 'frontal')));
+  const poses = prior.filter((p) => p.analysis.faceCount === 1 && p.analysis.pose != null).map((p) => p.analysis.pose!);
   const centre = poses.length ? { yawDeg: median(poses.map((p) => p.yawDeg)), pitchDeg: median(poses.map((p) => p.pitchDeg)) } : null;
-  const fb = checkStepFrame(action, analysis, { targetYawDeg: spec!.targetYawDeg, targetPitchDeg: spec!.targetPitchDeg }, action === 'center' ? null : centre);
+  const fb = checkStepFrame(action, analysis, { targetYawDeg: spec!.targetYawDeg, targetPitchDeg: spec!.targetPitchDeg }, centre);
   const accepted = analysis.primary != null && quality.faceCount === 1;
   const issues = quality.issues.filter((i) => i !== 'face_turned');
   const guidance = [...guidanceFor(issues)];
@@ -342,12 +355,13 @@ interface PreparedFrames {
 }
 
 async function prepareFrames(ctx: Ctx, checkId: string): Promise<PreparedFrames> {
-  const rows = await ctx.db.select().from(checkFrames).where(eq(checkFrames.checkId, checkId)).orderBy(asc(checkFrames.capturedAt));
+  // Server receipt order; the liveness time window and step order use server receipt time, not client clocks.
+  const rows = await ctx.db.select().from(checkFrames).where(eq(checkFrames.checkId, checkId)).orderBy(asc(checkFrames.seq));
   const frames = rows.map((f) => ({
     id: f.id,
     step: f.step,
     action: f.action,
-    capturedAt: f.capturedAt.getTime(),
+    capturedAt: f.receivedAt.getTime(),
     evidenceId: f.evidenceId,
     cropId: f.faceCropEvidenceId,
     analysis: frameToAnalysis(ctx, f),

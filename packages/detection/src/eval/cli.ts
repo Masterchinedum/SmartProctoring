@@ -1,13 +1,13 @@
 /**
  * Offline accuracy evaluation CLI for @sp/detection.
  *
- *   pnpm --filter @sp/detection eval                       # synthetic scenarios, 5 seeds, table
+ *   pnpm --filter @sp/detection eval                       # synthetic scenarios, 10 seeds, table
  *   pnpm --filter @sp/detection eval -- --write-baseline   # also write docs/accuracy/detection-baseline.json
  *   pnpm --filter @sp/detection eval -- --check            # fail (exit 1) on regression vs the baseline file
  *   pnpm --filter @sp/detection eval -- --trace rec.jsonl --labels rec.labels.json [--trace … --labels …]
  *
  * Options: --seeds N, --seed-base N, --scenario name[,name], --policy policy.json, --out report.json,
- *          --json, --verbose, --no-synthetic. With --trace, synthetic scenarios run only if --scenario is given.
+ *          --json, --markdown, --verbose, --no-synthetic. With --trace, synthetic scenarios run only if --scenario is given.
  * Relative paths resolve against the directory pnpm was invoked from (INIT_CWD).
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -27,12 +27,13 @@ interface Args {
   writeBaseline: boolean;
   check: boolean;
   json: boolean;
+  markdown: boolean;
   verbose: boolean;
   synthetic: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { seeds: 5, seedBase: 1, scenarios: [], traces: [], policy: null, out: null, writeBaseline: false, check: false, json: false, verbose: false, synthetic: true };
+  const a: Args = { seeds: 10, seedBase: 1, scenarios: [], traces: [], policy: null, out: null, writeBaseline: false, check: false, json: false, markdown: false, verbose: false, synthetic: true };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const next = () => {
@@ -78,6 +79,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--verbose':
         a.verbose = true;
+        break;
+      case '--markdown':
+        a.markdown = true;
         break;
       case '--no-synthetic':
         a.synthetic = false;
@@ -135,6 +139,26 @@ function table(report: EvalReport): string {
   return [line(head), widths.map((w) => '-'.repeat(w)).join('  '), ...rows.map(line)].join('\n');
 }
 
+function markdown(report: EvalReport): string {
+  const pct = (v: number | null) => (v === null ? '—' : v.toFixed(3));
+  const lines = [
+    '| Event type | GT | TP | FP | FN | Dup | Precision | Recall | F1 | False alerts / h | Onset latency mean (s) | p95 (s) |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    ...report.byType.map(
+      (m) =>
+        `| \`${m.type}\` | ${m.gt} | ${m.tp} | ${m.fp} | ${m.fn} | ${m.duplicates} | ${pct(m.precision)} | ${pct(m.recall)} | ${pct(m.f1)} | ${fmt(m.falseAlertsPerHour, 2)} | ${fmt(m.latencyMeanSec, 1)} | ${fmt(m.latencyP95Sec, 1)} |`,
+    ),
+    '',
+    '| Scenario | Runs | Minutes | Expected | Detected | False positives | Missed |',
+    '|---|---:|---:|---|---|---|---|',
+    ...report.scenarios.map((s) => {
+      const f = (o: Record<string, number>) => Object.entries(o).map(([k, v]) => `${k} ×${v}`).join(', ') || '—';
+      return `| ${s.scenario} | ${s.runs} | ${s.monitoredMin} | ${f(s.expected)} | ${f(s.detected)} | ${f(s.falsePositives)} | ${f(s.missed)} |`;
+    }),
+  ];
+  return lines.join('\n');
+}
+
 function checkRegression(report: EvalReport, baselinePath: string): string[] {
   if (!existsSync(baselinePath)) return [`baseline file not found: ${baselinePath}`];
   const base = JSON.parse(readFileSync(baselinePath, 'utf8')) as EvalReport;
@@ -172,6 +196,7 @@ function main(): void {
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
   if (args.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  else if (args.markdown) process.stdout.write(`${markdown(report)}\n`);
   else {
     process.stdout.write(`@sp/detection accuracy evaluation — ${runs.length} traces, ${report.monitoredHours} h monitored, seeds ${seeds.join(',')} (${elapsed} s)\n\n`);
     process.stdout.write(`${table(report)}\n\n`);
@@ -201,7 +226,7 @@ function main(): void {
   if (outPath) {
     mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`);
-    if (!args.json) process.stdout.write(`\nwrote ${outPath}\n`);
+    if (!args.json && !args.markdown) process.stdout.write(`\nwrote ${outPath}\n`);
   }
   if (args.check) {
     const problems = checkRegression(report, join(repoRoot(), 'docs/accuracy/detection-baseline.json'));

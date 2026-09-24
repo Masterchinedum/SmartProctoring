@@ -9,7 +9,16 @@ async function main() {
     console.error(`[config] ${(err as Error).message}`);
     process.exit(1);
   }
-  const app = await buildApp({ config });
+  let app;
+  try {
+    app = await buildApp({ config });
+  } catch (err) {
+    if ((err as Error).name === 'VisionModelsNotFoundError') {
+      console.error(`[vision] ${(err as Error).message}\nSet MODELS_DIR to the folder containing face_detection_yunet_2023mar.onnx and face_recognition_sface_2021dec.onnx.`);
+      process.exit(1);
+    }
+    throw err;
+  }
   const shutdown = async (signal: string) => {
     app.log.info(`${signal} received, shutting down`);
     const force = setTimeout(() => process.exit(1), 15_000);

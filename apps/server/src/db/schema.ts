@@ -422,6 +422,8 @@ export const checkFrames = pgTable(
       .notNull()
       .references(() => checks.id, { onDelete: 'cascade' }),
     sessionId: uuid('session_id').notNull(),
+    /** Server receipt order (liveness is verified in receipt order, not client timestamps). */
+    seq: bigserial('seq', { mode: 'number' }).notNull(),
     /** 'frontal' or the liveness step index as a string. */
     step: text('step').notNull(),
     action: text('action').$type<LivenessAction | 'center'>().notNull(),
@@ -435,7 +437,7 @@ export const checkFrames = pgTable(
     clientYaw: doublePrecision('client_yaw'),
     clientPitch: doublePrecision('client_pitch'),
   },
-  (t) => [index('check_frames_check_idx').on(t.checkId, t.capturedAt)],
+  (t) => [index('check_frames_check_idx').on(t.checkId, t.seq)],
 );
 
 export interface IdentityCheckContext {

@@ -26,12 +26,15 @@ export function EvidenceImage({
   alt,
   onOpen,
   caption,
+  eager = false,
 }: {
   evidence: EvidenceRefDTO | null | undefined;
   size?: Size;
   alt?: string;
   onOpen?: () => void;
   caption?: boolean;
+  /** Load immediately (e.g. printable report, where lazy images would be missing from the printout). */
+  eager?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
   const cls = `evidence evidence-${size}`;
@@ -60,7 +63,7 @@ export function EvidenceImage({
     <img
       src={evidence.url}
       alt={alt ?? `${evidenceKindLabel(evidence.kind)} captured ${formatDateTime(evidence.capturedAt)}`}
-      loading="lazy"
+      loading={eager ? 'eager' : 'lazy'}
       decoding="async"
       onError={() => setFailed(true)}
     />

@@ -275,7 +275,7 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
                 </div>
                 <div className="notable-images">
                   {e.evidence.slice(0, 2).map((ev) => (
-                    <EvidenceImage key={ev.id} evidence={ev} size="small" />
+                    <EvidenceImage key={ev.id} evidence={ev} size="small" eager />
                   ))}
                 </div>
               </li>

@@ -1,0 +1,797 @@
+{
+  "version": 1,
+  "generatedAt": "2026-09-24T05:10:01.950Z",
+  "engine": "@sp/detection",
+  "policy": {
+    "enabled": {
+      "absence": true,
+      "multiplePeople": true,
+      "lookingAway": true,
+      "movement": true,
+      "obstruction": true,
+      "objects": true,
+      "cameraIntegrity": true
+    },
+    "absenceSec": 8,
+    "multiplePeopleSec": 1,
+    "lookAwaySec": 5,
+    "lookAwayYawDeg": 28,
+    "lookDownPitchDeg": 20,
+    "glanceMinSec": 1.2,
+    "repeatedLookAwayCount": 5,
+    "repeatedLookAwayWindowSec": 120,
+    "sameDirectionCount": 4,
+    "obstructionSec": 6,
+    "phoneMinConfidence": 0.5,
+    "objectMinConfidence": 0.6,
+    "objectPersistSec": 2,
+    "frozenSec": 6,
+    "coveredSec": 4,
+    "lightingSec": 10,
+    "movementExitCount": 3,
+    "movementWindowSec": 300,
+    "farFromBaselineSec": 15,
+    "mergeGapSec": 10,
+    "clearSec": 2.5
+  },
+  "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "monitoredHours": 22.097,
+  "byType": [
+    {
+      "type": "multiple_people",
+      "gt": 30,
+      "pred": 30,
+      "tp": 30,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 21.94,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 1.46,
+      "latencyP95Sec": 2.47,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "candidate_absent",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 22.064,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 8.85,
+      "latencyP95Sec": 9.29,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "looking_away",
+      "gt": 30,
+      "pred": 29,
+      "tp": 28,
+      "fp": 1,
+      "fn": 2,
+      "duplicates": 0,
+      "precision": 0.966,
+      "recall": 0.933,
+      "f1": 0.949,
+      "cleanHours": 22.031,
+      "falseAlertsPerHour": 0.045,
+      "latencyMeanSec": 5.13,
+      "latencyP95Sec": 5.35,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "repeated_looking_away",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 21.881,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 63.07,
+      "latencyP95Sec": 71.67,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "offscreen_attention_pattern",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 21.873,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 60.19,
+      "latencyP95Sec": 63.76,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "unusual_movement",
+      "gt": 20,
+      "pred": 20,
+      "tp": 20,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 21.615,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 57.3,
+      "latencyP95Sec": 102.81,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "phone_detected",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 22.083,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 2.53,
+      "latencyP95Sec": 2.93,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "unauthorized_object",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 22.056,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 2.68,
+      "latencyP95Sec": 4.09,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "camera_covered",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 22.056,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 4.04,
+      "latencyP95Sec": 4.19,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "camera_feed_suspect",
+      "gt": 20,
+      "pred": 18,
+      "tp": 18,
+      "fp": 0,
+      "fn": 2,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 0.9,
+      "f1": 0.947,
+      "cleanHours": 21.181,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 14.72,
+      "latencyP95Sec": 35.4,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "face_obstructed",
+      "gt": 30,
+      "pred": 30,
+      "tp": 30,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 22.003,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 6.09,
+      "latencyP95Sec": 6.19,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "lighting_unusable",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 21.986,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 10.09,
+      "latencyP95Sec": 10.16,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "camera_disconnected",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 22.042,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 2.12,
+      "latencyP95Sec": 2.2,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "camera_permission_lost",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 22.056,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 1.11,
+      "latencyP95Sec": 1.19,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "camera_frozen",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 22.042,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 6.11,
+      "latencyP95Sec": 6.19,
+      "oneEventPerIssue": true
+    },
+    {
+      "type": "monitoring_degraded",
+      "gt": 10,
+      "pred": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "cleanHours": 21.986,
+      "falseAlertsPerHour": 0,
+      "latencyMeanSec": 15.12,
+      "latencyP95Sec": 15.19,
+      "oneEventPerIssue": true
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario": "clean_30min",
+      "runs": 10,
+      "monitoredMin": 300,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.006
+    },
+    {
+      "scenario": "noisy_frames",
+      "runs": 10,
+      "monitoredMin": 100,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.005
+    },
+    {
+      "scenario": "brief_glances",
+      "runs": 10,
+      "monitoredMin": 50,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.005
+    },
+    {
+      "scenario": "fidgety_candidate",
+      "runs": 10,
+      "monitoredMin": 200,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {
+        "looking_away": 1
+      },
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.005
+    },
+    {
+      "scenario": "sub_threshold_look",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.003
+    },
+    {
+      "scenario": "glances_below_min",
+      "runs": 10,
+      "monitoredMin": 25,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "multi_face_0_6s",
+      "runs": 10,
+      "monitoredMin": 15,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "phone_low_score",
+      "runs": 10,
+      "monitoredMin": 15,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.003
+    },
+    {
+      "scenario": "near_threshold_look_6s",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "looking_away": 10
+      },
+      "detected": {
+        "looking_away": 8
+      },
+      "falsePositives": {},
+      "missed": {
+        "looking_away": 2
+      },
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "look_away_8s",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "looking_away": 10
+      },
+      "detected": {
+        "looking_away": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "look_down_10s",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "looking_away": 10
+      },
+      "detected": {
+        "looking_away": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "repeated_glances",
+      "runs": 10,
+      "monitoredMin": 30,
+      "expected": {
+        "repeated_looking_away": 10
+      },
+      "detected": {
+        "repeated_looking_away": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.006
+    },
+    {
+      "scenario": "same_direction_glances",
+      "runs": 10,
+      "monitoredMin": 33.3,
+      "expected": {
+        "offscreen_attention_pattern": 10
+      },
+      "detected": {
+        "offscreen_attention_pattern": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.005
+    },
+    {
+      "scenario": "absence_12s",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "candidate_absent": 10
+      },
+      "detected": {
+        "candidate_absent": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.006
+    },
+    {
+      "scenario": "short_exits",
+      "runs": 10,
+      "monitoredMin": 43.3,
+      "expected": {
+        "unusual_movement": 10
+      },
+      "detected": {
+        "unusual_movement": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.006
+    },
+    {
+      "scenario": "far_from_baseline",
+      "runs": 10,
+      "monitoredMin": 25,
+      "expected": {
+        "unusual_movement": 10
+      },
+      "detected": {
+        "unusual_movement": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.006
+    },
+    {
+      "scenario": "multi_face_1_5s",
+      "runs": 10,
+      "monitoredMin": 15,
+      "expected": {
+        "multiple_people": 10
+      },
+      "detected": {
+        "multiple_people": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "multi_face_30s",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "multiple_people": 10
+      },
+      "detected": {
+        "multiple_people": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "background_person",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "multiple_people": 10
+      },
+      "detected": {
+        "multiple_people": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "phone_5s",
+      "runs": 10,
+      "monitoredMin": 15,
+      "expected": {
+        "phone_detected": 10
+      },
+      "detected": {
+        "phone_detected": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "book_15s",
+      "runs": 10,
+      "monitoredMin": 15,
+      "expected": {
+        "unauthorized_object": 10
+      },
+      "detected": {
+        "unauthorized_object": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.003
+    },
+    {
+      "scenario": "covered_lens",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "camera_covered": 10
+      },
+      "detected": {
+        "camera_covered": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "frozen_feed",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "camera_frozen": 10
+      },
+      "detected": {
+        "camera_frozen": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.005
+    },
+    {
+      "scenario": "dark_room",
+      "runs": 10,
+      "monitoredMin": 25,
+      "expected": {
+        "lighting_unusable": 10
+      },
+      "detected": {
+        "lighting_unusable": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.005
+    },
+    {
+      "scenario": "replay_loop",
+      "runs": 10,
+      "monitoredMin": 50,
+      "expected": {
+        "camera_feed_suspect": 10
+      },
+      "detected": {
+        "camera_feed_suspect": 8
+      },
+      "falsePositives": {},
+      "missed": {
+        "camera_feed_suspect": 2
+      },
+      "duplicates": 0,
+      "msPerTick": 0.027
+    },
+    {
+      "scenario": "still_person",
+      "runs": 10,
+      "monitoredMin": 50,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "camera_disconnect",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "camera_disconnected": 10
+      },
+      "detected": {
+        "camera_disconnected": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.005
+    },
+    {
+      "scenario": "permission_lost",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "camera_permission_lost": 10
+      },
+      "detected": {
+        "camera_permission_lost": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.003
+    },
+    {
+      "scenario": "face_cut_off",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "face_obstructed": 10
+      },
+      "detected": {
+        "face_obstructed": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "face_covered",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "face_obstructed": 10
+      },
+      "detected": {
+        "face_obstructed": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.005
+    },
+    {
+      "scenario": "person_without_face",
+      "runs": 10,
+      "monitoredMin": 20,
+      "expected": {
+        "face_obstructed": 10
+      },
+      "detected": {
+        "face_obstructed": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "virtual_camera",
+      "runs": 10,
+      "monitoredMin": 15,
+      "expected": {
+        "camera_feed_suspect": 10
+      },
+      "detected": {
+        "camera_feed_suspect": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.004
+    },
+    {
+      "scenario": "low_fps",
+      "runs": 10,
+      "monitoredMin": 25,
+      "expected": {
+        "monitoring_degraded": 10
+      },
+      "detected": {
+        "monitoring_degraded": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.008
+    }
+  ],
+  "checks": {
+    "noDuplicateEvents": true,
+    "oneEventPerOngoingIssue": true,
+    "cleanSessionFalseAlertsPerHour": 0.077,
+    "maxMsPerTick": 0.056
+  }
+}
