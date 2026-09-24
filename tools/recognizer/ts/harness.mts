@@ -17,6 +17,8 @@
  *   fits ({good|fair|poor: {genuine:{mean,sd}, impostor:{mean,sd}}}, sd x 1.15 as identity-v2 §6.2 did), i.e. the
  *   decision layer is recalibrated for the model. Use the `fits` written to --summary by a first (unrefit) run.
  *   Everything else in CALIBRATION (SPRT thresholds, frame thresholds, drift model) is left as shipped.
+ * - --hybrid-base <onnx>: QUALITY-ROUTED hybrid: poor-bucket frames use this model's embeddings, all other frames those
+ *   of the given base model (its analyses must exist: run it first with --tag base and the same --recipe).
  * - --summary: compact before/after numbers: enrolment per condition, engine check outcomes (3 / 6 frames) per
  *   condition, bucket fits, empirical EER / d' per bucket and per probe condition (burst template vs good/typical
  *   enrolment, genuine = other photo, impostors incl. family), sequential-test detection per condition, and the
@@ -57,6 +59,9 @@ const { values } = parseArgs({
     out: { type: 'string' },
     summary: { type: 'string' },
     facesets: { type: 'string' },
+    // HYBRID (quality-routed): take the embedding of every frame whose v2 quality bucket is 'poor' from this model's
+    // analyses, and of every other frame from the analyses of --hybrid-base (its model path; same recipe).
+    'hybrid-base': { type: 'string' },
   },
 });
 
@@ -123,8 +128,25 @@ if (values.refit) {
 
 // 3. report (the harness's own code)
 const noVision = { analyze: () => Promise.reject(new Error('analysis cache incomplete')) } as unknown as VisionService;
-const data = await buildWebcamData(noVision, { ...dataOpts, cachedOnly: true });
+let data = await buildWebcamData(noVision, { ...dataOpts, cachedOnly: true });
 const pipeline = currentPipeline('default');
+if (values['hybrid-base']) {
+  const bpath = resolve(values['hybrid-base']);
+  const bsha = createHash('sha256').update(readFileSync(bpath)).digest('hex').slice(0, 12);
+  const btag = `rec:base:${bsha}:${values.recipe}`;
+  const bdata = await buildWebcamData(noVision, { facesetDir, engineTag: btag, recipes: [], cachedOnly: true });
+  const byId = new Map(bdata.records.map((r) => [r.id, r]));
+  let fromCand = 0;
+  const records = data.records.map((r) => {
+    const q = pipeline.quality(r);
+    const poor = q.usable && pipeline.bucket!(q) === 'poor';
+    if (poor) fromCand++;
+    const b = byId.get(r.id);
+    return poor || !b ? r : { ...r, embeddings: b.embeddings };
+  });
+  data = { ...data, records };
+  log(`hybrid: ${fromCand} poor-bucket frames embedded by ${modelPath}, the rest by ${bpath} (${btag})`);
+}
 const hooks = await loadEngineHooks();
 const report = buildWebcamReport(data, [{ pipeline, data }], { runs: Number(values.runs), hooks });
 if (values.out) writeFileSync(resolve(values.out), JSON.stringify({ engineTag, model: modelPath, sha256_12: sha, recipe, refit: refitUsed, report }, null, 1) + '\n');
