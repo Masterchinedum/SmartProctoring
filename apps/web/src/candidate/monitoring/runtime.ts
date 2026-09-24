@@ -24,7 +24,7 @@ import { classifyApiError, uuid, type CandidateApi } from '../api';
 import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
-import { captureJpeg, GraySampler } from './frames';
+import { captureJpeg, GraySampler, sameFrame } from './frames';
 import type { TraceRecorder } from './trace';
 import { loadVision, type Vision } from './vision';
 
@@ -40,7 +40,9 @@ import { loadVision, type Vision } from './vision';
  */
 
 export const LOOP_INTERVAL_MS = 200; // ~5 Hz
-export const OBJECT_EVERY_N_TICKS = 5; // ~1 Hz object detection
+export const OBJECT_INTERVAL_MS = 1000; // ~1 Hz object detection
+/** The engine needs time to progress even when no new frame arrives (camera off / stalled). */
+export const MIN_INGEST_INTERVAL_MS = 1000;
 const FPS_WINDOW_MS = 5000;
 const OBSERVATION_MAX = 500;
 
@@ -97,7 +99,9 @@ export class MonitoringRuntime {
   private running = false;
   private stopped = false;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
-  private tickNo = 0;
+  private lastGray: Uint8Array | null = null;
+  private lastIngestAt = 0;
+  private lastObjectsAt = 0;
   private readonly frameTimes: number[] = [];
   private lastStatus: MonitoringStatus = { state: 'off', faces: 0, label: 'Monitoring starting', open: [] };
   private cameraGeneration = -1;
@@ -149,6 +153,8 @@ export class MonitoringRuntime {
     if (this.running || this.stopped) return;
     this.running = true;
     const t = this.now();
+    // Thresholds are relative to the candidate's normal position measured at this period's check.
+    if (this.deps.baseline) this.engine.setBaseline(this.deps.baseline);
     this.deps.trace?.marker(t, 'monitoring_start', { baseline: this.deps.baseline ?? null });
 
     // Environment comparison after resume (neutral context — never evidence of a person change).
@@ -198,6 +204,7 @@ export class MonitoringRuntime {
     if (s.info && s.generation !== this.cameraGeneration && s.state === 'live') {
       this.cameraGeneration = s.generation;
       this.metrics.reset();
+      this.lastGray = null;
       const t = this.now();
       this.deps.trace?.marker(t, 'camera', { label: s.info.label, deviceIdHash: s.info.deviceIdHash });
       try {
@@ -236,6 +243,7 @@ export class MonitoringRuntime {
 
   private step(): void {
     const t = this.now();
+    const nowMs = performance.now();
     const cam = this.deps.camera;
     const camState: CameraState = cam.state.state;
     const video = cam.video;
@@ -243,28 +251,39 @@ export class MonitoringRuntime {
     // Browser signal tracker runs regardless of the camera.
     this.pushEpisodes(this.tracker.tick(t));
 
-    let obs: FrameObservation;
-    if (camState === 'live') {
-      if (!cam.isVideoReady()) return; // frames not flowing yet: skip the tick
-      if (!this.vision?.face) return; // without the face model we cannot observe; monitoring_degraded is open
-      const gray = this.sampler.sample(video);
-      if (!gray) return;
-      const frame = this.metrics.next(gray.data, gray.width, gray.height);
-      const size = { width: video.videoWidth, height: video.videoHeight };
-      const faceRes = this.vision.detectFaces(video);
-      if (!faceRes) return;
-      const faces = facesFromMediapipe(faceRes, gray, size);
-      let objects: FrameObservation['objects'] = null;
-      if (this.tickNo % OBJECT_EVERY_N_TICKS === 0 && this.vision.objects) {
-        const objRes = this.vision.detectObjects(video);
-        if (objRes) objects = objectsFromMediapipe(objRes, size.width, size.height);
+    const stale = nowMs - this.lastIngestAt >= MIN_INGEST_INTERVAL_MS;
+    let obs: FrameObservation | null = null;
+    if (camState === 'live' && this.vision?.face) {
+      const gray = cam.isVideoReady() ? this.sampler.sample(video) : null;
+      if (gray) {
+        // Never analyse the same camera frame twice (it would look frozen) — unless no new frame has
+        // arrived for a while, which genuinely is a frozen feed.
+        if (sameFrame(gray.data, this.lastGray) && !stale) return;
+        this.lastGray = gray.data;
+        const size = { width: video.videoWidth, height: video.videoHeight };
+        const faceRes = this.vision.detectFaces(video);
+        if (faceRes) {
+          const frame = this.metrics.next(gray.data, gray.width, gray.height);
+          const faces = facesFromMediapipe(faceRes, gray, size);
+          let objects: FrameObservation['objects'] = null;
+          if (this.vision.objects && nowMs - this.lastObjectsAt >= OBJECT_INTERVAL_MS) {
+            this.lastObjectsAt = nowMs;
+            const objRes = this.vision.detectObjects(video);
+            if (objRes) objects = objectsFromMediapipe(objRes, size.width, size.height);
+          }
+          this.frameTimes.push(nowMs);
+          obs = { t, camera: 'live', frame, faces, objects, fps: Math.round(this.fps() * 10) / 10 };
+        }
       }
-      this.tickNo++;
-      this.frameTimes.push(performance.now());
-      obs = { t, camera: 'live', frame, faces, objects, fps: Math.round(this.fps() * 10) / 10 };
-    } else {
+      // No decodable frame yet (or the detector hiccuped): keep time moving at >= 1 Hz without a frame.
+      if (!obs && stale) obs = { t, camera: 'live', frame: null, faces: [], objects: null, fps: Math.round(this.fps() * 10) / 10 };
+    } else if (camState !== 'live' && stale) {
+      obs = { t, camera: camState, frame: null, faces: [], objects: null, fps: 0 };
+    } else if (camState !== 'live' && nowMs - this.lastIngestAt >= LOOP_INTERVAL_MS) {
       obs = { t, camera: camState, frame: null, faces: [], objects: null, fps: 0 };
     }
+    if (!obs) return;
+    this.lastIngestAt = nowMs;
     this.deps.trace?.observation(obs);
     let out: EngineOutput;
     try {

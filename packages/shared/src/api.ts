@@ -620,7 +620,7 @@ export interface DetectionQualityDTO {
     mismatchEventsDismissed: number;
     mismatchEventsConfirmed: number;
   };
-  offlineEvaluation: unknown | null; // latest stored offline evaluation report (see docs/ACCURACY.md)
+  offlineEvaluation: unknown | null; // { reports: [{ id, kind, createdAt, global, report }] } — latest per kind (see docs/accuracy/)
 }
 
 export interface AuditLogEntryDTO {

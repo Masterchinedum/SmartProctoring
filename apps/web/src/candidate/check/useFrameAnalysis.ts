@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createFrameMetricsTracker, facesFromMediapipe, regionStats } from '@sp/detection';
 import type { FaceObservation, FrameObservation } from '@sp/shared';
 import { useController } from '../context';
-import { GraySampler, type GrayFrame } from '../monitoring/frames';
+import { GraySampler, sameFrame, type GrayFrame } from '../monitoring/frames';
 import { loadVision, type Vision } from '../monitoring/vision';
 
 /**
@@ -65,6 +65,7 @@ export function useFrameAnalysis(enabled: boolean, onFrame: (a: FrameAnalysis) =
     let lastVideoTime = -1;
     let lastAdvance = 0;
     let generation = -1;
+    let lastGray: Uint8Array | null = null;
 
     const step = () => {
       if (!alive) return;
@@ -81,7 +82,10 @@ export function useFrameAnalysis(enabled: boolean, onFrame: (a: FrameAnalysis) =
             lastVideoTime = video.currentTime;
             lastAdvance = performance.now();
           }
-          const gray = sampler.sample(video);
+          let gray = sampler.sample(video);
+          // Skip exact duplicates (camera slower than our sampling) so each frame is analysed once.
+          if (gray && sameFrame(gray.data, lastGray)) gray = null;
+          if (gray) lastGray = gray.data;
           const res = gray ? vision.detectFaces(video) : null;
           if (gray && res) {
             const frame = metrics.next(gray.data, gray.width, gray.height);

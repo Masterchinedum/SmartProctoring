@@ -43,6 +43,13 @@ export class GraySampler {
   }
 }
 
+/** Byte-wise equality of two frames (a camera delivering fewer frames than we sample yields exact duplicates). */
+export function sameFrame(a: Uint8Array | null, b: Uint8Array | null): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 /** Target size for a snapshot: fit inside maxW×maxH keeping the camera's aspect ratio. */
 export function fitSize(vw: number, vh: number, maxW: number, maxH: number): { width: number; height: number } {
   if (!vw || !vh) return { width: maxW, height: maxH };

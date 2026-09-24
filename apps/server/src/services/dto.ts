@@ -311,7 +311,7 @@ export async function loadNoteDTOs(db: DbOrTx, where: { sessionId?: string; even
     .from(notes)
     .leftJoin(staffUsers, eq(staffUsers.id, notes.authorId))
     .where(and(...conds))
-    .orderBy(notes.createdAt);
+    .orderBy(notes.createdAt, notes.id);
   return rows.map((r) => toNoteDTO(r.note, r.authorName ?? 'Unknown'));
 }
 

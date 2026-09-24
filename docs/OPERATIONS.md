@@ -84,5 +84,6 @@ Contact the candidate, then release with a fresh check.
 triggers a reconnect check (readiness, live-person, identity) and the exam continues with answers
 and remaining time preserved. The gap appears in the timeline as an unobserved “disconnected” period.
 
-**A candidate needs more time.** Use Staff submit / terminate for early endings; to extend time,
-edit the exam duration before the candidate starts (per-session extensions are on the roadmap).
+**A candidate needs more time (accommodation or technical loss).** Open the session → *Extend time*
+and enter the minutes and a reason. The extension applies to that session only, is shown on the
+timeline as a neutral "Time extended" entry and is audit-logged.

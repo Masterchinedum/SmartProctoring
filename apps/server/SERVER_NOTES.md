@@ -33,7 +33,9 @@ src/
   routes/auth.ts       /api/auth/login|logout|me|password
   routes/public.ts     /api/health, /api/public/privacy-notice
   routes/candidate/*   /api/candidate/*
-  routes/admin/index.ts  EMPTY plugin owned by the admin-API agent (registered with prefix /api/admin)
+  routes/admin/*       /api/admin/* staff API (sessions, events, evidence, exams, candidates, org, metrics)
+  services/reports*.ts session report, timeline, identity comparison, CSV      services/metrics.ts  detection quality
+  services/retention.ts  evidence & event-metadata retention (hourly job + retention-cli)
   jobs/runner.ts       JobRunner (ctx.jobs): periodic jobs, each run guarded by a pg advisory lock
   jobs/sweeper.ts      heartbeat timeouts, clock expiry, stale checks (sweepOnce(ctx) for tests)
   scripts/seed.ts      demo data

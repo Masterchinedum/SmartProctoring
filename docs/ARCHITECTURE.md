@@ -146,8 +146,9 @@ system's limitations.
 
 Consent recorded before any camera analysis. Identity references and screenshots encrypted at rest,
 accessible only to authenticated staff, audit-logged. Retention job (hourly) purges evidence blobs
-`evidenceRetentionDays` after the session ends (org default, per-exam override) unless the session
-has unreviewed integrity events and `legalHold` is set; purges leave a metadata tombstone. No
+`evidenceRetentionDays` after the session ends (org default, per-exam override) unless staff placed
+the session under `legalHold`; purges leave a metadata tombstone. Event metadata is deleted after
+`eventRetentionDays`. No
 continuous video. Candidate references are per-session and never reused across exams.
 
 ## 9. Accuracy measurement
