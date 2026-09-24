@@ -101,7 +101,7 @@ pnpm test              # unit + integration tests (server tests need Postgres)
 pnpm typecheck
 pnpm --filter @sp/detection eval                          # behavioural detector accuracy
 pnpm --filter @sp/server eval:identity --dataset <dir>    # identity accuracy on your data
-pnpm --filter @sp/e2e test                                # end-to-end with fake camera
+pnpm test:e2e                                              # end-to-end with fake camera
 ```
 
 ## Licensing

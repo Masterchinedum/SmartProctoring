@@ -94,7 +94,7 @@ describe('possible person swap after a resume', () => {
 
   it('summarises the swap observationally in the report', async () => {
     const r = json<SessionReportDTO>(await reviewer.get(`/sessions/${sessionId}/report`));
-    expect(r.identity.summary).toMatch(/^A different face may have appeared after the resume at \d\d:\d\d UTC; this was held for review\.$/);
+    expect(r.identity.summary).toMatch(/^A different face may have appeared after the resume at \d\d:\d\d UTC with a different camera; this was held for review\.$/);
     expect(r.identity.mismatches).toBe(2);
     expect(r.notableEvents[0].type).toBe('identity_mismatch');
     expect(r.observations.join('\n')).toMatch(/on hold from .* because a possible different person was observed; it is still on hold\./);

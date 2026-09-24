@@ -262,28 +262,36 @@ interface IdentitySummaryInput {
   endAt: number;
 }
 
-/** What happened just before `at` that makes a swap more plausible (factual phrase, or null). */
+/**
+ * What happened just before `at` that makes a swap more plausible (factual phrase, or null).
+ * The most recent occurrence wins; occurrences within a minute of it are ranked (a resume outranks a camera
+ * change recorded during the same check), and a simultaneous camera change is mentioned as a qualifier.
+ */
 export function precedingContext(items: TimelineItemDTO[], at: number, clock: Clock, windowMs = 15 * 60_000): string | null {
-  let best: { at: number; phrase: string } | null = null;
-  const consider = (t: number | null | undefined, phrase: string) => {
+  const found: { at: number; rank: number; phrase: string; camera: boolean }[] = [];
+  const consider = (t: number | null | undefined, rank: number, phrase: string, camera = false) => {
     if (t == null || t > at + 1000 || t < at - windowMs) return;
-    if (!best || t >= best.at) best = { at: t, phrase };
+    found.push({ at: t, rank, phrase, camera });
   };
   for (const i of items) {
     if (i.kind === 'event') {
       const e = i.event;
-      if (e.type === 'session_resumed') consider(e.startedAt, `after the resume at ${clock.time(e.startedAt)}`);
-      else if (e.type === 'hold_released') consider(e.startedAt, `after the hold was released at ${clock.time(e.startedAt)}`);
-      else if (e.type === 'candidate_absent' && e.endedAt != null) consider(e.endedAt, `after the face returned to view at ${clock.time(e.endedAt)}`);
-      else if ((e.type === 'camera_disconnected' || e.type === 'camera_permission_lost') && e.endedAt != null) consider(e.endedAt, `after the camera reconnected at ${clock.time(e.endedAt)}`);
-      else if (e.type === 'camera_changed') consider(e.startedAt, `after the camera changed at ${clock.time(e.startedAt)}`);
-      else if (e.type === 'multiple_people' && e.endedAt != null) consider(e.endedAt, `after more than one person was in view at ${clock.time(e.startedAt)}`);
-      else if (e.type === 'multiple_instances') consider(e.startedAt, `after the exam was opened in another browser at ${clock.time(e.startedAt)}`);
+      if (e.type === 'session_resumed') consider(e.startedAt, 9, `after the resume at ${clock.time(e.startedAt)}`);
+      else if (e.type === 'hold_released') consider(e.startedAt, 8, `after the hold was released at ${clock.time(e.startedAt)}`);
+      else if (e.type === 'multiple_instances') consider(e.startedAt, 6, `after the exam was opened in another browser at ${clock.time(e.startedAt)}`);
+      else if ((e.type === 'camera_disconnected' || e.type === 'camera_permission_lost') && e.endedAt != null) consider(e.endedAt, 5, `after the camera reconnected at ${clock.time(e.endedAt)}`);
+      else if (e.type === 'candidate_absent' && e.endedAt != null) consider(e.endedAt, 4, `after the face returned to view at ${clock.time(e.endedAt)}`);
+      else if (e.type === 'multiple_people' && e.endedAt != null) consider(e.endedAt, 3, `after more than one person was in view at ${clock.time(e.startedAt)}`);
+      else if (e.type === 'camera_changed') consider(e.startedAt, 1, `after the camera changed at ${clock.time(e.startedAt)}`, true);
     } else if (i.kind === 'period' && i.period.kind === 'disconnected' && i.period.endedAt != null) {
-      consider(i.period.endedAt, `after the exam was reopened at ${clock.time(i.period.endedAt)}`);
+      consider(i.period.endedAt, 7, `after the exam was reopened at ${clock.time(i.period.endedAt)}`);
     }
   }
-  return (best as { at: number; phrase: string } | null)?.phrase ?? null;
+  if (found.length === 0) return null;
+  const latest = Math.max(...found.map((f) => f.at));
+  const recent = found.filter((f) => f.at >= latest - 60_000).sort((a, b) => b.rank - a.rank || b.at - a.at);
+  const best = recent[0];
+  return !best.camera && recent.some((f) => f.camera) ? `${best.phrase} with a different camera` : best.phrase;
 }
 
 function heldAfter(events: EventDTO[], at: number, endAt: number): boolean {
