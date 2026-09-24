@@ -47,6 +47,19 @@ Requirement-by-requirement mapping: the requirements audit (90 atomic requiremen
 7. **English only** (strings are centralised enough to localise).
 8. Per-session answer conflict: if two devices edit the same answer, the later client sequence wins; superseded devices are blocked from writing.
 9. **Docker image** — no Docker daemon was available in the build environment, so `docker build` itself was not executed. The image's runtime layout (`pnpm deploy --prod` node_modules + bundled `dist/` incl. the vision worker + migrations + models + web build) was reproduced by hand and booted with `NODE_ENV=production`: migrations, owner bootstrap, SPA/WASM/model serving, check-ins and identity samples through the worker pool all worked. Run `docker compose up --build` once in CI/staging before launch.
+10. **Not exercised against real external services here**: a real SMTP provider (TLS/auth/SPF/DKIM), S3-compatible storage (retention and `rekey` were verified on local storage), webhook delivery to a public endpoint with the private-network guard on (e2e had to allow a local receiver). Multi-instance realtime and rate limits over Redis are covered by integration tests with a local Redis, not by a multi-host deployment.
+11. **Staff MFA, SSO (SAML/OIDC), per-candidate accommodations beyond time extension and policy variants, and localisation** are the most likely next feature requests.
+
+## 4b. Try it in five minutes
+
+1. `pnpm install && createdb proctor && pnpm --filter @sp/server seed && pnpm dev`
+2. Staff: open http://localhost:5173/admin → sign in `admin@example.com` / `ChangeMe123!` → Live dashboard.
+3. Candidate: open one of the `/take/<token>` links printed by the seed in Chrome with a webcam (a second
+   browser profile or another machine works best) → consent → camera check → turn your head left/right
+   when asked → start → answer → pause → close the tab → reopen the link → resume.
+4. Watch the dashboard update live; open the session to see the timeline, periods, identity checks, events
+   with screenshots, and the final report. Try covering the camera, leaving the frame, a second person in
+   view, or switching tabs.
 
 ## 5. Defaults decided on your behalf (all configurable)
 
