@@ -32,6 +32,18 @@ and ID-photo mismatch **< 0.24**, with 2 confirmations. At 0.45 on the pairs set
 7.9 % of masked genuine probes become *inconclusive* (never *mismatch*). Tables in §4–§5 were produced at
 the earlier 0.40 setting; §6 has the 0.45 comparison.
 
+### ID-photo template stability gate
+
+An approved ID photo that is too low-resolution or too heavily compressed produces an unstable face
+template, and comparing a live candidate against it can report the *right* person as "possibly
+different" (found in end-to-end QA: a 130 px thumbnail saved at JPEG quality 3 and upscaled compared at
+≈ 0 with the same person). At upload, the photo's template is therefore compared with the templates of
+three near-identical variants (σ≈1.2 blur, 50 % down-and-up rescale, 3 % crop); photos whose minimum
+self-similarity is below **0.85** are refused with the `low_detail` reason and staff guidance. On public
+portrait photos the minimum was ≥ 0.915 (median 0.975); the thumbnail recipe scored 0.62; a 160 px-wide
+photo can score ≈ 0.77 and is refused as too small (`ID_PHOTO_MIN_TEMPLATE_STABILITY` in
+`apps/server/src/vision/id-photo.ts`).
+
 ## 2. Models and licensing
 
 | Model | Use | License | Notes |

@@ -176,6 +176,21 @@ describe.skipIf(!haveModels || !haveImages)('OnnxVisionService on real images', 
     expect(rejected.guidance[0]).toMatch(/No face/);
   });
 
+  it('refuses an ID photo whose face template is unstable (tiny, heavily compressed, upscaled)', async () => {
+    // A good photo is stable under a tiny blur / rescale / crop …
+    const good = await vision.processIdPhoto(img('obama.jpg'));
+    expect(good.accepted).toBe(true);
+    expect(good.templateStability ?? 0).toBeGreaterThan(0.85);
+    // … a 130 px thumbnail saved at JPEG quality 3 and scaled back up is not: comparing against it would
+    // report the right person as "possibly different". It must be refused at upload (or show no face).
+    const tiny = await sharp(img('obama.jpg')).resize(130).jpeg({ quality: 3 }).toBuffer();
+    const bad = await sharp(tiny).resize(600).jpeg({ quality: 90 }).toBuffer();
+    const res = await vision.processIdPhoto(bad);
+    expect(res.accepted).toBe(false);
+    expect(res.quality.issues.some((i) => i === 'low_detail' || i === 'no_face' || i === 'low_detection_confidence')).toBe(true);
+    if (res.quality.issues.includes('low_detail')) expect(res.guidance.join(' ')).toMatch(/low-resolution or too heavily compressed/);
+  });
+
   it('rejects non-images', async () => {
     await expect(vision.analyze(Buffer.from('not a jpeg'))).rejects.toBeInstanceOf(VisionInputError);
   });

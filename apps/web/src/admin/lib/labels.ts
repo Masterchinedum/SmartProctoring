@@ -125,6 +125,7 @@ export const QUALITY_ISSUE_LABELS: Record<QualityIssue, string> = {
   blurry: 'Blurry',
   face_turned: 'Face turned away',
   low_detection_confidence: 'Face unclear',
+  low_detail: 'Too low-resolution / compressed',
 };
 
 export function qualityIssueLabel(issue: string): string {

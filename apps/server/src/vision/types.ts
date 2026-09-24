@@ -135,6 +135,8 @@ export interface IdPhotoResult {
   analysis: ImageAnalysis;
   quality: FaceQuality;
   guidance: string[];
+  /** Template stability under tiny perturbations (null when not computed, e.g. no face). */
+  templateStability?: number | null;
 }
 
 /** Per-frame decision inside an aggregate. */

@@ -38,6 +38,8 @@ export const QUALITY_ISSUES = [
   'blurry',
   'face_turned',
   'low_detection_confidence',
+  /** Image too low-resolution or heavily compressed: the face template is not stable enough to compare. */
+  'low_detail',
 ] as const;
 export type QualityIssue = (typeof QUALITY_ISSUES)[number];
 
@@ -52,6 +54,7 @@ export const QUALITY_GUIDANCE: Record<QualityIssue, string> = {
   blurry: 'The image is blurry. Hold still, clean the camera lens, and check the camera focus.',
   face_turned: 'Look straight at the screen.',
   low_detection_confidence: 'We can’t see your face clearly. Remove anything covering your face and improve the lighting.',
+  low_detail: 'The picture is too low in detail. Move closer to the camera, improve the lighting, and use your best-quality camera.',
 };
 
 export interface FaceQuality {

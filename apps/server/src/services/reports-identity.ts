@@ -35,6 +35,7 @@ const ISSUE_TEXT: Record<QualityIssue, string> = {
   blurry: 'blurry',
   face_turned: 'face turned away',
   low_detection_confidence: 'face not clearly visible',
+  low_detail: 'too low in detail (resolution or compression)',
 };
 
 function str(v: unknown): string | null {
