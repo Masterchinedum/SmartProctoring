@@ -118,6 +118,8 @@ export class CandidateController {
   private hbSeq = 0;
   private hbInFlight = false;
   private hbSoon = false;
+  private timeUpRunning = false;
+  private timeUpLastAt = 0;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private uiTimer: ReturnType<typeof setInterval> | null = null;
   private outboxOpening: Promise<Outbox> | null = null;
@@ -271,7 +273,8 @@ export class CandidateController {
         lsSet(PAUSE_REASON_KEY(sid), null);
       }
     }
-    this.patch({ state, pausedAtLocal, pauseReasonLocal, timeUp: false });
+    const timeUp = state.session.status === 'active' && this.countdown.running && this.remainingMs() <= 0;
+    this.patch({ state, pausedAtLocal, pauseReasonLocal, timeUp });
 
     await this.ensureOutbox(sid);
     if (state.questions && (state.session.status === 'active' || state.session.status === 'paused' || state.session.status === 'on_hold')) {
@@ -579,18 +582,25 @@ export class CandidateController {
     const s = this.snap.state;
     if (!s || s.session.status !== 'active' || !this.countdown.running) return false;
     const up = this.remainingMs() <= 0;
-    if (up && !this.snap.timeUp) void this.onTimeUp();
+    if (up && !this.timeUpRunning && Date.now() - this.timeUpLastAt > 5000) void this.onTimeUp();
     return up;
   }
 
+  /**
+   * The exam clock reached zero: deliver the last answers, then send a heartbeat — the server submits
+   * an expired exam when it sees it, and the status change moves the page to the ended screen.
+   */
   private async onTimeUp(): Promise<void> {
-    // The server auto-submits when the clock reaches zero; make sure our answers get there first.
-    await this.answers?.flushPending();
-    await this.outbox?.flushNow(5000, 'answers');
-    for (let i = 0; i < 10 && !this.disposed; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const st = await this.load();
-      if (st && st.session.status !== 'active') return;
+    if (this.timeUpRunning) return;
+    this.timeUpRunning = true;
+    this.timeUpLastAt = Date.now();
+    try {
+      await this.answers?.flushPending();
+      await this.outbox?.flushNow(5000, 'answers');
+      await this.heartbeatNow();
+    } finally {
+      this.timeUpRunning = false;
+      this.timeUpLastAt = Date.now();
     }
   }
 
