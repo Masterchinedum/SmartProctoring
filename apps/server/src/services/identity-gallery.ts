@@ -280,7 +280,7 @@ export function aggregateBurst(
   if (consistent && spread <= BURST_MAX_SPREAD) {
     // The template of the burst averages frame noise out (the score the calibration is fitted for).
     const sim = scoreReference(usableIdx.map((i) => frames[i].embedding!), gallery);
-    evidence = { usable: true, similarity: sim, bucket, llr: comparisonLLR(sim, bucket, baseline, context).llr };
+    evidence = { usable: true, similarity: sim, bucket, llr: comparisonLLR(sim, bucket, baseline, context, usableIdx.length).llr };
     scoring = 'template';
   } else {
     scoring = 'median';

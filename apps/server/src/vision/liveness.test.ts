@@ -82,7 +82,7 @@ describe('verifyLiveness', () => {
         const fl = checkStepFrame('turn_left', f(0, 'turn_left', 1, { yawDeg: centre + d }).analysis, SPEC, c);
         const fr = checkStepFrame('turn_right', f(0, 'turn_right', 1, { yawDeg: centre - d }).analysis, SPEC, c);
         expect(fl.satisfied).toBe(fr.satisfied);
-        expect(Math.abs(fl.progress - fr.progress)).toBeLessThanOrEqual(tol / 10);
+        expect(Math.abs((fl.progress ?? 0) - (fr.progress ?? 0))).toBeLessThanOrEqual(tol / 10);
       }
     }
   });

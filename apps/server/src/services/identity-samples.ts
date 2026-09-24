@@ -206,8 +206,8 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
       const st = identityState(m.session);
       let pending = st.pendingBursts.find((b) => b.id === burstId) ?? null;
       const late = !pending && (recordOnly || (await burstSeen(m, burstId)));
-      const label = sampleLabel(sim, analysis.quality, env.thresholds);
-      const cmp = decideIdentity(sim, analysis.quality, env.thresholds, 'reference');
+      const label = sampleLabel(sim, analysis.quality, env.thresholds, fe.usable ? fe.llr : null);
+      const cmp = decideIdentity(sim, analysis.quality, env.thresholds, 'reference', fe.usable ? { llr: fe.llr } : undefined);
       const keepImages = !late && wantImages(env, label, fe, st);
       const images = keepImages ? await storeSampleImages(m, env, { at, instanceId, jpeg, crop: analysis.faceCropJpeg, identityCheckId: null }) : { probeId: null, frameId: null };
       const frameId = randomUUID();
@@ -452,8 +452,8 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
   }
   const repFrame = d.frames[rep];
   const quality = fe.usable ? repFrame.analysis.quality : (repFrame?.analysis.quality ?? null);
-  const label = sampleLabel(fe.similarity, quality, env.thresholds);
-  const cmp = decideIdentity(fe.similarity, quality, env.thresholds, 'reference');
+  const label = sampleLabel(fe.similarity, quality, env.thresholds, fe.usable ? fe.llr : null);
+  const cmp = decideIdentity(fe.similarity, quality, env.thresholds, 'reference', fe.usable ? { llr: fe.llr } : undefined);
 
   const pre = await precedingContext(m.tx, s.id, d.at, d.trigger);
   const ctxInfo: IdentityCheckContext = {

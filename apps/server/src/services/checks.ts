@@ -638,7 +638,7 @@ function assessContinuation(analyses: readonly ImageAnalysis[], active: ActiveRe
   else if (assessment.status === 'likely_mismatch' && aggSim != null && aggSim < thresholds.match) decision = 'mismatch';
   else if (usable.length === 0) decision = 'unable_to_verify';
   else decision = 'inconclusive';
-  const labels = perFrame.map((f) => sampleLabel(f.similarity, analyses[f.index].quality, thresholds));
+  const labels = perFrame.map((f) => sampleLabel(f.similarity, analyses[f.index].quality, thresholds, f.usable ? f.llr : null));
   const count = (d: IdentityDecision) => labels.filter((l) => l === d).length;
   const allIssues = analyses.flatMap((a) => a.quality.issues);
   let guidance: string[] = [];
