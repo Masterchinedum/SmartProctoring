@@ -31,6 +31,7 @@ import { buildCandidateState } from '../../services/candidate-state.js';
 import { completeCheck, startCheck, submitCheckFrame } from '../../services/checks.js';
 import { processIdentitySample } from '../../services/identity-samples.js';
 import { ingestEvents, uploadEventEvidence } from '../../services/ingest.js';
+import { trackInstanceRequest } from '../../services/instance-usage.js';
 
 const uuid = z.string().uuid();
 const optNum = z.preprocess((v) => (v === '' || v == null ? undefined : v), z.coerce.number().finite().optional());
@@ -77,9 +78,26 @@ function tokenKey(req: FastifyRequest): string {
 
 const limit = (max: number) => ({ rateLimit: { max, timeWindow: '1 minute', keyGenerator: tokenKey } });
 
+/** Client address (trust-proxy aware) and User-Agent, for concurrent-use detection (hashed there). */
+function clientMeta(req: FastifyRequest): { ip: string; userAgent: string } {
+  const ua = req.headers['user-agent'];
+  return { ip: req.ip, userAgent: (Array.isArray(ua) ? ua[0] : ua) ?? '' };
+}
+
 export const candidateRoutes: FastifyPluginAsync = async (app) => {
   const ctx = app.ctx;
   app.addHook('preHandler', candidateAuth);
+  // Concurrent use of the verified instance id from another device/network (services/instance-usage.ts). The
+  // heartbeat does this itself (it also tracks `seq`).
+  app.addHook('preHandler', async (req) => {
+    const c = req.candidateAuth;
+    if (!c?.instanceId || req.routeOptions.url?.endsWith('/heartbeat')) return;
+    try {
+      await trackInstanceRequest(ctx, c.session, c.instanceId, clientMeta(req));
+    } catch (err) {
+      req.log.error({ err, sessionId: c.session.id }, 'concurrent-use tracking failed (request continues)');
+    }
+  });
   app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer', bodyLimit: 1024 * 1024 }, (_req, body, done) => done(null, body));
 
   const state = (req: FastifyRequest): Promise<CandidateSessionState> => {
@@ -132,7 +150,7 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/heartbeat', { config: limit(120) }, async (req) => {
     const c = getCandidate(req);
-    return heartbeat(ctx, c.session.id, requireInstanceId(req), heartbeatRequestSchema.parse(req.body));
+    return heartbeat(ctx, c.session.id, requireInstanceId(req), heartbeatRequestSchema.parse(req.body), clientMeta(req));
   });
 
   app.post('/events/batch', { config: limit(240) }, async (req) => {

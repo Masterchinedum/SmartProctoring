@@ -20,6 +20,7 @@ import { audit } from '../lib/audit.js';
 import { badRequest, conflict, invalidState, notFound, validationFailed } from '../lib/errors.js';
 import { assertInControl, buildCandidateState, instanceInControl, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { recordMultipleInstances } from './checks.js';
+import { applyInstanceUsage } from './instance-usage.js';
 import { remainingMs, sessionClock } from './dto.js';
 import { assertStatus, finalizeSession, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession } from './session-state.js';
 import { clockExpired } from '@sp/shared';
@@ -154,7 +155,7 @@ export async function cancelPauseRequest(ctx: Ctx, sessionId: string, instanceId
 
 /* ------------------------------------------------------------------ heartbeat */
 
-export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string, body: HeartbeatRequest): Promise<HeartbeatResponse> {
+export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string, body: HeartbeatRequest, client?: { ip: string; userAgent: string }): Promise<HeartbeatResponse> {
   if (body.clientInstanceId && body.clientInstanceId !== instanceId) throw badRequest('clientInstanceId does not match the X-Client-Instance header', undefined, 'instance_mismatch');
   return withSession(ctx, sessionId, async (m) => {
     const s = m.session;
@@ -192,6 +193,9 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
     }
 
     m.set({ lastHeartbeatAt: new Date(now), lastHeartbeatInstanceId: instanceId, connection: 'online' });
+    // Same verified instance id used from two places at once (copied id): IP/UA/seq (services/instance-usage.ts).
+    // A signal clears verifiedInstanceId, so the block below is skipped and a reconnect check is required.
+    if (client) await applyInstanceUsage(m, instanceId, { ...client, seq: body.seq, at: now, refresh: true });
     if (instanceInControl(s, instanceId) && !TERMINAL.includes(s.status)) {
       const mon = body.monitoring;
       m.set({

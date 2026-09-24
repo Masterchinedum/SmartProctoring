@@ -1,9 +1,10 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { makeY4m, type Segment } from '../scripts/make-y4m';
-import { FIXTURES_DIR, faceImage, facesAvailable } from './config';
+import { E2E_DIR, FIXTURES_DIR, faceImage, facesAvailable } from './config';
 
 /**
  * Fake-camera fixtures, generated once per machine into e2e/.fixtures (gitignored) from the face images in
@@ -74,10 +75,25 @@ export const FIXTURE_SPECS = {
     { src: 'a-dark.jpg', seconds: 150 },
   ],
 } satisfies Record<string, Segment[]>;
-export type FixtureName = keyof typeof FIXTURE_SPECS;
+
+/**
+ * Synthetic videos made by scripts (run as a subprocess): `headturn` = candidate A, frontal for 10 s,
+ * then repeated cycles of turning left / right and back (real nose-vs-eyes parallax, identity preserved),
+ * for the ACTIVE liveness path (scripts/synth-headturn.ts).
+ */
+export const SYNTH_SPECS = {
+  headturn: { script: 'synth-headturn.ts', still: 'a.jpg' as StillName, args: ['5', '10', '6'] },
+} as const;
+
+export type FixtureName = keyof typeof FIXTURE_SPECS | keyof typeof SYNTH_SPECS;
+
+function isSynth(name: FixtureName): name is keyof typeof SYNTH_SPECS {
+  return name in SYNTH_SPECS;
+}
 
 /** Source images each fixture needs. */
 export function fixtureSources(name: FixtureName): string[] {
+  if (isSynth(name)) return [STILLS[SYNTH_SPECS[name].still].src];
   const stills = new Set<string>(FIXTURE_SPECS[name].map((s) => s.src).filter((s) => s in STILLS));
   return [...new Set([...stills].map((s) => STILLS[s as StillName].src))];
 }
@@ -101,10 +117,16 @@ async function makeStill(name: StillName): Promise<void> {
   await img.jpeg({ quality: 92 }).toFile(stillPath(name));
 }
 
-function specHash(name: FixtureName): string {
+function specHash(name: keyof typeof FIXTURE_SPECS): string {
   const h = createHash('sha256').update(JSON.stringify(FIXTURE_SPECS[name]));
   for (const s of FIXTURE_SPECS[name]) if (s.src in STILLS) h.update(JSON.stringify(STILLS[s.src as StillName]));
   return h.digest('hex').slice(0, 16);
+}
+
+function buildSynth(name: keyof typeof SYNTH_SPECS, out: string): void {
+  const spec = SYNTH_SPECS[name];
+  const r = spawnSync(join(E2E_DIR, 'node_modules/.bin/tsx'), [join(E2E_DIR, 'scripts', spec.script), stillPath(spec.still), out, ...spec.args], { cwd: E2E_DIR, encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`${spec.script} failed: ${r.stderr || r.stdout}`);
 }
 
 /** Builds the stills and every Y4M whose spec changed (or is missing). Returns the fixtures that were built. */
@@ -122,7 +144,23 @@ export async function ensureFixtures(log: (m: string) => void = () => undefined)
     await makeStill(name);
     manifest[key] = hash;
   }
-  for (const name of Object.keys(FIXTURE_SPECS) as FixtureName[]) {
+  for (const name of Object.keys(SYNTH_SPECS) as (keyof typeof SYNTH_SPECS)[]) {
+    if (!fixtureAvailable(name)) {
+      skipped.push(name);
+      continue;
+    }
+    const spec = SYNTH_SPECS[name];
+    const script = join(E2E_DIR, 'scripts', spec.script);
+    const hash = createHash('sha256').update(JSON.stringify(spec)).update(readFileSync(script)).update(manifest[`still:${spec.still}`] ?? '').digest('hex').slice(0, 16);
+    if (manifest[`y4m:${name}`] === hash && existsSync(fixturePath(name))) continue;
+    log(`building fake-camera fixture ${name}.y4m (${spec.script})`);
+    const tmp = `${fixturePath(name)}.tmp`;
+    buildSynth(name, tmp);
+    renameSync(tmp, fixturePath(name));
+    manifest[`y4m:${name}`] = hash;
+    built.push(name);
+  }
+  for (const name of Object.keys(FIXTURE_SPECS) as (keyof typeof FIXTURE_SPECS)[]) {
     if (!fixtureAvailable(name)) {
       skipped.push(name);
       continue;

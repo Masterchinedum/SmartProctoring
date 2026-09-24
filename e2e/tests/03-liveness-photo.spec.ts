@@ -71,3 +71,75 @@ test('active liveness: a still photo cannot pass; attempts recorded; held for re
     await browser.close();
   }
 });
+
+/**
+ * Scenario 3b — the passing path: a live (turning) person. Fake camera: candidate A frontal for 10 s,
+ * then cycles of turning left and right (synthetic parallax between nose and eyes, identity preserved —
+ * see scripts/synth-headturn.ts). Both the initial check and a resume check with active liveness pass.
+ */
+test('active liveness: a turning head passes at check-in and at resume', async ({ staff }) => {
+  skipUnlessFixtures('headturn');
+  test.setTimeout(5 * 60_000);
+  const s = await staff.createSession({ policy: { identity: { liveness: 'active', livenessSteps: 2 } } });
+  const browser = await launchCamera('headturn');
+  const trace = async (c: CandidatePage, label: string, until: () => Promise<boolean>, timeoutMs: number) => {
+    const t0 = Date.now();
+    let last = '';
+    while (Date.now() - t0 < timeoutMs) {
+      if (await until()) return;
+      const phase = await c.tid('verify-step').getAttribute('data-phase', { timeout: 1000 }).catch(() => null);
+      const instr = (await c.tid('verify-instruction').innerText({ timeout: 1000 }).catch(() => '')).replace(/\s+/g, ' ');
+      const line = `${phase} | ${instr}`;
+      if (line !== last) console.log(`[${label}] +${((Date.now() - t0) / 1000).toFixed(1)} s ${line}`);
+      last = line;
+      await c.page.waitForTimeout(500);
+    }
+  };
+  try {
+    let c = await CandidatePage.open(browser, s.link);
+    const logVerdicts = (page: typeof c.page) =>
+      page.on('response', async (r) => {
+        if (/\/checks\/[^/]+\/(complete|frames)/.test(r.url())) {
+          const b = await r.json().catch(() => null);
+          if (r.url().includes('/complete')) console.log(`complete: ${b?.outcome} liveness=${JSON.stringify(b?.liveness)} guidance=${JSON.stringify(b?.guidance)}`);
+          else console.log(`frame ${new URL(r.url()).searchParams.get('step')}: accepted=${b?.accepted} satisfied=${b?.stepSatisfied} measured=${JSON.stringify(b?.measured)} client=${new URL(r.url()).searchParams.get('clientYaw')}`);
+        }
+      });
+    logVerdicts(c.page);
+    await c.consent();
+    await c.passReadiness();
+    const anyOutcome = () => c.page.locator('[data-testid="ready-screen"], [data-testid="check-retry"], [data-testid="hold-screen"], [data-testid="check-passed"]').first().isVisible();
+    await trace(c, 'initial', anyOutcome, 120_000);
+    expect(await c.waitForCheckOutcome(1_000)).toBe('ready');
+
+    const d = await staff.session(s.sessionId);
+    expect(d.summary.status).toBe('ready');
+    expect(d.references).toHaveLength(1);
+    expect(d.references[0].liveness?.passed).toBe(true);
+    const types = (await staff.events(s.sessionId)).map((e) => e.type);
+    expect(types).toContain('reference_created');
+    expect(types).toContain('checkin_completed');
+    const checkin = (await staff.events(s.sessionId)).find((e) => e.type === 'checkin_completed')!;
+    expect(checkin.details.liveness).toBe('passed');
+
+    await c.startExam();
+    await c.gotoQuestion(0);
+    await c.page.getByRole('radio', { name: 'Mean' }).check();
+    await c.pause();
+    await c.close();
+
+    /* ---------------- resume with active liveness (the camera restarts: frontal, then turning) */
+    c = await CandidatePage.open(browser, s.link);
+    await c.tid('resume-button').click();
+    await c.tid('check-intro-continue').click();
+    await c.passReadiness();
+    await trace(c, 'resume', anyOutcome, 120_000);
+    expect(await c.waitForCheckOutcome(1_000)).toBe('passed');
+    await c.continueAfterCheck();
+    await expect(c.tid('qnav-0')).toHaveClass(/answered/);
+    const after = await staff.waitForSession(s.sessionId, (x) => x.summary.status === 'active');
+    expect(after.identityChecks.find((ch) => ch.trigger === 'resume')?.decision).toBe('match');
+  } finally {
+    await browser.close();
+  }
+});
