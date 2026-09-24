@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { EVENT_TYPES, REVIEW_STATUSES, type EventCategory, type EventSource, type EventType, type ReviewStatus, type Severity } from './events';
 import type { ProctoringPolicy } from './policy';
-import type { CheckPurpose, ConnectionStatus, EndReason, HoldReason, PeriodKind, SessionStatus } from './session';
+import type { CheckPurpose, ConnectionStatus, EndReason, HoldReason, PeriodKind, SessionEndReason, SessionStatus } from './session';
 import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityResultDTO, LivenessChallengeDTO, LivenessResultDTO } from './identity';
 import type { MonitoringStatus } from './observation';
 import { IDENTITY_CHECK_TRIGGERS } from './identity';
@@ -355,7 +355,8 @@ export interface SessionSummaryDTO {
   exam: { id: string; title: string };
   candidate: { id: string; name: string; email: string | null; externalId: string | null };
   status: SessionStatus;
-  endReason: EndReason | null;
+  /** Includes server housekeeping reasons such as 'abandoned' (see SYSTEM_END_REASONS). */
+  endReason: SessionEndReason | null;
   connection: ConnectionStatus;
   lastHeartbeatAt: number | null;
   /** Set while the browser is not reporting (offline) or reports a delayed outbox. */
@@ -597,6 +598,24 @@ export interface OrgSettingsDTO {
   defaultPolicy: ProctoringPolicy;
   privacyContact: string;
   identityThresholds: { match: number; mismatch: number; idPhotoMatch: number; idPhotoMismatch: number; mismatchConfirmations: number };
+  /**
+   * Invited / ready / paused sessions with no activity for this many days are closed automatically
+   * (status 'terminated', endReason 'abandoned'; answers kept, no score). Default 30.
+   */
+  abandonAfterDays: number;
+  /** Staff email addresses that receive alert emails (only when the server has SMTP configured). */
+  alertRecipients: string[];
+  /** Which alerts are emailed to alertRecipients (throttled to one email per session per 5 minutes). */
+  emailAlerts: EmailAlertToggles;
+}
+
+export interface EmailAlertToggles {
+  /** Exam put on hold (identity review, pause limit, staff hold...). */
+  holds: boolean;
+  /** Candidate requested a pause that needs approval. */
+  pauseRequests: boolean;
+  /** High-severity potential integrity events (e.g. possible different person, phone visible). */
+  highSeverity: boolean;
 }
 
 /** GET /api/admin/metrics/detection-quality */
@@ -626,7 +645,8 @@ export interface DetectionQualityDTO {
 export interface AuditLogEntryDTO {
   id: string;
   at: number;
-  actorType: 'staff' | 'candidate' | 'system';
+  /** 'api_key': an organisation API key used on the integration API (/api/v1); actorId is the key id. */
+  actorType: 'staff' | 'candidate' | 'system' | 'api_key';
   actorId: string | null;
   actorName: string | null;
   action: string;
@@ -703,6 +723,24 @@ export type { IdentityCheckTrigger };
  *   POST /metrics/offline-evaluation  (JSON report from an eval CLI, or {kind, report}) -> { id, kind, createdAt } [admin]
  *        (DetectionQualityDTO.offlineEvaluation is then { reports: [{ id, kind, createdAt, global, report }] })
  *   WS   /live                                    -> LiveMessage frames                            [reviewer]
+ *
+ *   Integrations (types in ./integrations.ts; public integration API /api/v1/* documented in docs/INTEGRATION_API.md):
+ *   GET  /integrations/status                      -> IntegrationStatusDTO                          [admin]
+ *   GET  /api-keys                                 -> { items: ApiKeyDTO[] }                        [admin]
+ *   POST /api-keys {name}                          -> CreatedApiKeyDTO  (secret shown once)         [admin]
+ *   POST /api-keys/:id/revoke                      -> ApiKeyDTO                                     [admin]
+ *   GET  /webhooks                                 -> { items: WebhookDTO[] }                       [admin]
+ *   POST /webhooks  WebhookInput                   -> CreatedWebhookDTO  (secret shown once)        [admin]
+ *   GET  /webhooks/:id                             -> WebhookDTO                                    [admin]
+ *   PUT  /webhooks/:id  WebhookUpdate              -> WebhookDTO   (active=true re-enables and resets the failure count) [admin]
+ *   DELETE /webhooks/:id                           -> { ok: true }                                  [admin]
+ *   POST /webhooks/:id/rotate-secret               -> CreatedWebhookDTO                             [admin]
+ *   POST /webhooks/:id/test                        -> WebhookDeliveryDTO  (sends a 'ping' now)      [admin]
+ *   GET  /webhooks/:id/deliveries                  -> { items: WebhookDeliveryDTO[] } (latest 100)  [admin]
+ *   GET  /webhooks/deliveries/:id                  -> WebhookDeliveryDTO (with payload)             [admin]
+ *   POST /webhooks/deliveries/:id/redeliver        -> WebhookDeliveryDTO  (same delivery id, attempted now) [admin]
+ *   POST /email-alerts/test {to?}                  -> { ok: true, recipients: string[] }  (409 smtp_not_configured) [admin]
+ *   (email alert recipients/toggles and abandonAfterDays are part of GET/PUT /settings)
  */
 
 export interface Paged<T> {
@@ -752,6 +790,9 @@ export const settingsUpdateSchema = z.object({
     })
     .partial()
     .optional(),
+  abandonAfterDays: z.number().int().min(1).max(3650).optional(),
+  alertRecipients: z.array(z.string().trim().email().max(254)).max(20).optional(),
+  emailAlerts: z.object({ holds: z.boolean(), pauseRequests: z.boolean(), highSeverity: z.boolean() }).partial().optional(),
 });
 export const legalHoldSchema = z.object({ enabled: z.boolean() });
 export const staffSubmitSchema = z.object({ note: z.string().max(1000).optional() });

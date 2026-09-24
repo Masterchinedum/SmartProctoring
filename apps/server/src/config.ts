@@ -47,8 +47,42 @@ export interface Config {
   /** Staff session idle timeout / absolute lifetime. */
   staffSessionIdleMs: number;
   staffSessionMaxMs: number;
+  /** SMTP server for email alerts (SMTP_*). null = email alerts unavailable. */
+  smtp: SmtpConfig | null;
+  /** Outgoing webhooks (services/webhooks.ts). */
+  webhooks: WebhookConfig;
+  /** Integration API /api/v1 (API-key authenticated). */
+  integrationApi: { rateLimitPerMinute: number };
   /** Warnings produced while loading (printed at startup). */
   warnings: string[];
+}
+
+export interface SmtpConfig {
+  host: string;
+  port: number;
+  /** true = implicit TLS (usually port 465); false = STARTTLS when offered (587/25). */
+  secure: boolean;
+  user: string | null;
+  password: string | null;
+  /** From header, e.g. `SmartProctoring <alerts@example.com>`. */
+  from: string;
+}
+
+export interface WebhookConfig {
+  /** Allow webhook URLs that resolve to private / loopback / link-local addresses (dev/test only). */
+  allowPrivateNetworks: boolean;
+  /** Only https:// webhook URLs (always in production). */
+  requireHttps: boolean;
+  /** Per-request timeout (connect + response). */
+  timeoutMs: number;
+  /** Attempts per delivery before it is marked failed (exponential backoff 30 s -> 6 h in between). */
+  maxAttempts: number;
+  /** Consecutive failed attempts after which a webhook is disabled automatically ... */
+  disableAfterFailures: number;
+  /** ... provided it has been failing (no success) for at least this long. */
+  disableMinFailingMs: number;
+  /** Delivery job interval. */
+  intervalMs: number;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -147,6 +181,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const cookieSecure = bool(env.COOKIE_SECURE, isProduction);
   if (isProduction && !cookieSecure) warnings.push('COOKIE_SECURE=false in production: staff cookies will be sent over plain HTTP.');
 
+  let smtp: SmtpConfig | null = null;
+  if (env.SMTP_HOST) {
+    if (!env.SMTP_FROM) throw new Error('SMTP_FROM is required when SMTP_HOST is set (e.g. "SmartProctoring <alerts@example.com>").');
+    const secure = bool(env.SMTP_SECURE, env.SMTP_PORT === '465');
+    smtp = {
+      host: env.SMTP_HOST,
+      port: int(env.SMTP_PORT, secure ? 465 : 587),
+      secure,
+      user: env.SMTP_USER || null,
+      password: env.SMTP_PASSWORD || null,
+      from: env.SMTP_FROM,
+    };
+    if (smtp.user && !smtp.password) warnings.push('SMTP_USER is set without SMTP_PASSWORD.');
+  }
+
+  const allowPrivateNetworks = bool(env.WEBHOOK_ALLOW_PRIVATE_NETWORKS, !isProduction);
+  if (isProduction && allowPrivateNetworks) warnings.push('WEBHOOK_ALLOW_PRIVATE_NETWORKS=true in production: webhooks may target internal network addresses (SSRF protection off).');
+  const webhooks: WebhookConfig = {
+    allowPrivateNetworks,
+    requireHttps: isProduction,
+    timeoutMs: 10_000,
+    maxAttempts: 10,
+    disableAfterFailures: Math.max(1, int(env.WEBHOOK_DISABLE_AFTER_FAILURES, 20)),
+    disableMinFailingMs: 3_600_000,
+    intervalMs: 5_000,
+  };
+
   return {
     env: nodeEnv,
     isProduction,
@@ -174,6 +235,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sweeperIntervalMs: int(env.SWEEPER_INTERVAL_MS, 5000),
     staffSessionIdleMs: int(env.STAFF_SESSION_IDLE_MIN, 8 * 60) * 60_000,
     staffSessionMaxMs: int(env.STAFF_SESSION_MAX_HOURS, 7 * 24) * 3_600_000,
+    smtp,
+    webhooks,
+    integrationApi: { rateLimitPerMinute: Math.max(1, int(env.API_RATE_LIMIT_PER_MINUTE, 600)) },
     warnings,
   };
 }

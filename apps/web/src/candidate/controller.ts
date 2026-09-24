@@ -420,8 +420,11 @@ export class CandidateController {
 
   /* ================================================================ heartbeat */
 
+  /** The server keeps the candidate's place (for resume on any device): report changes promptly. */
   setCurrentQuestionIndex(i: number): void {
+    if (i === this.currentQuestionIndex) return;
     this.currentQuestionIndex = i;
+    if (this.hbTimer) this.scheduleHeartbeat(1000);
   }
 
   getCurrentQuestionIndex(): number {
@@ -436,6 +439,13 @@ export class CandidateController {
   private stopHeartbeat(): void {
     if (this.hbTimer) clearTimeout(this.hbTimer);
     this.hbTimer = null;
+  }
+
+  /** Send a heartbeat now (e.g. before pausing) so the server has the latest place and status. */
+  private async heartbeatNow(timeoutMs = 3000): Promise<void> {
+    if (this.hbInFlight) return;
+    this.stopHeartbeat();
+    await Promise.race([this.heartbeatTick(), new Promise((r) => setTimeout(r, timeoutMs))]);
   }
 
   private scheduleHeartbeat(delay = HEARTBEAT_INTERVAL_MS): void {
@@ -592,6 +602,7 @@ export class CandidateController {
     if (!s) throw new Error('No session');
     const needsApproval = s.exam.policy.pause.requireApproval;
     await this.answers?.flushPending();
+    await this.heartbeatNow();
     lsSet(PAUSE_REASON_KEY(s.session.id), reason?.trim() || null);
     if (!needsApproval) {
       await this.stopMonitoring('pause', { flush: true, stopCamera: false });

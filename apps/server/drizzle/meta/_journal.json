@@ -15,6 +15,13 @@
       "when": 1790226583752,
       "tag": "0001_check_frame_receipt_order",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790228140537,
+      "tag": "0002_integrations_webhooks_email_alerts",
+      "breakpoints": true
     }
   ]
 }

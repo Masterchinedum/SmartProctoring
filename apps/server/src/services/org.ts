@@ -15,6 +15,9 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
     idPhotoMismatch: DEFAULT_IDENTITY_THRESHOLDS.idPhotoMismatch,
     mismatchConfirmations: DEFAULT_IDENTITY_THRESHOLDS.mismatchConfirmations,
   },
+  abandonAfterDays: 30,
+  alertRecipients: [],
+  emailAlerts: { holds: true, pauseRequests: true, highSeverity: true },
 };
 
 /** Organisation settings with every field filled from defaults. */
@@ -26,6 +29,9 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
     defaultPolicy: s.defaultPolicy ?? {},
     privacyContact: s.privacyContact ?? '',
     identityThresholds: { ...DEFAULT_ORG_SETTINGS.identityThresholds, ...(s.identityThresholds ?? {}) },
+    abandonAfterDays: s.abandonAfterDays ?? DEFAULT_ORG_SETTINGS.abandonAfterDays,
+    alertRecipients: Array.isArray(s.alertRecipients) ? s.alertRecipients : [],
+    emailAlerts: { ...DEFAULT_ORG_SETTINGS.emailAlerts, ...(s.emailAlerts ?? {}) },
   };
 }
 

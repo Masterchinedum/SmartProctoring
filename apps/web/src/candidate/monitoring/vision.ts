@@ -29,6 +29,26 @@ export interface Vision {
   detectObjects(source: TexImageSource, nowMs?: number): ObjectDetectorResult | null;
 }
 
+/** WebGL renderer string, e.g. "ANGLE (Intel, …)" or "SwiftShader" (software). */
+export function webglRenderer(): string | null {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = (canvas.getContext('webgl2') ?? canvas.getContext('webgl')) as WebGLRenderingContext | null;
+    if (!gl) return null;
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const r = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return typeof r === 'string' ? r : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Software WebGL (no usable GPU): the GPU delegate is then several times slower than CPU. */
+export function isSoftwareRenderer(renderer: string | null): boolean {
+  return renderer == null || /swiftshader|llvmpipe|softpipe|software|basic render|microsoft basic/i.test(renderer);
+}
+
 function preferredDelegates(): Delegate[] {
   let forced: string | null = null;
   try {
@@ -38,7 +58,7 @@ function preferredDelegates(): Delegate[] {
   }
   if (forced?.toLowerCase() === 'cpu') return ['CPU'];
   if (forced?.toLowerCase() === 'gpu') return ['GPU', 'CPU'];
-  return ['GPU', 'CPU'];
+  return isSoftwareRenderer(webglRenderer()) ? ['CPU'] : ['GPU', 'CPU'];
 }
 
 function errMessage(e: unknown): string {

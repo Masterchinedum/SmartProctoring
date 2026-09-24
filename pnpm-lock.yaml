@@ -40,6 +40,9 @@ importers:
       ioredis:
         specifier: ^5.7.0
         version: 5.11.1
+      nodemailer:
+        specifier: ^10.0.10
+        version: 10.0.10
       onnxruntime-node:
         specifier: ^1.22.0
         version: 1.30.0
@@ -2182,6 +2185,10 @@ packages:
   node-releases@2.0.57:
     resolution: {integrity: sha512-kQK9LGGFiHtrWiNhZtA7Qbw17AQz+dmsEKODRIVTXA9+e5MS/2gZEBhYJt13GrAz5/IOZKddH/0Z3TP/Zgo+yw==}
     engines: {node: '>=18'}
+
+  nodemailer@10.0.10:
+    resolution: {integrity: sha512-He9XskOFms62SyAKkLu8CcGcYHAo+BSHSsORI8s4PJH8qZgZY4L4lDfvyN0twvmbpyG+eGrxpyBlskj9d9rJ8A==}
+    engines: {node: '>=20.0.0'}
 
   nwsapi@2.2.28:
     resolution: {integrity: sha512-IlVB7OS7qrOsVYlpnFIkETjMwT9jwvmocJmmM+GZU/PAB3uGi9Ezd7vcWhWBUnSc0ya4ppmQITOyP1ez9gg8cg==}
@@ -4497,6 +4504,8 @@ snapshots:
   nanoid@3.3.19: {}
 
   node-releases@2.0.57: {}
+
+  nodemailer@10.0.10: {}
 
   nwsapi@2.2.28: {}
 

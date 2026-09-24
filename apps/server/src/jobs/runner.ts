@@ -41,6 +41,11 @@ export class JobRunner {
     return this.jobs.map((j) => j.name);
   }
 
+  /** True once start() was called (background jobs enabled) and until stop(). */
+  get isStarted(): boolean {
+    return this.started && !this.stopped;
+  }
+
   /** Run a job now (respecting the lock). Returns false if another instance holds the lock. */
   async runNow(name: string): Promise<boolean> {
     const job = this.jobs.find((j) => j.name === name);

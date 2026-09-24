@@ -24,7 +24,7 @@ import type {
   CheckPurpose,
   ConnectionStatus,
   DeviceInfo,
-  EndReason,
+  EmailAlertToggles,
   EventCategory,
   EventSource,
   EventType,
@@ -39,9 +39,13 @@ import type {
   ProctoringPolicyInput,
   QuestionType,
   ReviewStatus,
+  SessionEndReason,
   SessionStatus,
   Severity,
   StaffRole,
+  WebhookDeliveryStatus,
+  WebhookDeliveryType,
+  WebhookEventType,
 } from '@sp/shared';
 
 export const bytea = customType<{ data: Buffer; driverData: Buffer }>({
@@ -63,6 +67,11 @@ export interface OrgSettings {
   defaultPolicy: ProctoringPolicyInput;
   privacyContact: string;
   identityThresholds: { match: number; mismatch: number; idPhotoMatch: number; idPhotoMismatch: number; mismatchConfirmations: number };
+  /** Close invited/ready/paused sessions after this many days without activity (endReason 'abandoned'). */
+  abandonAfterDays: number;
+  /** Email alert recipients (used only when SMTP is configured). */
+  alertRecipients: string[];
+  emailAlerts: EmailAlertToggles;
 }
 
 export const organizations = pgTable('organizations', {
@@ -231,7 +240,7 @@ export const examSessions = pgTable(
     /** AES-GCM encrypted access token so staff can re-copy the link. */
     accessTokenEnc: bytea('access_token_enc'),
     status: text('status').$type<SessionStatus>().notNull().default('invited'),
-    endReason: text('end_reason').$type<EndReason>(),
+    endReason: text('end_reason').$type<SessionEndReason>(),
     /** Policy snapshot taken when the exam starts (null => use exam policy). */
     policy: jsonb('policy').$type<ProctoringPolicyInput>(),
     durationMs: integer('duration_ms').notNull(),
@@ -597,7 +606,7 @@ export const auditLog = pgTable(
     id: id(),
     orgId: uuid('org_id'),
     at: ts('at').notNull(),
-    actorType: text('actor_type').$type<'staff' | 'candidate' | 'system'>().notNull(),
+    actorType: text('actor_type').$type<'staff' | 'candidate' | 'system' | 'api_key'>().notNull(),
     actorId: uuid('actor_id'),
     action: text('action').notNull(),
     targetType: text('target_type').notNull(),
@@ -642,6 +651,134 @@ export const evaluationReports = pgTable(
   (t) => [index('evaluation_reports_kind_idx').on(t.kind, t.createdAt)],
 );
 
+/* ------------------------------------------------------------------ integrations (API keys, webhooks, email alerts) */
+
+/** Organisation API keys for the integration API (/api/v1). Only sha256(key) is stored. */
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** Display prefix: `sp_live_` + the first 8 characters of the random part. */
+    prefix: text('prefix').notNull(),
+    /** sha256 hex of the full key. */
+    keyHash: text('key_hash').notNull(),
+    scope: text('scope').$type<'integration'>().notNull().default('integration'),
+    createdBy: uuid('created_by'),
+    createdAt: createdAt(),
+    lastUsedAt: ts('last_used_at'),
+    revokedAt: ts('revoked_at'),
+    revokedBy: uuid('revoked_by'),
+  },
+  (t) => [uniqueIndex('api_keys_hash_uq').on(t.keyHash), index('api_keys_org_idx').on(t.orgId, t.createdAt)],
+);
+
+export const webhooks = pgTable(
+  'webhooks',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    url: text('url').notNull(),
+    description: text('description').notNull().default(''),
+    /** Signing secret, AES-GCM encrypted with the keyring (AAD `webhook-secret:<id>`). */
+    secretEnc: bytea('secret_enc').notNull(),
+    events: jsonb('events').$type<WebhookEventType[]>().notNull().default([]),
+    /** event.created / event.closed only for events at or above this severity. */
+    minSeverity: text('min_severity').$type<Severity>().notNull().default('medium'),
+    active: boolean('active').notNull().default(true),
+    createdBy: uuid('created_by'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    lastSuccessAt: ts('last_success_at'),
+    lastFailureAt: ts('last_failure_at'),
+    /** Consecutive failed attempts since the last success. */
+    failureCount: integer('failure_count').notNull().default(0),
+    /** First failure after the last success (null while healthy). */
+    failingSince: ts('failing_since'),
+    disabledAt: ts('disabled_at'),
+    disabledReason: text('disabled_reason').$type<'failures' | 'staff'>(),
+  },
+  (t) => [index('webhooks_org_idx').on(t.orgId, t.active)],
+);
+
+/** Durable webhook outbox: rows are enqueued in the transaction of the domain change and sent by the 'webhooks' job. */
+export const webhookDeliveries = pgTable(
+  'webhook_deliveries',
+  {
+    /** Also the X-SmartProctoring-Delivery header and the envelope id (receiver idempotency key). */
+    id: uuid('id').primaryKey(),
+    webhookId: uuid('webhook_id')
+      .notNull()
+      .references(() => webhooks.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id').notNull(),
+    eventType: text('event_type').$type<WebhookDeliveryType>().notNull(),
+    /** One delivery per (webhook, dedupeKey): replays of the same domain change never enqueue twice. */
+    dedupeKey: text('dedupe_key').notNull(),
+    sessionId: uuid('session_id'),
+    /** The JSON envelope (WebhookEnvelope) — identifiers, titles and links only, never images. */
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    status: text('status').$type<WebhookDeliveryStatus>().notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    /** Next attempt while pending (also the lease expiry while an attempt is in flight). */
+    nextAttemptAt: ts('next_attempt_at').notNull(),
+    lastAttemptAt: ts('last_attempt_at'),
+    lastStatusCode: integer('last_status_code'),
+    lastError: text('last_error'),
+    createdAt: ts('created_at').notNull(),
+    deliveredAt: ts('delivered_at'),
+  },
+  (t) => [
+    uniqueIndex('webhook_deliveries_dedupe_uq').on(t.webhookId, t.dedupeKey),
+    index('webhook_deliveries_due_idx')
+      .on(t.nextAttemptAt)
+      .where(sql`${t.status} = 'pending'`),
+    index('webhook_deliveries_webhook_idx').on(t.webhookId, t.createdAt),
+    index('webhook_deliveries_created_idx').on(t.createdAt),
+  ],
+);
+
+export type EmailAlertKind = 'hold' | 'pause_request' | 'high_severity';
+
+/** Email alert queue: one row per alert-worthy occurrence; the 'email-alerts' job sends one digest per session per 5 minutes. */
+export const emailAlerts = pgTable(
+  'email_alerts',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    sessionId: uuid('session_id')
+      .notNull()
+      .references(() => examSessions.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<EmailAlertKind>().notNull(),
+    /** The timeline event behind the alert (unique per kind: replays never enqueue twice). */
+    eventId: uuid('event_id').notNull(),
+    title: text('title').notNull(),
+    observation: text('observation').notNull(),
+    severity: text('severity').$type<Severity>().notNull(),
+    occurredAt: ts('occurred_at').notNull(),
+    status: text('status').$type<'pending' | 'sent' | 'failed' | 'skipped'>().notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: ts('next_attempt_at').notNull(),
+    lastError: text('last_error'),
+    createdAt: ts('created_at').notNull(),
+    sentAt: ts('sent_at'),
+  },
+  (t) => [
+    uniqueIndex('email_alerts_event_kind_uq').on(t.eventId, t.kind),
+    index('email_alerts_pending_idx')
+      .on(t.nextAttemptAt)
+      .where(sql`${t.status} = 'pending'`),
+    index('email_alerts_session_idx').on(t.sessionId, t.sentAt),
+    index('email_alerts_created_idx').on(t.createdAt),
+  ],
+);
+
 export type Organization = typeof organizations.$inferSelect;
 export type StaffUser = typeof staffUsers.$inferSelect;
 export type StaffSession = typeof staffSessions.$inferSelect;
@@ -661,3 +798,7 @@ export type Answer = typeof answers.$inferSelect;
 export type Note = typeof notes.$inferSelect;
 export type AuditLogRow = typeof auditLog.$inferSelect;
 export type DeviceRecord = typeof deviceRecords.$inferSelect;
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type Webhook = typeof webhooks.$inferSelect;
+export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
+export type EmailAlert = typeof emailAlerts.$inferSelect;

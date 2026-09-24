@@ -16,7 +16,7 @@ import {
   EVENT_CATALOG,
   EVENT_CATEGORIES,
   SEVERITY_RANK,
-  type EndReason,
+  type SessionEndReason,
   type EventCategory,
   type EventDTO,
   type EventType,
@@ -44,11 +44,12 @@ const MAX_BEHAVIOUR_LINES = 8;
 const PERIOD_PRECEDENCE: PeriodKind[] = ['on_hold', 'paused', 'disconnected', 'resume_check', 'check_in', 'active'];
 const UNOBSERVED: PeriodKind[] = ['on_hold', 'paused', 'disconnected'];
 
-const END_REASON_TEXT: Record<EndReason, string> = {
+const END_REASON_TEXT: Record<SessionEndReason, string> = {
   candidate_submitted: 'submitted by the candidate',
   time_expired: 'submitted automatically when the exam time ran out',
   staff_submitted: 'submitted by an administrator',
   staff_terminated: 'ended by an administrator',
+  abandoned: 'closed automatically after a long period without activity (no score is recorded)',
 };
 
 const HOLD_REASON_TEXT: Record<HoldReason, string> = {

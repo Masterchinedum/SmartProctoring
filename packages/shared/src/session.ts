@@ -30,6 +30,16 @@ export const END_REASONS = ['candidate_submitted', 'time_expired', 'staff_submit
 export type EndReason = (typeof END_REASONS)[number];
 
 /**
+ * End reasons set by server housekeeping rather than by a person or the exam clock (additive to END_REASONS):
+ *  - 'abandoned': an invited / ready / paused session with no activity for the organisation's `abandonAfterDays`
+ *    was closed automatically (status 'terminated', no score implied). Answers are kept; retention then applies.
+ * Staff-facing DTOs use SessionEndReason; the candidate contract (CandidateSessionState) keeps EndReason.
+ */
+export const SYSTEM_END_REASONS = ['abandoned'] as const;
+export const SESSION_END_REASONS = [...END_REASONS, ...SYSTEM_END_REASONS] as const;
+export type SessionEndReason = (typeof SESSION_END_REASONS)[number];
+
+/**
  * Periods partition the session timeline. Observed periods had monitoring running; unobserved periods
  * (pauses, disconnections, holds) carry no behavioural observations by design.
  */

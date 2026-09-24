@@ -62,3 +62,14 @@ describe('TraceRecorder', () => {
     expect(t.observationCount).toBe(2);
   });
 });
+
+describe('isSoftwareRenderer', () => {
+  it('recognises software WebGL renderers', async () => {
+    const { isSoftwareRenderer } = await import('./vision');
+    expect(isSoftwareRenderer('ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)')).toBe(true);
+    expect(isSoftwareRenderer('llvmpipe (LLVM 15.0.7, 256 bits)')).toBe(true);
+    expect(isSoftwareRenderer(null)).toBe(true);
+    expect(isSoftwareRenderer('ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe(false);
+    expect(isSoftwareRenderer('Apple M1')).toBe(false);
+  });
+});

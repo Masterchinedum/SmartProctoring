@@ -1,4 +1,4 @@
-import type { CandidateAnswerDTO, CandidateQuestionDTO, CandidateSessionState } from '@sp/shared';
+import { END_REASONS, type CandidateAnswerDTO, type CandidateQuestionDTO, type CandidateSessionState, type EndReason } from '@sp/shared';
 import { and, desc, eq, gte } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
@@ -70,7 +70,8 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
     session: {
       id: s.id,
       status: s.status,
-      endReason: s.endReason ?? null,
+      // Housekeeping end reasons (e.g. 'abandoned') are not part of the candidate contract: the candidate sees a terminated exam.
+      endReason: s.endReason && (END_REASONS as readonly string[]).includes(s.endReason) ? (s.endReason as EndReason) : null,
       remainingMs: remainingMs(s, now),
       timerRunning: s.runningSince != null,
       durationMs: s.durationMs,

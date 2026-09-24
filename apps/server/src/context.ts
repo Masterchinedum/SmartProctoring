@@ -3,6 +3,7 @@ import type { Config } from './config.js';
 import type { Database, Db } from './db/index.js';
 import type { JobRunner } from './jobs/runner.js';
 import type { Keyring } from './lib/crypto.js';
+import type { Mailer } from './lib/mailer.js';
 import type { BlobStorage } from './lib/storage.js';
 import type { RealtimeBus } from './realtime/bus.js';
 import type { LiveNotifier } from './realtime/notifier.js';
@@ -27,4 +28,6 @@ export interface Ctx {
   live: LiveNotifier;
   /** Periodic background jobs (advisory-lock guarded). Register with ctx.jobs.register({...}). */
   jobs: JobRunner;
+  /** Outgoing email (SMTP from config.smtp, or a fake in tests). null = email alerts unavailable. */
+  mailer: Mailer | null;
 }
