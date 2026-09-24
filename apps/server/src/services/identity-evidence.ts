@@ -47,6 +47,11 @@ export interface SessionBaseline {
   n: number;
   /** CALIBRATION.version when measured. */
   calibrationVersion?: string;
+  /**
+   * Quality bucket of the enrolment gallery (median over its frames): the calibrated per-comparison model may be
+   * conditioned on the reference's quality (a dim-enrolled reference makes impostors score higher).
+   */
+  bucket?: QualityBucket;
 }
 
 export type ComparisonContext =

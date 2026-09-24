@@ -41,13 +41,17 @@ describe('initial check', () => {
     expect(ok.complete!.outcome).toBe('passed');
   });
 
-  it('holds as identity_unverifiable after maxVerificationAttempts poor-quality attempts', async () => {
+  it('holds as identity_unverifiable after maxVerificationAttempts poor-quality attempts (quality-only attempts count half)', async () => {
     const { s, c } = await freshSession({ identity: { maxVerificationAttempts: 2 } });
     await consent(c);
     const dark = { person: 'alice', usable: false, issues: ['too_dark'] as const };
-    const r1 = await runCheck(env, c, 'initial', { spec: { ...dark, issues: ['too_dark'] } });
-    expect(r1.complete!.outcome).toBe('retry');
-    expect(r1.complete!.guidance.join(' ')).toMatch(/dark/i);
+    // Image quality alone: lighting guidance and more tries (each counts QUALITY_RETRY_WEIGHT) before human review.
+    for (const remaining of [2, 1, 1]) {
+      const r = await runCheck(env, c, 'initial', { spec: { ...dark, issues: ['too_dark'] } });
+      expect(r.complete!.outcome).toBe('retry');
+      expect(r.complete!.attemptsRemaining).toBe(remaining);
+      expect(r.complete!.guidance.join(' ')).toMatch(/dark/i);
+    }
     const r2 = await runCheck(env, c, 'initial', { spec: { ...dark, issues: ['too_dark'] } });
     expect(r2.complete!.outcome).toBe('held');
     expect(r2.complete!.state.session.hold).toMatchObject({ reason: 'identity_unverifiable', canReverify: false });
@@ -141,10 +145,12 @@ describe('resume identity comparison', () => {
     await startedSession(env, c);
     await c.req('POST', '/api/candidate/pause', {});
     const blurry = { person: 'alice', usable: false, issues: ['blurry' as const] };
-    const r1 = await runCheck(env, c, 'resume', { spec: blurry });
-    expect(r1.complete!.outcome).toBe('retry');
-    expect(r1.complete!.identity!.decision).toBe('unable_to_verify');
-    expect(r1.complete!.guidance.join(' ')).toMatch(/blurry/i);
+    for (let i = 0; i < 3; i++) {
+      const r1 = await runCheck(env, c, 'resume', { spec: blurry });
+      expect(r1.complete!.outcome).toBe('retry');
+      expect(r1.complete!.identity!.decision).toBe('unable_to_verify');
+      expect(r1.complete!.guidance.join(' ')).toMatch(/blurry/i);
+    }
     const r2 = await runCheck(env, c, 'resume', { spec: blurry });
     expect(r2.complete!.outcome).toBe('held');
     expect(r2.complete!.state.session.hold!.reason).toBe('identity_unverifiable');

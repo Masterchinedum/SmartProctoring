@@ -82,7 +82,7 @@ disconnect if `disconnectTimerBehavior='continue'`).
 4. **Reference and score (identity v2).** Enrolment (initial check, staff-authorised re-enrolment) keeps a
    gallery of up to 8 diverse, mutually consistent embeddings from the check's frontal frames plus its near-frontal
    liveness frames (|Δyaw| ≤ 20° from the candidate's own frontal pose), and a per-session **baseline** (mean / sd
-   of the leave-one-out scores of those frames). A probe (one frame, or the mean of a burst) is scored with
+   of the leave-one-out scores of those frames, and the gallery quality bucket). A probe (one frame, or the mean of a burst) is scored with
    `scoreAgainst` = cosine to the gallery template (vision/identity.ts). Per-sample labels still use the org
    thresholds (`≥0.45 match`, `<0.28 mismatch`, else `inconclusive`; ID photo `≥0.42` / `<0.24`), but escalation
    uses calibrated evidence: `sampleLLR(score, qualityBucket)` (vision/calibration.ts), after a per-session
@@ -97,8 +97,14 @@ disconnect if `disconnectTimerBehavior='continue'`).
    `CheckFrameResponse.progress` (frames wanted, running assessment, liveness step status, canComplete); the
    decision sums the (correlation-discounted) LLRs of all identity frames: likely same ⇒ pass, likely different ⇒
    `identity_mismatch` + hold / flag (also with some fair / poor frames), otherwise retry with guidance;
-   `unable_to_verify` only when no usable frame came after the adaptive collection. *During the exam*, samples are
-   bursts (1–5 frames within ~0.6 s, decided as ONE sample; incomplete bursts after ~3 s on the frames received)
+   `unable_to_verify` only when no usable frame came after the adaptive collection. Image quality is not identity:
+   while frames are being rejected for quality (backlight, a dim room) but the usable ones agree with the reference,
+   the attempt is extended (10 → up to 24 frontal frames); usable frames of earlier failed attempts of the same check
+   (same reference, ≤ 5 min) are pooled when the current attempt's own usable frames clearly agree with them; and a
+   retry caused only by image quality counts half against `maxVerificationAttempts` (lighting guidance, more tries,
+   then human review). *During the exam*, samples are
+   bursts (1–5 frames within ~0.6 s, decided as ONE sample — the burst template, or the frames' median when their
+   scores spread > 0.15; incomplete bursts after ~3 s on the frames received)
    feeding a per-session SPRT accumulator (`CALIBRATION.sprt`, `windowEvidence`: positive evidence from poor-light
    frames is capped below the confirm threshold): `suspect` ⇒ faster sampling (2.5 s, trigger `server_request`) —
    when only poor-light frames point away, also an uncertain `identity_unverifiable` (details.reason

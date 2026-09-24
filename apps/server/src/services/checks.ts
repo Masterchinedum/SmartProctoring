@@ -65,6 +65,7 @@ import {
   NO_EMBEDDING_GUIDANCE,
   qualityScore,
   serializeEmbeddings,
+  templateFrom,
   verifyLiveness,
   type FrameAggregateResult,
   type ImageAnalysis,
@@ -85,7 +86,7 @@ import { effectivePolicy, holdNow, identityState, requiredCheckFor, withSession,
 export const CHECK_TTL_MS = 3 * 60_000;
 export const TARGET_YAW_DEG = 20;
 export const TARGET_PITCH_DEG = 12;
-export const MAX_FRAMES_PER_CHECK = 40;
+export const MAX_FRAMES_PER_CHECK = 48;
 /**
  * A liveness step the server reports as not satisfied (CheckProgressDTO.steps) may be re-prompted: its frames are
  * judged in windows of LIVENESS_DEFAULTS.maxFramesPerStep, at most MAX_STEP_ATTEMPTS windows per step (bounded
@@ -95,6 +96,27 @@ export const MAX_STEP_ATTEMPTS = 2;
 export const MAX_FRAMES_PER_STEP = LIVENESS_DEFAULTS.maxFramesPerStep * MAX_STEP_ATTEMPTS;
 /** Adaptive collection: the server keeps asking for frontal frames (CheckProgressDTO.frontalNeeded) up to this many. */
 export const MAX_FRONTAL_FRAMES = 10;
+/**
+ * ... and up to this many (StartCheckResponse.maxFrontalFrames, the hard cap) while frames are being rejected for
+ * image quality (backlight, a dim room) but the usable ones agree: such an attempt is extended instead of ending
+ * with too few usable frames.
+ */
+export const MAX_FRONTAL_FRAMES_EXTENDED = 24;
+/** A check extends when at least this share of its frontal frames were unusable. */
+const EXTEND_MIN_UNUSABLE_SHARE = 0.5;
+/**
+ * Usable frames of earlier failed attempts of the same resume / reconnect / reverify check (same reference, within
+ * this window) are pooled with the current attempt's — only when the current attempt's own usable frames clearly
+ * agree with the reference and with them.
+ */
+export const POOL_WINDOW_MS = 5 * 60_000;
+export const POOL_MAX_FRAMES = 8;
+/**
+ * A failed attempt caused only by image quality (no or too few usable frames, or evidence only from poor-light
+ * frames) counts this much against maxVerificationAttempts: image quality alone must not lead to a hold as fast as a
+ * real non-match (the candidate gets lighting guidance and more tries before human review).
+ */
+export const QUALITY_RETRY_WEIGHT = 0.5;
 const BRIGHTNESS_CHANGE = 45;
 
 const TRIGGER_FOR: Record<CheckPurpose, IdentityCheckTrigger> = { initial: 'check_in', resume: 'resume', reconnect: 'reconnect', reverify: 'reverify' };
@@ -138,14 +160,17 @@ export function generateLivenessSteps(livenessSteps: number): CheckLivenessSpec[
   return all.map((action, index) => ({ index, action, instruction: LIVENESS_INSTRUCTIONS[action] }));
 }
 
-async function failedAttempts(db: DbOrTx, s: ExamSession, purpose: CheckPurpose, excludeCheckId?: string): Promise<number> {
+/** Failed attempts since the last reset, quality-only ones weighted QUALITY_RETRY_WEIGHT (unless `weighted` is false). */
+async function failedAttempts(db: DbOrTx, s: ExamSession, purpose: CheckPurpose, excludeCheckId?: string, weighted = true): Promise<number> {
   const since = s.checkAttemptsResetAt ?? new Date(0);
   const rows = await db
-    .select({ id: checks.id })
+    .select({ id: checks.id, result: checks.result })
     .from(checks)
     .where(and(eq(checks.sessionId, s.id), eq(checks.purpose, purpose), eq(checks.status, 'retry'), gte(checks.issuedAt, since)));
-  return rows.filter((r) => r.id !== excludeCheckId).length;
+  return rows.filter((r) => r.id !== excludeCheckId).reduce((a, r) => a + (weighted && (r.result as { _meta?: { qualityOnly?: boolean } } | null)?._meta?.qualityOnly ? QUALITY_RETRY_WEIGHT : 1), 0);
 }
+
+const remaining = (max: number, used: number) => Math.max(0, Math.ceil(max - used - 1e-9));
 
 /* =================================================================== start */
 
@@ -211,7 +236,7 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
         clientInstanceId: instanceId,
         device: body.device,
         status: 'open',
-        attempt: failed + 1,
+        attempt: (await failedAttempts(m.tx, s, required, undefined, false)) + 1,
         liveness: spec,
         nonce,
         issuedAt: new Date(m.now),
@@ -241,9 +266,9 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
       liveness: spec
         ? { challengeId: spec.challengeId, nonce, steps: spec.steps, expiresAt, targetYawDeg: spec.targetYawDeg, targetPitchDeg: spec.targetPitchDeg }
         : null,
-      attemptsRemaining: max - failed,
+      attemptsRemaining: remaining(max, failed),
       frontalFramesRequired: frontalFramesRequired(required, required === 'initial' || reEnrollmentApplies(s, required)),
-      maxFrontalFrames: MAX_FRONTAL_FRAMES,
+      maxFrontalFrames: MAX_FRONTAL_FRAMES_EXTENDED,
     };
   });
 }
@@ -325,7 +350,7 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
   const total = counts.reduce((a, c) => a + c.n, 0);
   const forStep = counts.find((c) => c.step === step)?.n ?? 0;
   if (total >= MAX_FRAMES_PER_CHECK) throw new HttpError(429, 'too_many_frames', 'Too many frames for this check. Start a new check.');
-  if (forStep >= (step === 'frontal' ? MAX_FRONTAL_FRAMES : MAX_FRAMES_PER_STEP)) {
+  if (forStep >= (step === 'frontal' ? MAX_FRONTAL_FRAMES_EXTENDED : MAX_FRAMES_PER_STEP)) {
     throw new HttpError(429, 'too_many_frames', 'Enough frames were received for this step. Continue with the next step or start a new check.');
   }
 
@@ -442,26 +467,44 @@ export async function checkProgress(ctx: Ctx, check: Check): Promise<CheckProgre
   const thresholds = orgThresholds(org);
   const prepared = await prepareFrames(ctx, check.id);
   const frontalSubmitted = prepared.frames.filter((f) => f.step === 'frontal').length;
-  const atLimit = frontalSubmitted >= MAX_FRONTAL_FRAMES || prepared.frames.length >= MAX_FRAMES_PER_CHECK;
-  const room = Math.max(0, MAX_FRONTAL_FRAMES - frontalSubmitted);
   const buildsReference = check.purpose === 'initial' || reEnrollmentApplies(s, check.purpose);
+  const frontalOnly = prepared.frames.filter((f) => f.step === 'frontal');
+  // Frames are being rejected for image quality (backlight, dim room): a condition for extending the attempt.
+  const qualityRejecting = frontalOnly.length > 0 && frontalOnly.filter((f) => !f.analysis.quality.usable || !f.analysis.embedding).length >= EXTEND_MIN_UNUSABLE_SHARE * frontalOnly.length;
 
   let frontalAccepted = prepared.frontal.filter((f) => f.isFrontal && f.analysis.quality.usable && f.analysis.embedding != null).length;
   let frontalNeeded = 0;
   let identity: CheckProgressDTO['identity'] = null;
+  let extend = false;
+  let limit = MAX_FRONTAL_FRAMES;
   if (buildsReference) {
     const g = buildGallery(prepared.frontal.map((f) => ({ analysis: f.analysis, frontal: f.isFrontal })), thresholds);
     frontalAccepted = g.usableFrontal;
+    // Too few clear frames so far, but some came through: keep collecting instead of failing the attempt.
+    extend = !g.ok && g.failure === 'too_few' && g.usableFrontal > 0 && qualityRejecting;
     if (g.ok) frontalNeeded = Math.max(0, ENROL_TARGET_FRAMES - g.usableFrontal);
     else frontalNeeded = g.failure === 'too_few' ? Math.max(1, ENROL_TARGET_FRAMES - g.usableFrontal) : 2;
   } else {
     const active = await loadActiveReference(ctx, ctx.db, check.sessionId);
     if (active) {
-      const a = assessCheck(probeEvidence(prepared.frontal.map((f) => f.analysis), active.embeddings, active.ref.baseline ?? null, 'relaxed'), { atLimit });
+      const pooled = await pooledEvidence(ctx, s, check, active, prepared.frontal.map((f) => f.analysis), thresholds);
+      const current = probeEvidence(prepared.frontal.map((f) => f.analysis), active.embeddings, active.ref.baseline ?? null, 'relaxed');
+      const all = [...current, ...pooled];
+      const usable = all.filter((f) => f.usable);
+      // The usable frames agree with the reference, just not enough of them yet: extend (quality, not identity).
+      const agreeing = usable.length > 0 && usable.every((f) => f.llr <= -2) && usable.some((f) => f.llr <= -3);
+      const provisional = assessCheck(all, { atLimit: false });
+      extend = qualityRejecting && agreeing && (provisional.status === 'pending' || provisional.status === 'uncertain');
+      limit = extend ? MAX_FRONTAL_FRAMES_EXTENDED : MAX_FRONTAL_FRAMES;
+      const atLimitNow = frontalSubmitted >= limit || prepared.frames.length >= MAX_FRAMES_PER_CHECK;
+      const a = assessCheck(all, { atLimit: atLimitNow });
       identity = a.status;
       frontalNeeded = a.status === 'pending' ? Math.max(1, CHECK_EVIDENCE.minFrames - a.usable) : a.status === 'uncertain' ? 2 : 0;
     }
   }
+  if (extend) limit = MAX_FRONTAL_FRAMES_EXTENDED;
+  const atLimit = frontalSubmitted >= limit || prepared.frames.length >= MAX_FRAMES_PER_CHECK;
+  const room = Math.max(0, limit - frontalSubmitted);
   frontalNeeded = atLimit ? 0 : Math.min(frontalNeeded, room);
 
   const expired = ctx.now() > check.expiresAt.getTime();
@@ -526,10 +569,53 @@ async function prepareFrames(ctx: Ctx, checkId: string): Promise<PreparedFrames>
   return { frames, frontal: identityFrameIndexes(frames).map((x) => frames[x.index]) };
 }
 
+/**
+ * Usable identity frames of earlier failed attempts of the same resume / reconnect / reverify check (same reference,
+ * within POOL_WINDOW_MS), as evidence against the reference — only when the current attempt's own usable frames all
+ * agree with the reference (at least one clearly) and the pooled frames show the same face as them. So attempt 2
+ * builds on attempt 1 in backlight, but frames of an earlier attempt never vouch for someone else now.
+ */
+async function pooledFrameAnalyses(ctx: Ctx, s: ExamSession, check: Check, active: ActiveReference): Promise<ImageAnalysis[]> {
+  if (check.purpose === 'initial') return [];
+  const since = Math.max(check.issuedAt.getTime() - POOL_WINDOW_MS, s.checkAttemptsResetAt?.getTime() ?? 0, active.ref.createdAt.getTime());
+  const prior = await ctx.db
+    .select({ id: checks.id })
+    .from(checks)
+    .where(and(eq(checks.sessionId, s.id), eq(checks.purpose, check.purpose), eq(checks.status, 'retry'), gte(checks.issuedAt, new Date(since))))
+    .orderBy(desc(checks.issuedAt))
+    .limit(3);
+  const out: ImageAnalysis[] = [];
+  for (const p of prior) {
+    if (p.id === check.id) continue;
+    const frames = await prepareFrames(ctx, p.id);
+    for (const f of [...frames.frontal].reverse()) if (f.analysis.quality.usable && f.analysis.embedding && out.length < POOL_MAX_FRAMES) out.push(f.analysis);
+  }
+  return out;
+}
+
+function gatePooled(current: ProbeEvidence[], currentAnalyses: readonly ImageAnalysis[], pooled: ProbeEvidence[], pooledAnalyses: readonly ImageAnalysis[], thresholds: IdentityThresholds): ProbeEvidence[] {
+  const cur = current.filter((f) => f.usable && currentAnalyses[f.index].embedding);
+  if (!cur.length || cur.some((f) => f.llr > 0) || !cur.some((f) => f.llr <= -3)) return [];
+  const t = templateFrom(cur.map((f) => currentAnalyses[f.index].embedding!));
+  return pooled.filter((f) => f.usable && pooledAnalyses[f.index].embedding && f.llr <= 0 && cosineSimilarity(pooledAnalyses[f.index].embedding!, t) >= thresholds.match);
+}
+
+async function pooledEvidence(ctx: Ctx, s: ExamSession, check: Check, active: ActiveReference, currentAnalyses: readonly ImageAnalysis[], thresholds: IdentityThresholds): Promise<ProbeEvidence[]> {
+  const pooledAnalyses = await pooledFrameAnalyses(ctx, s, check, active);
+  if (!pooledAnalyses.length) return [];
+  const current = probeEvidence(currentAnalyses, active.embeddings, active.ref.baseline ?? null, 'relaxed');
+  const pooled = probeEvidence(pooledAnalyses, active.embeddings, active.ref.baseline ?? null, 'relaxed');
+  return gatePooled(current, currentAnalyses, pooled, pooledAnalyses, thresholds);
+}
+
 /** Assessment of a resume / reconnect / reverify check's frames against the protected reference. */
 interface ContinuationIdentity extends FrameAggregateResult {
   assessment: CheckAssessment;
   perFrame: ProbeEvidence[];
+  /** Usable frames of earlier attempts that contributed (pooled). */
+  pooledFrames: number;
+  /** Not decided because of image quality alone (too few usable frames / poor-light-only evidence). */
+  qualityOnly: boolean;
 }
 
 /**
@@ -538,12 +624,15 @@ interface ContinuationIdentity extends FrameAggregateResult {
  * match threshold) => mismatch — also when some frames were fair / poor; otherwise inconclusive; no usable frame at
  * all => unable_to_verify (guidance).
  */
-function assessContinuation(analyses: readonly ImageAnalysis[], active: ActiveReference, thresholds: IdentityThresholds): ContinuationIdentity {
+function assessContinuation(analyses: readonly ImageAnalysis[], active: ActiveReference, thresholds: IdentityThresholds, pooledAnalyses: readonly ImageAnalysis[] = []): ContinuationIdentity {
   const perFrame = probeEvidence(analyses, active.embeddings, active.ref.baseline ?? null, 'relaxed');
-  const assessment = assessCheck(perFrame, { atLimit: true });
+  const pooledAll = probeEvidence(pooledAnalyses, active.embeddings, active.ref.baseline ?? null, 'relaxed');
+  const pooled = gatePooled(perFrame, analyses, pooledAll, pooledAnalyses, thresholds);
+  const assessment = assessCheck([...perFrame, ...pooled], { atLimit: true });
   const usable = perFrame.filter((f) => f.usable && analyses[f.index].embedding);
   const sims = usable.map((f) => f.similarity!).sort((a, b) => a - b);
-  const aggSim = usable.length ? scoreReference(usable.map((f) => analyses[f.index].embedding!), active.embeddings) : null;
+  const aggEmb = [...usable.map((f) => analyses[f.index].embedding!), ...pooled.map((f) => pooledAnalyses[f.index].embedding!)];
+  const aggSim = aggEmb.length ? scoreReference(aggEmb, active.embeddings) : null;
   let decision: IdentityDecision;
   if (assessment.status === 'likely_match' && aggSim != null && aggSim >= thresholds.mismatch) decision = 'match';
   else if (assessment.status === 'likely_mismatch' && aggSim != null && aggSim < thresholds.match) decision = 'mismatch';
@@ -595,6 +684,8 @@ function assessContinuation(analyses: readonly ImageAnalysis[], active: ActiveRe
     bestProbeIndex,
     assessment,
     perFrame,
+    pooledFrames: pooled.length,
+    qualityOnly: (decision === 'unable_to_verify' || decision === 'inconclusive') && (usable.length === 0 || assessment.status === 'pending' || assessment.poorLight || usable.length < CHECK_EVIDENCE.minFrames),
   };
 }
 
@@ -632,13 +723,16 @@ interface Outcome {
   identity: IdentityCheck | null;
   idPhoto: { decision: IdentityDecision; similarity: number | null } | null;
   attemptsRemaining: number;
+  /** A retry caused by image quality alone (counts QUALITY_RETRY_WEIGHT against the attempt budget). */
+  qualityOnly?: boolean;
 }
 
 export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: string, checkId: string): Promise<CompleteCheckResponse> {
   const { check } = await loadCheckFor(ctx, sessionId, checkId, instanceId);
   if (check.status !== 'open') {
     // Idempotent replay of a completed check.
-    const stored = (check.result ?? {}) as Partial<CompleteCheckResponse>;
+    const { _meta: _ignored, ...stored } = (check.result ?? {}) as Partial<CompleteCheckResponse> & { _meta?: unknown };
+    void _ignored;
     if (!stored.outcome) throw conflict('check_closed', 'This check is no longer open. Start a new check.');
     return { ...(stored as CompleteCheckResponse), state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
   }
@@ -679,7 +773,7 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
   if (purpose !== 'initial') {
     active = await loadActiveReference(ctx, ctx.db, sessionId);
     if (!active && !reEnroll) throw invalidState('No identity reference exists for this exam');
-    if (active) aggregate = assessContinuation(frontalAnalyses, active, thresholds);
+    if (active) aggregate = assessContinuation(frontalAnalyses, active, thresholds, await pooledFrameAnalyses(ctx, s0, check, active));
   }
 
   // Images for evidence: reference (best frontal) and probe (best probe frame).
@@ -779,7 +873,11 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
       idPhoto: out.idPhoto,
       attemptsRemaining: out.attemptsRemaining,
     };
-    await m.tx.update(checks).set({ status, completedAt: new Date(m.now), result: response as unknown as Record<string, unknown> }).where(eq(checks.id, check.id));
+    // _meta (not part of the response): quality-only retries count less against the attempt budget (failedAttempts).
+    await m.tx
+      .update(checks)
+      .set({ status, completedAt: new Date(m.now), result: { ...response, _meta: { qualityOnly: out.qualityOnly === true } } as unknown as Record<string, unknown> })
+      .where(eq(checks.id, check.id));
     return response;
   });
   return { ...outcome, state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
@@ -857,12 +955,12 @@ async function storePair(a: ApplyCtx, pair: ImagePair | null, kind: 'identity_pr
 }
 
 /** Retry (with guidance) or, once attempts are exhausted, hold for human review as identity_unverifiable. */
-async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string[]; identity: IdentityCheck | null; reason: string }): Promise<Outcome> {
+async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string[]; identity: IdentityCheck | null; reason: string; qualityOnly?: boolean }): Promise<Outcome> {
   const { m, policy, check } = a;
   const max = policy.identity.maxVerificationAttempts;
   const failedBefore = await failedAttempts(m.tx, m.session, check.purpose, check.id);
-  const used = failedBefore + 1;
-  if (used >= max) {
+  const used = failedBefore + (why.qualityOnly ? QUALITY_RETRY_WEIGHT : 1);
+  if (used >= max - 1e-9) {
     const firstAt = await m.tx
       .select({ issuedAt: checks.issuedAt })
       .from(checks)
@@ -875,7 +973,7 @@ async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string
       startedAt: firstAt[0]?.issuedAt.getTime() ?? check.issuedAt.getTime(),
       endedAt: m.now,
       confidence: why.identity?.confidence ?? null,
-      details: { purpose: check.purpose, attempts: used, lastReason: why.reason, guidance: why.guidance, livenessPassed: a.livenessOk, ...secondOpinionDetails(a.second) },
+      details: { purpose: check.purpose, attempts: used, lastReason: why.reason, qualityOnly: why.qualityOnly === true, guidance: why.guidance, livenessPassed: a.livenessOk, ...secondOpinionDetails(a.second) },
       context: { checkId: check.id },
     });
     if (why.identity) await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, why.identity.id));
@@ -885,7 +983,7 @@ async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string
     if (check.purpose !== 'initial') m.set({ verifiedInstanceId: a.instanceId });
     return { outcome: 'held', message: m.session.holdMessage ?? '', guidance: why.guidance, identity: why.identity, idPhoto: null, attemptsRemaining: 0 };
   }
-  return { outcome: 'retry', message: why.message, guidance: why.guidance, identity: why.identity, idPhoto: null, attemptsRemaining: max - used };
+  return { outcome: 'retry', message: why.message, guidance: why.guidance, identity: why.identity, idPhoto: null, attemptsRemaining: remaining(max, used), qualityOnly: why.qualityOnly === true };
 }
 
 const LIVENESS_RETRY_MESSAGE = 'We could not confirm the live head movements. Follow each instruction on screen, moving your head slowly, and try again.';
@@ -903,7 +1001,7 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     const guidance = reference?.reasons ?? ['We could not see your face clearly enough.'];
     const q = a.prepared.frontal.map((f) => f.analysis.quality).find((x) => !x.usable) ?? a.prepared.frontal[0]?.analysis.quality ?? null;
     const idRow = await insertIdentityCheck(a, { decision: 'unable_to_verify', confidence: 1, quality: q, guidance, context: { precededBy: [], periodKind: 'check_in', secondsSincePreviousMatch: null } });
-    return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance, identity: idRow, reason: 'reference_not_established' });
+    return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance, identity: idRow, reason: 'reference_not_established', qualityOnly: !reference || reference.failure === 'too_few' });
   }
   if (a.second && a.second.decision !== 'match') {
     // The external second opinion contradicted a borderline enrolment (frames possibly of different people):
@@ -1086,7 +1184,16 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     mismatchCount: aggregate?.mismatchCount,
     unableCount: aggregate?.unableCount,
     evidence: aggregate
-      ? { status: aggregate.assessment.status, llr: aggregate.assessment.llr, posterior: aggregate.assessment.posterior, usableFrames: aggregate.assessment.usable, poorLight: aggregate.assessment.poorLight, calibrationVersion: CALIBRATION.version }
+      ? {
+          status: aggregate.assessment.status,
+          llr: aggregate.assessment.llr,
+          posterior: aggregate.assessment.posterior,
+          usableFrames: aggregate.assessment.usable,
+          pooledFrames: aggregate.pooledFrames,
+          poorLight: aggregate.assessment.poorLight,
+          qualityOnly: aggregate.qualityOnly,
+          calibrationVersion: CALIBRATION.version,
+        }
       : undefined,
     ...(a.second ? { secondOpinion: a.second } : {}),
   };
@@ -1128,7 +1235,7 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     const ref = a.reference!;
     if (!ref.ok) {
       const idRow = await insertIdentityCheck(a, { decision: 'unable_to_verify', confidence: 1, quality, guidance: ref.reasons, context: { ...context, reEnrollment: true } });
-      return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance: ref.reasons, identity: idRow, reason: 'reference_not_established' });
+      return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance: ref.reasons, identity: idRow, reason: 'reference_not_established', qualityOnly: ref.failure === 'too_few' });
     }
     const refId = randomUUID();
     const old = a.active?.ref ?? null;
@@ -1264,7 +1371,7 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     await m.tx.update(identityChecks).set({ probeEvidenceId: imgs[0]?.id ?? null, frameEvidenceId: imgs[1]?.id ?? null }).where(eq(identityChecks.id, idRow.id));
   }
   const guidance = agg.guidance.length ? agg.guidance : ['Face the camera directly with even light on your face, and hold still.'];
-  return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance, identity: idRow, reason: agg.decision });
+  return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance, identity: idRow, reason: agg.decision, qualityOnly: agg.qualityOnly });
 }
 
 /**

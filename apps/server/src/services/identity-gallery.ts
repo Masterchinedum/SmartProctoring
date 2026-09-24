@@ -188,7 +188,8 @@ export function buildGallery(frames: readonly GalleryFrame[], thresholds: Pick<I
       return scoreReference(f.analysis.embedding!, rest);
     });
     const { mean, sd } = meanSd(scores);
-    baseline = { mean: round4(mean), sd: round4(sd), n: scores.length, calibrationVersion: CALIBRATION.version };
+    const buckets = selected.map((f) => qualityBucket(f.analysis.quality)).sort((a, b) => BUCKET_ORDER[a] - BUCKET_ORDER[b]);
+    baseline = { mean: round4(mean), sd: round4(sd), n: scores.length, calibrationVersion: CALIBRATION.version, bucket: buckets[Math.floor(buckets.length / 2)] };
   }
   return {
     ok: true,
@@ -219,11 +220,23 @@ export function probeEvidence(analyses: readonly ImageAnalysis[], gallery: reado
 
 const BUCKET_ORDER: Record<QualityBucket, number> = { good: 0, fair: 1, poor: 2 };
 
+/**
+ * Per-frame similarities of a burst spreading more than this (max - min) are not averaged into a template score:
+ * the burst is judged by its frames' median. A wide spread means the frames disagree (heavy noise, a turned face, two
+ * people), and averaging disagreeing frames can score the template above every single frame — e.g. dim impostor
+ * frames at 0.32–0.51 whose template scores 0.55. Genuine bursts in good light spread ~0.08 (p95 ~0.15).
+ */
+export const BURST_MAX_SPREAD = 0.15;
+
 export interface BurstAggregate {
   evidence: FrameEvidence;
   perFrame: FrameEvidence[];
   /** The frames' embeddings agree with each other (one person); false => judged per frame (median). */
   consistent: boolean;
+  /** How the burst was scored: the burst template (frames agree) or the frames' median (they disagree). */
+  scoring: 'template' | 'median';
+  /** max - min of the usable frames' similarities. */
+  spread: number;
   usable: number;
   /** Index of the frame representing the burst (evidence image, quality). */
   representative: number;
@@ -247,7 +260,7 @@ export function aggregateBurst(
   if (usableIdx.length === 0) {
     const withFace = frames.findIndex((f) => f.quality.faceCount > 0);
     const rep = withFace >= 0 ? withFace : 0;
-    return { evidence: { usable: false, similarity: null, bucket: null, llr: 0 }, perFrame, consistent: true, usable: 0, representative: rep, quality: frames[rep]?.quality ?? null };
+    return { evidence: { usable: false, similarity: null, bucket: null, llr: 0 }, perFrame, consistent: true, scoring: 'median', spread: 0, usable: 0, representative: rep, quality: frames[rep]?.quality ?? null };
   }
   let consistent = true;
   for (let x = 0; x < usableIdx.length && consistent; x++) {
@@ -260,14 +273,17 @@ export function aggregateBurst(
   }
   const buckets = usableIdx.map((i) => perFrame[i].bucket!).sort((a, b) => BUCKET_ORDER[a] - BUCKET_ORDER[b]);
   const bucket = buckets[Math.floor(buckets.length / 2)] ?? buckets[buckets.length - 1];
+  const frameSims = usableIdx.map((i) => perFrame[i].similarity!);
+  const spread = round4(Math.max(...frameSims) - Math.min(...frameSims));
   let evidence: FrameEvidence;
-  if (consistent) {
-    const sim = scoreReference(
-      usableIdx.map((i) => frames[i].embedding!),
-      gallery,
-    );
+  let scoring: BurstAggregate['scoring'];
+  if (consistent && spread <= BURST_MAX_SPREAD) {
+    // The template of the burst averages frame noise out (the score the calibration is fitted for).
+    const sim = scoreReference(usableIdx.map((i) => frames[i].embedding!), gallery);
     evidence = { usable: true, similarity: sim, bucket, llr: comparisonLLR(sim, bucket, baseline, context).llr };
+    scoring = 'template';
   } else {
+    scoring = 'median';
     const llrs = usableIdx.map((i) => perFrame[i].llr);
     const sims = usableIdx.map((i) => perFrame[i].similarity!);
     evidence = { usable: true, similarity: round4(median(sims)), bucket, llr: round4(median(llrs)) };
@@ -277,7 +293,7 @@ export function aggregateBurst(
   for (const i of usableIdx) {
     if (evidence.llr > 0 ? perFrame[i].llr > perFrame[representative].llr : qualityScore(frames[i].quality) > qualityScore(frames[representative].quality)) representative = i;
   }
-  return { evidence, perFrame, consistent, usable: usableIdx.length, representative, quality: frames[representative].quality };
+  return { evidence, perFrame, consistent, scoring, spread, usable: usableIdx.length, representative, quality: frames[representative].quality };
 }
 
 export { qualityBucket };

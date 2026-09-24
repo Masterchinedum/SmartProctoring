@@ -50,7 +50,7 @@ describe('adaptive checks', () => {
     const { s, c } = await freshSession();
     await consent(c);
     const { start, complete, progress, frontalSent } = await runCheck(env, c, 'initial');
-    expect(start).toMatchObject({ frontalFramesRequired: 5, maxFrontalFrames: 10 });
+    expect(start).toMatchObject({ frontalFramesRequired: 5, maxFrontalFrames: 24 }); // 10 normally, up to 24 while quality rejects frames
     expect(frontalSent).toBe(5);
     expect(progress).toMatchObject({ frontalAccepted: 6, frontalNeeded: 0, identity: null, canComplete: true }); // 5 frontal + the 'center' step
     expect(progress!.steps.every((x) => x.satisfied)).toBe(true);
@@ -58,7 +58,7 @@ describe('adaptive checks', () => {
     const [ref] = await env.ctx.db.select().from(identityReferences).where(eq(identityReferences.sessionId, s.id));
     expect(ref.embeddingCount).toBeGreaterThanOrEqual(3);
     expect(ref.embeddingCount).toBeLessThanOrEqual(8);
-    expect(ref.baseline).toMatchObject({ n: expect.any(Number), calibrationVersion: CALIBRATION.version });
+    expect(ref.baseline).toMatchObject({ n: expect.any(Number), calibrationVersion: CALIBRATION.version, bucket: 'good' });
     expect(ref.baseline!.mean).toBeGreaterThan(0.9); // the fake camera's frames of one person are identical
   });
 
@@ -322,6 +322,57 @@ describe('poor light and per-session normalisation', () => {
   });
 });
 
+/* =================================================================== backlight: quality-limited checks */
+
+describe('backlit / dim checks (image quality, not identity)', () => {
+  const REJECTED = { person: 'alice', usable: false, issues: ['low_contrast' as const] };
+  const CLEAR = { person: 'alice', similarity: 0.8 };
+  /** Frontal frames where only every 5th is usable (the rest rejected as low contrast). */
+  const backlit = (usableAt: (i: number) => boolean) => Array.from({ length: 24 }, (_, i) => (usableAt(i) ? CLEAR : REJECTED));
+
+  it('frames rejected for quality but the usable ones agree: the attempt is extended and passes first time', async () => {
+    const { c } = await freshSession({ identity: { liveness: 'off' } });
+    await startedSession(env, c);
+    await c.req('POST', '/api/candidate/pause', {});
+    const { complete, frontalSent } = await runCheck(env, c, 'resume', { spec: CLEAR, frontal: backlit((i) => i % 5 === 4) });
+    expect(frontalSent).toBeGreaterThan(10); // beyond the normal limit
+    expect(frontalSent).toBeLessThanOrEqual(24);
+    expect(complete!.outcome, JSON.stringify(complete)).toBe('passed');
+    expect(complete!.attemptsRemaining).toBe(5);
+  });
+
+  it('attempt 2 builds on attempt 1 (pooled usable frames); a quality-only retry costs half an attempt', async () => {
+    const { s, c } = await freshSession({ identity: { liveness: 'off' } });
+    await startedSession(env, c);
+    await c.req('POST', '/api/candidate/pause', {});
+    // Attempt 1: two usable frames early, then only rejected frames up to the hard cap => too few => retry.
+    const a1 = await runCheck(env, c, 'resume', { spec: CLEAR, frontal: backlit((i) => i === 4 || i === 9) });
+    expect(a1.frontalSent).toBe(24);
+    expect(a1.complete!.outcome).toBe('retry');
+    expect(a1.complete!.guidance.join(' ')).toMatch(/light|contrast/i);
+    expect(a1.complete!.attemptsRemaining).toBe(5); // 5 - 0.5, rounded up
+    // Attempt 2 a minute later: one clear usable frame now + the two from attempt 1 => decided.
+    env.clock.advance(60_000);
+    const a2 = await runCheck(env, c, 'resume', { spec: CLEAR, frontal: backlit((i) => i === 4) });
+    expect(a2.complete!.outcome, JSON.stringify(a2.complete)).toBe('passed');
+    const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
+    expect(row.context).toMatchObject({ evidence: { pooledFrames: 2 } });
+  });
+
+  it('pooled frames never vouch for someone else now', async () => {
+    const { s, c } = await freshSession({ identity: { liveness: 'off' } });
+    await startedSession(env, c);
+    await c.req('POST', '/api/candidate/pause', {});
+    await runCheck(env, c, 'resume', { spec: CLEAR, frontal: backlit((i) => i === 4 || i === 9) });
+    env.clock.advance(60_000);
+    const other = backlit(() => false).map((f, i) => (i === 4 ? { person: 'mallory' } : { ...f, person: 'mallory' }));
+    const a2 = await runCheck(env, c, 'resume', { spec: { person: 'mallory' }, frontal: other });
+    expect(a2.complete!.outcome).not.toBe('passed');
+    const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
+    expect(row.context).toMatchObject({ evidence: { pooledFrames: 0 } });
+  });
+});
+
 /* =================================================================== bursts */
 
 describe('bursts', () => {
@@ -384,6 +435,25 @@ describe('bursts', () => {
     expect(next.status).toBe('on_hold');
     const all = await checksOf(s.id);
     expect(all.some((x) => x.sampleId === `burst:${r2.burstId}`)).toBe(true);
+  });
+
+  it('frames whose scores spread widely are judged by their median, not the more favourable template', async () => {
+    const { s, c } = await examWithStartSample();
+    env.clock.advance(15_000);
+    const r = await burst(env, c, [
+      { person: 'alice', similarity: 0.32 },
+      { person: 'alice', similarity: 0.51 },
+      { person: 'alice', similarity: 0.4 },
+    ]);
+    expect(r.last.result.similarity).toBeCloseTo(0.4, 3);
+    expect(r.last.result.decision).not.toBe('match');
+    const rows = await checksOf(s.id);
+    expect(rows[rows.length - 1].context).toMatchObject({ burst: { scoring: 'median', consistent: true } });
+    // A tight burst is scored with its template (the calibrated score).
+    env.clock.advance(15_000);
+    const tight = await burst(env, c, [ALICE, { person: 'alice', similarity: 0.97 }, ALICE]);
+    expect(tight.last.result.decision).toBe('match');
+    expect((await checksOf(s.id)).pop()!.context).toMatchObject({ burst: { scoring: 'template' } });
   });
 
   it('frames of two different people in one burst are judged per frame (median), not averaged', async () => {

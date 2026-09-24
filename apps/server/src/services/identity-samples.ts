@@ -441,7 +441,14 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
     );
     fe = agg.evidence;
     rep = agg.representative;
-    burstInfo = { consistent: agg.consistent, usableFrames: agg.usable, frameSimilarities: agg.perFrame.map((p) => p.similarity), frameLlrs: agg.perFrame.map((p) => (p.usable ? p.llr : null)) };
+    burstInfo = {
+      consistent: agg.consistent,
+      scoring: agg.scoring,
+      spread: agg.spread,
+      usableFrames: agg.usable,
+      frameSimilarities: agg.perFrame.map((p) => p.similarity),
+      frameLlrs: agg.perFrame.map((p) => (p.usable ? p.llr : null)),
+    };
   }
   const repFrame = d.frames[rep];
   const quality = fe.usable ? repFrame.analysis.quality : (repFrame?.analysis.quality ?? null);
