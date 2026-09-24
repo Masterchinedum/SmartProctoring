@@ -15,10 +15,11 @@ pnpm --filter @sp/e2e fixtures                  # (re)build the fake-camera vide
 pnpm --filter @sp/e2e typecheck
 ```
 
-Runtime (32 tests, 4-core machine shared with other workloads): ~11.5 minutes with the default 2 workers
-(~22 minutes of test time; the longest tests wait for real detections: a person swap, an absence, a 2-minute
-exam running out; scenarios 16–18 add ~3 minutes of test time, including their own server starts). Global setup
-adds ~15 s (plus ~1 minute the first time, to generate the fixtures).
+Runtime (65 tests, 4-core machine): ~31 minutes with the default 2 workers — scenarios 01–18 (33 tests) take
+~14 minutes; the realistic-webcam scenarios 20–24 (32 tests, incl. two 5-minute genuine-candidate runs) ~17 minutes.
+The longest tests wait for real detections: a person swap, an absence, a 2-minute exam running out; scenarios 16–18
+include their own server starts. Global setup adds ~15 s (plus ~1 minute the first time for the studio fixtures and
+~10 minutes / ~5 GB for the realistic fixtures; `E2E_SKIP_REALISTIC=1` skips those).
 
 ## Prerequisites
 
