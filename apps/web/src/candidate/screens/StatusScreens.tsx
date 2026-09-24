@@ -243,6 +243,11 @@ export function EndedScreen() {
           <p className="cand-lead">{endText(state.session.endReason, terminated)}</p>
           {!terminated && <p>Thank you. Monitoring has stopped and your camera is off. You can close this window.</p>}
           {terminated && <p>Monitoring has stopped and your camera is off. If you have questions about this, contact your exam administrator.</p>}
+          {snap.answerNotice && (
+            <p className="muted" role="status" data-testid="answers-not-saved">
+              {snap.answerNotice}
+            </p>
+          )}
           {pending > 0 && (
             <p className="muted small" role="status">
               Finishing sending {pending} monitoring item{pending === 1 ? '' : 's'}… You may keep this page open for a moment.

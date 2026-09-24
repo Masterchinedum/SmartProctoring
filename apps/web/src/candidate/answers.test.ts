@@ -69,6 +69,37 @@ describe('AnswerStore', () => {
     expect(pending).toEqual(['q1', 'q3']);
   });
 
+  it('reconciles with the server after a resume in the same page: queued local answers win, otherwise the server', async () => {
+    const box = await openBox();
+    const store = new AnswerStore(box, { debounceMs: 600 });
+    await store.restore([
+      { questionId: 'q1', value: 'before pause', clientSeq: 1, savedAt: 1 },
+      { questionId: 'q2', value: 'server', clientSeq: 2, savedAt: 2 },
+    ]);
+    // Typed in the seconds after a staff-approved pause: refused by the server, parked (still pending).
+    store.set('q1', 'typed after approval');
+    await store.flushPending();
+    const [rec] = (await box.getAnswers()).filter((a) => a.questionId === 'q1');
+    expect(rec).toMatchObject({ value: 'typed after approval', clientSeq: 3, pending: true });
+    // A newer server value for q2 (clientSeq 7) and an edit still being typed on q3.
+    store.set('q3', 'still typing');
+    await store.reconcile([
+      { questionId: 'q1', value: 'before pause', clientSeq: 1, savedAt: 1 },
+      { questionId: 'q2', value: 'server newer', clientSeq: 7, savedAt: 9 },
+      { questionId: 'q3', value: 'server old', clientSeq: 4, savedAt: 9 },
+    ]);
+    expect(store.get('q1')).toBe('typed after approval');
+    expect(store.get('q2')).toBe('server newer');
+    expect(store.get('q3')).toBe('still typing');
+    const pending = (await box.getAnswers()).filter((a) => a.pending).map((a) => a.questionId);
+    expect(pending).toEqual(['q1']);
+    // The debounced edit is saved above every sequence seen, so it wins on the server.
+    await store.flushPending();
+    const q3 = (await box.getAnswers()).find((a) => a.questionId === 'q3')!;
+    expect(q3).toMatchObject({ value: 'still typing', pending: true });
+    expect(q3.clientSeq).toBeGreaterThan(7);
+  });
+
   it('continues numbering above the server sequence after a reload on a new device', async () => {
     const box = await openBox();
     const store = new AnswerStore(box, { debounceMs: 10 });

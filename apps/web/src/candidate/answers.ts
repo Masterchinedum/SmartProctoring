@@ -70,7 +70,9 @@ export class AnswerStore {
 
   /**
    * Merge server answers with the local mirror. The higher clientSeq wins per question; a newer local
-   * answer that the server has not acknowledged is re-queued.
+   * answer that the server has not acknowledged is re-queued (re-sending is idempotent). An edit that is
+   * still being typed (debounced, not yet persisted) is never overwritten: it is saved with a higher
+   * clientSeq than anything seen here.
    */
   async restore(server: CandidateAnswerDTO[] | null): Promise<void> {
     const local = await this.sink.getAnswers();
@@ -79,26 +81,39 @@ export class AnswerStore {
     for (const a of local) maxSeq = Math.max(maxSeq, a.clientSeq);
     for (const a of server ?? []) maxSeq = Math.max(maxSeq, a.clientSeq);
     this.seq = maxSeq;
+    const show = (questionId: string, value: AnswerValue) => {
+      if (!this.dirty.has(questionId)) this.values.set(questionId, value);
+    };
 
     const seen = new Set<string>();
     for (const s of server ?? []) {
       seen.add(s.questionId);
       const l = localById.get(s.questionId);
       if (l && l.clientSeq > s.clientSeq) {
-        this.values.set(s.questionId, l.value);
+        show(s.questionId, l.value);
         if (!l.pending) await this.sink.putAnswer({ questionId: l.questionId, value: l.value, clientSeq: ++this.seq, answeredAt: l.answeredAt });
       } else {
-        this.values.set(s.questionId, s.value);
+        show(s.questionId, s.value);
         await this.sink.rememberDeliveredAnswer({ questionId: s.questionId, value: s.value, clientSeq: s.clientSeq, answeredAt: s.savedAt });
       }
     }
     for (const l of local) {
       if (seen.has(l.questionId)) continue;
-      this.values.set(l.questionId, l.value);
+      show(l.questionId, l.value);
       // Local answer the server has never seen: make sure it is queued.
       if (!l.pending) await this.sink.putAnswer({ questionId: l.questionId, value: l.value, clientSeq: ++this.seq, answeredAt: l.answeredAt });
     }
     this.notify();
+  }
+
+  /**
+   * Re-sync with the server's answers when the exam becomes active again in this page (resume, reverify,
+   * reconnect): a local answer with a higher clientSeq wins (it is still queued — e.g. refused while the
+   * exam was paused — or is re-queued); otherwise the server's value wins and is shown.
+   */
+  async reconcile(server: CandidateAnswerDTO[] | null): Promise<void> {
+    await this.writes.catch(() => undefined); // let queued saves land in the mirror first
+    await this.restore(server);
   }
 
   get(questionId: string): AnswerValue {

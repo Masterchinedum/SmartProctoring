@@ -15,7 +15,7 @@ pnpm --filter @sp/e2e fixtures                  # (re)build the fake-camera vide
 pnpm --filter @sp/e2e typecheck
 ```
 
-Runtime (24 tests, 4-core machine shared with other workloads): ~9 minutes with the default 2 workers,
+Runtime (26 tests, 4-core machine shared with other workloads): ~9 minutes with the default 2 workers,
 ~7.5 minutes with `E2E_WORKERS=3` (~18 minutes of test time; the longest tests wait for real detections:
 a person swap, an absence, a 2-minute exam running out). Global setup adds ~15 s (plus ~1 minute the
 first time, to generate the fixtures).
@@ -120,6 +120,7 @@ How the fake camera behaves (and how the tests rely on it):
 | 12 | `12-extend-expiry` | 1-minute exam + 1 minute added in the admin UI → candidate clock jumps without reload → expiry auto-submits (`time_expired`), answers graded |
 | 13 | `13-degraded-and-context` | (folded in from the candidate app's drafts) vision models unavailable → the exam still runs, `monitoring_degraded`; resume from another seat on the same browser → match + neutral `environment_changed` only; manual staff hold → release without a new check → continues |
 | 14 | `14-accessibility` | WCAG 2.1 AA checks with the in-repo checker `lib/a11y.ts` (Chromium's accessibility tree over CDP: accessible names, landmarks, `<h1>`, lang/title, id references, text contrast). **a:** keyboard-only candidate walkthrough — consent → camera check → start → every question type → question navigation → submit / privacy / pause dialogs (focus moves to each new heading, dialogs trap focus and return it, Escape, inert background, error tied to its field, countdown announced at the 10-minute mark only, 320 px reflow); staff: new flag announced (rate-limited), status tabs, session tabs, events row → drawer, reference image → viewer (arrows, Escape). **b:** phone-sized screen without a camera → friendly notice, consent still possible, reflow, reduced motion; staff sign-in page. **c:** every staff page passes the checker (titles, skip link). See `docs/ACCESSIBILITY.md` |
+| 15 | `15-resume-continue` | **a:** `requireFullscreen`: pause → browser closed → reopened → resume check passes → 25 s on "Check complete" (longer than the heartbeat timeout and a paused-state poll): the session stays online (heartbeats, label "waiting for the candidate to continue"), no `reporting_interrupted`, and no `fullscreen_exited` before or after the click that enters fullscreen and starts monitoring. **b:** pause with approval: an answer typed after staff approved (heartbeats held back, the server refuses it with 409) is kept, re-sent after the resume in the same page and graded |
 
 ## Known limits
 

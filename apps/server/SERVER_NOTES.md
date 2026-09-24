@@ -84,7 +84,9 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
 * Realtime cost control (docs/PERFORMANCE.md): the notifier builds nothing for orgs without staff subscribers
   (`bus.hasSubscribers`, Redis-wide via PUBSUB NUMSUB), batches loads (50 ms) and coalesces summaries per session
   (<= 1 / 2 s). withSession passes `visible: false` when only heartbeat timestamps changed (dto.ts `staffVisibleKey`
-  — extend it when SessionSummaryDTO gains a field derived from exam_sessions); those refresh only every 30 s.
+  — extend it when SessionSummaryDTO gains a field derived from exam_sessions); those refresh only every 10 s
+  (keepalive; the staff UI calls a summary stale only after 25 s, web admin lib/liveness.ts — keep them in step).
+  A change nobody received (org unwatched) arms no per-session throttle.
 * Other writes that change what staff dashboards show: call `ctx.live.eventChanged(eventId)` (after review/notes) or
   `ctx.live.sessionChanged(sessionId)`.
 * DTO loaders: `loadSessionSummaries(ctx, db, { orgId, where?, limit?, offset?, orderBy? })` (where can reference
@@ -161,7 +163,16 @@ candidate-state.ts (CandidateSessionState, instanceInControl).
   session detail and the admin+ exam-assignment list (`loadSessionSummaries({ includeAccessLink })`).
 * WS `/api/admin/live` re-validates the staff session every 60 s and before delivering broadcasts when the last
   check is > 5 s old; closes with code 4401 after logout / revocation / disable. Session notes are pushed as
-  `{ type: 'note' }` messages.
+  `{ type: 'note' }` messages. It never drops messages silently: over 1,000 held broadcasts or 4 MB queued
+  (`LIVE_LIMITS`) it closes with 4408 ('resync') and the admin client reconnects at once. `hello` is sent once the
+  subscription is live (`bus.whenSubscribed`, Redis SUBSCRIBE confirmed); the admin client refetches its live views
+  on the first `hello` of every socket (first load included) and re-applies messages that arrived meanwhile.
+* Reporting outages in the report (services/reporting-gaps.ts): a `reporting_interrupted` span counts as observed
+  only if the same browser came back (`closedBy 'heartbeat_resumed'`) or something captured during it arrived late
+  (client event, screenshot, identity sample). Otherwise it is unobserved: `finalizeSession` turns the active time
+  from the last heartbeat to the end into a 'disconnected' period (reason `browser_not_returned`) and closes the
+  gone browser's open episodes at the gap start (`closedBy 'browser_not_returned'`); the report derives the same
+  split for ongoing outages / older data.
 * Logs never contain candidate tokens: `/take/<token>`, `?token=` and Authorization are redacted (lib/log-redact.ts).
 
 ## Performance rules (hot paths; measured in docs/PERFORMANCE.md)

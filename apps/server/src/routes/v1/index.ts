@@ -320,7 +320,7 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
       await apiAudit(tx, key, now, 'api.exam.assigned', 'exam', examId, { requested: ordered.length, created, existing: ordered.length - created });
       return out;
     });
-    for (const a of items) if (!a.existing) ctx.live.sessionChanged(a.sessionId);
+    for (const a of items) if (!a.existing) ctx.live.sessionChanged(a.sessionId, { orgId: key.orgId });
     return { items };
   });
 

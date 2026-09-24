@@ -16,9 +16,10 @@ import { conflict } from '../lib/errors.js';
 import { assertInControl } from './candidate-state.js';
 import { storeEvidence } from './evidence.js';
 import { EVENT_SCREENSHOT_SHARE, sessionHasEvidenceCapacity, storageLimitError } from './session-limits.js';
+import { LATE_DELIVERY_MS } from './reporting-gaps.js';
 import { BLOCKING_PERIOD_KINDS, withSession, type SessionPreload } from './session-state.js';
 
-export const LATE_DELIVERY_MS = 30_000;
+export { LATE_DELIVERY_MS };
 export const MAX_EVENTS_PER_SESSION = 5000;
 export const MAX_EVIDENCE_PER_SESSION = 3000;
 const MAX_DETAILS_BYTES = 16 * 1024;

@@ -62,3 +62,22 @@ describe.skipIf(!available)('RedisBus.hasSubscribers across instances', () => {
     }
   });
 });
+
+describe.skipIf(!available)('RedisBus.whenSubscribed', () => {
+  it('resolves once messages from another instance reach the new subscriber (the staff socket says hello then)', async () => {
+    const a = await RedisBus.connect(REDIS_URL, () => {}, { remoteTtlMs: 200 });
+    const b = await RedisBus.connect(REDIS_URL, () => {}, { remoteTtlMs: 200 });
+    const org = `test-${randomUUID()}`;
+    try {
+      const got: unknown[] = [];
+      const off = a.subscribe(org, (m) => got.push(m));
+      await a.whenSubscribed(org);
+      b.publish(org, { type: 'hello', serverTime: 3 }); // published right after "ready": not lost
+      expect(await until(() => got.length === 1)).toBe(true);
+      off();
+      await expect(a.whenSubscribed(org)).resolves.toBeUndefined(); // nothing pending after the last unsubscribe
+    } finally {
+      await Promise.all([a.close(), b.close()]);
+    }
+  });
+});

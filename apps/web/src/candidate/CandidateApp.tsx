@@ -62,19 +62,18 @@ function CandidateRouter() {
   useCandidateAnnouncements();
   // Local flow flags (buttons on paused / hold screens start a check).
   const [checkRequest, setCheckRequest] = useState<CheckPurpose | null>(null);
-  // A passed check whose "Check complete" screen is still waiting for the candidate's click.
-  const [passedCheck, setPassedCheck] = useState<{ key: string; purpose: CheckPurpose; from: string | undefined } | null>(null);
+  // A passed check whose "Check complete" screen is still waiting for the candidate's click. It lives in the
+  // controller (same store as the session state it is applied together with): until the click, heartbeats
+  // run but monitoring does not start. The controller drops it if the exam moves elsewhere (held, ended, …).
+  const passedCheck = snap.awaitingContinue;
   const status = snap.state?.session.status;
-  const pendingFor = (key: string, purpose: CheckPurpose) => (pending: boolean) => setPassedCheck(pending ? { key, purpose, from: status } : null);
+  const pendingFor = (key: string, purpose: CheckPurpose) => (pending: boolean) => ctrl.setAwaitingContinue(pending ? { key, purpose, from: status } : null);
 
   useEffect(() => {
     // A started check is only meaningful for the status it was started from.
     if (checkRequest === 'resume' && status !== 'paused') setCheckRequest(null);
     if (checkRequest === 'reverify' && status !== 'on_hold') setCheckRequest(null);
-    // The confirmation applies until the candidate continues, unless the exam moved elsewhere meanwhile
-    // (held again, ended, …): it may still show the pre-check status until the refresh arrives.
-    if (passedCheck && status !== 'active' && status !== passedCheck.from) setPassedCheck(null);
-  }, [status, checkRequest, passedCheck]);
+  }, [status, checkRequest]);
 
   if (snap.fatal) return <FatalScreen kind={snap.fatal.kind} message={snap.fatal.message} />;
   if (!snap.state) return <LoadingScreen error={snap.loadError} onRetry={() => void ctrl.load()} />;

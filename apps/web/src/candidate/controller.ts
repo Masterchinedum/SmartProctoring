@@ -6,6 +6,7 @@ import type {
   HeartbeatResponse,
   MonitoringStatus,
   PauseResponse,
+  SessionStatus,
 } from '@sp/shared';
 import {
   CandidateApiError,
@@ -41,6 +42,24 @@ export interface Toast {
   message: string;
 }
 
+/** A passed check whose "Check complete" screen waits for the candidate's click (see `setAwaitingContinue`). */
+export interface AwaitingContinue {
+  /** React key of the check flow that is kept mounted. */
+  key: string;
+  purpose: CheckPurpose;
+  /** Status when the check passed (the flow stays while the state still shows it). */
+  from: SessionStatus | undefined;
+}
+
+/** Calm, factual notice about answers that could not be saved because the exam had ended. */
+export function unsavedAnswersNotice(afterEnd: number, unsent: number): string | null {
+  const count = (n: number) => (n === 1 ? 'One answer' : `${n} answers`);
+  const parts: string[] = [];
+  if (afterEnd > 0) parts.push(`${count(afterEnd)} typed after the exam ended could not be saved.`);
+  if (unsent > 0) parts.push(`${count(unsent)} kept on this device could not be sent before the exam ended.`);
+  return parts.length ? parts.join(' ') : null;
+}
+
 export interface CandidatePrompt {
   key: string;
   message: string;
@@ -70,6 +89,10 @@ export interface ControllerSnapshot {
   /** Reason the candidate gave for a pause requested from this browser. */
   pauseReasonLocal: string | null;
   answersReady: boolean;
+  /** A passed check waits for the candidate's click: heartbeats run, monitoring starts with the click. */
+  awaitingContinue: AwaitingContinue | null;
+  /** Answers that could not be saved because the exam had ended (shown on the ended screen). */
+  answerNotice: string | null;
 }
 
 type Listener = () => void;
@@ -132,6 +155,9 @@ export class CandidateController {
   /** Baseline of the previous exam period (for environment comparison after resume/reconnect). */
   private previousBaseline: Baseline | null = null;
   private transitioning = false;
+  private answersRefusedAfterEnd = 0;
+  private answersUnsentAtEnd = 0;
+  private answersSettledAfterEnd = false;
 
   constructor(readonly token: string) {
     this.instanceId = getPageInstanceId();
@@ -156,6 +182,8 @@ export class CandidateController {
       pausedAtLocal: null,
       pauseReasonLocal: null,
       answersReady: false,
+      awaitingContinue: null,
+      answerNotice: null,
     };
     this.camera.subscribe((c) => this.patch({ camera: c }));
     window.addEventListener('online', this.onOnline);
@@ -180,11 +208,17 @@ export class CandidateController {
     for (const fn of this.listeners) fn();
   }
 
+  /**
+   * Live reporting is interrupted: offline, the heartbeat failing, or items waiting for delivery for more
+   * than 10 s. The outbox's `oldestAt` only counts items waiting for the network — not answers parked while
+   * the exam is paused / on hold, nor identity samples in the server's busy vision queue — and queued items
+   * only count while this page may deliver them (before a resume / reconnect check it may not, by design).
+   */
   private computeInterrupted(s: ControllerSnapshot): boolean {
     const status = s.state?.session.status;
     // Only meaningful while this page reports (active exam, or data still queued).
     const reporting = status === 'active' && isVerifiedInstance(s.state, this.instanceId);
-    const queued = (s.outbox?.size ?? 0) > 0;
+    const queued = (s.outbox?.size ?? 0) > 0 && !s.fatal && s.state?.session.verifiedInstanceId === this.instanceId;
     if (!reporting && !queued) return false;
     const now = Date.now();
     if (!s.online) return true;
@@ -231,7 +265,7 @@ export class CandidateController {
     try {
       const { data, timing } = await this.api.getState();
       if (seq !== this.loadSeq) return data;
-      await this.applyState(data, timing);
+      await this.apply(data, timing);
       this.patch({ loading: false, loadError: null });
       return data;
     } catch (e) {
@@ -247,10 +281,21 @@ export class CandidateController {
   }
 
   /**
+   * Apply a server state returned by an action (check result, start, pause, submit, …). It is newer than
+   * any state load still in flight, so those are discarded when they arrive (a stale "paused" state from a
+   * poll must not undo a resume that just passed).
+   */
+  async applyState(state: CandidateSessionState, timing?: RequestTiming): Promise<void> {
+    this.loadSeq++;
+    await this.apply(state, timing);
+    if (this.snap.loading || this.snap.loadError) this.patch({ loading: false, loadError: null });
+  }
+
+  /**
    * Apply a new server state. Starts/stops the heartbeat, polling and monitoring runtime to match.
    * `timing` (when available) refines the clock offset.
    */
-  async applyState(state: CandidateSessionState, timing?: RequestTiming): Promise<void> {
+  private async apply(state: CandidateSessionState, timing?: RequestTiming): Promise<void> {
     if (this.disposed) return;
     if (timing) this.clock.addSample(state.serverTime, timing.sentAt, timing.receivedAt);
     const serverNow = this.clock.synced ? this.clock.now() : state.serverTime;
@@ -274,12 +319,17 @@ export class CandidateController {
       }
     }
     const timeUp = state.session.status === 'active' && this.countdown.running && this.remainingMs() <= 0;
-    this.patch({ state, pausedAtLocal, pauseReasonLocal, timeUp });
+    // "Check complete" waits for the click while the exam stays active (or still shows the pre-check status);
+    // held again, ended, … meanwhile: that screen no longer applies.
+    let awaitingContinue = this.snap.awaitingContinue;
+    if (awaitingContinue && state.session.status !== 'active' && state.session.status !== awaitingContinue.from) awaitingContinue = null;
+    this.patch({ state, pausedAtLocal, pauseReasonLocal, timeUp, awaitingContinue });
 
     await this.ensureOutbox(sid);
     if (state.questions && (state.session.status === 'active' || state.session.status === 'paused' || state.session.status === 'on_hold')) {
-      await this.ensureAnswers(state);
+      await this.ensureAnswers(state, prev);
     }
+    await this.settleParkedAnswers(state);
     this.syncServices();
   }
 
@@ -292,7 +342,9 @@ export class CandidateController {
     if (shouldMonitor) {
       this.stopPolling();
       this.startHeartbeat();
-      void this.startMonitoring();
+      // While a passed check waits for the candidate's click the browser reports as alive (heartbeat), but
+      // monitoring starts only with the click — after it entered required fullscreen.
+      if (!this.snap.awaitingContinue) void this.startMonitoring();
     } else {
       this.stopHeartbeat();
       if (this.runtime) void this.stopMonitoring(status === 'paused' ? 'pause' : status === 'on_hold' ? 'hold' : status, { flush: true, stopCamera: status !== 'active' && status !== 'ready' });
@@ -312,6 +364,7 @@ export class CandidateController {
         onSampleResult: (_s, res) => this.onSampleResult(res),
         onFatal: (kind) => this.setFatal(kind),
         onDropped: (kind, id, reason) => console.warn(`[outbox] dropped ${kind} ${id}: ${reason}`),
+        onAnswerRefusedAfterEnd: () => this.noteUnsavedAnswers('after_end'),
       }).then((box) => {
         this.outbox = box;
         box.subscribe((stats) => this.patch({ outbox: stats }));
@@ -330,8 +383,15 @@ export class CandidateController {
     return s.session.verifiedInstanceId === this.instanceId;
   }
 
-  private async ensureAnswers(state: CandidateSessionState): Promise<void> {
-    if (this.answers || !this.outbox) return;
+  private async ensureAnswers(state: CandidateSessionState, prev: CandidateSessionState | null): Promise<void> {
+    if (this.answers) {
+      // The exam is active again in this page (resume / reverify / reconnect): the server did not serve its
+      // answers meanwhile. Re-sync — local answers it has not taken yet (e.g. refused while the exam was
+      // paused) win and stay queued; otherwise the server's value is shown.
+      if (state.answers && !prev?.answers) await this.answers.reconcile(state.answers);
+      return;
+    }
+    if (!this.outbox) return;
     if (!this.answersRestoring) {
       // answeredAt uses the server-synced clock: the server compares it with pause / hold start times.
       const store = new AnswerStore(this.outbox, { now: () => this.clock.now() });
@@ -342,6 +402,48 @@ export class CandidateController {
       });
     }
     await this.answersRestoring;
+  }
+
+  /**
+   * Answers refused while the exam was paused / on hold (parked in the outbox) are re-sent as soon as the
+   * exam is active again. Once it has ended they get the server's final answer (exam_ended → notice); a
+   * page that can no longer deliver at all (another browser was the verified one) gives up on them here.
+   */
+  private async settleParkedAnswers(state: CandidateSessionState): Promise<void> {
+    const box = this.outbox;
+    if (!box) return;
+    const st = state.session.status;
+    if (st === 'active' && isVerifiedInstance(state, this.instanceId)) {
+      void box.resumeAnswers();
+    } else if (st === 'submitted' || st === 'terminated') {
+      if (this.canDeliver()) {
+        void box.resumeAnswers();
+      } else if (!this.answersSettledAfterEnd && box.stats().pendingAnswers > 0) {
+        this.answersSettledAfterEnd = true;
+        const lost = await box.abandonPendingAnswers(state.answers);
+        if (lost > 0) this.noteUnsavedAnswers('unsent', lost);
+      }
+    }
+  }
+
+  private noteUnsavedAnswers(kind: 'after_end' | 'unsent', n = 1): void {
+    if (kind === 'after_end') this.answersRefusedAfterEnd += n;
+    else this.answersUnsentAtEnd += n;
+    this.patch({ answerNotice: unsavedAnswersNotice(this.answersRefusedAfterEnd, this.answersUnsentAtEnd) });
+  }
+
+  /**
+   * A passed check (resume / reconnect / reverify) shows "Check complete" until the candidate clicks
+   * Continue — which may also enter required fullscreen. The exam is already active on the server, so the
+   * check flow applies that state right away (heartbeats start: no false "offline" / reporting outage while
+   * the screen waits), but the monitoring runtime starts only when this is cleared (`null`) after the
+   * click. Otherwise its browser tracker would record "left fullscreen" before the candidate could enter
+   * it. If entering fullscreen then fails or is declined, that is recorded normally.
+   */
+  setAwaitingContinue(a: AwaitingContinue | null): void {
+    if (a === this.snap.awaitingContinue) return;
+    this.patch({ awaitingContinue: a });
+    this.syncServices();
   }
 
   /* ================================================================ calibration & baseline */
@@ -484,7 +586,13 @@ export class CandidateController {
         clientInstanceId: this.instanceId,
         clientTime: Date.now(),
         seq: ++this.hbSeq,
-        monitoring: this.runtime?.heartbeatMonitoring() ?? { state: 'off', faces: 0, label: 'Monitoring not running', open: [], cameraState: this.camera.state.state },
+        monitoring: this.runtime?.heartbeatMonitoring() ?? {
+          state: 'off',
+          faces: 0,
+          label: this.snap.awaitingContinue ? 'Check passed — waiting for the candidate to continue' : 'Monitoring not running',
+          open: [],
+          cameraState: this.camera.state.state,
+        },
         outboxSize: stats?.size ?? 0,
         outboxOldestAt: stats?.oldestAt ?? null,
         currentQuestionIndex: this.currentQuestionIndex,
@@ -516,6 +624,8 @@ export class CandidateController {
     for (const cmd of hb.commands ?? []) {
       if (await this.handleCommand(cmd, hb)) needReload = true;
     }
+    // Active on the server: answers refused while it was paused / on hold can be saved now.
+    if (hb.status === 'active' && !hb.requiredCheck) void this.outbox?.resumeAnswers();
     const s = this.snap.state;
     if (s && (hb.status !== s.session.status || hb.requiredCheck !== s.session.requiredCheck)) {
       needReload = true;
@@ -658,7 +768,13 @@ export class CandidateController {
     this.transitioning = true;
     try {
       await this.answers?.flushPending();
+      void this.outbox?.resumeAnswers(); // answers refused during a pause / hold get another try
       const delivered = await (this.outbox?.flushNow(ANSWER_FLUSH_BEFORE_SUBMIT_MS, 'answers') ?? Promise.resolve(true));
+      if (!delivered && (this.outbox?.stats().parkedAnswers ?? 0) > 0) {
+        // The server refuses answers because the exam is paused / on hold there: show that state.
+        void this.load();
+        throw new Error('Your exam is paused or on hold, so it cannot be submitted right now. Your answers are saved on this device.');
+      }
       if (!delivered) {
         throw new Error(
           'Some of your answers have not reached the server yet because the connection is interrupted. They are saved on this device. Please check your connection and try submitting again.',

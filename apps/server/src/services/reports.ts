@@ -10,6 +10,10 @@
  * disconnected) take precedence if periods overlap, so unobserved time is never counted as observed.
  * Time not covered by any period (e.g. waiting between the readiness check and pressing "start") is
  * neither observed nor unobserved exam time; it is mentioned in the observations.
+ *
+ * A reporting outage (reporting_interrupted) that nothing shows to have been observed — the browser never came
+ * back and nothing it captured was delivered late — is unobserved: it is cut out of the active periods as a
+ * 'disconnected' period (services/reporting-gaps.ts), so it is never counted or described as monitoring.
  */
 import {
   clockUsedMs,
@@ -35,6 +39,7 @@ import { notFound } from '../lib/errors.js';
 import { loadNoteDTOs, loadSessionSummaries, sessionClock } from './dto.js';
 import { capFirst, formatDuration, lcFirst, listJoin, makeClock, pct, plural, type Clock } from './reports-format.js';
 import { loadSessionTimeline } from './reports-timeline.js';
+import { capturesWithin, GAP_NOT_REPORTING, GAP_NOT_RETURNED, loadLateCaptures, unobservedOutages, withUnobservedOutages, type Span } from './reporting-gaps.js';
 import { effectivePolicy } from './session-state.js';
 
 export const NOTABLE_EVENTS_LIMIT = 200;
@@ -164,17 +169,21 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
   const { session, exam, candidate, org } = row;
   const now = ctx.now();
 
-  const [[summary], timeline, refs, notes] = await Promise.all([
+  const [[summary], timeline, refs, notes, lateCaptures] = await Promise.all([
     loadSessionSummaries(ctx, db, { orgId, sessionIds: [sessionId] }),
     loadSessionTimeline(db, sessionId),
     db.select().from(identityReferences).where(eq(identityReferences.sessionId, sessionId)).orderBy(asc(identityReferences.version)),
     loadNoteDTOs(db, { sessionId }),
+    loadLateCaptures(db, sessionId),
   ]);
   if (!summary) throw notFound('Session not found', 'session_not_found');
   const policy = effectivePolicy(session, exam, org);
-  const { periods, events: evs, checks } = timeline;
+  const { events: evs, checks } = timeline;
 
   const endAt = session.endedAt ? session.endedAt.getTime() : now;
+  // Outages nothing shows to have been observed are unobserved time, not monitoring (reporting-gaps.ts).
+  const outageEvents = evs.filter((e) => e.type === 'reporting_interrupted');
+  const periods = withUnobservedOutages(timeline.periods, unobservedOutages(outageEvents, lateCaptures, endAt));
   const totalsRaw = periodTotals(periods, endAt);
   const clock = makeClock(opts.timeZone ?? 'UTC', totalsRaw.firstAt ?? session.startedAt?.getTime() ?? session.createdAt.getTime());
 
@@ -231,7 +240,7 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
 
   /* -------------------------------------------------------------- narrative */
   const observations = buildObservations({ clock, session, exam, periods, events: evs, checks, identity, totals, uncoveredMs: totalsRaw.uncoveredMs, endAt, notableTruncated: notableAll.length - notableEvents.length });
-  const limitations = buildLimitations({ clock, periods, events: evs, policy, endAt, evidencePurgedAt: session.evidencePurgedAt?.getTime() ?? null });
+  const limitations = buildLimitations({ clock, periods, events: evs, policy, endAt, evidencePurgedAt: session.evidencePurgedAt?.getTime() ?? null, lateCaptures });
 
   return {
     generatedAt: now,
@@ -483,7 +492,9 @@ export function buildObservations(input: ObservationInput): string[] {
   }
 
   const active = periods.filter((p) => p.kind === 'active');
-  if (active.length) out.push(`Monitoring ran for ${formatDuration(totals.activeMs)} of active exam time across ${plural(active.length, 'active period')}.`);
+  const monitored = active.filter((p) => periodDuration(p, endAt) > 0);
+  if (monitored.length && totals.activeMs > 0) out.push(`Monitoring ran for ${formatDuration(totals.activeMs)} of active exam time across ${plural(monitored.length, 'active period')}.`);
+  else if (active.length) out.push('No active exam time was observed.');
   if (input.uncoveredMs >= 60_000 && session.startedAt) {
     out.push(`${formatDuration(input.uncoveredMs)} fell outside any exam period (for example between the readiness check and the start of the exam); no exam time was used and no observations were made then.`);
   }
@@ -499,6 +510,14 @@ export function buildObservations(input: ObservationInput): string[] {
       const extra = [reason ? `reason given: “${reason}”` : null, timer].filter(Boolean).join('; ');
       const resumed = p.endedAt != null ? resumedAfter(evs, p.endedAt, clock) : '';
       out.push(open ? `Paused since ${at} (${dur} so far${extra ? `; ${extra}` : ''}); this period is not observed.` : `Paused at ${at} for ${dur}${extra ? ` (${extra})` : ''}${resumed}; this period was not observed.`);
+    } else if (p.kind === 'disconnected' && p.reason === GAP_NOT_RETURNED) {
+      out.push(`The candidate’s browser stopped reporting at ${at} and did not return (${dur} until the end of the exam); this period was not observed.`);
+    } else if (p.kind === 'disconnected' && p.reason === GAP_NOT_REPORTING) {
+      out.push(
+        p.endedAt == null
+          ? `The candidate’s browser has not reported since ${at} (${dur} so far); this period is not observed.`
+          : `The candidate’s browser stopped reporting at ${at} and nothing it captured until ${clock.time(p.endedAt)} was delivered (${dur}); this period was not observed.`,
+      );
     } else if (p.kind === 'disconnected') {
       out.push(
         open
@@ -551,15 +570,19 @@ export function buildObservations(input: ObservationInput): string[] {
   out.push(...behaviourLines(evs, clock, endAt));
   if (input.notableTruncated > 0) out.push(`The report lists the ${NOTABLE_EVENTS_LIMIT} most significant events; ${input.notableTruncated} further events are available in the session’s event list.`);
 
-  // Delivery delays.
+  // Delivery delays. "Delivered later" is said only for what actually arrived late.
   const outages = evs.filter((e) => e.type === 'reporting_interrupted');
   const late = evs.filter((e) => e.deliveredLate);
+  const inOutage = (e: EventDTO) => outages.some((o) => capturesWithin([{ start: e.startedAt, end: e.startedAt + eventDuration(e, endAt) }], outageSpan(o, endAt)).length > 0);
+  const lateInOutages = late.filter(inOutage);
+  const lateElsewhere = late.filter((e) => !inOutage(e));
   if (outages.length) {
     out.push(
-      `Live reporting from the candidate’s browser was interrupted ${plural(outages.length, 'time')} (${formatDuration(unionDurationMs(outages, endAt))} in total)${late.length ? `; ${plural(late.length, 'event')} captured during outages ${late.length === 1 ? 'was' : 'were'} delivered later with ${late.length === 1 ? 'its' : 'their'} original timestamps` : ''}.`,
+      `Live reporting from the candidate’s browser was interrupted ${plural(outages.length, 'time')} (${formatDuration(unionDurationMs(outages, endAt))} in total)${lateInOutages.length ? `; ${plural(lateInOutages.length, 'event')} captured during ${outages.length === 1 ? 'the interruption' : 'the interruptions'} ${lateInOutages.length === 1 ? 'was' : 'were'} delivered later with ${lateInOutages.length === 1 ? 'its' : 'their'} original timestamps` : ''}.`,
     );
-  } else if (late.length) {
-    out.push(`${capFirst(plural(late.length, 'event'))} ${late.length === 1 ? 'was' : 'were'} delivered late (buffered by the candidate’s browser) and ${late.length === 1 ? 'keeps its' : 'keep their'} original timestamps.`);
+  }
+  if (lateElsewhere.length) {
+    out.push(`${capFirst(plural(lateElsewhere.length, 'event'))} ${lateElsewhere.length === 1 ? 'was' : 'were'} delivered late (buffered by the candidate’s browser) and ${lateElsewhere.length === 1 ? 'keeps its' : 'keep their'} original timestamps.`);
   }
 
   // Neutral context.
@@ -574,6 +597,10 @@ export function buildObservations(input: ObservationInput): string[] {
   const displays = evs.find((e) => e.type === 'additional_display_detected');
   if (displays) out.push(`At ${clock.time(displays.startedAt)} the browser reported more than one connected display; activity on other displays cannot be observed.`);
   return out;
+}
+
+function outageSpan(o: EventDTO, endAt: number): Span {
+  return { start: o.startedAt, end: Math.min(o.startedAt + eventDuration(o, endAt), endAt) };
 }
 
 function resumedAfter(evs: EventDTO[], at: number, clock: Clock): string {
@@ -646,6 +673,8 @@ interface LimitationInput {
   policy: ProctoringPolicy;
   endAt: number;
   evidencePurgedAt: number | null;
+  /** Client captures delivered late (reporting-gaps.ts loadLateCaptures); default: the late events only. */
+  lateCaptures?: Span[];
 }
 
 export const FIXED_LIMITATIONS = {
@@ -658,13 +687,18 @@ export const FIXED_LIMITATIONS = {
 
 const PERIOD_NOUN: Partial<Record<PeriodKind, string>> = { paused: 'pause', disconnected: 'disconnection', on_hold: 'hold' };
 
+function periodNoun(p: PeriodDTO): string {
+  if (p.kind === 'disconnected' && (p.reason === GAP_NOT_RETURNED || p.reason === GAP_NOT_REPORTING)) return 'browser not reporting';
+  return PERIOD_NOUN[p.kind] ?? p.kind;
+}
+
 export function buildLimitations(input: LimitationInput): string[] {
   const { clock, periods, events: evs, policy, endAt } = input;
   const out: string[] = [FIXED_LIMITATIONS.scope];
 
   const unobserved = periods.filter((p) => UNOBSERVED.includes(p.kind));
   if (unobserved.length) {
-    const list = unobserved.map((p) => `${PERIOD_NOUN[p.kind] ?? p.kind} at ${clock.time(p.startedAt)} (${formatDuration(periodDuration(p, endAt))}${p.endedAt == null ? ', ongoing' : ''})`);
+    const list = unobserved.map((p) => `${periodNoun(p)} at ${clock.time(p.startedAt)} (${formatDuration(periodDuration(p, endAt))}${p.endedAt == null ? ', ongoing' : ''})`);
     out.push(`No observations were made during unobserved periods: ${listJoin(list)}.`);
   } else {
     out.push('There were no unobserved periods (pauses, disconnections or holds).');
@@ -680,8 +714,22 @@ export function buildLimitations(input: LimitationInput): string[] {
   if (obstructed > 0) out.push(`The face was obstructed or unclear for ${formatDuration(obstructed)}; gaze and identity could not be assessed during that time.`);
   const camera = dur(CAMERA_OUTAGE_TYPES);
   if (camera > 0) out.push(`The camera provided no usable image for ${formatDuration(camera)} in total (disconnected, covered, frozen or without permission).`);
-  const reporting = dur(['reporting_interrupted']);
-  if (reporting > 0) out.push(`Live reporting was interrupted for ${formatDuration(reporting)}; observations captured during the outage were delivered later with their original timestamps.`);
+  const outages = evs.filter((e) => e.type === 'reporting_interrupted');
+  const reporting = unionDurationMs(outages, endAt);
+  if (reporting > 0) {
+    // Say "delivered later" only when something captured during an outage actually arrived late; say "not observed"
+    // for outages nothing shows to have been observed (they are listed as unobserved periods above).
+    const late = input.lateCaptures ?? evs.filter((e) => e.deliveredLate).map((e) => ({ start: e.startedAt, end: e.startedAt + eventDuration(e, endAt) }));
+    const delivered = outages.some((o) => capturesWithin(late, outageSpan(o, endAt)).length > 0);
+    const unobservedCount = unobservedOutages(outages, late, endAt).length;
+    const clauses = [
+      delivered ? 'observations captured during the interruption were delivered later with their original timestamps' : null,
+      unobservedCount
+        ? `nothing captured during ${unobservedCount === outages.length ? (outages.length === 1 ? 'it' : 'them') : plural(unobservedCount, 'of the interruptions', 'of the interruptions')} was delivered, so that time is listed as unobserved`
+        : null,
+    ].filter((x): x is string => !!x);
+    out.push(`Live reporting was interrupted for ${formatDuration(reporting)}${clauses.length ? `; ${clauses.join('; ')}` : ''}.`);
+  }
 
   const disabled = (Object.keys(DETECTOR_LABELS) as (keyof typeof DETECTOR_LABELS)[]).filter((k) => policy.detection.enabled[k] === false).map((k) => DETECTOR_LABELS[k]);
   if (disabled.length) out.push(`The exam rules turned off ${listJoin(disabled)}, so ${disabled.length === 1 ? 'this was' : 'these were'} not monitored.`);

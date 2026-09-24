@@ -49,7 +49,9 @@ const READY_RECONNECT_INTRO = {
  * `onPassedPending(true)` is called when the check passed and the exam is already active again, while the
  * "Check complete" screen waits for the candidate's click (which may also enter required fullscreen).
  * The router keeps this flow mounted until `onPassedPending(false)`, so a background state refresh that
- * already reports the exam as active cannot skip that screen.
+ * already reports the exam as active cannot skip that screen. The passed state is applied at once (the
+ * heartbeat starts, so the server never sees this browser as gone while the screen waits); the controller
+ * starts monitoring only after the click (`CandidateController.setAwaitingContinue`).
  */
 export function CheckFlow({ purpose, onCancel, onPassedPending }: { purpose: CheckPurpose; onCancel?: () => void; onPassedPending?: (pending: boolean) => void }) {
   const ctrl = useController();
@@ -75,8 +77,22 @@ export function CheckFlow({ purpose, onCancel, onPassedPending }: { purpose: Che
         void ctrl.applyState(res.state);
         return;
       }
-      if (res.outcome === 'passed') onPassedPending?.(true);
       setStep('result');
+      if (res.outcome === 'passed' && onPassedPending) {
+        // Keep "Check complete" (monitoring deferred) first, then apply the active state: heartbeats start now.
+        onPassedPending(true);
+        void ctrl.applyState(res.state);
+      }
+    },
+    [ctrl, onPassedPending],
+  );
+
+  /** "Resume / Continue exam": enter required fullscreen (needs this click), then monitoring starts. */
+  const onContinue = useCallback(
+    async (res: CompleteCheckResponse) => {
+      if (res.state.exam.policy.browser.requireFullscreen) await enterFullscreen(); // declined / failed: recorded as usual
+      if (onPassedPending) onPassedPending(false);
+      else await ctrl.applyState(res.state);
     },
     [ctrl, onPassedPending],
   );
@@ -113,7 +129,7 @@ export function CheckFlow({ purpose, onCancel, onPassedPending }: { purpose: Che
       <CheckResult
         purpose={purpose}
         res={result.res}
-        onContinued={() => onPassedPending?.(false)}
+        onContinue={() => onContinue(result.res)}
         onRetry={() => {
           setVerifyKey((k) => k + 1);
           setStep('verify');
@@ -137,13 +153,13 @@ function CheckResult({
   res,
   onRetry,
   onBackToSetup,
-  onContinued,
+  onContinue,
 }: {
   purpose: CheckPurpose;
   res: CompleteCheckResponse;
   onRetry: () => void;
   onBackToSetup: () => void;
-  onContinued: () => void;
+  onContinue: () => Promise<void>;
 }) {
   const ctrl = useController();
   const [busy, setBusy] = useState(false);
@@ -152,9 +168,8 @@ function CheckResult({
   if (res.outcome === 'passed') {
     const cont = async () => {
       setBusy(true);
-      if (requireFs) await enterFullscreen();
-      await ctrl.applyState(res.state);
-      onContinued();
+      // The fullscreen request must stay inside this click's user activation: nothing is awaited before it.
+      await onContinue();
     };
     return (
       <div className="stack" data-testid="check-passed">

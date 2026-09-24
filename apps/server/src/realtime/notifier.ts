@@ -11,7 +11,9 @@ export interface LiveNotifierOptions {
   sessionIntervalMs?: number;
   /**
    * Changes staff cannot see in a summary (heartbeat timestamps, the clock ticking) are sent at most this often
-   * per session, so "last heartbeat" stays roughly current without a summary per heartbeat.
+   * per session, so "last heartbeat" / the monitoring time stay current without a summary per heartbeat. The staff
+   * UI treats a summary as stale only after keepalive + heartbeat interval (5 s) + margin (web admin
+   * lib/liveness.ts LIVE_STALE_AFTER_MS = 25 s); keep them in step.
    */
   keepaliveMs?: number;
   /** Changes arriving within this window are loaded and published together (one query set per batch). */
@@ -25,7 +27,7 @@ export interface SessionChange {
   visible?: boolean;
 }
 
-export const LIVE_DEFAULTS: Required<LiveNotifierOptions> = { sessionIntervalMs: 2_000, keepaliveMs: 30_000, batchMs: 50 };
+export const LIVE_DEFAULTS: Required<LiveNotifierOptions> = { sessionIntervalMs: 2_000, keepaliveMs: 10_000, batchMs: 50 };
 
 const CHUNK = 200;
 
@@ -78,7 +80,8 @@ export class LiveNotifier {
   /** Session summary changed (status, connection, monitoring, counts, clock...). Coalesced. */
   sessionChanged(sessionId: string, change: SessionChange = {}): void {
     if (this.closed) return;
-    const orgId = change.orgId ?? null;
+    // (an earlier batch may have resolved the organisation of a caller that did not know it)
+    const orgId = change.orgId ?? this.sessions.get(sessionId)?.orgId ?? null;
     if (!this.observed(orgId)) return;
     let st = this.sessions.get(sessionId);
     if (!st) {
@@ -256,13 +259,26 @@ export class LiveNotifier {
         if (st) st.orgId = r.orgId;
       }
     }
+    const found = new Set([...byOrg.values()].flat());
+    for (const [id] of list) if (!found.has(id)) this.unthrottle(id);
     for (const [orgId, ids] of byOrg) {
-      if (!this.ctx.bus.hasSubscribers(orgId)) continue;
+      if (!this.ctx.bus.hasSubscribers(orgId)) {
+        // Nothing was sent (nobody watches this organisation — typically a caller that did not know the org):
+        // do not hold the next change back as if it had been, or a dashboard opened meanwhile would wait.
+        for (const id of ids) this.unthrottle(id);
+        continue;
+      }
       for (let i = 0; i < ids.length; i += CHUNK) {
         const dtos = await loadSessionSummaries(this.ctx, this.ctx.db, { orgId, sessionIds: ids.slice(i, i + CHUNK) });
         for (const session of dtos) this.publish(orgId, { type: 'session', session });
       }
     }
+  }
+
+  /** Forget that a summary was sent (none was): the next change of this session goes out at once. */
+  private unthrottle(sessionId: string) {
+    const st = this.sessions.get(sessionId);
+    if (st) st.lastSentAt = 0;
   }
 
   close(): void {

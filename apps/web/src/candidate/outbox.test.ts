@@ -207,6 +207,205 @@ describe.each([
     expect(res.remaining).toBe(0);
   });
 
+  it('parks an answer refused while the exam is paused (409 invalid_state) and re-sends it once the exam is active again', async () => {
+    const onDropped = vi.fn();
+    const onAnswerRefusedAfterEnd = vi.fn();
+    box.close();
+    box = await Outbox.open({ namespace: nextNs(), memory, onDropped, onAnswerRefusedAfterEnd });
+    await box.putAnswer({ questionId: 'gap', value: 'typed after approval', clientSeq: 5, answeredAt: 100 });
+    await box.putEvent(ev('abababab-abab-4bab-8bab-abababababab', 1));
+    let paused = true;
+    const { sender, calls } = makeSender({
+      saveAnswer: () => {
+        if (paused) throw new CandidateApiError(409, 'invalid_state', 'Answers cannot be saved right now', { status: 'paused' });
+        return { saved: true, applied: true, serverSeq: 5 };
+      },
+    });
+    // Not a delivery failure: the pass succeeds, events still go out, nothing is dropped.
+    const res = await box.flushOnce(sender);
+    expect(res.remaining).toBe(1);
+    expect(calls.map((c) => c.kind)).toEqual(['answer', 'events']);
+    expect(onDropped).not.toHaveBeenCalled();
+    expect(box.stats()).toMatchObject({ size: 1, pendingAnswers: 1, parkedAnswers: 1, oldestAt: null, failingSince: null });
+    expect(await box.getAnswers()).toEqual([expect.objectContaining({ questionId: 'gap', value: 'typed after approval', pending: true, parked: true })]);
+
+    // Not re-sent while parked (the server would refuse it again).
+    await box.flushOnce(sender);
+    expect(calls.filter((c) => c.kind === 'answer')).toHaveLength(1);
+    expect(await box.flushNow(2000, 'answers')).toBe(false);
+
+    // Active again: re-sent with its original clientSeq and answeredAt, then delivered.
+    paused = false;
+    const before = Date.now();
+    void box.resumeAnswers();
+    expect(box.stats()).toMatchObject({ parkedAnswers: 0, pendingAnswers: 1 });
+    expect(box.stats().oldestAt).toBeGreaterThanOrEqual(before); // the parked time was not a delivery delay
+    await box.flushOnce(sender);
+    const sent = calls.filter((c) => c.kind === 'answer');
+    expect(sent).toHaveLength(2);
+    expect(sent[1].args).toEqual(['gap', { value: 'typed after approval', clientSeq: 5, answeredAt: 100 }]);
+    expect(box.stats()).toMatchObject({ size: 0, pendingAnswers: 0, parkedAnswers: 0 });
+    expect(await box.getAnswers()).toEqual([expect.objectContaining({ questionId: 'gap', pending: false })]);
+    expect(onAnswerRefusedAfterEnd).not.toHaveBeenCalled();
+  });
+
+  it('parks answers refused during a hold too, and tries every answer once (an earlier one may still be accepted)', async () => {
+    await box.putAnswer({ questionId: 'after', value: 'x', clientSeq: 2, answeredAt: 200 });
+    await box.putAnswer({ questionId: 'before', value: 'y', clientSeq: 3, answeredAt: 50 });
+    const { sender } = makeSender({
+      saveAnswer: (qid: never, req: never) => {
+        if ((req as unknown as { answeredAt: number }).answeredAt > 100) throw new CandidateApiError(409, 'invalid_state', 'Answers cannot be saved right now', { status: 'on_hold' });
+        return { saved: true, applied: true, serverSeq: 3 };
+      },
+    });
+    await box.flushOnce(sender);
+    expect(box.stats()).toMatchObject({ pendingAnswers: 1, parkedAnswers: 1 });
+    const recs = await box.getAnswers();
+    expect(recs.find((a) => a.questionId === 'before')?.pending).toBe(false);
+    expect(recs.find((a) => a.questionId === 'after')).toMatchObject({ pending: true, parked: true });
+  });
+
+  it('drops a parked answer only when it is finally refused because the exam has ended', async () => {
+    const onDropped = vi.fn();
+    const onAnswerRefusedAfterEnd = vi.fn();
+    box.close();
+    box = await Outbox.open({ namespace: nextNs(), memory, onDropped, onAnswerRefusedAfterEnd });
+    await box.putAnswer({ questionId: 'gap', value: 'x', clientSeq: 5, answeredAt: 100 });
+    let status = 'paused';
+    const { sender } = makeSender({
+      saveAnswer: () => {
+        throw new CandidateApiError(409, status === 'paused' ? 'invalid_state' : 'exam_ended', 'Answers cannot be saved right now', { status });
+      },
+    });
+    await box.flushOnce(sender);
+    expect(box.stats().parkedAnswers).toBe(1);
+    status = 'terminated'; // e.g. ended by staff while paused
+    void box.resumeAnswers();
+    await box.flushOnce(sender);
+    expect(onAnswerRefusedAfterEnd).toHaveBeenCalledWith('gap');
+    expect(onDropped).toHaveBeenCalledWith('answer', 'gap', expect.stringContaining('exam_ended'));
+    expect(box.stats()).toMatchObject({ size: 0, pendingAnswers: 0, parkedAnswers: 0 });
+    // The local copy is kept (not pending).
+    expect(await box.getAnswers()).toEqual([expect.objectContaining({ questionId: 'gap', value: 'x', pending: false })]);
+  });
+
+  it('treats a terminal status in the refusal details as ended', async () => {
+    const onAnswerRefusedAfterEnd = vi.fn();
+    box.close();
+    box = await Outbox.open({ namespace: nextNs(), memory, onAnswerRefusedAfterEnd });
+    await box.putAnswer({ questionId: 'q', value: 'x', clientSeq: 1, answeredAt: 1 });
+    const { sender } = makeSender({
+      saveAnswer: () => {
+        throw new CandidateApiError(409, 'invalid_state', 'nope', { status: 'submitted' });
+      },
+    });
+    await box.flushOnce(sender);
+    expect(onAnswerRefusedAfterEnd).toHaveBeenCalledWith('q');
+    expect(box.stats().pendingAnswers).toBe(0);
+  });
+
+  it('tries a new edit of a parked answer right away', async () => {
+    await box.putAnswer({ questionId: 'q', value: 'a', clientSeq: 1, answeredAt: 1 });
+    let paused = true;
+    const { sender, calls } = makeSender({
+      saveAnswer: () => {
+        if (paused) throw new CandidateApiError(409, 'invalid_state', 'paused', { status: 'paused' });
+        return { saved: true, applied: true, serverSeq: 2 };
+      },
+    });
+    await box.flushOnce(sender);
+    expect(box.stats().parkedAnswers).toBe(1);
+    await box.putAnswer({ questionId: 'q', value: 'ab', clientSeq: 2, answeredAt: 2 });
+    expect(box.stats().parkedAnswers).toBe(0);
+    paused = false;
+    await box.flushOnce(sender);
+    expect(calls.filter((c) => c.kind === 'answer').map((c) => (c.args[1] as { clientSeq: number }).clientSeq)).toEqual([1, 2]);
+    expect(box.stats().pendingAnswers).toBe(0);
+  });
+
+  it('gives up on answers this page can no longer deliver after the exam ended (unless the server has them)', async () => {
+    await box.putAnswer({ questionId: 'q1', value: 'on server', clientSeq: 3, answeredAt: 1 });
+    await box.putAnswer({ questionId: 'q2', value: 'lost', clientSeq: 4, answeredAt: 2 });
+    await box.rememberDeliveredAnswer({ questionId: 'q3', value: 'done', clientSeq: 1, answeredAt: 0 });
+    const lost = await box.abandonPendingAnswers([
+      { questionId: 'q1', value: 'on server', clientSeq: 3, savedAt: 5 },
+      { questionId: 'q2', value: 'older', clientSeq: 2, savedAt: 5 },
+    ]);
+    expect(lost).toBe(1);
+    expect(box.stats()).toMatchObject({ size: 0, pendingAnswers: 0 });
+    expect((await box.getAnswers()).every((a) => !a.pending)).toBe(true);
+  });
+
+  it('keeps an identity sample the server answers with 503 (busy) without counting it as a delivery failure', async () => {
+    box.close();
+    box = await Outbox.open({ namespace: nextNs(), memory, sampleBusyMinMs: 40 });
+    await box.putSample({ id: 's1', trigger: 'face_return', capturedAt: 3, jpeg: jpeg() });
+    let busy: 503 | 429 | null = 503;
+    const { sender, calls } = makeSender({
+      identitySample: () => {
+        if (busy === 503) throw new CandidateApiError(503, 'vision_busy', 'The server is busy analysing images.');
+        if (busy === 429) throw new CandidateApiError(429, 'rate_limited', 'slow down');
+        return sampleResponse;
+      },
+    });
+    const res = await box.flushOnce(sender); // resolves: busy is not a failure
+    expect(res.remaining).toBe(1);
+    expect(box.stats()).toMatchObject({ size: 1, busySamples: 1, oldestAt: null, failingSince: null });
+    await box.flushOnce(sender); // still waiting: not re-sent yet
+    expect(calls.filter((c) => c.kind === 'sample')).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 50));
+    busy = 429; // rate limited: also "busy", waits twice as long
+    await box.flushOnce(sender);
+    expect(calls.filter((c) => c.kind === 'sample')).toHaveLength(2);
+    expect(box.stats()).toMatchObject({ busySamples: 1, oldestAt: null });
+    await new Promise((r) => setTimeout(r, 90));
+    busy = null;
+    await box.flushOnce(sender);
+    expect(calls.filter((c) => c.kind === 'sample')).toHaveLength(3);
+    expect(box.stats()).toMatchObject({ size: 0, busySamples: 0 });
+  });
+
+  it('queues a sample whose direct request was answered "busy" already waiting (no immediate retry, not delayed)', async () => {
+    await box.putSample({ id: 's1', trigger: 'periodic', capturedAt: 3, jpeg: jpeg(), busy: true });
+    expect(box.stats()).toMatchObject({ size: 1, busySamples: 1, oldestAt: null });
+    const { sender, calls } = makeSender();
+    await box.flushOnce(sender);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('counts an identity sample that fails with a network error as delayed', async () => {
+    await box.putSample({ id: 's1', trigger: 'periodic', capturedAt: 3, jpeg: jpeg() });
+    const { sender } = makeSender({
+      identitySample: () => {
+        throw new CandidateApiError(0, 'network_error', 'offline');
+      },
+    });
+    await expect(box.flushOnce(sender)).rejects.toThrow('offline');
+    expect(box.stats()).toMatchObject({ size: 1, busySamples: 0 });
+    expect(box.stats().oldestAt).not.toBeNull();
+  });
+
+  it('does not count an identity sample waiting in the server vision queue (request open) as delayed', async () => {
+    await box.putSample({ id: 's1', trigger: 'periodic', capturedAt: 3, jpeg: jpeg() });
+    await box.putEvent(ev('acacacac-acac-4cac-8cac-acacacacacac', 1));
+    let release!: () => void;
+    const answered = new Promise<void>((r) => (release = r));
+    let started = false;
+    const { sender } = makeSender({
+      identitySample: async () => {
+        started = true;
+        await answered;
+        return sampleResponse;
+      },
+    });
+    const pass = box.flushOnce(sender);
+    await vi.waitFor(() => expect(started).toBe(true));
+    expect(box.stats()).toMatchObject({ size: 1, busySamples: 1, oldestAt: null }); // the event is delivered already
+    release();
+    await pass;
+    expect(box.stats()).toMatchObject({ size: 0, busySamples: 0 });
+  });
+
   it('isolates an invalid event when a batch is refused', async () => {
     await box.putEvent(ev('44444444-4444-4444-8444-444444444444', 1));
     await box.putEvent(ev('55555555-5555-4555-8555-555555555555', 1));
@@ -348,6 +547,33 @@ describe('Outbox persistence (IndexedDB)', () => {
   });
 });
 
+describe('Outbox parked answers (IndexedDB)', () => {
+  it('stay parked across a reload, are not counted as delayed, and are re-sent after resumeAnswers', async () => {
+    const namespace = nextNs();
+    const a = await Outbox.open({ namespace });
+    await a.putAnswer({ questionId: 'gap', value: 'typed', clientSeq: 9, answeredAt: 123 });
+    const refuse = makeSender({
+      saveAnswer: () => {
+        throw new CandidateApiError(409, 'invalid_state', 'paused', { status: 'paused' });
+      },
+    });
+    await a.flushOnce(refuse.sender);
+    a.close();
+
+    const b = await Outbox.open({ namespace });
+    expect(b.stats()).toMatchObject({ size: 1, pendingAnswers: 1, parkedAnswers: 1, oldestAt: null });
+    const ok = makeSender();
+    await b.flushOnce(ok.sender);
+    expect(ok.calls).toHaveLength(0);
+    await b.resumeAnswers();
+    expect((await b.getAnswers())[0]).not.toHaveProperty('parked');
+    await b.flushOnce(ok.sender);
+    expect(ok.calls.map((c) => c.args[0])).toEqual(['gap']);
+    expect(b.stats().size).toBe(0);
+    b.close();
+  });
+});
+
 describe('Outbox worker', () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -395,6 +621,73 @@ describe('Outbox worker', () => {
     open = true;
     await vi.advanceTimersByTimeAsync(2_500);
     expect(calls).toHaveLength(1);
+    box.close();
+  });
+
+  it('delivers events while an identity sample waits in a slow vision queue', async () => {
+    const box = await Outbox.open({ namespace: nextNs(), memory: true });
+    let answer!: () => void;
+    const { sender, calls } = makeSender({
+      identitySample: () =>
+        new Promise((r) => {
+          answer = () => r(sampleResponse as never);
+        }),
+    });
+    box.start(sender);
+    await box.putSample({ id: 's1', trigger: 'face_return', capturedAt: 1, jpeg: jpeg() });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls.map((c) => c.kind)).toEqual(['sample']);
+    await box.putEvent(ev('adadadad-adad-4dad-8dad-adadadadadad', 1));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls.map((c) => c.kind)).toEqual(['sample', 'events']);
+    await vi.advanceTimersByTimeAsync(11_000); // the sample is still in the queue after 12 s
+    expect(box.stats()).toMatchObject({ size: 1, busySamples: 1, oldestAt: null });
+    answer();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(box.stats().size).toBe(0);
+    box.close();
+  });
+
+  it('retries a busy (503) identity sample with its own back-off and keeps delivering everything else promptly', async () => {
+    const box = await Outbox.open({ namespace: nextNs(), memory: true });
+    const sampleAt: number[] = [];
+    const { sender, calls } = makeSender({
+      identitySample: () => {
+        sampleAt.push(Date.now());
+        throw new CandidateApiError(503, 'vision_busy', 'busy');
+      },
+    });
+    box.start(sender);
+    await box.putSample({ id: 's1', trigger: 'periodic', capturedAt: 1, jpeg: jpeg() });
+    await vi.advanceTimersByTimeAsync(20);
+    await box.putEvent(ev('aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae', 1));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(calls.filter((c) => c.kind === 'events')).toHaveLength(1); // no global back-off
+    await vi.advanceTimersByTimeAsync(15_000);
+    const gaps = sampleAt.slice(1).map((t, i) => Math.round((t - sampleAt[i]) / 1000));
+    expect(gaps.slice(0, 3)).toEqual([2, 4, 8]);
+    expect(box.stats()).toMatchObject({ size: 1, busySamples: 1, oldestAt: null, failingSince: null });
+    box.close();
+  });
+
+  it('re-sends a parked answer when resumeAnswers is called, without polling while parked', async () => {
+    const box = await Outbox.open({ namespace: nextNs(), memory: true });
+    let paused = true;
+    const { sender, calls } = makeSender({
+      saveAnswer: () => {
+        if (paused) throw new CandidateApiError(409, 'invalid_state', 'paused', { status: 'paused' });
+        return { saved: true, applied: true, serverSeq: 1 };
+      },
+    });
+    box.start(sender);
+    await box.putAnswer({ questionId: 'q', value: 'x', clientSeq: 1, answeredAt: 1 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(1); // refused once, then left alone
+    paused = false;
+    void box.resumeAnswers();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(calls).toHaveLength(2);
+    expect(box.stats().pendingAnswers).toBe(0);
     box.close();
   });
 });

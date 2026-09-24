@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { resolveCandidateSession } from '../src/auth/candidate.js';
 import { examSessions, sessionCommands } from '../src/db/schema.js';
 import { LocalBus } from '../src/realtime/bus.js';
-import { LiveNotifier } from '../src/realtime/notifier.js';
+import { LIVE_DEFAULTS, LiveNotifier } from '../src/realtime/notifier.js';
 import { heartbeat } from '../src/services/candidate-actions.js';
 import { staffVisibleKey } from '../src/services/dto.js';
 import { withSession } from '../src/services/session-state.js';
@@ -152,6 +152,12 @@ describe('staff-visible changes', () => {
 
 describe('LiveNotifier', () => {
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  /** Poll (a loaded CI box can take longer than a fixed sleep for one batch's queries). */
+  async function until(fn: () => boolean, ms = 2000) {
+    const end = Date.now() + ms;
+    while (!fn() && Date.now() < end) await wait(10);
+    return fn();
+  }
 
   /** A notifier on its own bus, counting database reads. */
   function harness(opts = { sessionIntervalMs: 150, keepaliveMs: 600, batchMs: 10 }) {
@@ -181,36 +187,63 @@ describe('LiveNotifier', () => {
   });
 
   it('coalesces visible changes per session (first at once, then one trailing summary)', async () => {
-    const h = harness();
+    const h = harness({ sessionIntervalMs: 1000, keepaliveMs: 5000, batchMs: 10 });
     const off = h.listen();
     const sent = () => h.got.filter((m) => m.type === 'session').length;
     for (let i = 0; i < 5; i++) h.live.sessionChanged(env.session.id, { orgId: env.org.id }); // one load covers all
-    await wait(60);
+    expect(await until(() => sent() >= 1, 900)).toBe(true);
     expect(sent()).toBe(1);
     for (let i = 0; i < 5; i++) h.live.sessionChanged(env.session.id, { orgId: env.org.id }); // inside the interval
-    await wait(40);
+    await wait(100);
     expect(sent()).toBe(1);
-    await wait(150);
-    expect(sent()).toBe(2); // trailing edge: the last change is always delivered
+    expect(await until(() => sent() >= 2, 3000)).toBe(true); // trailing edge: the last change is always delivered
+    await wait(100);
+    expect(sent()).toBe(2);
     off();
     h.live.close();
   });
 
   it('sends invisible changes only as a keepalive', async () => {
-    const h = harness();
+    const h = harness({ sessionIntervalMs: 150, keepaliveMs: 1500, batchMs: 10 });
     const off = h.listen();
+    const t0 = Date.now();
     h.live.sessionChanged(env.session.id, { orgId: env.org.id, visible: false }); // nothing sent yet: goes out
-    await wait(40);
-    expect(h.got).toHaveLength(1);
+    expect(await until(() => h.got.length >= 1)).toBe(true);
     h.live.sessionChanged(env.session.id, { orgId: env.org.id, visible: false });
-    await wait(250); // past the visible interval, inside the keepalive
+    await wait(300); // past the visible interval, inside the keepalive
     expect(h.got).toHaveLength(1);
-    await wait(400);
+    await wait(Math.max(0, t0 + 1600 - Date.now())); // keepalive elapsed
     h.live.sessionChanged(env.session.id, { orgId: env.org.id, visible: false });
-    await wait(40);
+    expect(await until(() => h.got.length >= 2)).toBe(true);
     expect(h.got).toHaveLength(2);
     off();
     h.live.close();
+  });
+
+  it('a change nobody received arms no throttle: the first update after a dashboard opens goes out at once', async () => {
+    const h = harness({ sessionIntervalMs: 2000, keepaliveMs: 5000, batchMs: 10 });
+    // e.g. the assignments route: no organisation given, nobody watching.
+    h.live.sessionChanged(env.session.id);
+    expect(await until(() => h.reads() > 0)).toBe(true); // the batch resolved the organisation
+    await wait(50);
+    expect(h.got).toEqual([]);
+    const reads = h.reads();
+    h.live.sessionChanged(env.session.id); // organisation now known to be unwatched: skipped for free
+    await wait(30);
+    expect(h.reads()).toBe(reads);
+    const off = h.listen(); // a dashboard opens
+    const t0 = Date.now();
+    h.live.sessionChanged(env.session.id);
+    expect(await until(() => h.got.some((m) => m.type === 'session'), 1500)).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(1500); // not held back by the 2 s per-session interval
+    off();
+    h.live.close();
+  });
+
+  it('keeps routine heartbeats visible: the keepalive is short enough for the staff UI stale threshold', () => {
+    // web admin lib/liveness.ts: a summary is "stale" after 25 s = keepalive + 5 s heartbeat interval + margin.
+    expect(LIVE_DEFAULTS.keepaliveMs).toBe(10_000);
+    expect(LIVE_DEFAULTS.keepaliveMs + 5_000).toBeLessThan(25_000);
   });
 
   it('loads the summaries of many sessions with one query set', async () => {

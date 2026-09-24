@@ -7,6 +7,11 @@ import { staffSessions, staffUsers } from '../db/schema.js';
 
 /** WebSocket close code sent when the staff session behind the socket is no longer valid. */
 export const WS_CLOSE_UNAUTHORIZED = 4401;
+/**
+ * WebSocket close code sent when messages for this client had to be dropped (it fell too far behind): the client
+ * reconnects at once and refetches its views (web admin api/live.tsx). Never drop silently.
+ */
+export const WS_CLOSE_RESYNC = 4408;
 
 /**
  * How often an open socket re-checks its staff session. `periodicMs`: in any case; `onBroadcastAfterMs`: before
@@ -15,7 +20,11 @@ export const WS_CLOSE_UNAUTHORIZED = 4401;
  */
 export const LIVE_REVALIDATION = { periodicMs: 60_000, onBroadcastAfterMs: 5_000 };
 
-const MAX_HELD_MESSAGES = 1000;
+/**
+ * Per-socket limits (mutable for tests): broadcasts held while the staff session is re-validated, and bytes queued
+ * for a client that stopped reading. Beyond either the socket is closed with WS_CLOSE_RESYNC.
+ */
+export const LIVE_LIMITS = { maxHeldMessages: 1000, maxBufferedBytes: 4 * 1024 * 1024 };
 
 /** Is the staff session still valid: not logged out / revoked / expired, user not disabled, same organisation? */
 export async function staffSessionStillValid(ctx: Pick<Ctx, 'db' | 'now'>, staff: Pick<StaffPrincipal, 'staffSessionId' | 'id' | 'orgId'>): Promise<boolean> {
@@ -29,10 +38,12 @@ export async function staffSessionStillValid(ctx: Pick<Ctx, 'db' | 'now'>, staff
 
 /**
  * GET /api/admin/live (WebSocket). Authenticated by the staff cookie before the upgrade.
- * Sends {type:'hello'} then LiveMessage JSON frames for the staff member's organisation.
+ * Sends {type:'hello'} once the subscription is live (the client refetches its views then), then LiveMessage JSON
+ * frames for the staff member's organisation.
  * Server pings every 25 s; connections that miss a pong are terminated.
  * The staff session is re-validated periodically and before delivering broadcasts; after logout, revocation,
- * expiry or a disabled account the socket is closed with code 4401.
+ * expiry or a disabled account the socket is closed with code 4401. A client that falls too far behind (held
+ * broadcasts or send buffer over LIVE_LIMITS) is closed with 4408 so it reconnects and resyncs.
  */
 export const liveRoute: FastifyPluginAsync = async (app) => {
   app.get('/api/admin/live', { websocket: true, preHandler: requireStaff('reviewer') }, (socket, req) => {
@@ -44,21 +55,26 @@ export const liveRoute: FastifyPluginAsync = async (app) => {
     let checking: Promise<boolean> | null = null;
     const held: LiveMessage[] = [];
 
-    const deliver = (msg: LiveMessage) => {
-      if (closed || socket.readyState !== socket.OPEN) return;
-      // Backpressure guard: drop messages for a client that stopped reading (it will refetch on reconnect).
-      if (socket.bufferedAmount > 4 * 1024 * 1024) return;
-      socket.send(JSON.stringify(msg));
-    };
-    const revoke = () => {
+    const closeWith = (code: number, reason: string) => {
       if (closed) return;
       held.length = 0;
       cleanup();
       try {
-        socket.close(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
+        socket.close(code, reason);
       } catch {
         socket.terminate();
       }
+    };
+    const revoke = () => closeWith(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
+    // Messages would have to be dropped: tell the client to reconnect and refetch instead of losing them silently.
+    const resync = (why: 'backpressure' | 'held_overflow') => {
+      ctx.log.warn({ staffId: staff.id, why }, 'live: client fell behind; closing for resync');
+      closeWith(WS_CLOSE_RESYNC, 'resync');
+    };
+    const deliver = (msg: LiveMessage) => {
+      if (closed || socket.readyState !== socket.OPEN) return;
+      if (socket.bufferedAmount > LIVE_LIMITS.maxBufferedBytes) return resync('backpressure');
+      socket.send(JSON.stringify(msg));
     };
     const revalidate = (): Promise<boolean> => {
       checking ??= staffSessionStillValid(ctx, staff)
@@ -80,14 +96,19 @@ export const liveRoute: FastifyPluginAsync = async (app) => {
       if (closed) return;
       if (checking || Date.now() - lastValidated >= LIVE_REVALIDATION.onBroadcastAfterMs) {
         // Hold this broadcast batch until the staff session is confirmed (order preserved).
-        if (held.length < MAX_HELD_MESSAGES) held.push(msg);
+        if (held.length >= LIVE_LIMITS.maxHeldMessages) return resync('held_overflow');
+        held.push(msg);
         void revalidate();
         return;
       }
       deliver(msg);
     };
     const unsubscribe = ctx.bus.subscribe(staff.orgId, send);
-    deliver({ type: 'hello', serverTime: ctx.now() });
+    // 'hello' = "subscribed": the client refetches its snapshot on it, so a change committed between its first
+    // load and this subscription is not missed (with Redis: only once the SUBSCRIBE is confirmed).
+    void Promise.resolve(ctx.bus.whenSubscribed?.(staff.orgId))
+      .catch(() => {})
+      .then(() => deliver({ type: 'hello', serverTime: ctx.now() }));
 
     const recheck = setInterval(() => void revalidate(), LIVE_REVALIDATION.periodicMs);
     recheck.unref?.();

@@ -20,7 +20,7 @@ import type {
   MonitoringStatus,
   ProctoringPolicy,
 } from '@sp/shared';
-import { classifyApiError, uuid, type CandidateApi } from '../api';
+import { classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api';
 import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
@@ -415,8 +415,9 @@ export class MonitoringRuntime {
           return;
         }
         if (kind === 'client' || kind === 'invalid_state') return; // refused in this state / unusable — nothing to retry
-        // Offline or server trouble: keep it for later delivery with its original timestamp.
-        await this.deps.outbox.putSample({ id: sampleId, trigger, capturedAt, jpeg: blob });
+        // Offline or server trouble: keep it for later delivery with its original timestamp. A busy server
+        // (vision queue full) is told apart: the sample waits, and that is not a reporting outage.
+        await this.deps.outbox.putSample({ id: sampleId, trigger, capturedAt, jpeg: blob, busy: isServerBusy(e) });
       }
     } finally {
       this.sampleInFlight = false;

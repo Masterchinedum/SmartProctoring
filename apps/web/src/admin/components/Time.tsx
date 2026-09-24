@@ -1,5 +1,7 @@
+import type { SessionSummaryDTO } from '@sp/shared';
 import { useNow } from '../lib/clock';
 import { formatClock, formatDateTime, formatDuration, formatRelative, formatSmartTime, formatTime, remainingAt } from '../lib/format';
+import { heartbeatView } from '../lib/liveness';
 
 /** "42s ago" with the absolute time as tooltip; updates every second. */
 export function RelativeTime({ at, prefix }: { at: number | null | undefined; prefix?: string }) {
@@ -63,5 +65,30 @@ export function ReportingInterrupted({ since }: { since: number }) {
       <span className="pulse-dot" aria-hidden />
       Reporting interrupted since {formatTime(since)} ({formatDuration(now - since)})
     </div>
+  );
+}
+
+/**
+ * "Last heartbeat" of a session. While the server says the candidate is online and summaries are current, it
+ * shows that heartbeats are arriving (the recorded time lags by up to the summary keepalive by design, so a
+ * ticking "12s ago" would read as a problem that is not there); otherwise the plain time since the last one.
+ * Offline is decided by the server (lib/liveness.ts).
+ */
+export function LastHeartbeat({ s }: { s: Pick<SessionSummaryDTO, 'status' | 'connection' | 'lastHeartbeatAt' | 'monitoring'> }) {
+  const now = useNow(s.lastHeartbeatAt != null);
+  const v = heartbeatView(s, now);
+  if (v.kind === 'none') return <span className="muted">—</span>;
+  if (v.kind === 'live') {
+    return (
+      <span title={`Last heartbeat recorded ${formatDateTime(v.at)}`}>
+        Receiving <span className="muted small">(online)</span>
+      </span>
+    );
+  }
+  return (
+    <>
+      <RelativeTime at={v.at} />
+      {v.kind === 'offline' ? <span className="muted small"> · offline</span> : null}
+    </>
   );
 }

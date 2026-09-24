@@ -73,6 +73,14 @@ export function classifyApiError(err: unknown): ApiErrorKind {
   return 'client';
 }
 
+/**
+ * The server is busy (vision queue full: 503 vision_busy, or rate limited: 429). Retrying later will
+ * work; this says nothing about the connection (not a delivery failure).
+ */
+export function isServerBusy(err: unknown): boolean {
+  return err instanceof CandidateApiError && (err.status === 503 || err.status === 429 || err.code === 'vision_busy');
+}
+
 /** True when retrying the same request later may succeed. */
 export function isRetryable(err: unknown): boolean {
   const kind = classifyApiError(err);

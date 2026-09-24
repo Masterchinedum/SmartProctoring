@@ -22,7 +22,7 @@ import {
   type ProctoringPolicy,
   type SessionStatus,
 } from '@sp/shared';
-import { and, desc, eq, getTableColumns, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { Tx } from '../db/index.js';
 import {
@@ -47,6 +47,7 @@ import { sessionClock, staffVisibleKey } from './dto.js';
 import { gradeSession } from './grading.js';
 import { enqueueIntegrationNotifications } from './integration-events.js';
 import { mergePolicy, orgThresholds } from './org.js';
+import { capturesWithin, GAP_NOT_RETURNED, loadLateCaptures } from './reporting-gaps.js';
 
 export const TERMINAL: SessionStatus[] = ['submitted', 'terminated'];
 export const UNOBSERVED_KINDS: PeriodKind[] = ['paused', 'disconnected', 'on_hold'];
@@ -549,6 +550,7 @@ export async function finalizeSession(
   m.clockStop(at);
   // 'abandoned' (housekeeping after inactivity) ends as terminated so no score is implied; answers are kept.
   const status: SessionStatus = endReason === 'staff_terminated' || endReason === 'abandoned' ? 'terminated' : 'submitted';
+  await closeReportingGapAtEnd(m, at, endReason);
   await m.closeOpenEvents(at, 'session_end');
   await m.closeOpenPeriod(at);
   await m.tx
@@ -579,6 +581,52 @@ export async function finalizeSession(
   if (wasStarted && endReason !== 'abandoned') {
     const score = await gradeSession(m.tx, m.session.id, m.session.examId, at);
     m.set({ score });
+  }
+}
+
+const CLIENT_EVENT_SOURCES = ['client_browser', 'client_vision'] as const;
+
+/**
+ * The exam ends while the candidate's browser is not reporting (reporting_interrupted still open) and nothing it
+ * captured since the last heartbeat has arrived late: from that heartbeat on nothing was observed. As a reconnect
+ * check does for the gap it closes (checks.ts closeGapPeriods), the active time from there to the end becomes a
+ * 'disconnected' (unobserved) period, reason 'browser_not_returned', and the episodes the gone browser left open
+ * end where its observation ended (details.closedBy 'browser_not_returned') instead of spanning the gap.
+ * services/reporting-gaps.ts explains the rule; the report derives the same split where it was not materialised.
+ */
+async function closeReportingGapAtEnd(m: SessionMutation, at: number, endReason: SessionEndReason): Promise<void> {
+  const evId = m.session.reportingEventId;
+  if (!evId) return;
+  const [ev] = await m.tx
+    .select({ id: events.id, startedAt: events.startedAt, status: events.status })
+    .from(events)
+    .where(and(eq(events.id, evId), eq(events.sessionId, m.session.id)));
+  if (!ev || ev.status !== 'open') return;
+  const gapStart = ev.startedAt.getTime();
+  if (at <= gapStart) return;
+  const gap = { start: gapStart, end: at };
+  // The browser was still capturing (its outbox delivered something from the gap late): observed, nothing to do.
+  if (capturesWithin(await loadLateCaptures(m.tx, m.session.id, gap), gap).length) return;
+  const active = (await m.periods()).filter((p) => p.kind === 'active' && p.startedAt.getTime() < at && (p.endedAt == null || p.endedAt.getTime() > gapStart));
+  if (!active.length) return;
+  const open = await m.tx
+    .select({ id: events.id, startedAt: events.startedAt, details: events.details })
+    .from(events)
+    .where(and(eq(events.sessionId, m.session.id), eq(events.status, 'open'), inArray(events.source, [...CLIENT_EVENT_SOURCES])));
+  for (const e of open) {
+    await m.updateEvent(e.id, { status: 'closed', endedAt: new Date(Math.max(e.startedAt.getTime(), gapStart)), details: { ...e.details, closedBy: GAP_NOT_RETURNED } });
+  }
+  for (const p of active) {
+    const from = Math.max(p.startedAt.getTime(), gapStart);
+    const to = Math.min(p.endedAt?.getTime() ?? at, at);
+    if (!p.endedAt) {
+      await m.closeOpenPeriod(from);
+    } else if (p.endedAt.getTime() > from) {
+      // A hold / pause began while the browser was already gone: the tail of that active period was not observed.
+      await m.tx.update(sessionPeriods).set({ endedAt: new Date(from) }).where(eq(sessionPeriods.id, p.id));
+      p.endedAt = new Date(from);
+    }
+    if (to > from) await m.insertPeriod('disconnected', from, { endedAt: to, reason: GAP_NOT_RETURNED, meta: { reportingEventId: ev.id, endReason } });
   }
 }
 

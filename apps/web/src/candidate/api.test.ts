@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CandidateApiError, classifyApiError, createCandidateApi, isRetryable, sha256Hex, uuid } from './api';
+import { CandidateApiError, classifyApiError, createCandidateApi, isRetryable, isServerBusy, sha256Hex, uuid } from './api';
 
 function mockFetch(handler: (url: string, init: RequestInit) => Response | Promise<Response>) {
   const calls: { url: string; init: RequestInit }[] = [];
@@ -119,6 +119,15 @@ describe('candidate api client', () => {
     expect(classifyApiError(new CandidateApiError(429, 'rate_limited', ''))).toBe('rate_limited');
     expect(classifyApiError(new CandidateApiError(403, 'not_verified', ''))).toBe('not_verified');
     expect(isRetryable(new CandidateApiError(400, 'validation_failed', ''))).toBe(false);
+  });
+
+  it('tells a busy server apart from a failing connection', () => {
+    expect(isServerBusy(new CandidateApiError(503, 'vision_busy', 'busy'))).toBe(true);
+    expect(isServerBusy(new CandidateApiError(429, 'rate_limited', ''))).toBe(true);
+    expect(isServerBusy(new CandidateApiError(502, 'http_502', 'Bad Gateway'))).toBe(false);
+    expect(isServerBusy(new CandidateApiError(500, 'internal', ''))).toBe(false);
+    expect(isServerBusy(new CandidateApiError(0, 'network_error', ''))).toBe(false);
+    expect(isServerBusy(new Error('x'))).toBe(false);
   });
 });
 

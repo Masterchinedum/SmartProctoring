@@ -11,7 +11,7 @@ import { END_REASON_LABELS, HOLD_REASON_LABELS } from '../../lib/labels';
 import { ConnectionBadge, DecisionBadge, StatusBadge } from '../../components/Badges';
 import { ErrorState, Loading } from '../../components/Common';
 import { EventDrawer } from '../../components/EventDetail';
-import { Clock, Countdown, RelativeTime, ReportingInterrupted } from '../../components/Time';
+import { Clock, Countdown, LastHeartbeat, RelativeTime, ReportingInterrupted } from '../../components/Time';
 import { MonitoringLine } from '../DashboardPage';
 import { PauseDecisionBanner, SessionActions } from './SessionActions';
 import { TimelineTab } from './TimelineTab';
@@ -179,7 +179,9 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
             <span className="muted">Not yet given</span>
           )}
         </Fact>
-        <Fact label="Last heartbeat">{s.lastHeartbeatAt ? <RelativeTime at={s.lastHeartbeatAt} /> : <span className="muted">—</span>}</Fact>
+        <Fact label="Last heartbeat">
+          <LastHeartbeat s={s} />
+        </Fact>
         <Fact label="Last identity check">
           {s.identity.lastDecision ? (
             <>

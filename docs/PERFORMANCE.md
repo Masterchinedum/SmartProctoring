@@ -149,7 +149,7 @@ mutation — removed for organisations without webhooks and without SMTP, unchan
   `services/dto.ts` `staffVisibleKey`, `services/session-state.ts`: nothing is loaded for organisations nobody
   watches; summaries are coalesced per session (≤ 1 per 2 s, trailing edge) and batched (one query set per
   50 ms per organisation); a mutation that changes nothing staff see (routine heartbeat) only refreshes the
-  summary as a 30 s keepalive; events and identity checks are batched too.
+  summary as a 10 s keepalive (only while someone watches); events and identity checks are batched too.
 * **Single-statement heartbeat** — `services/candidate-actions.ts` `fastHeartbeat`: one
   `UPDATE … WHERE id = $1 AND xmin = <row version read by candidate auth> RETURNING exists(pending commands)`.
   Anything more (commands to deliver, outage to close, clock start or expiry, a concurrent-use signal, a
@@ -212,7 +212,8 @@ At N=1,000 (817 in the exam, one dashboard): server process ≈ 1.95 vCPU (visio
 event-loop utilisation 0.85 during the ramp), Postgres ≈ 0.25 vCPU, load generator ≈ 0.2 vCPU; RSS ≈ 700 MB
 (≈ 370 MB before; each vision worker ≈ 100 MB). Postgres: 89 % of `exam_sessions` updates HOT, 0 pool waiters.
 Realtime with one dashboard at N=500: ≈ 37 session summaries/s + 30 events/s + 14 identity checks/s, loaded in
-batches (≈ 7 summaries per minute per candidate: events, identity decisions, 30 s keepalive).
+batches (measured with the earlier 30 s keepalive: ≈ 7 summaries per minute per candidate; the keepalive is now
+10 s, adding ≈ 4 summaries per minute per watched candidate — still batched per organisation).
 
 ## 6. Sizing guidance
 

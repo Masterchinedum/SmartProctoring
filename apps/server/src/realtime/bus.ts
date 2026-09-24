@@ -15,6 +15,12 @@ export interface RealtimeBus {
    * instance)? Publishers use it to skip building messages nobody reads. May err on the side of `true`.
    */
   hasSubscribers(orgId: string): boolean;
+  /**
+   * Resolves once messages published for this organisation (from any instance) reach this instance's
+   * subscribers — e.g. after Redis confirmed the SUBSCRIBE. The staff socket sends its 'hello' only then, and the
+   * client refetches its snapshot on 'hello', so nothing committed in between is missed.
+   */
+  whenSubscribed?(orgId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -48,6 +54,8 @@ export const REMOTE_SUBSCRIBERS_TTL_MS = 5_000;
 export class RedisBus implements RealtimeBus {
   private readonly local = new EventEmitter();
   private readonly subscribedOrgs = new Map<string, number>();
+  /** Per org subscribed here: settles once Redis confirmed the SUBSCRIBE and other instances were told. */
+  private readonly subscribedReady = new Map<string, Promise<void>>();
   /** Per org: does any instance have subscribers (PUBSUB NUMSUB, refreshed in the background)? */
   private readonly remote = new Map<string, { has: boolean; at: number; refreshing: boolean }>();
   private constructor(
@@ -92,18 +100,30 @@ export class RedisBus implements RealtimeBus {
     const n = this.subscribedOrgs.get(orgId) ?? 0;
     this.subscribedOrgs.set(orgId, n + 1);
     if (n === 0) {
-      this.sub.subscribe(CHANNEL_PREFIX + orgId).catch(this.onError);
-      // Other instances may be skipping this org's messages (nobody was listening): tell them at once.
-      this.pub.publish(SUBSCRIBED_CHANNEL, orgId).catch(this.onError);
+      // Other instances may be skipping this org's messages (nobody was listening): tell them as soon as this
+      // instance can receive them.
+      const ready = this.sub
+        .subscribe(CHANNEL_PREFIX + orgId)
+        .then(() => this.pub.publish(SUBSCRIBED_CHANNEL, orgId))
+        .then(
+          () => undefined,
+          (err: Error) => this.onError(err),
+        );
+      this.subscribedReady.set(orgId, ready);
     }
     return () => {
       this.local.off(orgId, handler);
       const left = (this.subscribedOrgs.get(orgId) ?? 1) - 1;
       if (left <= 0) {
         this.subscribedOrgs.delete(orgId);
+        this.subscribedReady.delete(orgId);
         this.sub.unsubscribe(CHANNEL_PREFIX + orgId).catch(this.onError);
       } else this.subscribedOrgs.set(orgId, left);
     };
+  }
+
+  whenSubscribed(orgId: string): Promise<void> {
+    return this.subscribedReady.get(orgId) ?? Promise.resolve();
   }
 
   hasSubscribers(orgId: string): boolean {

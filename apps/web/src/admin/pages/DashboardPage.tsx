@@ -8,6 +8,7 @@ import { afterSessionAction, qk } from '../api/queries';
 import { useLiveMessages } from '../api/live';
 import { setServerTime, useNow } from '../lib/clock';
 import { formatDuration, formatPercent, formatSimilarity, formatTime } from '../lib/format';
+import { monitoringStale } from '../lib/liveness';
 import { CATEGORY_SHORT, HOLD_REASON_LABELS } from '../lib/labels';
 import {
   BOARD_GROUP_LABELS,
@@ -354,7 +355,9 @@ export function MonitoringLine({ s }: { s: SessionSummaryDTO }) {
   if (s.status === 'submitted' || s.status === 'terminated') return <div className="sc-monitor muted">Exam ended {s.endedAt ? formatTime(s.endedAt) : ''}</div>;
   if (s.status === 'invited' || s.status === 'ready') return <div className="sc-monitor muted">{s.status === 'ready' ? 'Check-in passed — not started yet' : 'Has not started the readiness check'}</div>;
   if (!m) return <div className="sc-monitor muted">No monitoring status received yet</div>;
-  const stale = now - m.at > 15_000;
+  // Offline is decided by the server (connection); an online session is only qualified as "as of … ago" when no
+  // refresh arrived for longer than a healthy one can go without (lib/liveness.ts).
+  const stale = monitoringStale(s, now);
   if (s.connection !== 'online') {
     return (
       <div className="sc-monitor muted">

@@ -358,7 +358,7 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
       await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'exam.assigned', targetType: 'exam', targetId: id, meta: { requested: requested.length, created, existing: requested.length - created }, ip: req.ip, at: now });
       return out;
     });
-    for (const a of items) if (!a.existing) ctx.live.sessionChanged(a.sessionId);
+    for (const a of items) if (!a.existing) ctx.live.sessionChanged(a.sessionId, { orgId: staff.orgId });
     return { items };
   });
 };
