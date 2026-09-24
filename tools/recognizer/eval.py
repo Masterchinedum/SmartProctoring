@@ -289,7 +289,7 @@ def _metrics_from_hist(hg: np.ndarray, hi: np.ndarray) -> dict:
     return out
 
 
-def point_metrics(t: dict) -> dict:
+def point_metrics(t: dict, thresholds: dict | None = None) -> dict:
     g, i = t["g"], t["i"]
     res = {"n_genuine": int(len(g)), "n_impostor": int(len(i)), "n_family": int(t["fam"].sum()), "n_identities_genuine": int(len(set(t["gid"].tolist()))),
            "n_probe_photos": t["n_probe_photos"], "n_enrol": t["n_enrol"]}
@@ -303,20 +303,23 @@ def point_metrics(t: dict) -> dict:
                impostor_p99=float(np.quantile(i, 0.99)), impostor_max=float(i.max()))
     thr = float(np.quantile(i, 1 - 1e-3))
     res["thr_far1e-3"] = thr
+    for name, th in (thresholds or {}).items():
+        res[f"fmr_at_{name}"] = float((i >= th).mean())
+        res[f"fnmr_at_{name}"] = float((g < th).mean())
     f = i[t["fam"]]
     if len(f):
         res.update({"family_mean": float(f.mean()), "family_max": float(f.max()), "family_fmr_at_thr1e-3": float((f >= thr).mean())})
     return res
 
 
-def bootstrap(trials: list[dict], reps: int = 400, seed: int = 0) -> list[dict]:
+def bootstrap(trials: list[dict], reps: int = 400, seed: int = 0, thresholds: list[dict] | None = None) -> list[dict]:
     """Identity-cluster bootstrap for several trial sets over the SAME identities (paired). Returns per set the
     (R,) arrays of EER / TAR metrics."""
     n_ids = trials[0]["n_ids"]
     rng = np.random.default_rng(seed)
     cnt = rng.multinomial(n_ids, np.full(n_ids, 1 / n_ids), size=reps).astype(float)  # (R, n_ids)
     out = []
-    for t in trials:
+    for k, t in enumerate(trials):
         if len(t["g"]) == 0 or len(t["i"]) == 0:
             out.append(None)
             continue
@@ -324,7 +327,12 @@ def bootstrap(trials: list[dict], reps: int = 400, seed: int = 0) -> list[dict]:
         Hi = _hist(t["i"], t["ie"] * n_ids + t["ip"], n_ids * n_ids)  # (ids*ids, bins)
         wg = cnt @ Hg
         wi = np.einsum("ra,rb->rab", cnt, cnt).reshape(reps, -1) @ Hi
-        out.append(_metrics_from_hist(wg, wi))
+        m = _metrics_from_hist(wg, wi)
+        for name, th in ((thresholds[k] if thresholds else None) or {}).items():
+            b = int(np.clip(np.searchsorted(BINS, th, side="right") - 1, 0, len(BINS) - 2))
+            m[f"fmr_at_{name}"] = wi[:, b:].sum(1) / np.maximum(wi.sum(1), 1e-12)
+            m[f"fnmr_at_{name}"] = wg[:, :b].sum(1) / np.maximum(wg.sum(1), 1e-12)
+        out.append(m)
     return out
 
 
@@ -378,6 +386,14 @@ def main() -> None:
                 variants.append((f"{name}|{rc}|mixed", Eb, E))
     report = {"generated": time.strftime("%Y-%m-%d %H:%M"), "parity": parity, "models": {n: {"path": p, "sha256": sha256_file(p)} for n, p in models},
               "usable_only": args.usable_only, "near_duplicate_threshold": NEAR_DUP, "results": {}}
+    # Operating points per variant: its OWN good-light threshold (check-in in good light vs good-light probes,
+    # FAR 1e-3) and the fixed product match threshold 0.45. FMR at these on matched-degradation pairs = inflation.
+    op = []
+    for _, Ee, Ep in variants:
+        ti = build_trials(d, Ee, Ep, base_raw, "checkin", "good", False, args.usable_only)["i"]
+        op.append({"own_good_thr": float(np.quantile(ti, 1 - 1e-3)), "0.45": 0.45})
+    report["operating_points"] = {lab: o for (lab, _, _), o in zip(variants, op)}
+    print("operating points:", report["operating_points"], flush=True)
     for proto in protocols:
         pconds = conds
         if proto.startswith("checkin:") and proto != "checkin:good":
@@ -389,10 +405,10 @@ def main() -> None:
                     continue
                 key = f"{proto}{'-3f' if three else ''}|{cond}"
                 trials = [build_trials(d, Ee, Ep, base_raw, proto, cond, three, args.usable_only) for _, Ee, Ep in variants]
-                boots = bootstrap(trials, args.reps)
+                boots = bootstrap(trials, args.reps, thresholds=op)
                 row = {}
-                for (label, _, _), t, b in zip(variants, trials, boots):
-                    m = point_metrics(t)
+                for (label, _, _), t, b, o in zip(variants, trials, boots, op):
+                    m = point_metrics(t, o)
                     if b is not None:
                         m["ci"] = {k: ci(v) for k, v in b.items()}
                         if boots[0] is not None and label != variants[0][0]:

@@ -21,6 +21,10 @@
  *     applies at resume / reconnect / reverify checks and to every mid-exam sample after such a check (the room,
  *     light and camera may differ from enrolment): 'continuous' normalisation across days caused 9–27 false alarms
  *     per 1,000 h in the vision module's simulation (docs/accuracy/identity-v2.md §9).
+ *     Calibration v2.1: the models are conditional on the reference's quality (`baseline.bucket`); a candidate
+ *     enrolled in poor light and still in poor light is judged mid-exam by the same-session model on the raw score
+ *     (vision `continuousApplies` / `continuousLLR`), and a fair / good probe against a poor-light reference is
+ *     normalised 'relaxed' (the light changed) — see `comparisonLLR`.
  *  2. Accumulation (SPRT / windowed CUSUM): clamped LLRs of samples (a burst counts as ONE sample: its frames are
  *     taken within ~0.6 s and are not independent) are summed over a window of the last `sprt.maxSamples` samples
  *     no older than 10 minutes, with positive evidence from 'poor' samples capped at `sprt.maxPoorEvidence`
@@ -35,7 +39,7 @@
  */
 import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityEvidenceDTO, IdentityPolicy, IdentitySampleRequestDTO, IdentityThresholds, SessionStatus } from '@sp/shared';
 import { GENUINE_DRIFT, windowEvidence } from '../vision/calibration.js';
-import { BUCKET_MODELS, CALIBRATION, decideIdentity, posteriorSwap, qualityBucket, sampleLLR, type QualityBucket } from '../vision/index.js';
+import { bucketModel, CALIBRATION, continuousApplies, decideIdentity, posteriorSwap, qualityBucket, referenceClass, sampleLLR, type EvidenceContext, type QualityBucket } from '../vision/index.js';
 
 /* =================================================================== per-session normalisation */
 
@@ -82,7 +86,7 @@ export function usableBaseline(b: SessionBaseline | null | undefined): b is Sess
 
 /** The personal genuine model (similarity of this person's probes to their reference) for a bucket. */
 export function personalGenuine(bucket: QualityBucket, baseline: SessionBaseline, context: ComparisonContext = 'continuous'): { mean: number; sd: number } {
-  const g = BUCKET_MODELS[bucket].genuine;
+  const g = bucketModel(bucket, baseline.bucket).genuine;
   const N = SESSION_NORMALISATION;
   const d = N.drift[context][bucket];
   const rawMean = clamp(baseline.mean - d.mean, g.mean - N.meanBand.below, g.mean + N.meanBand.above);
@@ -96,19 +100,36 @@ export function personalGenuine(bucket: QualityBucket, baseline: SessionBaseline
 /** Similarity mapped into the global genuine frame of the bucket (identity when there is no usable baseline). */
 export function normaliseSimilarity(similarity: number, bucket: QualityBucket, baseline: SessionBaseline | null | undefined, context: ComparisonContext = 'continuous'): number {
   if (!usableBaseline(baseline)) return similarity;
-  const g = BUCKET_MODELS[bucket].genuine;
+  const g = bucketModel(bucket, baseline.bucket).genuine;
   const p = personalGenuine(bucket, baseline, context);
   return g.mean + (similarity - p.mean) * (g.sd / p.sd);
 }
 
 /**
  * Evidence of one comparison: clamped, monotone LLR (> 0 = evidence of a different person; vision/calibration.ts
- * `sampleLLR`) of the similarity after per-session normalisation.
+ * `sampleLLR`), conditional on the quality of the reference (`baseline.bucket`, calibration v2.1):
+ *  - same session ('continuous'), poor-light reference, poor probe (`continuousApplies`): the same-session model on
+ *    the RAW similarity — the candidate's own level decides (a look-alike in the candidate's dim room scores far
+ *    below it although above the global match threshold);
+ *  - otherwise the reference-conditional cross-session model on the per-session normalised similarity. When the
+ *    light improved since a poor-light enrolment (fair / good probe), the enrolment baseline no longer describes the
+ *    capture: 'relaxed' normalisation even mid-exam (continuous normalisation there caused false confirmations).
+ * `frames`: usable frames averaged into the probe (a burst template: pass its frame count; default 1).
  */
-export function comparisonLLR(similarity: number, bucket: QualityBucket, baseline: SessionBaseline | null | undefined, context: ComparisonContext = 'continuous'): { llr: number; normalised: number } {
+export function comparisonLLR(
+  similarity: number,
+  bucket: QualityBucket,
+  baseline: SessionBaseline | null | undefined,
+  context: ComparisonContext = 'continuous',
+  frames = 1,
+): { llr: number; normalised: number } {
   if (!Number.isFinite(similarity)) return { llr: 0, normalised: similarity };
-  const normalised = normaliseSimilarity(similarity, bucket, baseline, context);
-  return { llr: round4(sampleLLR(normalised, bucket)), normalised: round4(normalised) };
+  const reference = baseline?.bucket ?? null;
+  const ev: EvidenceContext = { reference, baseline: usableBaseline(baseline) ? baseline : null, context, frames };
+  if (continuousApplies(bucket, ev)) return { llr: round4(sampleLLR(similarity, bucket, ev)), normalised: round4(similarity) };
+  const normContext: ComparisonContext = context === 'continuous' && referenceClass(reference) === 'poor' && bucket !== 'poor' ? 'relaxed' : context;
+  const normalised = normaliseSimilarity(similarity, bucket, baseline, normContext);
+  return { llr: round4(sampleLLR(normalised, bucket, { reference })), normalised: round4(normalised) };
 }
 
 export interface FrameEvidence {
@@ -304,10 +325,11 @@ export function accumulate(prev: Readonly<EvidenceAccumulator>, obs: SampleObser
  * The per-sample decision label shown in identity-check lists (org thresholds, as before): the calibrated evidence
  * decides escalation, the label only describes the single comparison. Unusable images are never a mismatch.
  */
-export function sampleLabel(similarity: number | null, quality: FaceQuality | null, thresholds: IdentityThresholds): IdentityDecision {
+export function sampleLabel(similarity: number | null, quality: FaceQuality | null, thresholds: IdentityThresholds, llr?: number | null): IdentityDecision {
   // vision's quality-aware rule: a poor frame is never labelled "mismatch", a fair / good one only with strong
-  // calibrated evidence (MISMATCH_MIN_LLR).
-  return decideIdentity(similarity, quality, thresholds, 'reference').decision;
+  // calibrated evidence (MISMATCH_MIN_LLR). With the sample's evidence (`llr`, from frameEvidence / aggregateBurst),
+  // "match" also needs that evidence to favour the candidate (a look-alike in a dim room: "inconclusive").
+  return decideIdentity(similarity, quality, thresholds, 'reference', llr == null || !Number.isFinite(llr) ? undefined : { llr }).decision;
 }
 
 /* =================================================================== check assessment (resume / reconnect / reverify) */

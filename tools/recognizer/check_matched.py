@@ -83,7 +83,7 @@ def main() -> None:
         for c in ("good", "dim", "backlit"):
             r = res_m[c]
             print(f"  {c:8s} n_imp={r['n_impostor']:6d} imp mean {r['impostor_mean']:.3f} p99 {r['impostor_p99']:.3f} p99.9 {r['impostor_p999']:.3f} max {r['impostor_max']:.3f} | "
-                  f"FMR@own-good-thr {100 * r['fmr_at_own_good_thr']:.2f}% FMR@0.45 {100 * r['fmr_at_0.45']:.3f}% | genuine(other scene) mean {r['genuine_other_scene_mean']:.3f} p05 {r['genuine_other_scene_p05']:.3f}")
+                  f"FMR@own-good-thr {100 * r['fmr_at_own_good_thr']:.2f}% FMR@0.45 {100 * r['fmr_at_0.45']:.3f}% | genuine(other scene) mean {r['genuine_other_scene_mean'] or float('nan'):.3f} p05 {r['genuine_other_scene_p05'] or float('nan'):.3f}")
     if args.out:
         Path(args.out).write_text(json.dumps(out, indent=1))
 

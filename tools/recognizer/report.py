@@ -31,13 +31,63 @@ def fmt_delta(m, k, scale=100):
     return f"{sig}{scale * d['mean']:+.1f} [{scale * lo:+.1f}, {scale * hi:+.1f}]{sig}"
 
 
+def harness_tables(specs: list[str]) -> None:
+    """Side-by-side tables of ts/harness.mts summaries: label=path,label=path,..."""
+    S = [(x.split("=", 1)[0], json.load(open(x.split("=", 1)[1]))) for x in specs]
+    labs = [l for l, _ in S]
+    print("\n#### threshold-free: burst template vs good/typical check-in (genuine = other photo), EER % / d'\n")
+    print("| | " + " | ".join(labs) + " |")
+    print("|---|" + "--:|" * len(labs))
+    for grp, keys in (("byBucket", ["good", "fair", "poor"]), ("byCondition", ["good", "typical", "dim", "backlit", "sidelit"])):
+        for k in keys:
+            print(f"| {grp[2:].lower()} {k} | " + " | ".join(f"{s[grp][k].get('eer', float('nan')):.2f} / {s[grp][k].get('dprime', float('nan')):.2f}" for _, s in S) + " |")
+    print("\n#### matched degradation: check-in in the SAME poor light as the probes (impostor mean / p99 / max; EER %)\n")
+    print("| | " + " | ".join(labs) + " |")
+    print("|---|" + "--:|" * len(labs))
+    for c in ("dim", "backlit"):
+        for res in ("all", "640x480"):
+            for lvl in ("burst", "frame"):
+                row = []
+                for _, s in S:
+                    x = s["sameCondition"][c][res][lvl]
+                    row.append(f"{x['impostorMean']:.3f} / {x['impostorP99']:.3f} / {x['impostorMax']:.3f}; EER {x.get('eer', float('nan')):.2f}")
+                print(f"| {c} {res} {lvl} | " + " | ".join(row) + " |")
+    print("\n#### decisions (production engine): enrolment, and resume checks of 3 frames (pass % genuine other photo / genuine same photo; impostor mismatch %; family pass %)\n")
+    print("| | " + " | ".join(labs) + " |")
+    print("|---|" + "--:|" * len(labs))
+    for c in ("good", "typical", "dim", "backlit"):
+        print(f"| enrolled in {c} | " + " | ".join(f"{s['enrolment'][c]['ok']}/{s['enrolment'][c]['total']}" for _, s in S) + " |")
+    for c in ("all", "good", "typical", "dim", "backlit", "sidelit"):
+        row = []
+        for _, s in S:
+            ch = s["checks3"].get(c, {})
+            if not ch:
+                row.append("–")
+                continue
+            row.append(f"{ch['genuineCross']['pass']} / {ch['genuineSame']['pass']}; imp mm {ch['impostor']['mismatch']}; fam pass {ch['family']['pass']}")
+        print(f"| check {c} | " + " | ".join(row) + " |")
+    print("\n#### sequential monitoring (per condition): swap detected within 3 samples / family within 3 / false confirmations per 1000 h (same photo)\n")
+    print("| | " + " | ".join(labs) + " |")
+    print("|---|" + "--:|" * len(labs))
+    for c in ("good", "typical", "dim", "backlit", "sidelit"):
+        row = []
+        for _, s in S:
+            x = s["sequentialPerCondition"].get(c, {})
+            row.append(f"{x.get('detectedWithin3')} / {x.get('family3')} / {x.get('falseConfirmPer1000h')}")
+        print(f"| {c} | " + " | ".join(row) + " |")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("json")
+    ap.add_argument("json", nargs="?")
+    ap.add_argument("--harness", default=None, help="label=summary.json,label=summary.json,... (ts/harness.mts summaries)")
     ap.add_argument("--protocol", default="photo")
     ap.add_argument("--variants", default=None, help="comma-separated labels to show (default all)")
     ap.add_argument("--conditions", default=",".join(COND_ORDER))
     args = ap.parse_args()
+    if args.harness:
+        harness_tables(args.harness.split(","))
+        return
     rep = json.load(open(args.json))
     res = rep["results"]
     labels = None

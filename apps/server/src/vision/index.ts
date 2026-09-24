@@ -26,6 +26,7 @@ export {
   REFERENCE_MAX_PITCH_DEG,
   REFERENCE_INCONSISTENT_REASON,
   type ComparisonTarget,
+  type DecisionEvidence,
 } from './identity';
 export {
   CALIBRATION,
@@ -39,6 +40,8 @@ export {
   REFERENCE_MODELS,
   CONTINUOUS_MODEL,
   continuousLLR,
+  continuousApplies,
+  usableReferenceBaseline,
   windowEvidence,
   GENUINE_DRIFT,
   sampleLLR,
@@ -74,6 +77,7 @@ export {
   resolveGate,
   assessQuality,
   regateQuality,
+  lowContrast,
   poseWithinGate,
   FRONTAL_PITCH_DEG,
   guidanceForIssues,

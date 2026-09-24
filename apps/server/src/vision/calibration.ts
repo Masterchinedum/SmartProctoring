@@ -218,11 +218,14 @@ export interface ReferenceBaseline {
 export interface EvidenceContext {
   /** Bucket of the enrolled reference (`referenceBucket`). Missing => a good / fair reference is assumed. */
   reference?: QualityBucket | null;
-  /** Enrolment baseline; used in the 'continuous' context when n >= CONTINUOUS_MODEL.minBaselineFrames. */
+  /** Enrolment baseline (leave-one-out self-similarity of the gallery); used by the same-session model. */
   baseline?: ReferenceBaseline | null;
-  /** Default 'relaxed' (cross-session model, no per-session sharpening). */
+  /**
+   * 'continuous' = the same active period as the enrolment (mid-exam samples); anything after a resume, reconnect,
+   * camera change or reverify is 'relaxed' (the default: cross-session models only).
+   */
   context?: ComparisonContext;
-  /** Frames averaged into the probe (`scoreAgainst(burst, gallery)`: the burst's usable frames). Default 1. */
+  /** Frames averaged into the probe (`scoreAgainst(burst, gallery)`: the burst template's usable frames). Default 1. */
   frames?: number;
 }
 
@@ -232,34 +235,34 @@ export interface DriftModel {
 }
 
 /**
- * Same-session ('continuous') model: a genuine probe scores near the candidate's own enrolment baseline,
- * s ~ N(baseline.mean - drift.mean, sqrt(drift.sd^2 + baseline.sd^2 / n)), per reference class x probe bucket,
- * for a single frame and for a burst template. The alternative ("somebody else") is a mixture of the
- * cross-session impostor model and a look-alike component, uniform on [lookAlikeLow, personal genuine mean]
- * with weight `lookAlikeWeight`: a sample clearly BELOW the person's own level is evidence of another person even
- * when a random impostor would rarely score that high (family members, look-alikes, a poor-light room that lifts
- * everybody's scores). Fitted on simulated same-room frames (v2.1).
+ * Same-session, same-light model (identity v2.1) for a POOR probe against a POOR-light reference — a candidate
+ * enrolled in a dim / backlit room and still in that light. There, the cross-session models cannot see a
+ * look-alike impostor: a poor-light gallery lifts everybody's score (same room, same noise and exposure; a burst
+ * template of an impostor scored 0.52–0.59 against a dim gallery in the realistic e2e run, simulated same-room
+ * impostor bursts reach 0.57), while cross-session genuine scores in poor light spread from 0.2 to 0.9. The
+ * candidate's own level does separate them: in their own room and light a genuine probe scores near the enrolment
+ * baseline (leave-one-out self-similarity of the gallery), a different person far below it.
+ *
+ * Genuine: s ~ N(baseline.mean - drift.mean, sqrt(drift.sd^2 + baseline.sd^2 / n)), drift per single frame and per
+ * burst template (averaging frames lifts the score above the single-frame baseline). Alternative ("somebody else"):
+ * (1 - w) x same-room impostor Gaussian + w x a look-alike component uniform on [lookAlikeLow, personal mean].
+ * Fitted on simulated same-room frames (41 dim / backlit galleries; genuine = the enrolled person later in the
+ * enrolment scene, impostor = 12 other people + family members rendered into that scene): genuine burst drift
+ * median -0.10 (dim -0.14, backlit -0.10), p99 0.08; single frames median 0.0, p99 0.2; impostor bursts
+ * 0.16 ± 0.12 (max 0.57). The drift sds are those of the fit plus a margin for pose / expression changes the
+ * simulator does not render; means are set conservatively (above the fitted medians).
+ *
+ * Applied only when `continuousApplies`: the 'continuous' context (same active period — never after a resume,
+ * reconnect or camera change), a usable baseline, a poor reference AND a poor probe. When the light improves
+ * (fair / good probe) the enrolment baseline no longer describes the capture and the cross-session models apply.
  */
 export const CONTINUOUS_MODEL = Object.freeze({
-  drift: Object.freeze({
-    good: Object.freeze({
-      good: { frame: { mean: 0.04, sd: 0.055 }, burst: { mean: 0.01, sd: 0.052 } },
-      fair: { frame: { mean: 0.04, sd: 0.06 }, burst: { mean: 0.0, sd: 0.065 } },
-      poor: { frame: { mean: 0.28, sd: 0.17 }, burst: { mean: 0.26, sd: 0.16 } },
-    }),
-    poor: Object.freeze({
-      good: { frame: { mean: 0.15, sd: 0.13 }, burst: { mean: 0.12, sd: 0.12 } },
-      fair: { frame: { mean: 0.05, sd: 0.1 }, burst: { mean: 0.02, sd: 0.1 } },
-      poor: { frame: { mean: 0.04, sd: 0.09 }, burst: { mean: -0.06, sd: 0.078 } },
-    }),
-  }) as Readonly<Record<ReferenceClass, Readonly<Record<QualityBucket, { frame: DriftModel; burst: DriftModel }>>>>,
-  /** Impostor score in the candidate's own room (same camera and light), per reference class x probe bucket. */
-  impostor: Object.freeze({
-    good: Object.freeze({ good: { mean: 0.1, sd: 0.1 }, fair: { mean: 0.1, sd: 0.1 }, poor: { mean: 0.12, sd: 0.13 } }),
-    poor: Object.freeze({ good: { mean: 0.07, sd: 0.11 }, fair: { mean: 0.13, sd: 0.13 }, poor: { mean: 0.16, sd: 0.13 } }),
-  }) as Readonly<Record<ReferenceClass, Readonly<Record<QualityBucket, DriftModel>>>>,
+  drift: Object.freeze({ frame: Object.freeze({ mean: 0.04, sd: 0.09 }), burst: Object.freeze({ mean: -0.06, sd: 0.078 }) }),
+  /** Impostor burst score in the candidate's own poor-light room. */
+  impostor: Object.freeze({ mean: 0.16, sd: 0.13 }),
   lookAlikeWeight: 0.2,
   lookAlikeLow: -0.1,
+  /** Baselines from fewer gallery frames are not used. */
   minBaselineFrames: 3,
 });
 
@@ -268,9 +271,11 @@ export const CONTINUOUS_MODEL = Object.freeze({
  * 754 same-session and 2,132 cross-session genuine sessions and 100k+ impostor sessions at the default cadence
  * (6 s for 3 min, then 15 s; bursts of 3): 0 false confirmed swaps in same-session monitoring, median 2 samples
  * to confirm a swap in good / typical / side light (family members: 77-83 % within 3 samples).
+ * v2.1: reference-conditional models (REFERENCE_MODELS, CONTINUOUS_MODEL) and the confident-detection contrast
+ * exception of the quality gate; thresholds and SPRT unchanged.
  */
 export const CALIBRATION: Readonly<Calibration> = Object.freeze({
-  version: 'webcam-v2.0',
+  version: 'webcam-v2.1',
   match: 0.45,
   mismatch: 0.3,
   idPhotoMatch: 0.42,
@@ -366,30 +371,43 @@ function logAdd(a: number, b: number): number {
 
 /** Parameters of the same-session (continuous) evidence model; exported for evaluation what-ifs. */
 export interface ContinuousParams {
-  drift: Readonly<Record<ReferenceClass, Readonly<Record<QualityBucket, { frame: DriftModel; burst: DriftModel }>>>>;
-  impostor: Readonly<Record<ReferenceClass, Readonly<Record<QualityBucket, DriftModel>>>>;
+  drift: Readonly<{ frame: DriftModel; burst: DriftModel }>;
+  impostor: Readonly<DriftModel>;
   lookAlikeWeight: number;
   lookAlikeLow: number;
   minBaselineFrames: number;
 }
 
+/** A baseline usable by the same-session model (finite, measured on >= minBaselineFrames frames). */
+export function usableReferenceBaseline(b: ReferenceBaseline | null | undefined, p: Pick<ContinuousParams, 'minBaselineFrames'> = CONTINUOUS_MODEL): b is ReferenceBaseline {
+  return !!b && Number.isFinite(b.mean) && Number.isFinite(b.sd) && Number.isFinite(b.n) && b.n >= p.minBaselineFrames;
+}
+
+/**
+ * Whether `sampleLLR(similarity, bucket, ctx)` uses the same-session model (`continuousLLR`, on the RAW similarity):
+ * context 'continuous', a usable baseline, a poor reference and a poor probe. Otherwise the cross-session model of
+ * the reference class applies (callers may normalise the similarity per session first).
+ */
+export function continuousApplies(bucket: QualityBucket, ctx: EvidenceContext | null | undefined): boolean {
+  return !!ctx && ctx.context === 'continuous' && bucket === 'poor' && referenceClass(ctx.reference) === 'poor' && usableReferenceBaseline(ctx.baseline);
+}
+
 /**
  * Unclamped same-session LLR: log p(s | somebody else) - log p(s | this candidate, given the enrolment baseline).
- * Monotone by construction: evaluated at min(s, personal genuine mean) and max(s, lookAlikeLow).
+ * `frames` >= 2: the probe is a burst template. Monotone by construction: evaluated at s clamped to
+ * [impostor mean, personal genuine mean].
  */
-export function continuousLLR(similarity: number, bucket: QualityBucket, reference: QualityBucket | null | undefined, baseline: ReferenceBaseline, frames: number, p: ContinuousParams = CONTINUOUS_MODEL): number {
-  const rc = referenceClass(reference);
-  const d = p.drift[rc][bucket] ?? p.drift[rc].poor;
-  const dm = frames >= 2 ? d.burst : d.frame;
+export function continuousLLR(similarity: number, baseline: ReferenceBaseline, frames = 1, p: ContinuousParams = CONTINUOUS_MODEL): number {
+  const dm = frames >= 2 ? p.drift.burst : p.drift.frame;
   const mu = baseline.mean - dm.mean;
   const sd = Math.sqrt(dm.sd * dm.sd + (baseline.sd * baseline.sd) / Math.max(1, baseline.n));
-  const imp = p.impostor[rc][bucket] ?? p.impostor[rc].poor;
-  const lo = p.lookAlikeLow;
-  const x = Math.max(lo, Math.min(mu, Math.max(-1, Math.min(1, similarity))));
+  // Monotone: below the typical impostor score the evidence is that of the impostor mean (the genuine density sits on
+  // its uniform floor there, so the raw ratio would fall again towards -1); above the personal mean, that of the mean.
+  const x = Math.max(Math.min(p.impostor.mean, mu), Math.min(mu, Math.max(-1, Math.min(1, similarity))));
   const logGen = logMixture(x, mu, sd);
   const w = p.lookAlikeWeight;
-  const width = Math.max(0.05, mu - lo);
-  const logAlt = logAdd(Math.log(1 - w) + logMixture(x, imp.mean, imp.sd), Math.log(w) - Math.log(width));
+  const width = Math.max(0.05, mu - p.lookAlikeLow);
+  const logAlt = logAdd(Math.log(1 - w) + logMixture(x, p.impostor.mean, p.impostor.sd), Math.log(w) - Math.log(width));
   return logAlt - logGen;
 }
 
@@ -399,10 +417,11 @@ export function continuousLLR(similarity: number, bucket: QualityBucket, referen
  * Monotone non-increasing in `similarity`, clamped to ±CALIBRATION.llrClamp. Non-finite similarity => 0.
  *
  * Without `ctx` (identity v2.0 call): the cross-session model of a good / fair reference (BUCKET_MODELS).
- * With `ctx` (v2.1): the model is conditional on the reference's quality bucket (`ctx.reference`); in the
- * 'continuous' context with a usable enrolment baseline it is the same-session model (`continuousLLR`), which
- * compares the score with the candidate's OWN level — the only way to see a look-alike impostor in a dim room,
- * where a poor-light gallery lifts every face's score (docs/accuracy/identity-v2.md §6.5).
+ * With `ctx` (v2.1): conditional on the reference's quality bucket (`ctx.reference`, `REFERENCE_MODELS`); and when
+ * `continuousApplies(bucket, ctx)` (same session, poor-light reference, poor probe, usable baseline) the
+ * same-session model `continuousLLR` on the RAW similarity, which compares the score with the candidate's OWN level —
+ * the only way to see a look-alike impostor in a dim room, where a poor-light gallery lifts every face's score
+ * (docs/accuracy/identity-v2.md §6.5). Otherwise `similarity` may be a per-session normalised score.
  */
 export function sampleLLR(similarity: number, bucket: QualityBucket, ctx?: EvidenceContext): number {
   if (!Number.isFinite(similarity)) return 0;
@@ -411,14 +430,11 @@ export function sampleLLR(similarity: number, bucket: QualityBucket, ctx?: Evide
   let llr: number;
   if (!ctx) {
     llr = tableLLR(similarity, BUCKET_MODELS[b], `good|${b}`);
+  } else if (continuousApplies(b, ctx)) {
+    llr = continuousLLR(similarity, ctx.baseline!, ctx.frames ?? 1);
   } else {
     const rc = referenceClass(ctx.reference);
-    const bl = ctx.baseline;
-    if (ctx.context === 'continuous' && bl && Number.isFinite(bl.mean) && Number.isFinite(bl.sd) && bl.n >= CONTINUOUS_MODEL.minBaselineFrames) {
-      llr = continuousLLR(similarity, b, ctx.reference, bl, ctx.frames ?? 1);
-    } else {
-      llr = tableLLR(similarity, REFERENCE_MODELS[rc][b], `${rc}|${b}`);
-    }
+    llr = tableLLR(similarity, REFERENCE_MODELS[rc][b], `${rc}|${b}`);
   }
   return Math.max(-c, Math.min(c, llr));
 }

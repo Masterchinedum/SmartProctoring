@@ -28,10 +28,21 @@ measurement — including on your own webcam captures.
 
 ¹ v1 has no calibrated evidence model: the v1 figure is its own check rule (`aggregateFrames`, 3 frames).
 
+**v2.1 (`webcam-v2.1`, after the realistic e2e run).** Two calibration failures were found and fixed; details in
+§4 (gate) and §6.5 (evidence), numbers in §8.1.
+
+| Question (webcam simulator + e2e replica) | v2.0 | **v2.1** |
+|---|--:|--:|
+| Look-alike swap in the candidate's **own dim / backlit room, reference enrolled in that room**: *suspect* within 3 samples (all impostors / look-alikes scoring ≥ 0.35) | 54 / **0 %** dim, 60 / **7 %** backlit | **85 / 86 %** dim, **78 / 66 %** backlit |
+| … the same candidate in that room: false *suspect* / confirm per 1,000 h | 0 / 0 | **0 / 0** |
+| Dim-enrolled candidate, light switched on (reference poor, probes good): false confirms per 1,000 h | 47 | **9** (2 failed dim galleries) |
+| Backlit frames usable (face contrast 5–7 with a confident detection) | 45 % | **57 %** |
+| Backlit resume, first-attempt pass (6 frames), impostor accepted at a check | 62 % / 0.06 % | **71 % / 0.09 %** |
+
 **What changed.** File references are to `apps/server/src/vision`.
 
 1. **Quality gate v2** (`quality.ts` `QUALITY_GATE`). The gate now refuses a frame only where face recognition
-   itself breaks down: contrast < 7, brightness < 40, inter-eye distance < 20 px, detector score < 0.65,
+   itself breaks down: contrast < 7 (< 5 for a confidently detected face, v2.1), brightness < 40, inter-eye distance < 20 px, detector score < 0.65,
    |yaw| > 30°, strong blur, a cut-off face or extra faces. Every other frame is usable and falls into a
    good / fair / poor **quality bucket** (`calibration.ts` `qualityBucket`). The v1 gate is kept as
    `QUALITY_GATE_V1` for evaluation.
@@ -157,7 +168,7 @@ noise-robust "detail" measure and an Immerkær noise estimate were added to `Fac
 
 **Gate v2 (unusable ⇒ *unable to verify* + guidance).** A frame is unusable when:
 
-* contrast < 7;
+* contrast < 7 — or, since v2.1, < 5 when the detector is confident (score ≥ 0.88; see below);
 * brightness < 40 or > 235. Brightness 40 is the same limit as v1: below it, 33–50 % of genuine dim frames collapse
   to a similarity below 0.2;
 * inter-eye distance < 20 px (v1: 28);
@@ -165,6 +176,22 @@ noise-robust "detail" measure and an Immerkær noise estimate were added to `Fac
 * |yaw| > 30° (v1: 25°) or pitch outside [−35°, 25°];
 * sharpness < 80 (strong blur, unchanged);
 * the face is cut off, or more than one face is visible (unchanged).
+
+**Confident-detection contrast exception (v2.1, `QUALITY_GATE.minContrastConfident` 5 /
+`confidentDetectionScore` 0.88, `quality.ts` `lowContrast`).** A window behind the candidate exposes for the bright
+background: veiling glare lifts the blacks and leaves the face with a contrast of 6.6–7.1 (realistic e2e fixture:
+face luma 61, lift 25), right at the limit, so ~80 % of backlit resume frames were refused, attempts ended with 1–2
+usable frames and the candidate was held after 5 attempts although the usable frames scored 0.74–0.84. Within
+contrast 5–7, the detector score separates reliable from unreliable faces: backlit frames with a detection score
+≥ 0.88 keep p05 0.39 / median 0.63 against the person's template (2 % below 0.3), unconfident ones 16–42 % below 0.3.
+Such frames are admitted and are always in the **poor** bucket (contrast < 12), so their evidence is capped like any
+poor frame; faces found only by the low-light pass (score ≤ 0.79) never qualify. Effect (simulator, reference
+enrolled in good / typical light): usable backlit frames 45 → 57 %, dim 52 → 61 %; the engine's first-attempt pass
+at a backlit resume 38 → 48 % (3 frames) and 62 → 71 % (6 frames), dim 41 → 49 % / 63 → 69 %. Cost: none of the
+11,376 impostor frames the exception admits reaches the match threshold (107 score ≥ 0.30); impostors accepted at a
+check (`likely_match`) went from 11 to 16 of 18,516 backlit 6-frame attempts (0.06 → 0.09 %) and 3 → 4 of 37,032
+3-frame attempts; unchanged in dim (7 → 6, 2 → 2). In the e2e replica (the fixture's scene, 1280×720) all 38 backlit
+frames (contrast 6.3–6.7, score ≥ 0.88) become usable (before: 0).
 
 **Buckets** (usable frames, `BUCKET_THRESHOLDS`):
 
@@ -338,6 +365,59 @@ session ever confirmed a swap. The data cannot, however, exclude that up to 3 in
 reality (95 % bound). If they did, the rate would be ≤ 4 per 1,000 candidate-hours. Establishing ≤ 1 per 1,000 h
 needs ≥ 3,000 real genuine sessions (§10).
 
+### 6.5 Reference-conditional and same-session evidence (v2.1)
+
+**The failure.** Realistic e2e (real browser and server, simulator video): candidate A enrolled in a dim room at
+640×480; person B (SFace 0.25–0.36 to A in good light) sat down in the same room. B's burst templates scored
+0.52–0.59 against A's dim gallery (single frames 0.32–0.51; A's own frames 0.72–0.82), were labelled *match* and the
+evidence stayed *consistent* for 45 s. Two causes: the models of §6.2 were fitted on references enrolled in good
+light, and a poor-light gallery lifts **everybody's** score in that room (same noise, exposure and colour, and a
+template averages the identity noise away but keeps the shared capture); and cross-session genuine scores in poor
+light spread from 0.2 to 0.9, so no global model can call 0.55 "someone else".
+
+**Reference-conditional cross-session models (`REFERENCE_MODELS`, `bucketModel(bucket, reference)`,
+`referenceBucket`, `referenceClass`).** Fitted on 37 simulated galleries enrolled in dim or backlit light (sds
+× 1.15): against a poor-light reference, genuine good / fair / poor probes score N(0.49, 0.155) / N(0.52, 0.15) /
+N(0.47, 0.165), impostors N(0.07, 0.107) / N(0.08, 0.11) / N(0.10, 0.125). Good and fair references keep
+`BUCKET_MODELS` exactly. `sampleLLR(s, bucket, { reference })` uses them; without a context `sampleLLR` is unchanged.
+
+**Same-session model for a poor-light reference and a poor probe (`CONTINUOUS_MODEL`, `continuousLLR`,
+`continuousApplies`).** What does separate B from A is A's **own** level in that room. New simulator data (`room`
+frames, `WebcamDataOptions.room`): probes rendered in the enrolment scene of each host (same room, camera and light):
+the host again (2 bursts, new frame noise and small movements), the same person from other photos, and 12 other
+people plus family members sitting down there — 1,165 same-room sessions over dim / backlit / typical rooms.
+Against a poor-light gallery (leave-one-out baseline b):
+
+| same room, poor probe vs poor-light gallery (leave-one-out baseline b) | burst template |
+|---|---|
+| the candidate | score − b: median +0.14 (dim) / +0.10 (backlit); 1st percentile −0.08 (single frames: median 0.0, 1st percentile −0.2) |
+| impostors incl. family (n 385 sessions) | score 0.16 ± 0.12, 99th percentile 0.46, max 0.57 |
+| the same person, other photo (another day) | score − b: median −0.11 (dim) / −0.18 (backlit); 5th percentile −0.33 / −0.45 |
+
+The model: genuine s ~ N(b − drift, √(drift.sd² + b.sd²/n)) with drift N(−0.06, 0.078) for a burst template and
+N(0.04, 0.09) for a single frame (means conservative, sds with a margin for pose / expression the simulator does not
+render); alternative = 0.8 × N(0.16, 0.13) + 0.2 × uniform look-alike on [−0.1, personal mean]; evaluated between
+the impostor mean and the personal mean (monotone), clamped ±5. It applies only when `continuousApplies(bucket,
+ctx)`: context `'continuous'` (the active period in which the reference was enrolled — never after a resume,
+reconnect, camera change or reverify), a usable baseline (n ≥ 3), a poor-light reference **and** a poor probe.
+Everything else uses the reference-conditional cross-session model (the engine keeps its per-session
+normalisation there). Why so narrow: applied across a change of light or camera it raised false alarms by an order
+of magnitude — e.g. a dim-enrolled candidate after the light is switched on, or a different dim room and camera
+(the simulator's cross-scene sessions: 250 false *suspects* per 1,000 h, and false confirms from fair frames). When
+the light improves after a poor-light enrolment (fair / good probe), the engine now normalises 'relaxed' even
+mid-exam: false confirms in that situation 47 → 9 per 1,000 h (the remaining 2 sessions are dim galleries with a
+baseline ≈ 0.6 that do not recognise the person in good light at all — an enrolment problem).
+
+The per-sample label follows the evidence: with the sample's LLR (`decideIdentity(…, { llr })`, engine
+`sampleLabel(…, llr)`), *match* also needs LLR ≤ −1 (`MATCH_MAX_LLR`) — B's dim-room templates are *inconclusive*.
+Poor light still never confirms (`maxPoorEvidence` 4 < `confirm` 7): a dim-room look-alike becomes *suspect*
+(faster sampling, lighting guidance, an uncertain observation for staff) and is confirmed once a fair or good frame
+agrees.
+
+**Self-derived only.** No cohort of other people's images or embeddings is used or shipped: the models are
+per-bucket distributions (six numbers each) fitted offline on the simulator, and the only per-person input is the
+candidate's own enrolment baseline.
+
 ## 7. Liveness under webcam noise
 
 **Pose noise under the simulator.** Five-point yaw was measured on frames of one burst (same scene, sub-pixel
@@ -466,6 +546,41 @@ Calibration `webcam-v2.0`; 140 source photos, 34 enrolled identities, 3 families
 | sidelit | v2 | 0 | 4.081 | 92.8 % | 2 | 79.7 % | 97.9 % |
 | sidelit | v2 + session normalisation | 0 | 27.148 | 94.2 % | 2 | 93.3 % | 98.5 % |
 
+### 8.1 v2.1: same-room monitoring and the backlit gate
+
+The tables above are `webcam-v2.0`. v2.1 changes only (a) which frames with contrast 5–7 are usable and (b) the
+evidence against poor-light references; good-light results are unchanged. The report's new section
+*Same room and light as the enrolment* (`eval:identity -- --webcam`) produces the plain-calibration rows; the
+engine rows use the identity engine's `comparisonLLR` in the 'continuous' context (burst templates scored with their
+frame count). Genuine sessions are simulated for 3 h each (40 runs); per-sample noise as in §6.4.
+(`identity-v2-webcam.json` and the tables above remain the v2.0 run.)
+
+| candidate's own room, reference enrolled there | v2.0 engine | **v2.1 engine** | v2.1, templates scored as single frames ² |
+|---|--:|--:|--:|
+| dim: the candidate, false suspect / confirm per 1,000 h (14 sessions) | 0 / 0 | **0 / 0** | 0 / 0 |
+| dim: impostor or family, *suspect* ≤ 3 samples / ever (172) | 54 / 64 % | **85 / 86 %** | 83 / 86 % |
+| dim: look-alikes (mean score ≥ 0.35), *suspect* ≤ 3 samples (11) | 0 % | **86 %** | 60 % |
+| dim: confirmed ≤ 3 samples (needs a fair / good frame) | 9 % | 5 % | 5 % |
+| backlit: the candidate (21) | 0 / 0 | **0 / 0** | 0 / 0 |
+| backlit: impostor or family, *suspect* ≤ 3 / ever (253) | 60 / 68 % | **78 / 80 %** | 77 / 79 % |
+| backlit: look-alikes ≥ 0.35 (12) | 7 % | **66 %** | 45 % |
+| the same person from another photo in that room (another day; not a mid-exam case), false suspect / confirm per 1,000 h | 0–36 / 0–36 | 340–540 / **0** | 110–300 / 0 |
+
+² If the engine does not pass the burst's frame count to `comparisonLLR`, templates are judged by the single-frame
+drift (more lenient). Impostor sessions that never reach *suspect* are mostly sessions without a single usable
+impostor frame in that light (62 of 418) and impostors whose frames are *fair* (judged by the cross-session model).
+
+Other sessions, v2.0 → v2.1 engine (continuous context, 3 h): reference enrolled in dim / backlit light and the
+light switched on (probes good / typical / side-lit) — false confirms per 1,000 h 47 / 28 / 34 → 9 / 9 / 9; a
+different dim or backlit room and camera (cross-scene, same bucket; a camera change is a 'relaxed' event in the
+engine, so this is a stress test) — false suspects 20 → 128 (dim) and 14 → 86 (backlit) per 1,000 h, confirms 0 → 0;
+good-light swap detection unchanged (confirmed ≤ 3 samples 96 / 94 / 93 % good / typical / side-lit).
+
+**E2e replica** (the fixture's people and scene, rendered offline): A enrolled in the dim room (baseline 0.72 at
+640×480, 0.87 at 1280×720). B's per-sample LLR in that room: v2.0 −3.9 … +0.7 (never *suspect*); v2.1 +1.9 … +5
+per sample at 640×480 (frames 0.3–0.45) and +3.8 … +5 at 1280×720 — *suspect* after one or two samples. A in the
+same room (dim, and after the window light changes it to backlit): −2.8 … −3.2 per sample. A with the lamp on
+(typical): −5.
 
 ## 9. Limitations
 
@@ -491,6 +606,16 @@ Calibration `webcam-v2.0`; 140 source photos, 34 enrolled identities, 3 families
 * **Liveness** still does not detect replayed video of the person turning their head, 3-D masks, or a single-frame
   client that fishes across windows (bounded to 2 windows per step).
 * The false-alarm bound in §6.4 is limited by the number of distinct sessions (754), not by Monte-Carlo runs.
+* **Same-session model (v2.1).** It rests on 35 simulated dim / backlit candidates re-rendered in their own
+  enrolment scene: real mid-exam variation (expressions, larger head movements, glasses, a monitor lighting the
+  face) is wider than that, and only a margin in the drift sds covers it. In poor light a genuine change of
+  appearance (glasses on / off, hair) can therefore raise *suspect* (never *confirmed*: poor evidence is capped).
+  A look-alike whose face is *fair* in the candidate's dim room, or who enters after a resume ('relaxed'), is judged
+  by the cross-session model and may go unnoticed until the light improves. A dim gallery that does not recognise
+  the person in good light (baseline ≈ 0.6) still produces false alarms when the light is switched on — re-enrol in
+  better light.
+* **Backlit gate exception.** Admitted frames (contrast 5–7) are poor-bucket evidence; the measured impostor cost
+  is ≤ 0.03 percentage points of accepted checks, from simulated backlight only.
 
 ## 10. Re-running the measurement
 
@@ -537,12 +662,23 @@ These are the calibration contracts the identity engine codes against, all expor
 * `sampleLLR(similarity, bucket)` is monotone and clamped to ±5. `posteriorSwap(sum, prior?)` converts the
   accumulated evidence to a posterior. `BUCKET_MODELS` holds the per-bucket fits and `GENUINE_DRIFT` the measured
   per-session drift.
-* `CALIBRATION` = `{ version: 'webcam-v2.0', match 0.45, mismatch 0.30, idPhotoMatch 0.42, idPhotoMismatch 0.24,
+* `CALIBRATION` = `{ version: 'webcam-v2.1', match 0.45, mismatch 0.30, idPhotoMatch 0.42, idPhotoMismatch 0.24,
   prior 0.001, sprt { suspect 3, confirm 7, clear −6, maxSamples 8, maxPoorEvidence 4 }, llrClamp 5,
   minFramesForDecision 3 }`.
 * **New:** `windowEvidence(window)` is the window sum with the poor-evidence cap. Use it for the SPRT window
   **and** in `assessCheck`. Poor-only evidence should end *uncertain* with lighting guidance, not *likely
   mismatch*: today `assessCheck` holds 0.3 % of genuine dim-room resumes for review.
+* **v2.1 — conditional on the reference.** `sampleLLR(similarity, bucket, ctx?)` takes an optional
+  `EvidenceContext` `{ reference?: QualityBucket, baseline?: {mean, sd, n}, context?: 'continuous' | 'relaxed',
+  frames?: number }`. Without it, nothing changed. `reference` = the gallery's bucket (`referenceBucket(qualities)`,
+  or the engine's stored median bucket); a good / fair / missing reference keeps `BUCKET_MODELS` exactly.
+  When `continuousApplies(bucket, ctx)` (context 'continuous', poor reference, poor probe, baseline n ≥ 3) pass the
+  RAW similarity (the same-session model uses the baseline itself); otherwise pass the (optionally per-session
+  normalised) similarity, normalised against `bucketModel(bucket, reference)`. The identity engine does exactly this
+  in `comparisonLLR(similarity, bucket, baseline, context, frames = 1)`; burst templates must pass their usable frame
+  count as `frames`. `decideIdentity(…, against, evidence?)` accepts `{ llr }` (or an `EvidenceContext`): *match* then
+  also needs LLR ≤ −`MATCH_MAX_LLR` (1). `QUALITY_GATE.minContrastConfident` / `confidentDetectionScore` and
+  `lowContrast(contrast, detectionScore, gate)` implement the backlit exception.
 * `templateFrom(embeddings)` and `scoreAgainst(probe | probes[], gallery)` produce THE score the models are
   calibrated for: probe or burst template against the gallery template.
 * `decideIdentity` labels are quality-aware: a poor frame is never labelled *mismatch*, and a non-poor frame only

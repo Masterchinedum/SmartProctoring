@@ -49,6 +49,8 @@ function dataOptions(engine: Engine, quick: boolean, facesetDir: string): Webcam
     engineTag: engine,
     // v2 also embeds with the v1 recipe, to measure comparisons against references stored before the change.
     recipes: engine === 'v2' ? [{ ...RECIPE_V1 }] : [],
+    // Same-room frames (mid-exam continuity and an impostor in the candidate's own room and light), v2 only.
+    ...(engine === 'v2' ? { room: { conditions: ['dim', 'backlit', 'typical'] as const, impostorsPerHost: quick ? 4 : 12, genuineBursts: 2 } } : {}),
     ...(quick ? { maxIdentities: 12, resolutions: ['640x480'] as const, scenes: 1 } : {}),
   };
 }

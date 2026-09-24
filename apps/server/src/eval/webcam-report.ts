@@ -4,7 +4,7 @@
  * calibrated LLR + windowed SPRT) on simulated laptop-webcam frames. See docs/accuracy/identity-v2.md.
  */
 import { DEFAULT_IDENTITY_THRESHOLDS } from '@sp/shared';
-import { CALIBRATION, BUCKET_MODELS, qualityBucket, sampleLLR, type QualityBucket } from '../vision/calibration';
+import { CALIBRATION, BUCKET_MODELS, qualityBucket, referenceClass, sampleLLR, type QualityBucket } from '../vision/calibration';
 import { QUALITY_GATE, QUALITY_GATE_V1, regateQuality } from '../vision/quality';
 import { decideIdentity } from '../vision/identity';
 import type { FrameRecord, WebcamData } from './webcam-eval';
@@ -13,6 +13,7 @@ import {
   fitBuckets,
   formatConditionTables,
   gatePipelineQuality,
+  roomSessions,
   scoreTrials,
   sessionsFrom,
   simulateSequential,
@@ -57,7 +58,13 @@ export function currentPipeline(embedding = 'default'): PipelineSpec {
  * the plain calibrated `sampleLLR` and a template-score rule for checks.
  */
 export interface EngineHooks {
-  comparisonLLR(similarity: number, bucket: QualityBucket, baseline: { mean: number; sd: number; n: number } | null, context: 'continuous' | 'relaxed'): { llr: number };
+  comparisonLLR(
+    similarity: number,
+    bucket: QualityBucket,
+    baseline: { mean: number; sd: number; n: number; bucket?: QualityBucket } | null,
+    context: 'continuous' | 'relaxed',
+    frames?: number,
+  ): { llr: number };
   assessCheck(frames: { usable: boolean; similarity: number | null; bucket: QualityBucket | null; llr: number }[], opts?: { atLimit?: boolean }): { status: string };
 }
 
@@ -108,8 +115,24 @@ export interface PipelineReport {
       perCondition: Record<string, PerConditionSeq>;
     };
   };
+  /**
+   * Mid-exam monitoring in the candidate's OWN room and light (probes rendered in the enrolment scene): genuine
+   * same-room sessions, the same person on another day in that room ("other photo"), and impostors / family members
+   * sitting down in that room. Key `${condition}|${reference class}`. 'plain' = calibrated sampleLLR without context
+   * (v2.0), 'engine' = the identity engine's comparisonLLR in the 'continuous' context (what ships).
+   */
+  sameRoom?: { plain: Record<string, SameRoomRow>; engine?: Record<string, SameRoomRow> };
   /** Checks decided by the identity engine's assessCheck ('relaxed' context): 3 frames, and 6 frames (adaptive). */
   engineChecks?: Record<string, Record<'genuineSame' | 'genuineCross' | 'impostor' | 'family', { frames3: CheckOutcomeRates; frames6: CheckOutcomeRates }>>;
+}
+
+export interface SameRoomRow {
+  genuine: { sessions: number; falseSuspectPer1000h: number | undefined; falseConfirmPer1000h: number | undefined };
+  otherPhoto: { sessions: number; falseSuspectPer1000h: number | undefined; falseConfirmPer1000h: number | undefined };
+  /** Impostors / family: % of sessions reaching 'suspect' within 3 samples / ever, confirmed within 3 samples. */
+  impostor: { sessions: number; suspectWithin3: number | undefined; suspectEver: number | undefined; confirmWithin3: number | undefined };
+  /** Impostor sessions whose mean burst score is >= 0.35 (look-alikes in that light). */
+  hardImpostor: { sessions: number; suspectWithin3: number | undefined; suspectEver: number | undefined; confirmWithin3: number | undefined };
 }
 
 export interface WebcamReport {
@@ -167,7 +190,7 @@ function sequentialFor(p: PipelineSpec, data: WebcamData, runs: number, hooks?: 
   const plain = simulateAll(sessions, rule, sd, runs);
   let normalised: PipelineReport['sequential']['normalised'];
   if (hooks && rule.type === 'sprt') {
-    const nrule: SequentialRule = { ...rule, llr: (sim, b, session) => hooks.comparisonLLR(sim, b, session.refBaseline, 'continuous').llr };
+    const nrule: SequentialRule = { ...rule, llr: (sim, b, session) => hooks.comparisonLLR(sim, b, engineBaseline(session), 'continuous', session.frames).llr };
     const { impostorAfterGenuine: _ignored, ...rest } = simulateAll(sessions, nrule, sd, runs);
     void _ignored;
     normalised = rest;
@@ -179,6 +202,49 @@ function sequentialFor(p: PipelineSpec, data: WebcamData, runs: number, hooks?: 
     sdWithin: sd,
     fits: p.scoring === 'template' ? fitBuckets(all.bursts.filter((b) => b.enrol === 'good' || b.enrol === 'typical')) : undefined,
   };
+}
+
+/** The session baseline as the engine stores it (with the reference's quality bucket). */
+function engineBaseline(s: Pick<Session, 'refBaseline' | 'refBucket'>): { mean: number; sd: number; n: number; bucket?: QualityBucket } | null {
+  return s.refBaseline ? { ...s.refBaseline, ...(s.refBucket ? { bucket: s.refBucket } : {}) } : null;
+}
+
+const ROOM_CONDITIONS: readonly WebcamCondition[] = ['dim', 'backlit', 'typical'];
+
+function sameRoomRows(sessions: readonly Session[], rule: SequentialRule, sd: Record<QualityBucket, number>, runs: number): Record<string, SameRoomRow> {
+  const out: Record<string, SameRoomRow> = {};
+  const mean = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0);
+  for (const c of ROOM_CONDITIONS) {
+    for (const rc of ['poor', 'good'] as const) {
+      const sel = (kinds: string[]) => sessions.filter((s) => kinds.includes(s.kind) && s.condition === c && referenceClass(s.refBucket) === rc);
+      const gen = sel(['genuine_same']);
+      if (gen.length === 0) continue;
+      const g = simulateSequential(gen, rule, sd, { mode: 'genuine', runs, hours: 3 });
+      const o = simulateSequential(sel(['genuine_cross']), rule, sd, { mode: 'genuine', runs: Math.max(5, Math.round(runs / 4)) });
+      const imps = sel(['impostor', 'impostor_family']);
+      const hard = imps.filter((s) => mean(s.sims) >= 0.35);
+      const i = simulateSequential(imps, rule, sd, { mode: 'impostor', runs: Math.max(5, Math.round(runs / 4)) });
+      const h = simulateSequential(hard, rule, sd, { mode: 'impostor', runs });
+      out[`${c}|${rc}`] = {
+        genuine: { sessions: g.sessions, falseSuspectPer1000h: g.falseSuspectPer1000h, falseConfirmPer1000h: g.falseConfirmPer1000h },
+        otherPhoto: { sessions: o.sessions, falseSuspectPer1000h: o.falseSuspectPer1000h, falseConfirmPer1000h: o.falseConfirmPer1000h },
+        impostor: { sessions: i.sessions, suspectWithin3: i.suspectWithin3, suspectEver: i.suspectEver, confirmWithin3: i.detectedWithin?.[3] },
+        hardImpostor: { sessions: h.sessions, suspectWithin3: h.suspectWithin3, suspectEver: h.suspectEver, confirmWithin3: h.detectedWithin?.[3] },
+      };
+    }
+  }
+  return out;
+}
+
+/** Same-room monitoring (needs 'room' frames: WebcamDataOptions.room). */
+function sameRoom(p: PipelineSpec, data: WebcamData, sd: Record<QualityBucket, number>, runs: number, hooks?: EngineHooks): PipelineReport['sameRoom'] {
+  if (p.scoring !== 'template' || !data.records.some((r) => r.role === 'room')) return undefined;
+  const sessions = roomSessions(data, p, ROOM_CONDITIONS);
+  if (sessions.length === 0) return undefined;
+  const params = { ...CALIBRATION.sprt, llrClamp: CALIBRATION.llrClamp };
+  const plain: SequentialRule = { type: 'sprt', llr: (sim, b) => sampleLLR(sim, b), params };
+  const engine: SequentialRule | null = hooks ? { type: 'sprt', llr: (sim, b, s) => hooks.comparisonLLR(sim, b, engineBaseline(s), 'continuous', s.frames).llr, params } : null;
+  return { plain: sameRoomRows(sessions, plain, sd, runs), ...(engine ? { engine: sameRoomRows(sessions, engine, sd, runs) } : {}) };
 }
 
 function rates(statuses: string[]): CheckOutcomeRates {
@@ -222,6 +288,7 @@ export function pipelineReport(data: WebcamData, p: PipelineSpec, opts: { runs?:
   );
   const seq = sequentialFor(p, data, opts.runs ?? 100, p.scoring === 'template' ? opts.hooks : undefined);
   const { sdWithin, fits, ...sequential } = seq;
+  const room = sameRoom(p, data, sdWithin, Math.max(10, Math.round((opts.runs ?? 100) / 5)), opts.hooks);
   return {
     pipeline: p.name,
     enrolment,
@@ -231,6 +298,7 @@ export function pipelineReport(data: WebcamData, p: PipelineSpec, opts: { runs?:
     buckets: fits,
     sdWithin,
     sequential,
+    ...(room ? { sameRoom: room } : {}),
     ...(opts.hooks && p.scoring === 'template' ? { engineChecks: engineChecks(normal.frames, normal.bursts, opts.hooks) } : {}),
   };
 }
@@ -284,6 +352,17 @@ export function formatWebcamReport(r: WebcamReport): string {
       const n = s.normalised;
       out.push(`  with the engine's per-session normalisation (continuous): FA same-photo ${n.genuineSamePhoto.falseConfirmPer1000h}/1000h (bad ${n.genuineSamePhoto.badSessions}/${n.genuineSamePhoto.sessions}), cross-photo ${n.genuineCrossPhoto.falseConfirmPer1000h}; swap median ${n.impostor.medianSamples} samples (${n.impostor.medianSeconds} s), <=3 ${n.impostor.detectedWithin?.[3]}%, never ${n.impostor.notDetected}%; family median ${n.impostorFamily.medianSamples}, <=3 ${n.impostorFamily.detectedWithin?.[3]}%, never ${n.impostorFamily.notDetected}%`);
       out.push(`    per condition: ${Object.entries(n.perCondition).map(([c, v]) => `${c}: FA ${v.falseConfirmPer1000h} (cross ${v.falseConfirmCrossPer1000h}), median ${v.medianSamples}, <=3 ${v.detectedWithin3}%, family <=3 ${v.family3}%, suspect <=3 ${v.suspectWithin3}%`).join(' | ')}`);
+    }
+    if (p.sameRoom) {
+      out.push(`\nSame room and light as the enrolment (mid-exam, 'continuous'): genuine false suspect / confirm per 1000 h | other photo (another day) suspect / confirm | impostor+family suspect <=3 / ever, confirm <=3 % | look-alikes (mean >= 0.35) suspect <=3 / ever %`);
+      const row = (r: SameRoomRow) =>
+        `gen ${r.genuine.falseSuspectPer1000h}/${r.genuine.falseConfirmPer1000h} (n ${r.genuine.sessions}) | other ${r.otherPhoto.falseSuspectPer1000h}/${r.otherPhoto.falseConfirmPer1000h} (n ${r.otherPhoto.sessions}) | imp ${r.impostor.suspectWithin3}/${r.impostor.suspectEver}, conf ${r.impostor.confirmWithin3} (n ${r.impostor.sessions}) | look-alike ${r.hardImpostor.suspectWithin3 ?? '-'}/${r.hardImpostor.suspectEver ?? '-'} (n ${r.hardImpostor.sessions})`;
+      for (const [k, v] of Object.entries(p.sameRoom.plain)) {
+        const [c, rc] = k.split('|');
+        out.push(`  ${c.padEnd(8)} ${rc}-light reference  v2.0 sampleLLR: ${row(v)}`);
+        const e = p.sameRoom.engine?.[k];
+        if (e) out.push(`  ${''.padEnd(8)} ${''.padEnd(15)}      engine: ${row(e)}`);
+      }
     }
     if (p.engineChecks) {
       out.push(`\nChecks decided by the identity engine (assessCheck, 'relaxed'): pass / uncertain / pending / MISMATCH %, 3 frames | 6 frames`);
