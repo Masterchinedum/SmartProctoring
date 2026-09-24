@@ -25,11 +25,15 @@ Requirement-by-requirement mapping: the requirements audit (90 atomic requiremen
 
 ## 3. Verification performed
 
-* **Unit + integration tests**: `pnpm test` — shared, detection engine, server (real Postgres, real ONNX models where relevant), web. All green at handover (see CI workflow).
+* **Unit + integration tests**: `pnpm test` — 667 tests across shared (5), detection engine (109), server (364, real Postgres, real ONNX models where relevant) and web (189). All green at handover; `pnpm typecheck` clean.
 * **End-to-end**: `pnpm test:e2e` — real Chromium with a fake camera (Y4M videos generated from still photos + a synthetic head-turn video), real server, real models: 24 tests covering all core scenarios — happy path with pause/close/resume, pause rules, liveness (still photo fails, turning head passes, tampered client rejected), person swap mid-exam (held ~12 s after the second person appears, compared, released/terminated), different person on resume (held with before/after evidence), dim room (unable to verify → guidance → pass), multiple people, absence + face-return check, covered lens, browser events, 40 s offline (both sides see the interruption; events delivered late exactly once), reload/second browser, staff UI, time extension/expiry, degraded models, environment change as context only, accessibility walkthroughs.
 * **Requirements audit**: an independent read-through of the spec against the code, with empirical verification against a running server; all P0/P1 findings fixed with regression tests.
 * **Security review** (+ follow-ups): IDOR/role checks on every route, CSRF, rate limits, decompression bombs, crypto, headers, SSRF, token leakage, dependency audit (`pnpm audit --prod`: clean). See `SECURITY.md`.
-* **Load test** (`e2e/scripts/load-test.ts`) and profiling — see `PERFORMANCE.md` for measured capacity and sizing.
+* **Load test** (`e2e/scripts/load-test.ts`) and profiling — on a 4-vCPU VM (Postgres and the load generator
+  on the same box): 500 concurrent candidates with heartbeat p95 8 ms, answers/events p95 ≤ 14 ms, identity
+  sample p95 96 ms, check-in frame p95 98 ms, zero errors; one instance sustains ~1,000 candidates
+  (≈ 52 identity samples/s). Plan ≈ 250 candidates per vCPU; scale horizontally with Redis. Details and
+  before/after profiles in `PERFORMANCE.md`.
 * **Accuracy**: identity harness and behavioural-detector harness with committed baselines — see `accuracy/`.
 
 ## 4. Known limitations / before launch
