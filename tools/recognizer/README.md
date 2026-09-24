@@ -20,6 +20,9 @@ is written under `$RECOG_WORK` (default `/tmp/claude-0/recognizer`).
 | `train.py` | Method A (partial self-distillation fine-tune of SFace) and method B (enhancement front-end in front of frozen SFace) |
 | `export.py` | ONNX export with the SFace I/O contract, PyTorch-vs-onnxruntime parity, and CPU latency against the original |
 | `eval.py` | Held-out evaluation on the vision agent's simulated webcam frames and clean photos: EER, TAR@FAR, family impostors, 3-frame averaging, identity-cluster bootstrap CIs and paired deltas |
+| `ts/harness.mts` | Runs the vision agent's **production webcam harness** (`apps/server/src/eval/webcam-*.ts`, the v2 pipeline: quality gate, low-light detection pass, flip/denoise recipe, templates, calibrated LLR/SPRT, engine checks) with another model, via a model-specific cache tag. Optional `--refit` recalibrates `BUCKET_MODELS` to the model's own score distributions. The summary includes the **matched-degradation** case (dim/backlit enrolment vs same-condition probes) |
+| `report.py` | Markdown tables from `eval.py` JSON |
+| `check_recipes.py` | Parity of `prep.py` with the server's recipe embeddings |
 | `check_parity.py`, `ts/dump_embeddings.mts` | Python-vs-server parity of decode, alignment and embedding (also runs a candidate through the real TS engine) |
 | `ts/export_faceset.mts` | Lists the evaluation images from `apps/server/src/eval/datasets.ts` (single source of truth) |
 
@@ -52,10 +55,21 @@ $PY tools/recognizer/train.py --method B --name B_enh --steps 1200 --batch 32 --
 # 5. export + parity + latency
 $PY tools/recognizer/export.py --run A_upto7 --method A --train-upto conv_7 --out $RECOG_WORK/export/A_upto7.onnx
 
-# 6. evaluate (first --model is the reference for paired deltas)
+# 6. evaluate (first --model is the reference for paired deltas); protocols photo, checkin (good-light check-in),
+#    checkin:dim / checkin:backlit (MATCHED degradation: enrolled in the same poor light as the probes)
+$PY tools/recognizer/eval.py --embed-only --model A=$RECOG_WORK/export/A_nce.onnx --recipe none --recipe none+flip   # optional, parallel
 $PY tools/recognizer/eval.py --model base=apps/server/models/face_recognition_sface_2021dec.onnx \
-    --model A=$RECOG_WORK/export/A_upto7.onnx --recipe none --recipe none+flip --recipe gamma+flip --mixed \
-    --out $RECOG_WORK/eval/report
+    --model A=$RECOG_WORK/export/A_nce.onnx --recipe none --recipe none+flip --mixed --out $RECOG_WORK/eval/report
+$PY tools/recognizer/report.py $RECOG_WORK/eval/report.json --protocol photo
+
+# 7. the production harness (v2 pipeline) with the candidate swapped in, then recalibrated
+mkdir -p $RECOG_WORK/harness
+for m in base:apps/server/models/face_recognition_sface_2021dec.onnx A:$RECOG_WORK/export/A_nce.onnx; do
+  $TSX tools/recognizer/ts/harness.mts --model ${m#*:} --tag ${m%%:*} --recipe v2 --shards 2 \
+      --summary $RECOG_WORK/harness/${m%%:*}-v2.summary.json
+  $TSX tools/recognizer/ts/harness.mts --model ${m#*:} --tag ${m%%:*} --recipe v2 --shards 1 \
+      --refit $RECOG_WORK/harness/${m%%:*}-v2.summary.json --summary $RECOG_WORK/harness/${m%%:*}-v2-refit.summary.json
+done
 ```
 
 ## Rules this tooling follows

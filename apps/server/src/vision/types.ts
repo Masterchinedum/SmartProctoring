@@ -122,8 +122,15 @@ export interface QualityGate {
   /** Face-region mean luminance outside [min, max] => `too_dark` / `too_bright`. */
   minBrightness: number;
   maxBrightness: number;
-  /** Face-region luminance std-dev below this => `low_contrast`. */
+  /** Face-region luminance std-dev below this => `low_contrast` (unless the detection is confident, see below). */
   minContrast: number;
+  /**
+   * Optional (identity v2.1): a face whose detector score is at least `confidentDetectionScore` stays usable down
+   * to this contrast (a backlit face lifted by lens flare is flat but still clearly detected and recognisable).
+   * Absent => `minContrast` applies to every face.
+   */
+  minContrastConfident?: number;
+  confidentDetectionScore?: number;
   /** Contrast-normalised variance of Laplacian on the aligned crop below this => `blurry`. */
   minSharpness: number;
   /** |yaw| above this (degrees) => `face_turned`. */

@@ -29,6 +29,8 @@ export const RW_PEOPLE = {
   A: { file: 'deepface/tests__unit__dataset__img47.jpg', label: 'candidate A (deepface p03, photo img47)' },
   /** Candidate A on ANOTHER day: different photo — hair down with a side parting, smiling, other make-up. */
   A2: { file: 'deepface/tests__unit__dataset__img8.jpg', label: 'candidate A, another day (deepface p03, photo img8)' },
+  /** Candidate A on a third day (hair up, other make-up): the other-room head-turn fixture (its photo turns symmetrically). */
+  A3: { file: 'deepface/tests__unit__dataset__img51.jpg', label: 'candidate A, a third day (deepface p03, photo img51)' },
   /**
    * Person B — a plausible substitute: same gender, similar colouring (SFace similarity to A's photos 0.25–0.36 on
    * the source photos; the most A-like non-relative in the sets).
@@ -194,10 +196,10 @@ export const RW_FIXTURES = {
   },
 
   /* ------------------------------------------------ active liveness (head turns) */
-  rwTurnA_typical: { resolution: '1280x720', fps: 5, about: 'A, home, typical: frontal 8 s, then 3 cycles left/right', segments: [{ headturn: shot('A', 'home', 'typical'), frontalSec: 8, cycles: 3 }] },
-  rwTurnA_typical_later: { resolution: '1280x720', fps: 5, variant: 1, about: 'A, home, typical, later (other frames): frontal 8 s, then 3 cycles left/right', segments: [{ headturn: shot('A', 'home', 'typical'), frontalSec: 8, cycles: 3 }] },
-  rwTurnA_dim: { resolution: '1280x720', fps: 5, about: 'A, home, dim: frontal 8 s, then 3 cycles left/right', segments: [{ headturn: shot('A', 'home', 'dim'), frontalSec: 8, cycles: 3 }] },
-  rwTurnA2_other: { resolution: '640x480', fps: 5, about: 'A on another day, other room + USB camera, side lamp: frontal 8 s, 3 cycles', segments: [{ headturn: shot('A2', 'other', 'sidelit'), frontalSec: 8, cycles: 3 }] },
+  rwTurnA_typical: { resolution: '1280x720', fps: 5, about: 'A, home, typical: frontal 14 s, then 3 cycles left / centre / right / centre', segments: [{ headturn: shot('A', 'home', 'typical'), frontalSec: 14, cycles: 3 }] },
+  rwTurnA_typical_later: { resolution: '1280x720', fps: 5, variant: 1, about: 'A, home, typical, later (other frames): frontal 14 s, then 3 cycles', segments: [{ headturn: shot('A', 'home', 'typical'), frontalSec: 14, cycles: 3 }] },
+  rwTurnA_dim: { resolution: '1280x720', fps: 5, about: 'A, home, dim: frontal 14 s, then 3 cycles', segments: [{ headturn: shot('A', 'home', 'dim'), frontalSec: 14, cycles: 3 }] },
+  rwTurnA2_other: { resolution: '640x480', fps: 5, about: 'A on another day (photo img51), other room + USB camera, side lamp: frontal 14 s, 3 cycles', segments: [{ headturn: shot('A3', 'other', 'sidelit'), frontalSec: 14, cycles: 3 }] },
 } satisfies Record<string, RwFixtureSpec>;
 
 export type RwFixtureName = keyof typeof RW_FIXTURES;
@@ -227,13 +229,24 @@ export function rwFixtureAvailable(name: RwFixtureName): boolean {
   return existsSync(FACESETS_DIR) && peopleOf(RW_FIXTURES[name]).every((p) => existsSync(rwPersonFile(p)));
 }
 
-/** Files whose content defines the rendered output (a change rebuilds every fixture). */
-const BUILDER_INPUTS = [join(E2E_DIR, 'scripts/make-realistic.ts'), join(REPO_DIR, 'apps/server/src/eval/webcam-sim.ts')];
+/**
+ * Versions of the builder (scripts/make-realistic.ts): bump COMPOSE when the composition changes (rebuilds every
+ * fixture), TURNS when head turns / glances change (rebuilds only fixtures with head movement). A change of the
+ * simulator (webcam-sim.ts) rebuilds everything.
+ */
+export const RW_BUILDER_VERSION = { compose: 3, turns: 4 } as const;
+const SIMULATOR = join(REPO_DIR, 'apps/server/src/eval/webcam-sim.ts');
+
+function hasTurns(spec: RwFixtureSpec): boolean {
+  return spec.segments.some((s) => 'headturn' in s || ('hold' in s && s.glances));
+}
 
 function specHash(name: RwFixtureName): string {
   const spec = RW_FIXTURES[name];
   const h = createHash('sha256').update(JSON.stringify(spec));
-  for (const f of BUILDER_INPUTS) h.update(existsSync(f) ? readFileSync(f) : '');
+  h.update(`compose:${RW_BUILDER_VERSION.compose}`);
+  if (hasTurns(spec)) h.update(`turns:${RW_BUILDER_VERSION.turns}`);
+  h.update(existsSync(SIMULATOR) ? readFileSync(SIMULATOR) : '');
   for (const p of peopleOf(spec)) h.update(RW_PEOPLE[p].file).update(String(statSync(rwPersonFile(p)).mtimeMs));
   for (const seg of spec.segments) h.update(JSON.stringify(seg));
   h.update(JSON.stringify(RW_SCENES));

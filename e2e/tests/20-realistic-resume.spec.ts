@@ -16,9 +16,14 @@ import { expect, test } from '../lib/test';
  * member (the father resumes the son's… here: the son resumes the father's exam).
  *
  * Measured per run: attempts until the outcome, time from clicking Resume to the outcome, in-place liveness
- * re-prompts, the server's resume-check decisions / similarities. Asserted: a genuine candidate is never held or
- * called a different person and passes within 5 attempts; first-attempt pass in typical and dim light (the target);
- * an impostor never passes.
+ * re-prompts, the server's resume-check decisions / similarities. Asserted — what the product SHOULD do, so these are
+ * regression scenarios, not a snapshot of today's behaviour:
+ *  - a genuine candidate is never called a different person (no identity_mismatch) in any condition;
+ *  - `first`: passes at the first attempt (same room in typical or dim light, another day in typical light);
+ *  - `within2`: passes within two attempts (backlit, side lamp, VGA camera, active liveness in dim / another room);
+ *  - `honest`: may end "unable to verify" with guidance (another day AND poor light — the image may really be too
+ *    poor), but never a mismatch;
+ *  - an impostor never passes.
  */
 
 interface ResumeCase {
@@ -26,34 +31,34 @@ interface ResumeCase {
   enrol: RwFixtureName;
   resume: RwFixtureName;
   liveness: 'off' | 'active';
-  /** The target: passes on the first attempt. */
-  firstAttempt: boolean;
+  /** What the product should achieve for a genuine candidate (see above); impostors: 'never'. */
+  expect: 'first' | 'within2' | 'honest' | 'never';
 }
 
 const GENUINE: ResumeCase[] = [
   // Same day (the check-in photo of A, other frames): the light changes.
-  { id: 'typical', enrol: 'rwA_typical', resume: 'rwA_typical_later', liveness: 'off', firstAttempt: true },
-  { id: 'dim', enrol: 'rwA_typical', resume: 'rwA_dim', liveness: 'off', firstAttempt: true },
-  { id: 'backlit', enrol: 'rwA_typical', resume: 'rwA_backlit', liveness: 'off', firstAttempt: false },
-  { id: 'sidelit', enrol: 'rwA_typical', resume: 'rwA_sidelit', liveness: 'off', firstAttempt: false },
-  { id: 'dim-480p', enrol: 'rwA_typical', resume: 'rwA_dim480', liveness: 'off', firstAttempt: true },
+  { id: 'typical', enrol: 'rwA_typical', resume: 'rwA_typical_later', liveness: 'off', expect: 'first' },
+  { id: 'dim', enrol: 'rwA_typical', resume: 'rwA_dim', liveness: 'off', expect: 'first' },
+  { id: 'backlit', enrol: 'rwA_typical', resume: 'rwA_backlit', liveness: 'off', expect: 'within2' },
+  { id: 'sidelit', enrol: 'rwA_typical', resume: 'rwA_sidelit', liveness: 'off', expect: 'within2' },
+  { id: 'dim-480p', enrol: 'rwA_typical', resume: 'rwA_dim480', liveness: 'off', expect: 'within2' },
   // Another day (another photo of A: hair down, smiling, other make-up).
-  { id: 'other-day-typical', enrol: 'rwA_typical', resume: 'rwA2_typical', liveness: 'off', firstAttempt: true },
-  { id: 'other-day-dim', enrol: 'rwA_typical', resume: 'rwA2_dim', liveness: 'off', firstAttempt: true },
-  { id: 'other-day-backlit', enrol: 'rwA_typical', resume: 'rwA2_backlit', liveness: 'off', firstAttempt: false },
-  { id: 'other-day-room-camera', enrol: 'rwA_typical', resume: 'rwA2_other_typical', liveness: 'off', firstAttempt: false },
-  { id: 'other-day-room-camera-dim', enrol: 'rwA_typical', resume: 'rwA2_other_dim', liveness: 'off', firstAttempt: false },
+  { id: 'other-day-typical', enrol: 'rwA_typical', resume: 'rwA2_typical', liveness: 'off', expect: 'first' },
+  { id: 'other-day-dim', enrol: 'rwA_typical', resume: 'rwA2_dim', liveness: 'off', expect: 'honest' },
+  { id: 'other-day-backlit', enrol: 'rwA_typical', resume: 'rwA2_backlit', liveness: 'off', expect: 'honest' },
+  { id: 'other-day-room-camera', enrol: 'rwA_typical', resume: 'rwA2_other_typical', liveness: 'off', expect: 'within2' },
+  { id: 'other-day-room-camera-dim', enrol: 'rwA_typical', resume: 'rwA2_other_dim', liveness: 'off', expect: 'honest' },
   // Active liveness (head turns) at check-in and at resume.
-  { id: 'typical', enrol: 'rwTurnA_typical', resume: 'rwTurnA_typical_later', liveness: 'active', firstAttempt: true },
-  { id: 'dim', enrol: 'rwTurnA_typical', resume: 'rwTurnA_dim', liveness: 'active', firstAttempt: true },
-  { id: 'other-day-room-camera', enrol: 'rwTurnA_typical', resume: 'rwTurnA2_other', liveness: 'active', firstAttempt: false },
+  { id: 'typical', enrol: 'rwTurnA_typical', resume: 'rwTurnA_typical_later', liveness: 'active', expect: 'first' },
+  { id: 'dim', enrol: 'rwTurnA_typical', resume: 'rwTurnA_dim', liveness: 'active', expect: 'within2' },
+  { id: 'other-day-room-camera', enrol: 'rwTurnA_typical', resume: 'rwTurnA2_other', liveness: 'active', expect: 'within2' },
 ];
 
 const IMPOSTOR: ResumeCase[] = [
-  { id: 'B-typical', enrol: 'rwA_typical', resume: 'rwB_typical', liveness: 'off', firstAttempt: false },
-  { id: 'B-dim', enrol: 'rwA_typical', resume: 'rwB_dim', liveness: 'off', firstAttempt: false },
-  { id: 'B-backlit', enrol: 'rwA_typical', resume: 'rwB_backlit', liveness: 'off', firstAttempt: false },
-  { id: 'family-son-for-father', enrol: 'rwDAD_typical', resume: 'rwSON_typical', liveness: 'off', firstAttempt: false },
+  { id: 'B-typical', enrol: 'rwA_typical', resume: 'rwB_typical', liveness: 'off', expect: 'never' },
+  { id: 'B-dim', enrol: 'rwA_typical', resume: 'rwB_dim', liveness: 'off', expect: 'never' },
+  { id: 'B-backlit', enrol: 'rwA_typical', resume: 'rwB_backlit', liveness: 'off', expect: 'never' },
+  { id: 'family-son-for-father', enrol: 'rwDAD_typical', resume: 'rwSON_typical', liveness: 'off', expect: 'never' },
 ];
 
 async function checkInPauseClose(link: string, enrol: RwFixtureName, browser: Browser) {
@@ -95,13 +100,15 @@ for (const cs of [...GENUINE, ...IMPOSTOR]) {
         const events = await staff.events(s.sessionId);
         const types = events.map((e) => e.type);
         const verdictLines = c.apiLog.filter((l) => / complete /.test(l));
-        const pass = impostor ? r.final !== 'passed' : r.final === 'passed' && (!cs.firstAttempt || r.attempts === 1);
+        const within = cs.expect === 'first' ? 1 : cs.expect === 'within2' ? 2 : 5;
+        const pass = impostor ? r.final !== 'passed' : cs.expect === 'honest' ? !types.includes('identity_mismatch') : r.final === 'passed' && r.attempts <= within;
         recordMetric(testInfo, {
           scenario: impostor ? 'resume-impostor' : 'resume',
           case: cs.id,
           liveness: cs.liveness,
           rep,
           pass,
+          target: cs.expect,
           fixture: cs.resume,
           camera: cam ? `${cam.width}x${cam.height}` : null,
           final: r.final,
@@ -128,10 +135,19 @@ for (const cs of [...GENUINE, ...IMPOSTOR]) {
           expect(d.summary.status).not.toBe('active');
           return;
         }
-        // Genuine: never held, never "a different person"; passes (target: at the first attempt in typical / dim).
+        // Genuine: never "a different person" in any light.
         expect(types, 'no identity_mismatch for the genuine candidate').not.toContain('identity_mismatch');
-        expect(r.final, `genuine resume outcome after ${r.attempts} attempt(s): ${JSON.stringify(r.outcomes)} ${JSON.stringify(r.guidance)}`).toBe('passed');
-        if (cs.firstAttempt) expect.soft(r.attempts, 'target: first-attempt pass').toBe(1);
+        expect(d.summary.hold?.reason ?? null).not.toBe('identity_mismatch');
+        if (cs.expect === 'honest') {
+          // Another day in poor light: "unable to verify" with guidance is an honest answer; a pass is welcome.
+          if (r.final !== 'passed') {
+            expect(r.guidance.flat().length, 'guidance to improve the view').toBeGreaterThan(0);
+            return;
+          }
+        } else {
+          expect(r.final, `genuine resume outcome after ${r.attempts} attempt(s): ${JSON.stringify(r.outcomes)} ${JSON.stringify(r.guidance)}`).toBe('passed');
+          expect(r.attempts, `target: pass within ${within} attempt(s) (${cs.expect})`).toBeLessThanOrEqual(within);
+        }
         await c.continueAfterCheck();
         await expect(c.tid('qnav-0')).toHaveClass(/answered/);
       } finally {

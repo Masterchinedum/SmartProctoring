@@ -19,6 +19,10 @@ Loss (L2-normalised embeddings s = student, t = teacher target, over a batch of 
       + w_rel * mean_{i != j} (<s(deg_i), t_j> - <t_i, t_j>)^2      keep the teacher's impostor geometry
       + w_rel * mean_{i != j} (<s(clean_i), t_j> - <t_i, t_j>)^2
       (+ w_pix * mean|E(clean) - clean| / 255 for method B)
+      (+ w_dd * mean_{i != j} (<s(deg_i), s(deg_j)> - <t_i, t_j>)^2      degraded-vs-degraded geometry (MATCHED
+         degradation: a dim-room reference vs dim-room probes), with --p-homog condition-homogeneous batches
+       + w_mean * [(mean <s(deg_i), t_j> - mean <t_i, t_j>)^2 + (mean <s(deg_i), s(deg_j)> - mean <t_i, t_j>)^2]
+         first-moment (impostor-mean) penalties)
       (+ w_nce * InfoNCE(s(deg_i) vs the teacher's clean embeddings of ALL training portraits, both orientations,
          temperature tau): instance discrimination against fixed prototypes, still label-free; counteracts the
          regression-to-the-mean of the cosine term, which raises impostor similarity on uninformative inputs)
@@ -171,10 +175,21 @@ class Data:
         for j, s in enumerate(self.deg_src):
             by.setdefault(int(s), []).append(j)
         self.deg_by_src = by
+        self.by_cond = {}
+        for j, (s_, tg) in enumerate(zip(self.deg_src, self.deg_tags)):
+            if not self.is_val[s_]:
+                self.by_cond.setdefault(str(tg).split("+")[0], {}).setdefault(int(s_), []).append(j)
 
-    def batch(self, rng: np.random.Generator, b: int):
-        srcs = rng.choice(self.train_src, size=b, replace=False)
-        js = np.array([rng.choice(self.deg_by_src[int(s)]) for s in srcs])
+    def batch(self, rng: np.random.Generator, b: int, condition: str | None = None):
+        """b distinct portraits, one degraded crop each; with `condition`, only crops rendered in that condition
+        (matched degradation inside the batch)."""
+        if condition is None:
+            srcs = rng.choice(self.train_src, size=b, replace=False)
+            js = np.array([rng.choice(self.deg_by_src[int(s)]) for s in srcs])
+        else:
+            pool = self.by_cond[condition]
+            srcs = rng.choice(np.array(sorted(pool)), size=b, replace=False)
+            js = np.array([rng.choice(pool[int(s)]) for s in srcs])
         deg = torch.from_numpy(self.deg[js]).permute(0, 3, 1, 2).float()
         fl = torch.from_numpy(self.deg_flip[js].astype(np.int64))
         s_t = torch.from_numpy(srcs)
@@ -219,6 +234,18 @@ def validate(model: nn.Module, data: Data, max_items: int = 900) -> dict:
     cl = data.clean_t[gal_ids, 0]
     sc = torch.cat([F.normalize(model(cl[i : i + 64]), dim=1) for i in range(0, len(cl), 64)])
     compat = (sc * gallery).sum(1)
+    tags_all = np.array([str(t).split("+")[0] for t in data.deg_tags[js]])
+    dd = {}
+    for c in ("dim", "backlit"):
+        m_ = torch.from_numpy(tags_all == c)
+        sc_ = s[m_]
+        if len(sc_) > 2:
+            g_ = sc_ @ sc_.T
+            srcc = src[m_]
+            off_ = srcc[:, None] != srcc[None, :]
+            v_ = g_[off_]
+            dd[f"dd_{c}_imp_mean"] = float(v_.mean())
+            dd[f"dd_{c}_imp_p99"] = float(torch.quantile(v_, 0.99))
     tar = {}
     for far in (1e-2, 1e-3):
         thr = torch.quantile(imp[torch.randperm(len(imp), generator=torch.Generator().manual_seed(0))[:200000]], 1 - far)
@@ -235,6 +262,7 @@ def validate(model: nn.Module, data: Data, max_items: int = 900) -> dict:
         "clean_compat_min": float(compat.min()),
         "per_condition_genuine": per,
         **tar,
+        **dd,
         "n": len(js),
     }
 
@@ -254,6 +282,11 @@ def main() -> None:
     ap.add_argument("--w-pix", type=float, default=0.1)
     ap.add_argument("--w-nce", type=float, default=0.0, help="InfoNCE of s(deg) against the teacher's clean embeddings of all training portraits")
     ap.add_argument("--tau", type=float, default=0.07)
+    ap.add_argument("--w-dd", type=float, default=0.0, help="relational loss between DEGRADED student embeddings: <s(deg_i), s(deg_j)> ~ <t_i, t_j> (matched degradation)")
+    ap.add_argument("--w-mean", type=float, default=0.0, help="first-moment penalty: mean impostor similarity (deg-vs-clean and deg-vs-deg) = teacher's clean-clean mean")
+    ap.add_argument("--p-homog", type=float, default=0.0, help="probability that a batch's degraded crops all share one condition")
+    ap.add_argument("--init", default=None, help="start from this checkpoint (state_dict of the same method)")
+    ap.add_argument("--dd-penalty", type=float, default=0.0, help="early-stopping penalty per unit of matched-degradation impostor p99 above the start model")
     ap.add_argument("--p-crop-aug", type=float, default=0.25, help="fraction of the degraded batch replaced by crop-level degradations of clean crops")
     ap.add_argument("--val-every", type=int, default=100)
     ap.add_argument("--patience", type=int, default=5)
@@ -273,6 +306,9 @@ def main() -> None:
     data = Data(Path(args.data))
     print(f"data: {len(data.clean)} portraits ({len(data.train_src)} train / {len(data.val_src)} val), {len(data.deg)} degraded crops; teacher targets in {time.time() - t0:.0f}s", flush=True)
     model, params = build_student(args.method, args.train_upto, args.enh_c1, args.enh_c2, args.enh_blocks)
+    if args.init:
+        model.load_state_dict(torch.load(args.init))
+        print(f"initialised from {args.init}", flush=True)
     lr = args.lr if args.lr is not None else (5e-5 if args.method == "A" else 1e-3)
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=0.0)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 50) * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps))))
@@ -285,13 +321,28 @@ def main() -> None:
     score = lambda v: v["tar_far1e-03"] + 0.5 * v["tar_far1e-02"] + 0.25 * v["genuine_mean"] - max(0.0, 0.985 - v["clean_compat_mean"]) * 10  # noqa: E731
     bank = data.t[torch.from_numpy(data.train_src.astype(np.int64))].reshape(-1, 128)  # (2 * n_train, 128) fixed prototypes
     bank_pos = {int(s_): k for k, s_ in enumerate(data.train_src)}
+    ref_val = base_val
+    if args.init:  # matched-degradation reference = the ORIGINAL SFace, not the checkpoint we start from
+        ref_val = validate(build_student("A", "conv_1")[0], data)
+        print("teacher val", json.dumps(ref_val), flush=True)
+    dd0 = max(ref_val.get("dd_dim_imp_p99", 0.0), ref_val.get("dd_backlit_imp_p99", 0.0))
+    if args.dd_penalty:
+        _score0 = score
+        score = lambda v: _score0(v) - args.dd_penalty * max(0.0, max(v.get("dd_dim_imp_p99", 0.0), v.get("dd_backlit_imp_p99", 0.0)) - dd0)  # noqa: E731
     best = score(base_val)
     best_step, bad = 0, 0
     torch.save({k: v for k, v in model.state_dict().items()}, out / "best.pt")
     for step in range(1, args.steps + 1):
         model.eval()  # BN statistics frozen (eval mode) for every method
-        deg, t, srcs, fl = data.batch(rng, args.batch)
-        n_aug = int(round(args.p_crop_aug * args.batch))
+        cond = None
+        if args.p_homog and rng.random() < args.p_homog:
+            cond = str(rng.choice(["dim", "backlit", "typical", "sidelit", "good"], p=[0.35, 0.35, 0.1, 0.1, 0.1]))
+        deg, t, srcs, fl = data.batch(rng, args.batch, cond)
+        if cond is not None:
+            n_aug_override = 0
+        else:
+            n_aug_override = None
+        n_aug = int(round(args.p_crop_aug * args.batch)) if n_aug_override is None else n_aug_override
         if n_aug:
             cl = data.clean_t[srcs[:n_aug], fl[:n_aug]]
             deg[:n_aug] = crop_degrade(cl, g)
@@ -311,6 +362,15 @@ def main() -> None:
         l_clean = (1 - (sc * tc).sum(1)).mean()
         l_rel = rel_loss(sd, t) + rel_loss(sc, tc)
         loss = l_cos + args.w_clean * l_clean + args.w_rel * l_rel
+        if args.w_dd or args.w_mean:
+            off = ~torch.eye(len(t), dtype=torch.bool)
+            gt = (t @ t.T)[off]
+            gdd = (sd @ sd.T)[off]
+            if args.w_dd:
+                loss = loss + args.w_dd * ((gdd - gt) ** 2).mean()
+            if args.w_mean:
+                gdt = (sd @ t.T)[off]
+                loss = loss + args.w_mean * ((gdt.mean() - gt.mean()) ** 2 + (gdd.mean() - gt.mean()) ** 2)
         if args.w_nce:
             target = torch.tensor([2 * bank_pos[int(s_)] for s_ in srcs]) + fl
             l_nce = F.cross_entropy(sd @ bank.T / args.tau, target)

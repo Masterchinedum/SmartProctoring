@@ -114,7 +114,8 @@ export async function checkWithRetries(c: CandidatePage, o: { purpose?: 'resume'
       const rp = await c.tid('verify-reprompt').isVisible().catch(() => false);
       if (rp && !repromptVisible) res.reprompts++;
       repromptVisible = rp;
-      await c.page.waitForTimeout(400);
+      await c.traceVerify();
+      await c.page.waitForTimeout(250);
     }
     res.attemptMs.push(Date.now() - ta);
     if (!outcome) {

@@ -75,7 +75,7 @@ export const test = base.extend<{ staffPage: (b?: Browser) => Promise<Page>; dia
       let i = 0;
       for (const c of OPEN_CANDIDATE_PAGES) {
         i++;
-        const body = [`# candidate page ${i}: identity API answers`, ...c.apiLog, '', '# console errors / warnings', ...c.logs, '', '# HTTP errors', ...c.httpErrors].join('\n');
+        const body = [`# candidate page ${i}: identity API answers`, ...c.apiLog, '', '# identity check screen (on change)', ...c.verifyTrace, '', '# console errors / warnings', ...c.logs, '', '# HTTP errors', ...c.httpErrors].join('\n');
         const file = testInfo.outputPath(`candidate-${i}.log`);
         writeFileSync(file, body);
         await testInfo.attach(`candidate-${i}.log`, { path: file, contentType: 'text/plain' });

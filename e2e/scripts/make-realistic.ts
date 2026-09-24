@@ -136,38 +136,49 @@ async function makeWarp(who: string, amp: number): Promise<Buffer> {
   return sharp(res, { raw: { width: W, height: H, channels: 3 } }).jpeg({ quality: 96 }).toBuffer();
 }
 
-/** Warp amplitudes giving +TURN_DEG (subject's left, yaw+) and −TURN_DEG of measured yaw for `who`. */
+/**
+ * Warp amplitudes giving +TURN_DEG (subject's left, yaw+) and −TURN_DEG of yaw, measured by YuNet on the RENDERED
+ * webcam frame of `who` in `scene` (good light) — the webcam's downscale / blur shrink the measured turn.
+ */
 const turnCache = new Map<string, Promise<{ left: number; right: number; yaw0: number }>>();
-function turnAmps(who: string): Promise<{ left: number; right: number; yaw0: number }> {
-  let p = turnCache.get(who);
+function turnAmps(who: string, scene: string): Promise<{ left: number; right: number; yaw0: number }> {
+  const key = `${who}/${scene}`;
+  let p = turnCache.get(key);
   if (!p) {
     p = (async () => {
-      const yawAt = async (amp: number) => (await vision.analyze(await warpedSource(who, amp), {})).pose?.yawDeg ?? NaN;
+      const yawAt = async (amp: number) => {
+        const r = await render(who, scene, 'good', amp, 0);
+        const jpeg = await sharp(r.rgb, { raw: { width: r.w, height: r.h, channels: 3 } }).jpeg({ quality: 95 }).toBuffer();
+        return (await vision.analyze(jpeg, {})).pose?.yawDeg ?? NaN;
+      };
       const yaw0 = await yawAt(0);
+      // The warp's measured yaw is not monotonic for every photo (hair / expression): scan, take the smallest
+      // amplitude reaching the target, else the one with the largest turn.
       const solve = async (dir: 1 | -1) => {
-        let lo = 0.02;
-        let hi = 0.9;
-        for (let i = 0; i < 9; i++) {
-          const mid = Math.round(((lo + hi) / 2) * 100) / 100;
-          const d = dir * ((await yawAt(dir * mid)) - yaw0);
-          if (Number.isFinite(d) && d >= TURN_DEG) hi = mid;
-          else lo = mid;
+        let best = { amp: 0.05, d: -Infinity };
+        for (let a = 0.05; a <= 0.6 + 1e-9; a += 0.05) {
+          const amp = Math.round(a * 100) / 100;
+          const d = dir * ((await yawAt(dir * amp)) - yaw0);
+          if (!Number.isFinite(d)) continue;
+          if (d >= TURN_DEG) return dir * amp;
+          if (d > best.d) best = { amp, d };
         }
-        return dir * hi;
+        log(`head-turn for ${who} in ${scene} (${dir > 0 ? 'left' : 'right'}): target ${TURN_DEG}° not reached, using ${best.d.toFixed(1)}°`);
+        return dir * best.amp;
       };
       const r = { left: await solve(1), right: await solve(-1), yaw0 };
-      log(`head-turn amplitudes for ${who}: left ${r.left}, right ${r.right} (photo yaw ${yaw0.toFixed(1)}°, target ±${TURN_DEG}°)`);
+      log(`head-turn amplitudes for ${who} in ${scene}: left ${r.left}, right ${r.right} (frontal yaw ${yaw0.toFixed(1)}°, target ±${TURN_DEG}°)`);
       return r;
     })();
-    turnCache.set(who, p);
+    turnCache.set(key, p);
   }
   return p;
 }
 
 /** Warp amplitude for a normalised turn u ∈ [-1, 1] (u > 0 = subject's left), quantised to 0.01. */
-async function ampFor(who: string, u: number): Promise<number> {
+async function ampFor(s: Shot, u: number): Promise<number> {
   if (Math.abs(u) < 1e-6) return 0;
-  const t = await turnAmps(who);
+  const t = await turnAmps(s.who, s.scene);
   return Math.round((u > 0 ? u * t.left : -u * t.right) * 100) / 100;
 }
 
@@ -367,12 +378,19 @@ function glance(t: number): number {
   return Math.round((dir * GLANCE_FRAC * e) / 0.125) * 0.125;
 }
 
+/**
+ * One head-turn cycle (seconds, normalised turn): turn left, hold, back to the centre and look at the screen for 3 s,
+ * turn right, hold, centre for 3 s. A recorded video cannot follow the instructions, so the centre pauses are long
+ * enough for the frontal pictures / 'look at the screen' step whenever the check happens to start.
+ */
+const HEADTURN_CYCLE: readonly (readonly [number, number])[] = [[1.2, 1], [2.5, 1], [1.2, 0], [3, 0], [1.2, -1], [2.5, -1], [1.2, 0], [3, 0]];
+
 /** Liveness turn timeline (normalised, as synth-headturn.ts): frontal hold, then cycles left → centre → right → centre. */
 function headturnAmp(t: number, frontalSec: number, cycles: number): number {
   const keys: [number, number][] = [[0, 0], [frontalSec, 0]];
   let tt = frontalSec;
   for (let i = 0; i < cycles; i++) {
-    for (const [dur, amp] of [[1.2, 1], [2.5, 1], [1.2, 0], [1.5, 0], [1.2, -1], [2.5, -1], [1.2, 0], [1.5, 0]] as const) {
+    for (const [dur, amp] of HEADTURN_CYCLE) {
       tt += dur;
       keys.push([tt, amp]);
     }
@@ -386,7 +404,7 @@ function headturnAmp(t: number, frontalSec: number, cycles: number): number {
 }
 
 function headturnSeconds(frontalSec: number, cycles: number): number {
-  return frontalSec + cycles * 12.8;
+  return frontalSec + cycles * HEADTURN_CYCLE.reduce((a, [d]) => a + d, 0);
 }
 
 function segSeconds(s: RwSegment): number {
@@ -403,13 +421,13 @@ async function frameAt(spec: RwFixtureSpec, W: number, H: number, seg: RwSegment
     const l = await layerFor(seg.hold);
     const sw = sway(t, l.ie, loop, seg.motion === 'still');
     const u = seg.glances ? glance(t) : 0;
-    people.push({ shot: seg.hold, dx: sw.dx + u * HEAD_SHIFT * l.ie, dy: sw.dy, amp: await ampFor(seg.hold.who, u), alpha: 1 });
+    people.push({ shot: seg.hold, dx: sw.dx + u * HEAD_SHIFT * l.ie, dy: sw.dy, amp: await ampFor(seg.hold, u), alpha: 1 });
     bg = await matchedRoom(seg.hold.who, seg.hold.scene, seg.hold.cond);
   } else if ('headturn' in seg) {
     const l = await layerFor(seg.headturn);
     const sw = sway(t, l.ie, loop, true);
     const u = Math.round(headturnAmp(tSeg, seg.frontalSec, seg.cycles) / 0.125) * 0.125;
-    people.push({ shot: seg.headturn, dx: sw.dx + u * HEAD_SHIFT * l.ie, dy: sw.dy, amp: await ampFor(seg.headturn.who, u), alpha: 1 });
+    people.push({ shot: seg.headturn, dx: sw.dx + u * HEAD_SHIFT * l.ie, dy: sw.dy, amp: await ampFor(seg.headturn, u), alpha: 1 });
     bg = await matchedRoom(seg.headturn.who, seg.headturn.scene, seg.headturn.cond);
   } else if ('leave' in seg) {
     const l = await layerFor(seg.leave);

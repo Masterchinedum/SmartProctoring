@@ -6,6 +6,7 @@ import { errorMessage, useController, useSnapshot } from '../context';
 import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
 import { captureFaceCrop } from '../monitoring/frames';
 import { AdaptiveCheck } from './adaptive';
+import { PoseSmoother } from './poseFilter';
 import { CheckProgress } from './progress';
 import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrameAnalysis';
 
@@ -112,6 +113,8 @@ export function VerifyStep({
     centre: null as Pose | null,
     /** When to hand the attempt to the server although the guided capture did not finish. */
     progress: new CheckProgress(),
+    /** Noise-adaptive pose smoothing for the liveness tracker (dim-light pose jitter, poseFilter.ts). */
+    pose: new PoseSmoother(),
   });
 
   const setPhaseBoth = (p: Phase) => {
@@ -157,6 +160,7 @@ export function VerifyStep({
       r.tracker = null;
       r.trackerCentred = false;
       r.completing = false;
+      r.pose = new PoseSmoother();
       const b = ctrl.currentBaseline();
       r.centre = b && b.samples > 0 ? { yaw: b.yaw, pitch: b.pitch } : null;
       r.progress.start(performance.now());
@@ -384,6 +388,11 @@ export function VerifyStep({
       if (!r.check || !a || r.cancelled || r.completing) return;
       const faces = plausibleFaces(fa.faces);
       const face = faces.length === 1 ? faces[0] : null;
+      // The liveness tracker sees the smoothed pose (warmed up during the frontal phase, so its noise estimate is
+      // ready when the head turns start); frontal frames are gated on the raw pose.
+      const sm = face ? r.pose.push(fa.t, face.yaw, face.pitch) : null;
+      if (!face) r.pose.reset();
+      const turnFace = face && sm ? { ...face, yaw: sm.yaw, pitch: sm.pitch } : null;
       const spacedOk = performance.now() - r.lastCaptureAt >= MIN_CAPTURE_SPACING_MS;
       advance();
       if (r.completing) return;
@@ -418,7 +427,7 @@ export function VerifyStep({
 
       if (r.phase === 'liveness' && r.tracker) {
         const tr = r.tracker;
-        const prog = tr.update(face, faces.length, fa.t);
+        const prog = tr.update(turnFace, faces.length, fa.t);
         r.progress.liveness(prog.stepIndex, prog.stage === 'verify' ? 1 : (prog.progress ?? 0), performance.now());
         const steps: LivenessStep[] = r.check.liveness?.steps ?? [];
         const step = steps.find((s) => s.index === prog.stepIndex) ?? steps[Math.min(steps.length - 1, Math.max(0, prog.stepIndex))];
@@ -435,14 +444,14 @@ export function VerifyStep({
           advance();
           return;
         }
-        if (face && prog.readyToCapture && spacedOk && r.inflight < 2) {
+        if (turnFace && prog.readyToCapture && spacedOk && r.inflight < 2) {
           const idx = prog.stepIndex;
           tr.markCaptured(fa.t);
           r.progress.captured(performance.now());
           a.stepSentOne(idx);
           upload(
             idx,
-            face,
+            turnFace,
             ctrl.api,
             (res) => {
               a.stepResult(idx, res);

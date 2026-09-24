@@ -141,6 +141,30 @@ export class CandidatePage {
   readonly httpErrors: string[] = [];
   /** Identity-relevant API answers (check frames, check completes, identity samples), one line each. */
   readonly apiLog: string[] = [];
+  /** What the identity check screen showed over time (phase / stage / instruction / progress), on change. */
+  readonly verifyTrace: string[] = [];
+  private lastVerify = '';
+
+  /** Sample the identity check screen once; appends a line to `verifyTrace` when it changed. */
+  async traceVerify(): Promise<void> {
+    const v = await this.page
+      .evaluate(() => {
+        const q = (id: string) => document.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+        const step = q('verify-step');
+        if (!step) return null;
+        const prog = q('verify-step-progress')?.getAttribute('aria-valuenow') ?? '-';
+        const hold = q('verify-hold') ? (q('verify-hold')!.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') ?? '?') : '-';
+        const g = (q('verify-guidance')?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 120);
+        const live = (step.querySelector('.cand-live-slot') as HTMLElement | null)?.innerText.replace(/\s+/g, ' ').slice(0, 120) ?? '';
+        return `${step.dataset.phase ?? '-'} ${step.dataset.stage ?? '-'} prog=${prog} hold=${hold} "${(q('verify-instruction')?.innerText ?? '').replace(/\s+/g, ' ')}"${q('verify-reprompt') ? ' REPROMPT' : ''}${live || g ? ` | ${live || g}` : ''}`;
+      })
+      .catch(() => null);
+    if (v && v !== this.lastVerify) {
+      this.lastVerify = v;
+      this.verifyTrace.push(`${hhmmss(Date.now())} ${v}`);
+      if (this.verifyTrace.length > 3000) this.verifyTrace.splice(0, 1000);
+    }
+  }
 
   private constructor(
     readonly context: BrowserContext,

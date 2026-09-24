@@ -11,7 +11,10 @@ import { interEyeDistance } from './detect';
  * Default gate for live webcam frames (identity v2). It only refuses frames on which face RECOGNITION is not
  * reliable — measured on simulated laptop-webcam frames as the similarity of a frame to the same person's
  * good-light template collapsing (docs/accuracy/identity-v2.md §4):
- *   - face-region contrast (luma std) < 7: genuine similarity p05 0.03-0.10 (vs 0.65+ at >= 15), impostors alike
+ *   - face-region contrast (luma std) < 7: genuine similarity p05 0.03-0.10 (vs 0.65+ at >= 15), impostors alike —
+ *     except when the detector is confident (score >= 0.88): such flat faces (typically backlit, lifted by lens
+ *     flare) stay recognisable down to contrast 5 (v2.1: backlit contrast 5-7 with a confident detection: genuine
+ *     p05 0.39, median 0.63, 2 % below 0.3; without: 16-42 % below 0.3)
  *   - face-region brightness < 40 (unchanged from v1: below it 33-50 % of genuine dim-room frames collapse to
  *     similarity < 0.2 against the person's own good-light template) or > 235 (clipped)
  *   - inter-eye distance < 20 px (at 20-24 px genuine similarity is still p05 0.91 in good light)
@@ -28,6 +31,8 @@ export const QUALITY_GATE: Readonly<QualityGate> = Object.freeze({
   minBrightness: 40,
   maxBrightness: 235,
   minContrast: 7,
+  minContrastConfident: 5,
+  confidentDetectionScore: 0.88,
   minSharpness: 80,
   maxAbsYawDeg: 30,
   minPitchDeg: -35,
@@ -254,6 +259,13 @@ export function isCutOff(face: DetectedFace, width: number, height: number, tole
   return face.landmarks.some((p) => p.x < margin || p.y < margin || p.x > width - 1 - margin || p.y > height - 1 - margin);
 }
 
+/** Face contrast too low to recognise: below `minContrast`, unless the detection is confident (then below `minContrastConfident`). */
+export function lowContrast(contrast: number, detectionScore: number, gate: Pick<QualityGate, 'minContrast' | 'minContrastConfident' | 'confidentDetectionScore'>): boolean {
+  if (contrast >= gate.minContrast) return false;
+  if (gate.minContrastConfident == null || gate.confidentDetectionScore == null) return true;
+  return contrast < gate.minContrastConfident || detectionScore < gate.confidentDetectionScore;
+}
+
 /** Order in which issues (and therefore guidance) are presented: most fundamental first. */
 const ISSUE_ORDER: QualityIssue[] = [
   'no_face',
@@ -305,7 +317,7 @@ export function assessQuality(input: QualityInput, gate: QualityGate = QUALITY_G
   if (cutOff) issues.add('face_cut_off');
   if (brightness < gate.minBrightness) issues.add('too_dark');
   if (brightness > gate.maxBrightness) issues.add('too_bright');
-  if (contrast < gate.minContrast) issues.add('low_contrast');
+  if (lowContrast(contrast, primary.score, gate)) issues.add('low_contrast');
   if (interEyePx < gate.minInterEyePx) issues.add('face_too_small');
   if (!poseWithinGate(yawDeg, pitchDeg, gate)) issues.add('face_turned');
   // Sharpness is meaningless on a crop that is mostly dark/flat; those images are already rejected.
@@ -344,7 +356,7 @@ export function regateQuality(q: FaceQuality, faces: DetectedFace[], width: numb
   if (cutOff) issues.add('face_cut_off');
   if (q.brightness < gate.minBrightness) issues.add('too_dark');
   if (q.brightness > gate.maxBrightness) issues.add('too_bright');
-  if (q.contrast < gate.minContrast) issues.add('low_contrast');
+  if (lowContrast(q.contrast, q.detectionScore, gate)) issues.add('low_contrast');
   if (q.interEyePx < gate.minInterEyePx) issues.add('face_too_small');
   if (!poseWithinGate(q.yawDeg, q.pitchDeg, gate)) issues.add('face_turned');
   if (q.sharpness < gate.minSharpness && !issues.has('too_dark') && !issues.has('low_contrast')) issues.add('blurry');

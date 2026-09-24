@@ -20,7 +20,7 @@
 import { DEFAULT_IDENTITY_THRESHOLDS, type FaceQuality, type IdentityDecision, type IdentityThresholds } from '@sp/shared';
 import type { FrameAggregateResult, FrameDecision, IdentityComparison, ImageAnalysis, ReferenceBuildResult } from './types';
 import { advisoryGuidance, guidanceForIssues, qualityScore } from './quality';
-import { qualityBucket, sampleLLR } from './calibration';
+import { qualityBucket, sampleLLR, type EvidenceContext } from './calibration';
 
 export type ComparisonTarget = 'reference' | 'id_photo';
 
@@ -30,6 +30,8 @@ export const CONFIDENCE_MARGIN = 0.25;
  * ~7:1 for a different person) on a frame that is not 'poor'; weaker low scores are "inconclusive".
  */
 export const MISMATCH_MIN_LLR = 2;
+/** With an evidence context, a per-sample "match" label needs sampleLLR <= -MATCH_MAX_LLR (~3:1 for the same person). */
+export const MATCH_MAX_LLR = 1;
 export const INCONCLUSIVE_GUIDANCE = 'We could not confirm the match. Face the camera directly, with even light on your face, and hold still.';
 export const NO_EMBEDDING_GUIDANCE = 'We couldn’t analyse your face. Sit in front of the camera with your face fully visible.';
 
@@ -129,12 +131,19 @@ export function thresholdsFor(thresholds: IdentityThresholds, against: Compariso
   return { match, mismatch: Math.min(mismatch, match) };
 }
 
-/** Decide one probe against a reference (or ID photo). See the module comment for the rule. */
+/**
+ * Decide one probe against a reference (or ID photo). See the module comment for the rule.
+ * `evidence` (identity v2.1, optional): the reference's bucket / enrolment baseline / context as passed to
+ * `sampleLLR`. With it, "match" also needs the calibrated evidence to favour the same person
+ * (sampleLLR <= -MATCH_MAX_LLR): in a dim room a look-alike can score above `match` against a dim-light gallery
+ * while clearly below the candidate's own level — that is "inconclusive", not "match".
+ */
 export function decideIdentity(
   similarity: number | null,
   quality: FaceQuality | null,
   thresholds: IdentityThresholds = DEFAULT_IDENTITY_THRESHOLDS,
   against: ComparisonTarget = 'reference',
+  evidence?: EvidenceContext,
 ): IdentityComparison {
   const sim = similarity == null || !Number.isFinite(similarity) ? null : round4(similarity);
   if (!quality || !quality.usable || sim == null) {
@@ -142,14 +151,17 @@ export function decideIdentity(
     return { decision: 'unable_to_verify', similarity: sim, confidence: 1, guidance };
   }
   const t = thresholdsFor(thresholds, against);
+  const bucket = qualityBucket(quality);
   if (sim >= t.match) {
+    if (evidence && against === 'reference' && sampleLLR(sim, bucket, evidence) > -MATCH_MAX_LLR) {
+      return { decision: 'inconclusive', similarity: sim, confidence: 0.5, guidance: advisoryGuidance(quality).concat(INCONCLUSIVE_GUIDANCE) };
+    }
     return { decision: 'match', similarity: sim, confidence: round4(0.5 + 0.5 * clamp01((sim - t.match) / CONFIDENCE_MARGIN)), guidance: [] };
   }
   if (sim < t.mismatch) {
     // A low score on a poor-quality frame (dim room, backlight, small face) is weak evidence: say "mismatch" only
     // when the calibrated per-sample evidence is strong, otherwise "inconclusive" (with lighting guidance).
-    const bucket = qualityBucket(quality);
-    if (bucket === 'poor' || sampleLLR(sim, bucket) < MISMATCH_MIN_LLR) {
+    if (bucket === 'poor' || sampleLLR(sim, bucket, against === 'reference' ? evidence : undefined) < MISMATCH_MIN_LLR) {
       return { decision: 'inconclusive', similarity: sim, confidence: 0.5, guidance: advisoryGuidance(quality).concat(INCONCLUSIVE_GUIDANCE) };
     }
     return { decision: 'mismatch', similarity: sim, confidence: round4(0.5 + 0.5 * clamp01((t.mismatch - sim) / CONFIDENCE_MARGIN)), guidance: [] };

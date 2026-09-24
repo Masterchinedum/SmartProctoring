@@ -34,14 +34,23 @@ export interface SourcePhoto {
   interEyePx: number;
 }
 
+export type FrameRole = 'enrol' | 'probe' | 'room';
+
 export interface FrameJob {
   id: string;
   photo: SourcePhoto;
-  role: 'enrol' | 'probe';
+  /**
+   * 'enrol': check-in frames; 'probe': independent scenes (another room / light / placement); 'room': a person
+   * captured in the SAME scene (room, camera, light) as `host`'s enrolment — mid-exam continuity, and an impostor
+   * sitting down in the candidate's room.
+   */
+  role: FrameRole;
   condition: WebcamCondition;
   resolution: WebcamResolution;
   scene: number;
   frame: number;
+  /** role 'room': the enrolment photo whose scene is reused. */
+  host?: SourcePhoto;
 }
 
 export interface FrameRecord {
@@ -49,7 +58,9 @@ export interface FrameRecord {
   photoKey: string;
   identity: string;
   family: string | null;
-  role: 'enrol' | 'probe';
+  role: FrameRole;
+  /** role 'room': photo key of the host enrolment whose scene was reused. */
+  hostPhotoKey?: string;
   condition: WebcamCondition;
   resolution: WebcamResolution;
   scene: number;
@@ -90,6 +101,12 @@ export interface WebcamDataOptions {
   cachedOnly?: boolean;
   /** Identifies the vision-service configuration in the analysis cache key (e.g. 'v1', 'v2'). */
   engineTag?: string;
+  /**
+   * Same-room frames (role 'room'): per enrolled identity and condition, the enrolment photo (`genuineBursts`
+   * bursts) and the person's other photos (1 burst each) in the enrolment scene, plus 1 burst of each of
+   * `impostorsPerHost` other people (seeded choice) and every family member in that same scene.
+   */
+  room?: { conditions: readonly WebcamCondition[]; impostorsPerHost: number; genuineBursts: number };
   /** Use this analysis-cache key instead of the computed one (re-reading an older cache). */
   cacheKey?: string;
 }
@@ -153,6 +170,30 @@ export function planFrames(sources: readonly SourcePhoto[], opts: WebcamDataOpti
       }
     }
   }
+  if (opts.room) {
+    const enrolled = ids.filter((id) => byId.get(id)!.length >= 2);
+    const refOf = (id: string) => enrolmentPhoto(byId.get(id)!);
+    const push = (host: SourcePhoto, photo: SourcePhoto, c: WebcamCondition, bursts: number) => {
+      for (let sc = 1; sc <= bursts; sc++) {
+        for (let f = 0; f < burst; f++) {
+          jobs.push({ id: `room|${host.key}|${photo.key}|${c}|640x480|${sc}|${f}`, photo, host, role: 'room', condition: c, resolution: '640x480', scene: sc, frame: f });
+        }
+      }
+    };
+    for (const id of enrolled) {
+      const host = refOf(id);
+      const others = ids.filter((o) => o !== id);
+      // Seeded choice of impostors for this host (stable across runs), plus every family member.
+      const ranked = [...others].sort((a, b) => seedOf(`${id}|${a}`) - seedOf(`${id}|${b}`));
+      const family = others.filter((o) => host.family && byId.get(o)![0].family === host.family);
+      const chosen = [...new Set([...family, ...ranked.slice(0, opts.room.impostorsPerHost)])];
+      for (const c of opts.room.conditions) {
+        push(host, host, c, opts.room.genuineBursts);
+        for (const p of byId.get(id)!) if (p.key !== host.key) push(host, p, c, 1);
+        for (const o of chosen) push(host, enrolmentPhoto(byId.get(o)!), c, 1);
+      }
+    }
+  }
   for (const p of sources) {
     if (!keep.has(p.identity)) continue;
     for (const c of conditions) {
@@ -167,8 +208,15 @@ export function planFrames(sources: readonly SourcePhoto[], opts: WebcamDataOpti
 }
 
 function framePath(dir: string, job: FrameJob): string {
-  const safe = job.photo.key.replace(/[^a-zA-Z0-9_-]+/g, '_');
-  return join(dir, `v${SIM_VERSION}`, safe, `${job.role}-${job.condition}-${job.resolution}-s${job.scene}-f${job.frame}.jpg`);
+  const safe = (k: string) => k.replace(/[^a-zA-Z0-9_-]+/g, '_');
+  const role = job.role === 'room' ? `room-${safe(job.host!.key)}` : job.role;
+  return join(dir, `v${SIM_VERSION}`, safe(job.photo.key), `${role}-${job.condition}-${job.resolution}-s${job.scene}-f${job.frame}.jpg`);
+}
+
+/** Scene seed of a job: 'room' frames reuse the host's enrolment scene (same room, camera and light). */
+function sceneSeedOf(job: FrameJob): number {
+  if (job.role === 'room') return seedOf(`enrol|${job.host!.key}|${job.condition}|${job.resolution}|0`);
+  return seedOf(`${job.role}|${job.photo.key}|${job.condition}|${job.resolution}|${job.scene}`);
 }
 
 /** Simulated JPEG for a job (rendered once, then read from the cache). */
@@ -182,13 +230,13 @@ export async function renderJob(dir: string, job: FrameJob, srcCache: Map<string
     srcCache.set(job.photo.file, src);
     if (srcCache.size > 32) srcCache.delete(srcCache.keys().next().value!);
   }
-  const sceneSeed = seedOf(`${job.role}|${job.photo.key}|${job.condition}|${job.resolution}|${job.scene}`);
   const fr = await simulateWebcamFrame(src, { landmarks: job.photo.landmarks }, {
     condition: job.condition,
     resolution: job.resolution,
-    sceneSeed,
-    frameSeed: job.frame,
-    jitter: job.role === 'enrol' ? 'session' : 'burst',
+    sceneSeed: sceneSeedOf(job),
+    // Room frames: new frame noise and the small movements of a seated person (distinct from the enrolment frames).
+    frameSeed: job.role === 'room' ? 100 + 10 * job.scene + job.frame : job.frame,
+    jitter: job.role === 'probe' ? 'burst' : 'session',
   });
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, fr.jpeg);
@@ -309,6 +357,7 @@ export async function buildWebcamData(vision: VisionService, opts: WebcamDataOpt
         identity: job.photo.identity,
         family: job.photo.family,
         role: job.role,
+        ...(job.host ? { hostPhotoKey: job.host.key } : {}),
         condition: job.condition,
         resolution: job.resolution,
         scene: job.scene,
