@@ -161,13 +161,12 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
       // A different device/browser while the other one is live => recorded now. The same device is most
       // likely a page reload; it is recorded only if the old window proves to be alive (see heartbeat()).
       const [prevDevice] = await m.tx
-        .select({ userAgent: deviceRecords.userAgent, cameraIdHash: deviceRecords.cameraIdHash })
+        .select({ userAgent: deviceRecords.userAgent, cameraLabel: deviceRecords.cameraLabel, cameraIdHash: deviceRecords.cameraIdHash })
         .from(deviceRecords)
         .where(and(eq(deviceRecords.sessionId, s.id), eq(deviceRecords.clientInstanceId, other)))
         .orderBy(desc(deviceRecords.at))
         .limit(1);
-      const differentDevice =
-        !prevDevice || prevDevice.userAgent !== (body.device.userAgent ?? '') || (!!prevDevice.cameraIdHash && !!body.device.cameraIdHash && prevDevice.cameraIdHash !== body.device.cameraIdHash);
+      const differentDevice = !prevDevice || prevDevice.userAgent !== (body.device.userAgent ?? '') || cameraDiffers(prevDevice, body.device);
       if (differentDevice) {
         await recordMultipleInstances(m, other, instanceId, {
           purpose: required,
@@ -231,6 +230,21 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
       frontalFramesRequired: frontalFramesRequired(required, required === 'initial' || reEnrollmentApplies(s, required)),
     };
   });
+}
+
+/**
+ * Whether two device records refer to different cameras. Browsers re-randomise deviceId per origin in
+ * private/incognito profiles (every page load), so the label is authoritative when both sides have one;
+ * the deviceId hash is only used when a label is missing.
+ */
+export function cameraDiffers(
+  a: { cameraLabel?: string | null; cameraIdHash?: string | null },
+  b: { cameraLabel?: string | null; cameraIdHash?: string | null },
+): boolean {
+  const la = (a.cameraLabel ?? '').trim();
+  const lb = (b.cameraLabel ?? '').trim();
+  if (la && lb) return la !== lb;
+  return !!a.cameraIdHash && !!b.cameraIdHash && a.cameraIdHash !== b.cameraIdHash;
 }
 
 /** Record a multiple_instances observation once per superseded instance. */
@@ -743,7 +757,7 @@ async function environmentContext(a: ApplyCtx): Promise<{ cameraChanged: boolean
     .limit(1);
   const before = prevDevice ?? (active?.ref.environment ? { cameraLabel: active.ref.environment.cameraLabel, cameraIdHash: active.ref.environment.cameraIdHash } : null);
   const now = { cameraLabel: check.device.cameraLabel ?? '', cameraIdHash: check.device.cameraIdHash ?? '' };
-  const cameraChanged = !!before && ((before.cameraIdHash && now.cameraIdHash && before.cameraIdHash !== now.cameraIdHash) || (!!before.cameraLabel && !!now.cameraLabel && before.cameraLabel !== now.cameraLabel));
+  const cameraChanged = !!before && cameraDiffers(before, now);
   if (cameraChanged) {
     notes.push(`Camera changed from “${before!.cameraLabel || 'unknown'}” to “${now.cameraLabel || 'unknown'}”.`);
     await m.addEvent({ type: 'camera_changed', source: 'server_system', details: { previousLabel: before!.cameraLabel, newLabel: now.cameraLabel, purpose: check.purpose } });

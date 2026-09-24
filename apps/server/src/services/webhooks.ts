@@ -41,6 +41,7 @@ import { organizations, webhookDeliveries, webhooks, type Webhook, type WebhookD
 import { audit } from '../lib/audit.js';
 import { randomToken } from '../lib/crypto.js';
 import { postJson, type PostResult } from '../lib/net-guard.js';
+import { stripUrls } from '../lib/text-safety.js';
 import { orgSettings } from './org.js';
 
 export const WEBHOOK_JOB = 'webhooks';
@@ -308,7 +309,8 @@ async function notifyDisabledByEmail(ctx: Ctx, h: Webhook, host: string, lastErr
       subject: `[SmartProctoring] Webhook to ${host} was disabled after repeated failures`,
       text:
         `SmartProctoring (${org.name}) stopped sending notifications to the webhook at ${host} because ${h.failureCount} delivery attempts in a row failed.\n` +
-        `${lastError ? `Last error: ${lastError}\n` : ''}\nNotifications that could not be delivered are kept for 72 hours. Fix the receiving endpoint, then re-enable the webhook:\n${url}\n`,
+        // The receiver's response text is third-party controlled: no links in our email.
+        `${lastError ? `Last error: ${stripUrls(lastError)}\n` : ''}\nNotifications that could not be delivered are kept for 72 hours. Fix the receiving endpoint, then re-enable the webhook:\n${url}\n`,
     });
   } catch (err) {
     ctx.log.warn({ err }, 'could not email the webhook-disabled notice');

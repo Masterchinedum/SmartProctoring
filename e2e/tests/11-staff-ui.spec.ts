@@ -101,14 +101,17 @@ test('staff UI: dashboard, live flag, drawer, review, notes, filters, report, CS
     await expect(rows).toHaveCount(1);
     await sp.getByRole('button', { name: 'Clear filters' }).click();
 
-    const other = (await staff.events(s.sessionId)).find((e) => e.category !== 'neutral' && e.type !== 'multiple_people' && e.review.status === 'unreviewed');
-    if (other) {
-      await rows.filter({ hasText: other.title }).first().click();
-      await eventDrawer(sp).getByRole('button', { name: 'Dismiss as false positive' }).click();
-      await expect(eventDrawer(sp).locator('.review-panel')).toContainText('Dismissed');
-      await eventDrawer(sp).getByRole('button', { name: 'Close' }).click();
-      expect((await staff.json<{ review: { status: string } }>('get', `/api/admin/events/${other.id}`)).review.status).toBe('dismissed');
-    }
+    // Chrome's file-backed fake camera is (correctly) reported as a possible virtual camera: dismiss it.
+    const other = await staff.waitForEvent(s.sessionId, (e) => e.category !== 'neutral' && e.type !== 'multiple_people' && e.review.status === 'unreviewed', {
+      timeout: 15_000,
+      message: 'another non-neutral event to dismiss (camera_feed_suspect expected)',
+    });
+    await sp.reload();
+    await rows.filter({ hasText: other.title }).first().click();
+    await eventDrawer(sp).getByRole('button', { name: 'Dismiss as false positive' }).click();
+    await expect(eventDrawer(sp).locator('.review-panel')).toContainText('Dismissed');
+    await eventDrawer(sp).getByRole('button', { name: 'Close' }).click();
+    expect((await staff.json<{ review: { status: string } }>('get', `/api/admin/events/${other.id}`)).review.status).toBe('dismissed');
 
     /* ---------------- session note */
     await sp.getByRole('tab', { name: /Notes/ }).click();

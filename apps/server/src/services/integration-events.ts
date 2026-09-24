@@ -16,10 +16,16 @@
  *
  * The inserts run in a SAVEPOINT: if anything here fails, the integration rows are rolled back and logged, but
  * the proctoring change itself still commits (monitoring must never fail because of an integration).
+ *
+ * Outbound text (security review #10): client-authored free text never leaves through these trusted channels.
+ * Events reported by the candidate's browser (sources client_browser / client_vision) are described with their
+ * EVENT_CATALOG title/observation, never the client-supplied `observation`; other user-controlled text (the
+ * candidate's pause reason) has links removed (lib/text-safety.ts). Event `details` are never forwarded.
  */
-import { EVENT_CATALOG, type HoldReason, type SessionStatus } from '@sp/shared';
+import { EVENT_CATALOG, type EventSource, type EventType, type HoldReason, type SessionStatus } from '@sp/shared';
 import { and, eq, inArray } from 'drizzle-orm';
 import { events, webhooks, type EventRow } from '../db/schema.js';
+import { stripUrls } from '../lib/text-safety.js';
 import { enqueueEmailAlerts, HOLD_REASON_SENTENCES, isHighSeverityAlert, kickEmailAlerts, sessionStaffUrl, type EmailAlertInput } from './email-alerts.js';
 import { orgSettings } from './org.js';
 import type { SessionMutation } from './session-state.js';
@@ -35,6 +41,25 @@ const SESSION_NOTIFICATIONS: Partial<Record<EventRow['type'], WebhookNotificatio
 
 function str(v: unknown): string | null {
   return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+const CLIENT_SOURCES: readonly EventSource[] = ['client_browser', 'client_vision'];
+
+/**
+ * Title and observation of an event as they may appear in a webhook or an alert email: the catalog wording for
+ * anything the candidate's browser reported (its free text is candidate-controlled), link-free server wording
+ * otherwise.
+ */
+export function outboundEventText(ev: { type: EventType; source: EventSource; title: string; observation: string }): { title: string; observation: string } {
+  const cat = EVENT_CATALOG[ev.type];
+  if (cat && (CLIENT_SOURCES.includes(ev.source) || !ev.observation)) return { title: cat.title, observation: cat.observation };
+  return { title: stripUrls(cat?.title ?? ev.title), observation: stripUrls(ev.observation) };
+}
+
+/** Candidate-written reason (pause request): kept for staff, without links. */
+export function outboundReason(v: unknown, max = 300): string | null {
+  const s = str(v);
+  return s ? stripUrls(s.slice(0, max)) : null;
 }
 
 export async function enqueueIntegrationNotifications(m: SessionMutation): Promise<void> {
@@ -69,14 +94,15 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
         const created = ev.firstReceivedAt.getTime() === m.now;
         const startedAt = ev.startedAt.getTime();
         const endedAt = ev.endedAt?.getTime() ?? null;
+        const text = outboundEventText(ev);
         const eventData = {
           id: ev.id,
           sessionId: s.id,
           type: ev.type,
           category: ev.category,
           severity: ev.severity,
-          title: ev.title,
-          observation: ev.observation,
+          title: text.title,
+          observation: text.observation,
           status: ev.status,
           startedAt,
           endedAt,
@@ -95,7 +121,7 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           }
           if (created && ev.type === 'identity_mismatch') notifications.push({ type: 'identity.mismatch', dedupeKey: `identity.mismatch:${ev.id}`, sessionId: s.id, data: eventData });
           if (created && emailOn && settings.emailAlerts.highSeverity && isHighSeverityAlert(ev.category, ev.severity)) {
-            emails.push({ kind: 'high_severity', eventId: ev.id, sessionId: s.id, title: ev.title, observation: ev.observation, severity: ev.severity, occurredAt: startedAt });
+            emails.push({ kind: 'high_severity', eventId: ev.id, sessionId: s.id, title: text.title, observation: text.observation, severity: ev.severity, occurredAt: startedAt });
           }
         }
 
@@ -117,7 +143,7 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
             data.reason = str(d.reason);
             data.requireCheck = d.requireCheck !== false;
           }
-          if (ev.type === 'pause_requested') data.pauseRequest = { id: str(d.requestId), reason: str(d.reason) };
+          if (ev.type === 'pause_requested') data.pauseRequest = { id: str(d.requestId), reason: outboundReason(d.reason, 1000) };
           if (ev.type === 'session_submitted') data.score = s.score ? { points: s.score.points, maxPoints: s.score.maxPoints, autoGraded: s.score.autoGraded } : null;
           // Free-text staff notes are never forwarded; only the structured automatic reason.
           if (ev.type === 'session_terminated') data.reason = str(d.reason) === 'abandoned_after_inactivity' ? 'abandoned_after_inactivity' : null;
@@ -130,13 +156,13 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           emails.push({ kind: 'hold', eventId: ev.id, sessionId: s.id, title: 'Exam on hold', observation: `The exam was put on hold because ${why}.`, severity: ev.severity, occurredAt: startedAt });
         }
         if (created && emailOn && ev.type === 'pause_requested' && settings.emailAlerts.pauseRequests) {
-          const reason = str(ev.details?.reason);
+          const reason = outboundReason(ev.details?.reason);
           emails.push({
             kind: 'pause_request',
             eventId: ev.id,
             sessionId: s.id,
             title: 'Pause requested',
-            observation: `The candidate requested a pause${reason ? ` (reason given: “${reason.slice(0, 300)}”)` : ''}. It needs approval in the staff app; the candidate keeps working until then.`,
+            observation: `The candidate requested a pause${reason ? ` (reason given: “${reason}”)` : ''}. It needs approval in the staff app; the candidate keeps working until then.`,
             severity: ev.severity,
             occurredAt: startedAt,
           });

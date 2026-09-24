@@ -17,6 +17,7 @@ import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
 import { candidates, emailAlerts, examSessions, exams, organizations, type EmailAlert, type EmailAlertKind, type OrgSettings } from '../db/schema.js';
 import { headerSafe, type MailMessage } from '../lib/mailer.js';
+import { stripUrls } from '../lib/text-safety.js';
 import { orgSettings } from './org.js';
 
 export const EMAIL_ALERT_JOB = 'email-alerts';
@@ -104,8 +105,21 @@ export interface DigestContext {
   staffUrl: string;
 }
 
-/** One email for a session's pending alerts (oldest first). Observational wording, no images. */
-export function composeAlertEmail(c: DigestContext, items: Pick<EmailAlert, 'title' | 'observation' | 'occurredAt'>[], to: string[]): MailMessage {
+/**
+ * One email for a session's pending alerts (oldest first). Observational wording, no images. No links except our
+ * own staff URL (security review #10): the alert text (already catalog wording for candidate-reported events, see
+ * integration-events.ts) is stripped of anything link-like again at rendering time — also for alerts queued before
+ * that rule existed — and explicit links are removed from names and titles.
+ */
+export function composeAlertEmail(c0: DigestContext, items0: Pick<EmailAlert, 'title' | 'observation' | 'occurredAt'>[], to: string[]): MailMessage {
+  const id = (t: string) => stripUrls(t, { bareHosts: false });
+  const c: DigestContext = {
+    ...c0,
+    orgName: id(c0.orgName),
+    candidate: { name: id(c0.candidate.name), externalId: c0.candidate.externalId ? id(c0.candidate.externalId) : null },
+    exam: { title: id(c0.exam.title) },
+  };
+  const items = items0.map((i) => ({ ...i, title: stripUrls(i.title), observation: stripUrls(i.observation) }));
   const who = `${c.candidate.name} — ${c.exam.title}`;
   const subject = headerSafe(`[SmartProctoring] ${items.length === 1 ? items[0].title : `${items.length} alerts`}: ${who}`);
   const lines = items.map((i) => `• ${formatUtc(i.occurredAt.getTime())} — ${i.title}: ${i.observation}`);
