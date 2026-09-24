@@ -62,13 +62,19 @@ function CandidateRouter() {
   useCandidateAnnouncements();
   // Local flow flags (buttons on paused / hold screens start a check).
   const [checkRequest, setCheckRequest] = useState<CheckPurpose | null>(null);
-
+  // A passed check whose "Check complete" screen is still waiting for the candidate's click.
+  const [passedCheck, setPassedCheck] = useState<{ key: string; purpose: CheckPurpose; from: string | undefined } | null>(null);
   const status = snap.state?.session.status;
+  const pendingFor = (key: string, purpose: CheckPurpose) => (pending: boolean) => setPassedCheck(pending ? { key, purpose, from: status } : null);
+
   useEffect(() => {
     // A started check is only meaningful for the status it was started from.
     if (checkRequest === 'resume' && status !== 'paused') setCheckRequest(null);
     if (checkRequest === 'reverify' && status !== 'on_hold') setCheckRequest(null);
-  }, [status, checkRequest]);
+    // The confirmation applies until the candidate continues, unless the exam moved elsewhere meanwhile
+    // (held again, ended, …): it may still show the pre-check status until the refresh arrives.
+    if (passedCheck && status !== 'active' && status !== passedCheck.from) setPassedCheck(null);
+  }, [status, checkRequest, passedCheck]);
 
   if (snap.fatal) return <FatalScreen kind={snap.fatal.kind} message={snap.fatal.message} />;
   if (!snap.state) return <LoadingScreen error={snap.loadError} onRetry={() => void ctrl.load()} />;
@@ -77,6 +83,9 @@ function CandidateRouter() {
   const st = s.session.status;
   if (st === 'submitted' || st === 'terminated') return <EndedScreen />;
   if (!s.consent.accepted) return <WelcomeScreen />;
+  if (passedCheck && st === 'active') {
+    return <CheckFlow key={passedCheck.key} purpose={passedCheck.purpose} onPassedPending={pendingFor(passedCheck.key, passedCheck.purpose)} />;
+  }
 
   switch (st) {
     case 'invited':
@@ -85,13 +94,18 @@ function CandidateRouter() {
       if (s.session.requiredCheck) return <CheckFlow key={`ready-${s.session.requiredCheck}`} purpose={s.session.requiredCheck} />;
       return <ReadyScreen />;
     case 'active':
-      if (!isVerifiedInstance(s, ctrl.instanceId)) return <CheckFlow key="reconnect" purpose={s.session.requiredCheck ?? 'reconnect'} />;
+      if (!isVerifiedInstance(s, ctrl.instanceId)) {
+        const purpose = s.session.requiredCheck ?? 'reconnect';
+        return <CheckFlow key="reconnect" purpose={purpose} onPassedPending={pendingFor('reconnect', purpose)} />;
+      }
       return <ExamScreen />;
     case 'paused':
-      if (checkRequest === 'resume') return <CheckFlow key="resume" purpose="resume" onCancel={() => setCheckRequest(null)} />;
+      if (checkRequest === 'resume') return <CheckFlow key="resume" purpose="resume" onCancel={() => setCheckRequest(null)} onPassedPending={pendingFor('resume', 'resume')} />;
       return <PausedScreen onResume={() => setCheckRequest('resume')} />;
     case 'on_hold':
-      if (checkRequest === 'reverify' && s.session.hold?.canReverify) return <CheckFlow key="reverify" purpose="reverify" onCancel={() => setCheckRequest(null)} />;
+      if (checkRequest === 'reverify' && s.session.hold?.canReverify) {
+        return <CheckFlow key="reverify" purpose="reverify" onCancel={() => setCheckRequest(null)} onPassedPending={pendingFor('reverify', 'reverify')} />;
+      }
       return <HoldScreen onReverify={() => setCheckRequest('reverify')} />;
     default:
       return <LoadingScreen error={`Unknown exam status: ${String(st)}`} onRetry={() => void ctrl.load()} />;

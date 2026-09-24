@@ -45,7 +45,13 @@ const READY_RECONNECT_INTRO = {
   ],
 };
 
-export function CheckFlow({ purpose, onCancel }: { purpose: CheckPurpose; onCancel?: () => void }) {
+/**
+ * `onPassedPending(true)` is called when the check passed and the exam is already active again, while the
+ * "Check complete" screen waits for the candidate's click (which may also enter required fullscreen).
+ * The router keeps this flow mounted until `onPassedPending(false)`, so a background state refresh that
+ * already reports the exam as active cannot skip that screen.
+ */
+export function CheckFlow({ purpose, onCancel, onPassedPending }: { purpose: CheckPurpose; onCancel?: () => void; onPassedPending?: (pending: boolean) => void }) {
   const ctrl = useController();
   const snap = useSnapshot();
   const intro = purpose === 'reconnect' && snap.state?.session.status === 'ready' ? READY_RECONNECT_INTRO : INTRO[purpose];
@@ -69,9 +75,10 @@ export function CheckFlow({ purpose, onCancel }: { purpose: CheckPurpose; onCanc
         void ctrl.applyState(res.state);
         return;
       }
+      if (res.outcome === 'passed') onPassedPending?.(true);
       setStep('result');
     },
-    [ctrl],
+    [ctrl, onPassedPending],
   );
 
   const title = snap.state?.exam.title;
@@ -106,6 +113,7 @@ export function CheckFlow({ purpose, onCancel }: { purpose: CheckPurpose; onCanc
       <CheckResult
         purpose={purpose}
         res={result.res}
+        onContinued={() => onPassedPending?.(false)}
         onRetry={() => {
           setVerifyKey((k) => k + 1);
           setStep('verify');
@@ -124,7 +132,19 @@ export function CheckFlow({ purpose, onCancel }: { purpose: CheckPurpose; onCanc
   );
 }
 
-function CheckResult({ purpose, res, onRetry, onBackToSetup }: { purpose: CheckPurpose; res: CompleteCheckResponse; onRetry: () => void; onBackToSetup: () => void }) {
+function CheckResult({
+  purpose,
+  res,
+  onRetry,
+  onBackToSetup,
+  onContinued,
+}: {
+  purpose: CheckPurpose;
+  res: CompleteCheckResponse;
+  onRetry: () => void;
+  onBackToSetup: () => void;
+  onContinued: () => void;
+}) {
   const ctrl = useController();
   const [busy, setBusy] = useState(false);
   const requireFs = res.state.exam.policy.browser.requireFullscreen;
@@ -134,6 +154,7 @@ function CheckResult({ purpose, res, onRetry, onBackToSetup }: { purpose: CheckP
       setBusy(true);
       if (requireFs) await enterFullscreen();
       await ctrl.applyState(res.state);
+      onContinued();
     };
     return (
       <div className="stack" data-testid="check-passed">
