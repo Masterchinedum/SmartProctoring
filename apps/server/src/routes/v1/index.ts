@@ -17,6 +17,7 @@
  *   GET  /sessions/:id/events?category=&type=&severity=&since= -> { items: IntegrationEventDTO[] }
  */
 import {
+  EVENT_CATALOG,
   integrationAssignSchema,
   integrationCandidateSchema,
   SESSION_STATUSES,
@@ -81,7 +82,11 @@ export function withoutFaceScores<T>(value: T): T {
 
 export function toIntegrationEventDTO(e: EventDTO, publicUrl: string): IntegrationEventDTO {
   const { evidence, ...rest } = e;
-  return withoutFaceScores({ ...rest, evidenceCount: evidence.length, staffUrl: `${sessionStaffUrl(publicUrl, e.sessionId)}?event=${e.id}` });
+  // Observations reported by the candidate's browser are client-authored text: integrations get the
+  // catalog wording instead (same rule as webhooks and alert emails).
+  const clientSourced = e.source === 'client_vision' || e.source === 'client_browser';
+  const observation = clientSourced ? EVENT_CATALOG[e.type].observation : e.observation;
+  return withoutFaceScores({ ...rest, observation, evidenceCount: evidence.length, staffUrl: `${sessionStaffUrl(publicUrl, e.sessionId)}?event=${e.id}` });
 }
 
 async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSummaryDTO[]): Promise<IntegrationSessionDTO[]> {
