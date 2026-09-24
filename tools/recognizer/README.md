@@ -5,6 +5,10 @@ Reproducible, label-free robustness training of the server's face recogniser (Op
 held-out evaluation that decides whether a candidate ships. Results, decision and limitations:
 [`docs/accuracy/recognizer.md`](../../docs/accuracy/recognizer.md).
 
+**Current status: no candidate shipped.** The best candidate (A_mdeg) halves the error in dim and backlit light,
+but it raised the matched-degradation (dim-room) false-match rate and family false-accepts on the evaluation set.
+See §4.5 of that document.
+
 Nothing in this folder ships with the server. No images, crops, checkpoints or datasets are committed. Everything
 is written under `$RECOG_WORK` (default `/tmp/claude-0/recognizer`).
 
@@ -84,7 +88,32 @@ for m in base:apps/server/models/face_recognition_sface_2021dec.onnx A:$RECOG_WO
   $TSX tools/recognizer/ts/harness.mts --model ${m#*:} --tag ${m%%:*} --recipe v2 --shards 1 \
       --refit $RECOG_WORK/harness/${m%%:*}-v2.summary.json --summary $RECOG_WORK/harness/${m%%:*}-v2-refit.summary.json
 done
+#    NOTE: the harness uses the vision code in the working tree. Run base and candidate on the SAME calibration version
+#    (the report's calibrationVersion; --out writes it).
+
+# 8. quality-routed hybrid: candidate embeddings for POOR-bucket frames only, SFace elsewhere (needs both caches above)
+$TSX tools/recognizer/ts/harness.mts --model $RECOG_WORK/export/A_mdeg.onnx --tag A --recipe v2 --shards 1 \
+    --hybrid-base apps/server/models/face_recognition_sface_2021dec.onnx --summary $RECOG_WORK/harness/hybrid.summary.json
+$PY tools/recognizer/report.py --harness base=$RECOG_WORK/harness/base-v2.summary.json,A=$RECOG_WORK/harness/A-v2-refit.summary.json,hybrid=$RECOG_WORK/harness/hybrid.summary.json
+
+# 9. matched-degradation false-match rates with paired bootstrap CIs (base / candidate / hybrid), production pipeline
+$TSX tools/recognizer/ts/matched.mts --base apps/server/models/face_recognition_sface_2021dec.onnx \
+    --cand $RECOG_WORK/export/A_mdeg.onnx --tag A --reps 1000 --out $RECOG_WORK/harness/matched.json
 ```
+
+## Deciding
+
+Ship only if **all** of the following hold on the evaluation set. The paired bootstrap CIs are in `eval.py` /
+`ts/matched.mts` output.
+* **Win**: a pooled-webcam win in both ΔEER and ΔTAR@1e-3.
+* **Non-inferiority on clean / good / typical / sidelit**: ΔEER upper CI ≤ +1.0 pt and ΔTAR@1e-3 lower CI
+  ≥ −3.0 pts.
+* **Matched degradation**: FMR not worse in dim or backlit (at the model's own good-light threshold and at 0.45).
+* **Families**: no worse family swap detection, and no worse family pass at checks.
+* **Poor light**: a clear poor-bucket gain.
+* **Engineering**: ONNX parity ≥ 0.999 and latency ≤ 2×.
+
+If shipping, recalibrate every model in `apps/server/src/vision/calibration.ts`, not only `BUCKET_MODELS`.
 
 ## Rules this tooling follows
 

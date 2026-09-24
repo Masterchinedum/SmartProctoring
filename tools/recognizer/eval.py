@@ -42,6 +42,7 @@ intervals of the difference to the first model/recipe (same resamples), which is
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -143,7 +144,7 @@ def build_crops(out: Path, frames_dir: Path = FRAMES) -> dict:
         base = dict(kind=r["role"], photo=r["photoKey"], identity=r["identity"], family=r["family"] or "", resolution=r["resolution"],
                     scene=r["scene"], frame=r["frame"], usable=bool(r["quality"].get("usable")))
         emb = r.get("embeddings") or {}
-        de = np.frombuffer(__import__("base64").b64decode(emb["default"]), np.float32) if "default" in emb else np.zeros(128, np.float32)
+        de = np.frombuffer(base64.b64decode(emb["default"]), np.float32) if "default" in emb else np.zeros(128, np.float32)
         add(_align_valid(decode_image(rgb), f), condition=r["condition"], default_emb=de, **base)
         if r["role"] == "probe" and r["condition"] == "typical":
             for kind in DERIVED:
