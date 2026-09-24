@@ -126,15 +126,17 @@ test('resume in a dim room: unable to verify, guidance and retry — never a dif
 });
 
 /**
- * 5c — the room goes dark DURING the exam (camera: A for 50 s, then too dark for a dependable comparison).
- * Routine identity samples become "unable to verify": after repeated ones an UNCERTAIN observation
- * (identity_unverifiable) is recorded and the candidate is guided — never a mismatch, never a hold.
+ * 5c — the room goes dark DURING the exam (camera: A, dark from 50 s to 90 s, then light again).
+ * The image is too dark for dependable monitoring or comparison: the candidate is guided to add light,
+ * an UNCERTAIN lighting observation spans the dark period, monitoring is shown as limited, and no identity
+ * verdict is drawn from unusable images — never a mismatch, never a hold. When the light is back, routine
+ * identity samples match again.
  */
-test('room goes dark mid-exam: unable to verify is uncertain, with guidance — never a different person', async ({ staff }) => {
-  skipUnlessFixtures('lightThenDark');
+test('room goes dark mid-exam: uncertain lighting observation with guidance — never a different person', async ({ staff }) => {
+  skipUnlessFixtures('darkPeriod');
   test.setTimeout(4 * 60_000);
   const s = await staff.createSession({ policy: { identity: { periodicCheckIntervalSec: 10 } } });
-  const browser = await launchCamera('lightThenDark');
+  const browser = await launchCamera('darkPeriod');
   try {
     const c = await CandidatePage.open(browser, s.link);
     await c.consent();
@@ -143,23 +145,26 @@ test('room goes dark mid-exam: unable to verify is uncertain, with guidance — 
     await c.startExam();
     await c.answerStandardQuestions();
 
-    const ev = await staff.waitForEventType(s.sessionId, 'identity_unverifiable', { timeout: 120_000 });
-    console.log(`identity_unverifiable +${Math.round((ev.startedAt - t0) / 1000)} s`);
-    expect(ev.category).toBe('uncertain');
-    expect(ev.startedAt - t0).toBeGreaterThan(45_000);
-    await expect(c.tid('candidate-prompt').filter({ hasText: 'couldn’t confirm your identity' })).toBeVisible({ timeout: 30_000 });
-    await expect(c.tid('candidate-prompt').filter({ hasText: /light/i }).first()).toBeVisible();
+    /* ---------------- dark: guidance, limited monitoring, uncertain observation */
+    await expect(c.tid('candidate-prompt').filter({ hasText: 'Your face is too dark' })).toBeVisible({ timeout: 80_000 });
+    expect(Date.now() - t0).toBeGreaterThan(50_000);
+    await expect(c.tid('monitoring-status')).toContainText('Monitoring limited', { timeout: 20_000 });
+    const lighting = await staff.waitForEventType(s.sessionId, 'lighting_unusable', { timeout: 30_000 });
+    expect(lighting.category).toBe('uncertain');
+    expect(Math.abs(lighting.startedAt - (t0 + 50_000))).toBeLessThan(8_000);
 
-    const d = await staff.session(s.sessionId);
-    const late = d.identityChecks.filter((ch) => ch.at > t0 + 52_000);
-    console.log(`checks after dark: ${late.map((ch) => `${ch.trigger}:${ch.decision}`).join(', ')}; events: ${[...new Set((await staff.events(s.sessionId)).map((e) => e.type))].join(', ')}`);
-    expect(late.length).toBeGreaterThanOrEqual(3);
-    expect(late.every((ch) => ch.decision === 'unable_to_verify' || ch.decision === 'inconclusive')).toBe(true);
+    /* ---------------- light again: the observation closes, identity matches again */
+    const closed = await staff.waitForEvent(s.sessionId, (e) => e.type === 'lighting_unusable' && e.status === 'closed', { timeout: 60_000 });
+    console.log(`lighting_unusable +${Math.round((closed.startedAt - t0) / 1000)}..+${Math.round((closed.endedAt! - t0) / 1000)} s`);
+    expect(Math.abs(closed.endedAt! - (t0 + 90_000))).toBeLessThan(8_000);
+    await expect(c.tid('candidate-prompt').filter({ hasText: 'Your face is too dark' })).toHaveCount(0, { timeout: 20_000 });
+    await expect(c.tid('monitoring-status')).toContainText('Monitoring active', { timeout: 20_000 });
+    const d = await staff.waitForSession(s.sessionId, (x) => x.identityChecks.some((ch) => ch.at > closed.endedAt! && ch.decision === 'match'), { timeout: 40_000 });
     expect(d.identityChecks.some((ch) => ch.decision === 'mismatch')).toBe(false);
     expect(d.summary.status).toBe('active');
     const events = await staff.events(s.sessionId);
     expect(events.some((e) => e.type === 'identity_mismatch' || e.type === 'session_held')).toBe(false);
-    await expect(c.tid('exam-screen')).toBeVisible();
+    expect(events.filter((e) => e.type === 'lighting_unusable')).toHaveLength(1);
   } finally {
     await browser.close();
   }

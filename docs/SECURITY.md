@@ -33,18 +33,28 @@ server-side identity match, read other sessions, or change category/severity (th
 ## 2. Controls
 
 ### Authentication and sessions
-* Staff: scrypt password hashes (N=2^15, r=8, p=1, 16-byte salt, parameters stored per hash), uniform
-  timing for unknown users (dummy hash), generic error message, `auth.login_failed` audit entries,
-  10 login attempts per minute per client IP.
+* Staff: scrypt password hashes (N=2^17, r=8, p=1 ≈ 128 MiB, 16-byte salt, parameters stored per hash; older
+  hashes keep verifying and are upgraded at the next successful sign-in; at most two derivations run at once),
+  uniform timing for unknown users (dummy hash), generic error message, `auth.login_failed` audit entries
+  (address tried, reason, backoff state — never the password), 10 login attempts per minute per client IP, and a
+  per-account backoff independent of the IP: after 5 consecutive failures (no 15-minute pause) the address
+  waits 30 s, doubling up to 15 min, before any password is checked again (429 `too_many_attempts`). It is keyed
+  on the address tried, so unknown addresses behave identically (no enumeration); attempts are charged before
+  the password check (bursts cannot slip through); an administrator's password reset lifts it.
 * Staff sessions: opaque 256-bit token in a signed cookie, only `sha256(token)` stored; `HttpOnly`,
   `SameSite=Lax`, `Secure` (default in production), new token at every login (no fixation), sliding idle
-  timeout (`STAFF_SESSION_IDLE_MIN`, default 480) and absolute lifetime (`STAFF_SESSION_MAX_HOURS`, default
-  168). Logout deletes the server-side session; password change/reset and disabling a user revoke sessions;
-  the realtime WebSocket re-validates and closes with 4401.
+  timeout (`STAFF_SESSION_IDLE_MIN`, default 60) and absolute lifetime (`STAFF_SESSION_MAX_HOURS`, default
+  12). Logout deletes the server-side session; password change/reset and disabling a user revoke sessions;
+  the realtime WebSocket re-validates and closes with 4401 (the staff app then re-checks the sign-in and returns
+  to the login page with the current page as return path).
 * Candidates: access token = 256 random bits (only sha256 + an AES-GCM copy for staff re-display stored),
   regenerating a link invalidates the old one immediately. Every write also requires the browser instance
   that passed the camera/identity check (`X-Client-Instance`); a new instance must pass a reconnect check.
-  The verified instance id is echoed only to that instance.
+  The verified instance id is echoed only to that instance. Concurrent use of the verified instance id from
+  two places (a copied id) is detected from its requests — a different User-Agent, two networks alternating
+  within 60 s, or two interleaved heartbeat `seq` streams (hashed IPs/UA only; a single network change, a
+  dual-stack switch, a counter restart or a page reload are not signals): a `multiple_instances` event
+  (`details.signal`, `ipHashes`, `uaChanged`) and a mandatory reconnect (identity) check for both devices.
 * API keys: 256-bit, shown once, sha256 stored, revocation effective on the next request, per-key rate limit,
   every write/report read audited as actor `api_key`. They cannot call the staff API.
 
@@ -81,7 +91,10 @@ server-side identity match, read other sessions, or change category/severity (th
 ### Cryptography
 * AES-256-GCM for every blob and template, random 96-bit IV per object, AAD binding each ciphertext to its
   row (`evidence:<id>`, `reference:<id>`, `idphoto:<candidateId>`, `access-token:<sessionId>`,
-  `webhook-secret:<id>`, `frame:<id>`), key id embedded for rotation (`EVIDENCE_KEYS_OLD`).
+  `webhook-secret:<id>`, `frame:<id>`), key id embedded for rotation (`EVIDENCE_KEYS_OLD`). After a rotation
+  the `rekey` CLI re-encrypts every encrypted column and evidence blob under the current key (batched,
+  resumable, compare-and-set per row, `--dry-run`, audit `keys.rekeyed`), so old keys can be retired
+  (`docs/OPERATIONS.md` §3).
 * Constant-time comparison for liveness nonces; tokens/keys are looked up by hash.
 * Webhooks: `HMAC-SHA256(secret, t.body)` with timestamp; secrets shown once, stored encrypted.
 
@@ -94,7 +107,8 @@ server-side identity match, read other sessions, or change category/severity (th
 ### Abuse and availability
 * Rate limits: candidate endpoints per access token (30–600/min per endpoint), privacy notice 60/min/IP,
   login and password change 10/min/IP, integration API 600/min/key, webhook test/redeliver and test email.
-  Limits are kept in memory per server instance.
+  With `REDIS_URL` the counters are kept in Redis and shared by all instances (a Redis outage lets requests
+  through and is logged); without it they are in memory per instance.
 * Vision work is bounded (concurrency + queue of 256); overload returns `503 vision_busy` with `Retry-After`
   and the candidate client backs off exponentially.
 
@@ -103,6 +117,9 @@ server-side identity match, read other sessions, or change category/severity (th
   `GET /api/admin/evidence/:id`) writes `evidence.view` to the audit log; so do reviews, notes, holds,
   releases, re-enrolments, settings, users, API keys, webhooks and retention purges.
 * Webhooks, alert emails and the integration API never contain images, templates or similarity scores.
+  Webhooks and alert emails never carry candidate-written text as is: events reported by the browser use the
+  catalog title/observation, the pause reason and other user-controlled text are stripped of links
+  (URLs, `www.`, bare host names, IP literals), and alert emails contain no link except the staff app's.
 * Logs never contain access tokens (`/take/<token>`, `?token=`, `Authorization`, cookies are redacted).
 
 ## 3. Security review — 2026-09-24
@@ -119,12 +136,12 @@ against a running instance and with integration tests (`apps/server/test/securit
 | 4 | Medium | `TRUST_PROXY=true` (as in `.env.example`) trusts the client-written left-most `X-Forwarded-For` entry: rotating it bypassed the login rate limit (12/12 attempts, no 429) and forged audit-log IPs. | Mitigated (production warning, hop counts refused — Fastify ≥ 5.12 ignores them); operators must set proxy addresses (§4) |
 | 5 | Medium | The integration API returned face-similarity scores (event `details.min/maxSimilarity`, report `session.identity.lastSimilarity`, ID-photo similarity, "(lowest similarity 0.00)" in sentences) although documented as never doing so. | Fixed (nulled / removed in `/api/v1`; staff views unchanged) |
 | 6 | Low | CSRF defence relied on `Origin` only when present; logout had no check (cross-origin logout worked). | Fixed (`Sec-Fetch-Site`/`Referer` fallback; logout same-origin only) |
-| 7 | Medium | A colluding candidate can still copy their own instance id (DevTools) to a second device. | Open — bind the verified instance to a server-issued secret and flag concurrent use (IP/UA change, interleaved heartbeat `seq`) as `multiple_instances` |
-| 8 | Medium | Key rotation is incomplete: no re-encryption tool, and long-lived ciphertexts (ID-photo templates, access tokens, webhook secrets, legal-hold evidence) keep needing old keys indefinitely. | Open — add a re-encryption CLI (re-encrypt rows/blobs whose key id ≠ current) |
-| 9 | Low | Login throttling is per IP only (no per-account backoff); no MFA/SSO for staff who can view biometric evidence; scrypt N=2^15 is below current guidance (2^17). | Open |
-| 10 | Low | Candidate-controlled text (event `observation` ≤ 500 chars, camera label) is forwarded into staff alert emails (escaped) and webhooks — phishing from a trusted sender. | Open — use catalog wording or strip URLs for client-sourced events |
-| 11 | Low | Rate-limit counters are in memory per instance (not shared through Redis). | Open |
-| 12 | Low | Default staff session lifetime is long (8 h idle / 7 days absolute). | Open — shorter defaults recommended |
+| 7 | Medium | A colluding candidate can still copy their own instance id (DevTools) to a second device. | Fixed (detection) — UA change, networks alternating within 60 s or interleaved heartbeat `seq` for the verified instance → `multiple_instances` event (hashed IPs) + mandatory reconnect check; binding the instance to a server-issued secret remains a possible hardening |
+| 8 | Medium | Key rotation is incomplete: no re-encryption tool, and long-lived ciphertexts (ID-photo templates, access tokens, webhook secrets, legal-hold evidence) keep needing old keys indefinitely. | Fixed — `rekey` CLI re-encrypts every encrypted column and evidence blob (batched, resumable, `--dry-run`, audited); retire an old key once `rekey --dry-run` reports nothing under it |
+| 9 | Low | Login throttling is per IP only (no per-account backoff); no MFA/SSO for staff who can view biometric evidence; scrypt N=2^15 is below current guidance (2^17). | Fixed — scrypt N=2^17 (old hashes upgraded at sign-in), per-account backoff 30 s → 15 min after 5 failures (IP-independent, no enumeration), failed logins audited; MFA/SSO still open |
+| 10 | Low | Candidate-controlled text (event `observation` ≤ 500 chars, camera label) is forwarded into staff alert emails (escaped) and webhooks — phishing from a trusted sender. | Fixed — catalog wording for client-reported events; links stripped from pause reasons and other user-controlled text in webhooks and emails |
+| 11 | Low | Rate-limit counters are in memory per instance (not shared through Redis). | Fixed — Redis store for all rate limits when `REDIS_URL` is set |
+| 12 | Low | Default staff session lifetime is long (8 h idle / 7 days absolute). | Fixed — defaults 60 min idle / 12 h absolute (env overridable); the staff app returns to the sign-in page with a return path |
 | 13 | Low | `POST /api/admin/users` answers `email_taken` for addresses registered in any organisation (cross-tenant enumeration by admins). | Open |
 | 14 | Low | `apps/web/index.html` has no `<meta name="referrer" content="no-referrer">` (defence in depth if the SPA is ever served without our headers); production build ships public source maps. | Open |
 | 15 | Info | CSP `connect-src` allows any `ws:`/`wss:` host; reviewers receive exam answer keys; candidate links stay valid after the exam ends; unlimited WebSocket connections per staff session; client retry backoff has no jitter. | Open |
@@ -137,6 +154,10 @@ bypass / directory listing, fixed in ≥ 10.1.2) — not exploitable here (no `l
 static paths; the root only holds the public web build; traversal attempts return 403); upgrade.
 **drizzle-orm 0.44.7** (identifier escaping, fixed in ≥ 0.45.2) — not reachable (no `sql.identifier`,
 `.as()` or `sql.raw` with request data); upgrade.
+**FIXED:** upgraded to sharp 0.35.4, @fastify/static 10.1.4 (static/SPA-fallback tests incl. encoded traversal)
+and drizzle-orm 0.45.3 (drizzle-kit 0.31.11: no schema diff, migrations apply on a fresh database);
+`pnpm audit --prod` reports no known vulnerabilities. Remaining advisories are development-only (vitest 3 →
+fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, never shipped).
 
 ## 4. Production checklist
 
@@ -155,9 +176,8 @@ static paths; the root only holds the public web build; traversal attempts retur
 **Secrets and keys**
 - [ ] `EVIDENCE_KEY` (32 random bytes) and `SESSION_SECRET` (≥ 32 chars) from a secret manager, never in
       images or the repository; back the evidence key up separately from the database backups.
-- [ ] Rotate `EVIDENCE_KEY` by moving the old key to `EVIDENCE_KEYS_OLD`. Until a re-encryption tool exists
-      (finding #8), keep old keys for as long as any ID photo, webhook, unfinished session or legal hold
-      created under them exists.
+- [ ] Rotate `EVIDENCE_KEY` by moving the old key to `EVIDENCE_KEYS_OLD`, restart, then run `rekey`; remove the
+      old key only once `rekey --dry-run` reports nothing left under it (`docs/OPERATIONS.md` §3).
 - [ ] Rotating `SESSION_SECRET` signs every staff member out. Rotate webhook secrets and API keys on staff
       turnover; revoke unused keys.
 - [ ] Remove `BOOTSTRAP_ADMIN_PASSWORD` from the environment after the first start; the owner changes it.
@@ -172,18 +192,18 @@ static paths; the root only holds the public web build; traversal attempts retur
       (purged evidence survives in backups until they expire); test restores; keep backups encrypted.
 
 **Abuse and monitoring**
-- [ ] With several instances, add rate limiting at the proxy/WAF as well (in-app limits are per instance):
-      e.g. `/api/auth/login` ≤ 10/min per IP, `/api/candidate/*` ≤ 20 req/s per IP, request bodies ≤ 5 MB.
-- [ ] Alert on bursts of `auth.login_failed`, `evidence.view` by one user, `api_key.created`,
+- [ ] With several instances, set `REDIS_URL` so in-app rate limits are shared (otherwise they are per
+      instance); add rate limiting at the proxy/WAF as well, e.g. `/api/auth/login` ≤ 10/min per IP,
+      `/api/candidate/*` ≤ 20 req/s per IP, request bodies ≤ 5 MB.
+- [ ] Alert on bursts of `auth.login_failed` (reason `throttled` = an account under attack), `evidence.view` by one user, `api_key.created`,
       `user.updated` (role changes), `webhook.auto_disabled`, and on `503 vision_busy` rates.
 - [ ] Ship logs to central storage with restricted access; they contain staff emails and IP addresses but
       never tokens.
-- [ ] Keep dependencies patched (`pnpm audit --prod` in CI); upgrade sharp, @fastify/static and drizzle-orm
-      (§3).
+- [ ] Keep dependencies patched (`pnpm audit --prod` in CI).
 
 **Accounts and process**
 - [ ] Give most staff the reviewer role; limit owners/admins; disable accounts on departure (revokes sessions
       immediately).
-- [ ] Shorten staff session lifetimes (`STAFF_SESSION_IDLE_MIN=60`, `STAFF_SESSION_MAX_HOURS=12`) where staff use
-      shared or unmanaged devices.
+- [ ] Keep staff session lifetimes short (defaults `STAFF_SESSION_IDLE_MIN=60`, `STAFF_SESSION_MAX_HOURS=12`;
+      shorten further where staff use shared or unmanaged devices).
 - [ ] Review the audit log regularly (evidence views, re-enrolments, legal holds, settings changes).

@@ -47,6 +47,12 @@ src/
   services/email-alerts.ts  alert email queue + per-session 5-min digest; lib/mailer.ts (SMTP / MemoryMailer)
   services/abandonment.ts  closes never-ending sessions after org abandonAfterDays (endReason 'abandoned')
   lib/net-guard.ts     SSRF guard (public-address classification, connect-time DNS check) + guarded POST
+  lib/redis.ts         ioredis client for the shared rate-limit store (REDIS_URL)
+  lib/text-safety.ts   stripUrls(): no links in user-controlled text sent by webhooks / alert emails
+  services/login-throttle.ts  per-account failed-login backoff (login_throttle table, keyed by sha256(address))
+  services/instance-usage.ts  concurrent use of the verified instance id (UA / networks / heartbeat seq)
+  services/rekey.ts    re-encryption after EVIDENCE_KEY rotation (all encrypted columns + evidence blobs)
+  scripts/rekey-cli.ts `rekey [--dry-run]` (docs/OPERATIONS.md §3)
   scripts/seed.ts      demo data
   vision/**, eval/**   vision agent
 ```
@@ -86,7 +92,8 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
   idPhotoEvidenceId, idPhotoQuality, idPhotoApprovedAt/By. The candidate check decrypts with the same AAD.
 * Access link display: `accessLinkFor(ctx, sessionRow)`.
 * Encrypted AADs in use: `evidence:<evidenceId>`, `access-token:<sessionId>`, `idphoto:<candidateId>`,
-  `reference:<referenceId>`, `frame:<frameId>`, `webhook-secret:<webhookId>`.
+  `reference:<referenceId>`, `frame:<frameId>`, `webhook-secret:<webhookId>`. A NEW encrypted column must be
+  added to services/rekey.ts `COLUMN_TARGETS` (test/rekey.test.ts fails for an uncovered bytea column).
 
 ## Background jobs
 `ctx.jobs.register({ name, intervalMs, runAtStart?, run: (ctx) => Promise })` from any plugin; jobs start on
@@ -103,7 +110,9 @@ after-commit "kicks" are no-ops).
   and email alerts. So any NEW code path that changes events must go through a SessionMutation (addEvent /
   updateEvent / closeEvent / touchEvent) — then webhooks and emails follow automatically, including sweeper paths.
 * Webhook payloads / emails: identifiers, catalog titles/observations, links (`PUBLIC_URL/admin/sessions/:id`);
-  never images, event `details`, similarity scores or staff free-text notes.
+  never images, event `details`, similarity scores or staff free-text notes. Client-reported events
+  (client_browser / client_vision) always use the EVENT_CATALOG title/observation (`outboundEventText`); other
+  user-controlled text (pause reason) goes through `stripUrls` — also re-applied when an email is rendered.
 * `finalizeSession(m, 'abandoned', …)` = status terminated, no grading, neutral `session_terminated`
   (details.reason 'abandoned_after_inactivity'). Staff DTOs carry `SessionEndReason` (incl. 'abandoned'); the
   candidate state maps it to `endReason: null` (EndReason contract unchanged).
@@ -125,6 +134,10 @@ candidate-state.ts (CandidateSessionState, instanceInControl).
   'disconnected' periods) do NOT block events — the outbox delivers them late (`deliveredLate`).
 * multiple_instances: recorded at check start when another live instance is on a different device (UA / camera
   hash); for the same device (likely a reload) only if the old window heartbeats after being superseded.
+  Also (details.detectedBy 'concurrent_use'): the verified instance id used from two places — another UA, two
+  networks alternating A→B→A→B within 60 s, or interleaved heartbeat `seq` streams (services/instance-usage.ts,
+  state in exam_sessions.instance_usage, hashes only). Then verifiedInstanceId is cleared (reconnect check) and a
+  require_check command is queued. Candidate routes run it in a preHandler; heartbeat() runs it with `seq`.
 * Server-side updates of events never change `version` (that sequence belongs to the reporting client).
 * Reconnect (new browser instance): the old instance's still-open client events are closed at the gap start
   (`details.closedBy='instance_replaced'`); late updates reported by a non-active instance are clamped at the
@@ -151,6 +164,9 @@ migrates a per-run template DB; `createTestEnv()` in `test/helpers.ts` clones it
 `{ app, ctx, clock, vision (FakeVisionService), storage, org, users{owner,admin,reviewer}, exam, questions,
 candidate, session{id,token,link}, login(role) -> cookie, candidateClient(token?, instanceId?), newSession(), newExam(), close() }`.
 Staff password for all seeded test users: `TEST_PASSWORD`. Fake camera frames: `FakeVisionService.encode({ person: 'alice', yawDeg: 20 })`.
+Staff sessions expire after 60 min of (test-clock) inactivity: mint a fresh cookie (`staffApi(env, role)`) after
+moving the clock further. Login tests: vary `remoteAddress` (10 logins/min/IP) and remember the per-account
+backoff after 5 failures.
 
 ## Running
 * dev: `pnpm --filter @sp/server seed && pnpm --filter @sp/server dev` (port 8080; web dev server proxies /api)

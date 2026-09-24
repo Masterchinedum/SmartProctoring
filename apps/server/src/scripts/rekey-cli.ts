@@ -1,7 +1,7 @@
 /**
  * Re-encrypt everything still encrypted under an old evidence key (after rotating EVIDENCE_KEY).
  *
- *   pnpm --filter @sp/server rekey [-- --dry-run] [--batch-size <n>] [--only <target,...>] [--json]
+ *   pnpm --filter @sp/server rekey [--dry-run] [--batch-size <n>] [--only <target,...>] [--json]
  *   node apps/server/dist/scripts/rekey.js [--dry-run] ...
  *
  * Uses the same environment as the server (DATABASE_URL, STORAGE_*, EVIDENCE_KEY, EVIDENCE_KEYS_OLD). Rotate first
@@ -45,6 +45,8 @@ async function main(): Promise<number> {
   let values: { 'dry-run'?: boolean; json?: boolean; 'batch-size'?: string; only?: string; help?: boolean };
   try {
     ({ values } = parseArgs({
+      // `pnpm … rekey -- --dry-run` passes the `--` through: ignore a leading one.
+      args: process.argv.slice(2).filter((a, i) => !(i === 0 && a === '--')),
       options: {
         'dry-run': { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },

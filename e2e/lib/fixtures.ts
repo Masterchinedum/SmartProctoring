@@ -69,10 +69,11 @@ export const FIXTURE_SPECS = {
     { src: 'a-dim.jpg', seconds: 30 },
     { src: 'a.jpg', seconds: 90 },
   ],
-  /** A, then the room goes dark for good. */
-  lightThenDark: [
+  /** A, the room is dark from 50 s to 90 s, then the light is back. */
+  darkPeriod: [
     { src: 'a.jpg', seconds: 50 },
-    { src: 'a-dark.jpg', seconds: 150 },
+    { src: 'a-dark.jpg', seconds: 40 },
+    { src: 'a.jpg', seconds: 90 },
   ],
 } satisfies Record<string, Segment[]>;
 

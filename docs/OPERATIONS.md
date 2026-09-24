@@ -34,7 +34,8 @@ NODE_ENV=production DATABASE_URL=... EVIDENCE_KEY=... SESSION_SECRET=... node ap
   (~25–60 ms CPU). With the default 30 s interval, one vCPU sustains roughly 500–1,000 concurrent
   candidates; check-ins are burstier (≈10 frames each). Tune `VISION_CONCURRENCY` to the core count.
 * **Multiple instances**: run N app containers behind a load balancer, set `REDIS_URL` so realtime
-  staff updates fan out across instances, and use `STORAGE_DRIVER=s3` (or a shared volume) so every
+  staff updates fan out across instances and rate-limit counters (login, candidate endpoints, integration API)
+  are shared by all instances, and use `STORAGE_DRIVER=s3` (or a shared volume) so every
   instance can read evidence. Background jobs (heartbeat timeouts, clock expiry, retention) use
   Postgres row locks and are safe to run on every instance.
 
@@ -42,10 +43,30 @@ NODE_ENV=production DATABASE_URL=... EVIDENCE_KEY=... SESSION_SECRET=... node ap
 
 * `EVIDENCE_KEY` encrypts all images and face templates (AES-256-GCM). Losing it makes evidence
   unreadable — store it in a secret manager and back it up separately from the database.
-* **Rotation**: generate a new key, move the old one into `EVIDENCE_KEYS_OLD` (comma-separated) and
-  set the new one as `EVIDENCE_KEY`. New evidence uses the new key; old evidence stays readable. Old
-  keys can be dropped once all evidence encrypted with them has passed retention.
+* **Rotation**:
+  1. Generate a new key (`openssl rand -base64 32`), set it as `EVIDENCE_KEY` and move the old one into
+     `EVIDENCE_KEYS_OLD` (comma-separated), then restart **every** instance. New data uses the new key; old data
+     stays readable.
+  2. Re-encrypt what is still under the old key, with the same environment as the servers (safe while they run;
+     interrupt and re-run at will — it continues where it stopped):
+     ```bash
+     pnpm --filter @sp/server rekey --dry-run      # or: node apps/server/dist/scripts/rekey.js --dry-run
+     pnpm --filter @sp/server rekey                # re-encrypts in batches (--batch-size, default 200)
+     ```
+     It covers every encrypted value: evidence blobs (images), ID-photo, reference and check-frame face
+     templates, stored access tokens and webhook secrets. Progress goes to stderr; the summary names each
+     `EVIDENCE_KEYS_OLD` key id as "still needed" or "no longer needed"; the run is audit-logged
+     (`keys.rekeyed`). Exit code 0 = nothing left under an old key, 3 = items remain (or failed — see the
+     output), 75 = another run holds the lock.
+  3. Drop an old key from `EVIDENCE_KEYS_OLD` **only once `rekey --dry-run` reports nothing left under it**
+     (exit code 0). Keep a copy of the retired key in your secret manager until backups made before the
+     rotation have expired — restoring such a backup needs it.
 * `SESSION_SECRET` signs staff session cookies; rotating it signs everyone out.
+* **Staff sign-in**: sessions expire after `STAFF_SESSION_IDLE_MIN` (default 60) minutes without activity and
+  `STAFF_SESSION_MAX_HOURS` (default 12) hours at most; the staff app then returns to the sign-in page and back
+  to the page that was open. After 5 failed sign-ins in a row for an address (no 15-minute pause), further
+  attempts for it wait 30 s, then 1, 2, 4 … up to 15 minutes, whatever the client IP (`auth.login_failed`
+  audit entries, reason `throttled`). An administrator's password reset lifts the wait.
 
 ## 4. Backups
 
@@ -127,7 +148,7 @@ and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) s
 | `SMTP_FROM` | — (required with `SMTP_HOST`) | From header, e.g. `SmartProctoring <proctoring-alerts@example.com>`. |
 | `WEBHOOK_ALLOW_PRIVATE_NETWORKS` | `false` in production, `true` otherwise | Allow webhook URLs on localhost / private networks and plain `http://`… only for development. In production webhooks must be `https://` and resolve to public addresses (checked when saved and again at connect time). |
 | `WEBHOOK_DISABLE_AFTER_FAILURES` | 20 | Consecutive failed attempts (spanning ≥ 1 h) before a webhook is disabled. |
-| `API_RATE_LIMIT_PER_MINUTE` | 600 | Integration API requests per minute per API key (429 above). With several instances and no shared rate-limit store the limit applies per instance. |
+| `API_RATE_LIMIT_PER_MINUTE` | 600 | Integration API requests per minute per API key (429 above). Counted across all instances when `REDIS_URL` is set; otherwise per instance. |
 
 Background jobs (advisory-lock guarded, one instance at a time): `webhooks` every 5 s (plus immediately
 after a change), `email-alerts` every 10 s, `abandoned-sessions` hourly. Webhook attempts have a 10 s

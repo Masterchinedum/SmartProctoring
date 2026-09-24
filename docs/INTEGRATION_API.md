@@ -171,6 +171,9 @@ delivers a `ping` immediately.
 Event fields: `id, sessionId, type, category, severity, title, observation, status, startedAt, endedAt,
 durationMs, confidence, deliveredLate, sessionStatus, candidate { id, name, externalId }, exam { id, title },
 staffUrl`. Session fields: `sessionId, status, endReason, at, eventId, reason, candidate, exam, staffUrl`.
+For events reported by the candidate's browser, `title` and `observation` are always the standard wording of the
+event type (never text supplied by the browser); `pauseRequest.reason` is the candidate's own text with links
+removed (`[link removed]`).
 
 ### Request format
 

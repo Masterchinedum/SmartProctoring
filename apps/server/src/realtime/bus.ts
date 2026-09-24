@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { LiveMessage } from '@sp/shared';
+import { loadRedisClass } from '../lib/redis.js';
 
 /**
  * Staff realtime fan-out. Messages are scoped per organisation.
@@ -52,7 +53,7 @@ export class RedisBus implements RealtimeBus {
   }
 
   static async connect(url: string, onError: (err: Error) => void = () => {}): Promise<RedisBus> {
-    const { Redis } = await import('ioredis');
+    const Redis = await loadRedisClass(); // bundle-safe (see lib/redis.ts)
     const opts = { maxRetriesPerRequest: null, enableReadyCheck: true, lazyConnect: true } as const;
     const pub = new Redis(url, opts);
     const sub = new Redis(url, opts);
