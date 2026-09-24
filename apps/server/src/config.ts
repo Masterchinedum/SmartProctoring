@@ -45,7 +45,7 @@ export interface Config {
   /** Enable background sweeper (heartbeat timeouts, clock expiry, stale checks). */
   sweeperEnabled: boolean;
   sweeperIntervalMs: number;
-  /** Staff session idle timeout / absolute lifetime. */
+  /** Staff session idle timeout / absolute lifetime (STAFF_SESSION_IDLE_MIN, default 60; STAFF_SESSION_MAX_HOURS, default 12). */
   staffSessionIdleMs: number;
   staffSessionMaxMs: number;
   /**
@@ -252,8 +252,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logLevel: env.LOG_LEVEL || (nodeEnv === 'test' ? 'silent' : 'info'),
     sweeperEnabled: bool(env.SWEEPER_ENABLED, nodeEnv !== 'test'),
     sweeperIntervalMs: int(env.SWEEPER_INTERVAL_MS, 5000),
-    staffSessionIdleMs: int(env.STAFF_SESSION_IDLE_MIN, 8 * 60) * 60_000,
-    staffSessionMaxMs: int(env.STAFF_SESSION_MAX_HOURS, 7 * 24) * 3_600_000,
+    // Staff can view biometric evidence: 60 min idle / 12 h absolute by default (security review #12).
+    staffSessionIdleMs: Math.max(1, int(env.STAFF_SESSION_IDLE_MIN, 60)) * 60_000,
+    staffSessionMaxMs: Math.max(1, int(env.STAFF_SESSION_MAX_HOURS, 12)) * 3_600_000,
     sessionLimits: {
       maxEvidenceItems: Math.max(1, int(env.SESSION_MAX_EVIDENCE_ITEMS, 1500)),
       maxEvidenceBytes: Math.max(1, int(env.SESSION_MAX_EVIDENCE_MB, 300)) * 1024 * 1024,

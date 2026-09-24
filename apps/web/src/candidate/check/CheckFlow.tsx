@@ -150,13 +150,21 @@ function CheckResult({ purpose, res, onRetry, onBackToSetup }: { purpose: CheckP
   }
 
   if (res.outcome === 'retry') {
+    const livenessHelp =
+      res.liveness && !res.liveness.passed
+        ? [
+            'Turn your whole head (not only your eyes) slowly in the direction shown, until the bar fills, then hold still for a moment.',
+            'Keep your face fully in view and well lit while you turn.',
+          ]
+        : [];
+    const guidance = [...new Set([...res.guidance, ...livenessHelp])];
     return (
       <div className="stack" data-testid="check-retry">
         <h1>Let’s try that again</h1>
         <p className="cand-lead">{res.message || 'We could not complete the check this time.'}</p>
-        {res.guidance.length > 0 && (
-          <ul className="cand-guidance-list">
-            {res.guidance.map((g, i) => (
+        {guidance.length > 0 && (
+          <ul className="cand-guidance-list" data-testid="check-retry-guidance">
+            {guidance.map((g, i) => (
               <li key={i}>{g}</li>
             ))}
           </ul>

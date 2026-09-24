@@ -34,6 +34,7 @@ import { hashPassword } from '../../lib/crypto.js';
 import { badRequest, conflict, forbidden, notFound, validationFailed } from '../../lib/errors.js';
 import { toStaffUserDTO } from '../../services/dto.js';
 import { mergePolicy, orgSettings } from '../../services/org.js';
+import { clearLoginFailures } from '../../services/login-throttle.js';
 import { blankToUndefined, escapeLike, idParam, loadOrgRow, pagingSchema, sanitizePolicyInput } from './common.js';
 
 const auditQuerySchema = pagingSchema.extend({
@@ -250,6 +251,8 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       return { user: u, revoke: patch.disabled === true || passwordHash !== undefined };
     });
     if (revoke) await revokeStaffSessions(ctx, id);
+    // An administrator's password reset also lifts the per-account sign-in backoff.
+    if (passwordHash !== undefined) await clearLoginFailures(ctx.db, user.email);
     return toStaffUserDTO(user);
   });
 

@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { api, ApiError, errorMessage } from '../api/client';
+import { api } from '../api/client';
 import { qk } from '../api/queries';
 import { useMe } from '../auth';
+import { loginErrorMessage } from '../lib/auth-errors';
 
 function safeNext(next: string | null): string {
   // Only allow in-app admin paths (no open redirects).
@@ -33,10 +34,7 @@ export function LoginPage() {
       qc.setQueryData(qk.me, res);
       navigate(next, { replace: true });
     } catch (err) {
-      if (err instanceof ApiError && (err.status === 401 || err.status === 400)) setError('Incorrect email or password.');
-      else if (err instanceof ApiError && err.status === 429) setError('Too many attempts. Wait a minute and try again.');
-      else if (err instanceof ApiError && err.status === 403) setError('This account is disabled. Contact your administrator.');
-      else setError(errorMessage(err));
+      setError(loginErrorMessage(err));
     } finally {
       setBusy(false);
     }

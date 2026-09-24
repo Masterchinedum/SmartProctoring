@@ -5,6 +5,7 @@ import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import type { Redis } from 'ioredis';
 import { ZodError } from 'zod';
 import { loadConfig, type Config } from './config.js';
 import type { Ctx } from './context.js';
@@ -12,6 +13,7 @@ import { createDatabase, migrate, type Database } from './db/index.js';
 import { createKeyring } from './lib/crypto.js';
 import { HttpError } from './lib/errors.js';
 import { appLoggerOptions } from './lib/log-redact.js';
+import { connectRateLimitRedis, RATE_LIMIT_NAMESPACE } from './lib/redis.js';
 import { createStorage, type BlobStorage } from './lib/storage.js';
 import { createBus, type RealtimeBus } from './realtime/bus.js';
 import { liveRoute } from './realtime/live-route.js';
@@ -50,6 +52,13 @@ export interface BuildAppOptions {
   serveWeb?: boolean;
   /** Outgoing email for alerts (default: SMTP from config.smtp, or none). Tests pass a MemoryMailer. */
   mailer?: Mailer | null;
+  /**
+   * Redis client for the shared rate-limit store (default: connected from config.redisUrl when set; null = keep
+   * the counters in memory, per instance).
+   */
+  rateLimitRedis?: Redis | null;
+  /** Key prefix for the rate-limit counters in Redis (default `sp:rl:`; tests use a unique one). */
+  rateLimitNamespace?: string;
 }
 
 declare module 'fastify' {
@@ -86,7 +95,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   });
   for (const w of config.warnings) app.log.warn(w);
 
-  const owned: { database?: Database; vision?: VisionService; bus?: RealtimeBus; storage?: BlobStorage } = {};
+  const owned: { database?: Database; vision?: VisionService; bus?: RealtimeBus; storage?: BlobStorage; rateLimitRedis?: Redis } = {};
   const database = opts.database ?? (owned.database = createDatabase(config.databaseUrl));
   if (opts.migrate !== false) await migrate(database);
 
@@ -135,9 +144,17 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   app.decorateRequest('apiKey', null);
 
   await app.register(fastifyCookie, { secret: config.sessionSecret });
+  // With REDIS_URL the counters live in Redis, so every limit applies across all server instances (not per
+  // process). A Redis failure lets requests through (skipOnError) rather than failing them; it is logged.
+  const rateLimitRedis =
+    opts.rateLimitRedis !== undefined
+      ? opts.rateLimitRedis
+      : config.redisUrl
+        ? (owned.rateLimitRedis = await connectRateLimitRedis(config.redisUrl, (err) => app.log.error({ err }, 'redis rate-limit store error')))
+        : null;
   await app.register(fastifyRateLimit, {
     global: false,
-    ...(config.redisUrl ? {} : {}),
+    ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: opts.rateLimitNamespace ?? RATE_LIMIT_NAMESPACE, skipOnError: true } : {}),
     errorResponseBuilder: (_req, context) => ({
       statusCode: 429,
       error: 'rate_limited',
@@ -192,10 +209,11 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       index: false,
       wildcard: true,
       cacheControl: false,
-      setHeaders(res, path) {
-        if (path.includes(`${join('/', 'assets', '/')}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        else if (path.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
-        else res.setHeader('Cache-Control', 'public, max-age=86400');
+      // @fastify/static >= 10 passes the FastifyReply (not the raw response).
+      setHeaders(reply, path) {
+        if (path.includes(`${join('/', 'assets', '/')}`)) reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+        else if (path.endsWith('.html')) reply.header('Cache-Control', 'no-cache');
+        else reply.header('Cache-Control', 'public, max-age=86400');
       },
     });
   } else if (opts.serveWeb !== false) {
@@ -223,6 +241,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     await ctx.jobs.stop();
     ctx.live.close();
     await owned.bus?.close();
+    await owned.rateLimitRedis?.quit().catch(() => {});
     await owned.vision?.close();
     await owned.storage?.close?.();
     await ownedMailer?.close?.();

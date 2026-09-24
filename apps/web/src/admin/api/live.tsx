@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useQueryClient } from '@tanstack/react-query';
 import type { LiveMessage } from '@sp/shared';
 import { setServerTime } from '../lib/clock';
+import { isSessionEndedClose } from '../lib/auth-errors';
 import { applyEvent, applyIdentityCheck, applyNote, applyPauseRequestMessage, applySessionSummary, qk } from './queries';
 
 /**
@@ -133,9 +134,12 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       socket.onmessage = (e) => {
         if (typeof e.data === 'string') handle(e.data);
       };
-      socket.onclose = () => {
+      socket.onclose = (ev) => {
         if (ws !== socket) return;
         ws = null;
+        // 4401: the staff session ended (idle/absolute expiry, logout elsewhere, revoked). Re-check who is signed
+        // in: a 401 there drops the cached user and routes to the login page with a return path.
+        if (isSessionEndedClose(ev.code)) void qc.invalidateQueries({ queryKey: qk.me });
         scheduleReconnect();
       };
       socket.onerror = () => {

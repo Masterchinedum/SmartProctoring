@@ -105,35 +105,92 @@ export function createKeyring(current: Buffer, old: Buffer[] = []): Keyring {
 
 /* ------------------------------------------------------------------ passwords (scrypt) */
 
-const SCRYPT_N = 1 << 15;
-const SCRYPT_R = 8;
-const SCRYPT_P = 1;
+/**
+ * scrypt parameters for NEW hashes: N=2^17, r=8, p=1 (≈128 MiB, OWASP guidance). The parameters are stored in
+ * every hash, so older hashes (N=2^15) keep verifying; routes/auth.ts rehashes them at the next successful login
+ * (passwordNeedsRehash).
+ */
+export const SCRYPT_PARAMS = { N: 1 << 17, r: 8, p: 1 } as const;
 const SCRYPT_KEYLEN = 64;
+const SCRYPT_SALT_LEN = 16;
+/** Hashes with parameters above these bounds are refused (a corrupted / hostile row must not exhaust memory). */
+const SCRYPT_MAX = { N: 1 << 20, r: 32, p: 16, memBytes: 512 * 1024 * 1024 };
 
-function scrypt(password: string, salt: Buffer, keylen: number, opts: ScryptOptions): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    scryptCb(password.normalize('NFKC'), salt, keylen, opts, (err, key) => (err ? reject(err) : resolve(key)));
-  });
+/**
+ * scrypt runs on libuv's small thread pool (4 threads by default, shared with fs / dns / zlib). Each derivation
+ * at N=2^17 takes ~0.4 s and 128 MiB, so at most two run at once; further logins wait here instead of starving
+ * file and DNS operations or multiplying memory use.
+ */
+const SCRYPT_CONCURRENCY = 2;
+let scryptActive = 0;
+const scryptWaiting: (() => void)[] = [];
+
+async function withScryptSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (scryptActive >= SCRYPT_CONCURRENCY) await new Promise<void>((resolve) => scryptWaiting.push(resolve));
+  scryptActive++;
+  try {
+    return await fn();
+  } finally {
+    scryptActive--;
+    scryptWaiting.shift()?.();
+  }
+}
+
+/** Memory bound for a derivation: scrypt needs ≈128·N·r (+128·r·p) bytes; allow twice that. */
+function scryptMaxmem(N: number, r: number, p: number): number {
+  return 2 * 128 * r * (N + p + 2);
+}
+
+function scrypt(password: string, salt: Buffer, keylen: number, opts: { N: number; r: number; p: number }): Promise<Buffer> {
+  const options: ScryptOptions = { N: opts.N, r: opts.r, p: opts.p, maxmem: scryptMaxmem(opts.N, opts.r, opts.p) };
+  return withScryptSlot(
+    () =>
+      new Promise<Buffer>((resolve, reject) => {
+        scryptCb(password.normalize('NFKC'), salt, keylen, options, (err, key) => (err ? reject(err) : resolve(key)));
+      }),
+  );
+}
+
+interface ParsedHash {
+  N: number;
+  r: number;
+  p: number;
+  salt: Buffer;
+  hash: Buffer;
+}
+
+function parsePasswordHash(stored: string): ParsedHash | null {
+  const parts = stored.split('$');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return null;
+  const [N, r, p] = [Number(parts[1]), Number(parts[2]), Number(parts[3])];
+  if (![N, r, p].every(Number.isInteger)) return null;
+  if (N < 2 || N > SCRYPT_MAX.N || (N & (N - 1)) !== 0 || r < 1 || r > SCRYPT_MAX.r || p < 1 || p > SCRYPT_MAX.p) return null;
+  if (128 * N * r > SCRYPT_MAX.memBytes) return null;
+  const salt = Buffer.from(parts[4], 'base64');
+  const hash = Buffer.from(parts[5], 'base64');
+  if (salt.length === 0 || hash.length === 0) return null;
+  return { N, r, p, salt, hash };
 }
 
 /** Format: scrypt$N$r$p$saltB64$hashB64 */
-export async function hashPassword(password: string): Promise<string> {
-  const salt = randomBytes(16);
-  const key = await scrypt(password, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: 128 * SCRYPT_N * SCRYPT_R * 2 });
-  return ['scrypt', SCRYPT_N, SCRYPT_R, SCRYPT_P, salt.toString('base64'), key.toString('base64')].join('$');
+export async function hashPassword(password: string, params: { N: number; r: number; p: number } = SCRYPT_PARAMS): Promise<string> {
+  const salt = randomBytes(SCRYPT_SALT_LEN);
+  const key = await scrypt(password, salt, SCRYPT_KEYLEN, params);
+  return ['scrypt', params.N, params.r, params.p, salt.toString('base64'), key.toString('base64')].join('$');
 }
 
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const parts = stored.split('$');
-  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
-  const N = Number(parts[1]);
-  const r = Number(parts[2]);
-  const p = Number(parts[3]);
-  if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p) || N < 2 || N > 1 << 20) return false;
-  const salt = Buffer.from(parts[4], 'base64');
-  const expected = Buffer.from(parts[5], 'base64');
-  const key = await scrypt(password, salt, expected.length, { N, r, p, maxmem: 128 * N * r * 2 });
-  return key.length === expected.length && timingSafeEqual(key, expected);
+  const h = parsePasswordHash(stored);
+  if (!h) return false;
+  const key = await scrypt(password, h.salt, h.hash.length, h);
+  return key.length === h.hash.length && timingSafeEqual(key, h.hash);
+}
+
+/** True when a stored hash uses weaker / different parameters than SCRYPT_PARAMS (rehash after a successful login). */
+export function passwordNeedsRehash(stored: string): boolean {
+  const h = parsePasswordHash(stored);
+  if (!h) return true;
+  return h.N < SCRYPT_PARAMS.N || h.r !== SCRYPT_PARAMS.r || h.p !== SCRYPT_PARAMS.p || h.salt.length < SCRYPT_SALT_LEN || h.hash.length < SCRYPT_KEYLEN;
 }
 
 /** A hash to compare against when the user does not exist (keeps login timing uniform). */

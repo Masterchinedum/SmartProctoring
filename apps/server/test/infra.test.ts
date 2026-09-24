@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
@@ -163,6 +163,7 @@ describe('bootstrap and static web', () => {
     writeFileSync(join(dist, 'index.html'), '<!doctype html><title>SmartProctoring</title>');
     mkdirSync(join(dist, 'assets'));
     writeFileSync(join(dist, 'assets', 'app-abc.js'), 'console.log(1)');
+    writeFileSync(join(dist, 'robots.txt'), 'User-agent: *');
     const app = await buildApp({
       config: { ...env.config, webDistDir: dist },
       database: env.ctx.database,
@@ -182,6 +183,33 @@ describe('bootstrap and static web', () => {
       const asset = await app.inject({ method: 'GET', url: '/assets/app-abc.js' });
       expect(asset.statusCode).toBe(200);
       expect(asset.headers['cache-control']).toContain('immutable');
+      expect(asset.body).toBe('console.log(1)');
+      const rootFile = await app.inject({ method: 'GET', url: '/robots.txt' });
+      expect(rootFile.statusCode).toBe(200);
+      expect(rootFile.headers['cache-control']).toBe('public, max-age=86400');
+      expect(idx.headers['cache-control']).toBe('no-cache');
+      const head = await app.inject({ method: 'HEAD', url: '/admin/sessions' });
+      expect(head.statusCode).toBe(200);
+      // @fastify/static >= 10.1.2: no directory listings, no escaping the web root (encoded or not).
+      const secret = join(dist, '..', `${basename(dist)}-secret.txt`);
+      writeFileSync(secret, 'TOP-SECRET');
+      try {
+        for (const url of [
+          `/..%2f${basename(dist)}-secret.txt`,
+          `/assets/..%2f..%2f${basename(dist)}-secret.txt`,
+          `/%2e%2e/${basename(dist)}-secret.txt`,
+          `/assets%2fapp-abc.js`,
+          '/assets/',
+          '/assets',
+        ]) {
+          const r = await app.inject({ method: 'GET', url });
+          expect(r.body, url).not.toContain('TOP-SECRET');
+          expect(r.body, url).not.toContain('app-abc.js');
+          if (r.statusCode === 200) expect(r.body, url).toContain('SmartProctoring'); // SPA fallback only
+        }
+      } finally {
+        rmSync(secret, { force: true });
+      }
       const api404 = await app.inject({ method: 'GET', url: '/api/nope' });
       expect(api404.statusCode).toBe(404);
       expect(api404.json().error).toBe('not_found');

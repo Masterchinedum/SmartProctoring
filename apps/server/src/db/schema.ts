@@ -120,7 +120,40 @@ export const staffSessions = pgTable(
   (t) => [uniqueIndex('staff_sessions_token_uq').on(t.tokenHash), index('staff_sessions_user_idx').on(t.staffUserId)],
 );
 
+/**
+ * Per-account failed-login backoff (routes/auth.ts, services/login-throttle.ts). Keyed by sha256 of the
+ * normalised email that was TRIED — whether or not such an account exists — so the backoff never reveals
+ * which addresses are registered. Independent of the client IP.
+ */
+export const loginThrottle = pgTable(
+  'login_throttle',
+  {
+    /** sha256 hex of `login:<lower-case email>`. */
+    key: text('key').primaryKey(),
+    /** Consecutive failed attempts (reset after LOGIN_FAILURE_WINDOW_MS without a failure, or on success). */
+    failures: integer('failures').notNull().default(0),
+    lastFailureAt: ts('last_failure_at').notNull(),
+    /** No password is checked for this address before this instant (429). */
+    lockedUntil: ts('locked_until'),
+  },
+  (t) => [index('login_throttle_last_failure_idx').on(t.lastFailureAt)],
+);
+
 /* ------------------------------------------------------------------ exams */
+
+/** exam_sessions.instance_usage (services/instance-usage.ts). Hashes only — never raw IP addresses or user agents. */
+export interface InstanceUsage {
+  /** The verified instance this record describes (reset when another instance is verified). */
+  instanceId: string;
+  /** sha256 prefix of the User-Agent first seen for this instance. */
+  uaHash: string;
+  /** Recent runs of consecutive requests from one network (sha256 prefix of the /24 or /64), newest last. */
+  nets: { net: string; firstAt: number; lastAt: number }[];
+  /** Distinct client IP hashes (sha256 prefix) seen for this instance, newest last (max 6). */
+  ipHashes: string[];
+  /** Heartbeat `seq` streams: each is the last seq of one monotonic sequence; `cur` is the stream used last. */
+  seq: { streams: { last: number; at: number }[]; cur: number } | null;
+}
 
 export const exams = pgTable(
   'exams',
@@ -259,6 +292,11 @@ export const examSessions = pgTable(
     lastHeartbeatInstanceId: text('last_heartbeat_instance_id'),
     /** Last heartbeat from the verified instance (start of a retroactive 'disconnected' period on reconnect). */
     lastVerifiedHeartbeatAt: ts('last_verified_heartbeat_at'),
+    /**
+     * Where the verified browser instance's requests come from (hashed networks / user agent, heartbeat `seq`
+     * streams): concurrent use of a copied instance id is detected from it (services/instance-usage.ts).
+     */
+    instanceUsage: jsonb('instance_usage').$type<InstanceUsage>(),
     connection: text('connection').$type<ConnectionStatus>().notNull().default('never_connected'),
     reportingInterruptedSince: ts('reporting_interrupted_since'),
     /** Open reporting_interrupted event while offline. */
@@ -782,6 +820,7 @@ export const emailAlerts = pgTable(
 export type Organization = typeof organizations.$inferSelect;
 export type StaffUser = typeof staffUsers.$inferSelect;
 export type StaffSession = typeof staffSessions.$inferSelect;
+export type LoginThrottleRow = typeof loginThrottle.$inferSelect;
 export type Exam = typeof exams.$inferSelect;
 export type Question = typeof questions.$inferSelect;
 export type Candidate = typeof candidates.$inferSelect;

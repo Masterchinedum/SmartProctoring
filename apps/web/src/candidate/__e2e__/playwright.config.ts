@@ -12,6 +12,7 @@ import { defineConfig } from '@playwright/test';
  *       SP_Y4M_OBAMA  person A, frontal, ~20 s (loops)
  *       SP_Y4M_SWAP   person A 90 s → empty room 6 s → a different, frontal person B 120 s
  *       SP_Y4M_ENV    person A 45 s → the same person A shifted/smaller 90 s (moved seat)
+ *       SP_Y4M_DIM    person A in a dim room (contrast below the server gate) 35 s → light on 60 s
  *   - SP_ADMIN_EMAIL / SP_ADMIN_PASSWORD: staff login used to create exams/sessions and verify timelines.
  *     (flow/liveness/offline/swap can instead use pre-created links: SP_LINK_<KEY>, SP_SESSION_<KEY>.)
  * Run:  PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers pnpm --filter @sp/web exec playwright test -c src/candidate/__e2e__/playwright.config.ts

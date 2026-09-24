@@ -3,7 +3,7 @@
  *
  * All pixel buffers in the vision module are 8-bit RGB, interleaved (HWC), row-major, no padding.
  */
-import sharp from 'sharp';
+import sharp, { type Metadata as SharpMetadata } from 'sharp';
 
 export interface RgbImage {
   /** width * height * 3 bytes, RGB interleaved. */
@@ -38,7 +38,7 @@ const SHARP_INPUT = { failOn: 'error', limitInputPixels: MAX_INPUT_PIXELS } as c
 
 /** Oriented (EXIF-applied) size of an encoded image without decoding the pixels. */
 export async function orientedSize(input: Buffer): Promise<{ width: number; height: number }> {
-  let meta: sharp.Metadata;
+  let meta: SharpMetadata;
   try {
     meta = await sharp(input, SHARP_INPUT).metadata();
   } catch (err) {

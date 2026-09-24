@@ -5,6 +5,7 @@ import { classifyApiError, type CandidateApi } from '../api';
 import { errorMessage, useController, useSnapshot } from '../context';
 import { CameraPreview, Spinner } from '../components/common';
 import { captureJpeg } from '../monitoring/frames';
+import { CheckProgress } from './progress';
 import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrameAnalysis';
 
 /**
@@ -97,6 +98,8 @@ export function VerifyStep({
     cancelled: false,
     /** The candidate's own straight-ahead pose from calibration (for the frontal-frame gate). */
     centre: null as Pose | null,
+    /** When to hand the attempt to the server although the guided capture did not finish. */
+    progress: new CheckProgress(),
   });
 
   const setPhaseBoth = (p: Phase) => {
@@ -132,6 +135,7 @@ export function VerifyStep({
       r.completing = false;
       const b = ctrl.currentBaseline();
       r.centre = b && b.samples > 0 ? { yaw: b.yaw, pitch: b.pitch } : null;
+      r.progress.start(performance.now());
       setFrontalCount(0);
       setStepsDone(0);
       setStepView(null);
@@ -147,6 +151,7 @@ export function VerifyStep({
       (res) => {
         if (!alive || r.check) return;
         r.check = res;
+        r.progress.start(performance.now());
         setCheck(res);
         if (res.liveness) {
           r.tracker = createLivenessTracker({ steps: res.liveness.steps, targetYawDeg: res.liveness.targetYawDeg, targetPitchDeg: res.liveness.targetPitchDeg });
@@ -228,7 +233,12 @@ export function VerifyStep({
                 setPhaseBoth('expired');
                 return;
               }
-              if (kind === 'invalid_state' || kind === 'client' || code === 'too_many_frames' || kind === 'invalid_link' || kind === 'superseded') {
+              if (code === 'too_many_frames') {
+                // The server has all the frames it will take: let it decide on what it has.
+                void completeRef.current();
+                return;
+              }
+              if (kind === 'invalid_state' || kind === 'client' || kind === 'invalid_link' || kind === 'superseded') {
                 // Challenge closed, too many frames, or frame refused: stop this attempt.
                 r.cancelled = true;
                 setError(errorMessage(e));
@@ -254,6 +264,7 @@ export function VerifyStep({
     [ctrl],
   );
 
+  const completeRef = useRef<() => Promise<void>>(async () => undefined);
   const complete = useCallback(async () => {
     const r = run.current;
     if (r.completing || !r.check) return;
@@ -274,6 +285,20 @@ export function VerifyStep({
       setPhaseBoth('error');
     }
   }, [ctrl, onResult]);
+  completeRef.current = complete;
+
+  /* ---------------------------------------------------------------- give up gracefully */
+  // Hand the attempt to the server when nothing progresses (e.g. a photo cannot turn its head, or the
+  // face is never usable): the server records it, counts it toward the attempt limit and explains why.
+  useEffect(() => {
+    if (phase !== 'frontal' && phase !== 'liveness') return;
+    const id = setInterval(() => {
+      const r = run.current;
+      if (!r.check || r.cancelled || r.completing || r.inflight > 0) return;
+      if (r.progress.stalled(performance.now())) void completeRef.current();
+    }, 1000);
+    return () => clearInterval(id);
+  }, [phase]);
 
   /* ---------------------------------------------------------------- per frame */
   const onFrame = useCallback(
@@ -299,6 +324,7 @@ export function VerifyStep({
           upload('frontal', face, ctrl.api, (res) => {
             if (res.accepted) {
               r.frontalAccepted++;
+              r.progress.accepted(performance.now());
               setFrontalCount(r.frontalAccepted);
               setGuidance([]);
               if (r.frontalAccepted >= c.frontalFramesRequired) {
@@ -308,6 +334,9 @@ export function VerifyStep({
             } else {
               r.frontalSent = r.frontalAccepted; // allow another attempt
               setGuidance(res.guidance.length ? res.guidance : ['Please look straight at the camera and hold still.']);
+              // The image keeps failing the quality gate (e.g. too dark): let the server record
+              // "unable to verify" and return its guidance rather than retrying endlessly.
+              if (r.progress.frontalRejected()) void complete();
             }
           }, () => {
             r.frontalSent = r.frontalAccepted;
@@ -319,6 +348,7 @@ export function VerifyStep({
       if (r.phase === 'liveness' && r.tracker) {
         // The tracker measures each step relative to the centre pose it captures itself.
         const prog = r.tracker.update(face, faces.length, a.t);
+        r.progress.liveness(prog.stepIndex, prog.progress ?? 0, performance.now());
         const steps: LivenessStep[] = c.liveness?.steps ?? [];
         const step = steps.find((s) => s.index === prog.stepIndex) ?? steps[Math.min(steps.length - 1, Math.max(0, prog.stepIndex))];
         setStepView({ index: prog.stepIndex, action: String(prog.action ?? step?.action ?? 'center'), message: prog.message || step?.instruction || '', progress: prog.progress ?? 0, problem: prog.problem ?? null });
@@ -332,6 +362,7 @@ export function VerifyStep({
           const idx = prog.stepIndex;
           r.perStep.set(idx, (r.perStep.get(idx) ?? 0) + 1);
           r.tracker.markCaptured(a.t);
+          r.progress.captured(performance.now());
           upload(idx, face, ctrl.api, (res) => {
             if (!res.accepted && res.guidance.length) setGuidance(res.guidance);
             else setGuidance([]);
@@ -364,13 +395,17 @@ export function VerifyStep({
           upload('frontal', null, ctrl.api, (res) => {
             if (res.accepted) {
               r.frontalAccepted++;
+              r.progress.accepted(performance.now());
               setFrontalCount(r.frontalAccepted);
               if (r.frontalAccepted >= c.frontalFramesRequired) {
                 stepStartedAt = performance.now();
                 if (steps.length) setPhaseBoth('liveness');
                 else void complete();
               }
-            } else setGuidance(res.guidance.length ? res.guidance : ['Please look straight at the camera and hold still.']);
+            } else {
+              setGuidance(res.guidance.length ? res.guidance : ['Please look straight at the camera and hold still.']);
+              if (r.progress.frontalRejected()) void complete();
+            }
           });
         }
         return;
@@ -385,6 +420,7 @@ export function VerifyStep({
       if (elapsed > 1800 + shotsThisStep * 900 && shotsThisStep < FRAMES_PER_STEP) {
         shotsThisStep++;
         r.perStep.set(step.index, shotsThisStep);
+        r.progress.captured(performance.now());
         upload(step.index, null, ctrl.api, () => undefined);
       }
       if (shotsThisStep >= FRAMES_PER_STEP && elapsed > 3200) {
