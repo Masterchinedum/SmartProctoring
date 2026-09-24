@@ -9,11 +9,13 @@
  */
 import { poseFromFivePoints } from '@sp/shared';
 import * as ort from 'onnxruntime-node';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { alignFace, type AlignedFace } from './align';
 import { DEFAULT_DETECT_THRESHOLD, YUNET_INPUT_SIZE, decodeToDetectedFaces, interEyeDistance, packBgrPlanar, planDetectorInput } from './detect';
 import { DEFAULT_MAX_DECODE_SIDE, decodeImage, decodeRegion, encodeJpegRegion, resizeRgb, wholeImageStats, type RgbImage } from './image';
 import { SFACE_MODEL_FILE, YUNET_MODEL_FILE } from './models';
+import { removeInitializersFromInputs } from './onnx-model';
 import { assessQuality, faceRegionStats, resolveGate } from './quality';
 import type { AnalyzeOptions, DetectedFace, HeadPose, ImageAnalysis, QualityGate } from './types';
 
@@ -37,6 +39,21 @@ const MAX_ALIGN_INTER_EYE = 120;
 const FACE_CROP_MARGIN = 0.4;
 const FACE_CROP_MAX_SIDE = 256;
 const FACE_CROP_QUALITY = 85;
+
+/**
+ * Load a model with its weights treated as constants (onnx-model.ts): the SFace file lists its initializers as
+ * graph inputs, which blocks constant folding (measured: SFace 37 -> 29 ms per face on one thread, identical
+ * embeddings). Falls back to loading the file as is if the rewrite fails.
+ */
+async function createSession(path: string, options: ort.InferenceSession.SessionOptions): Promise<ort.InferenceSession> {
+  let model: Uint8Array | null = null;
+  try {
+    model = removeInitializersFromInputs(await readFile(path)).model;
+  } catch {
+    model = null;
+  }
+  return model ? ort.InferenceSession.create(model, options) : ort.InferenceSession.create(path, options);
+}
 
 export class VisionEngine {
   private readonly gate: QualityGate;
@@ -67,8 +84,8 @@ export class VisionEngine {
       extra: { session: { intra_op: { allow_spinning: '0' }, inter_op: { allow_spinning: '0' } } },
     };
     const [detector, recognizer] = await Promise.all([
-      ort.InferenceSession.create(resolve(opts.modelsDir, YUNET_MODEL_FILE), sessionOptions),
-      ort.InferenceSession.create(resolve(opts.modelsDir, SFACE_MODEL_FILE), sessionOptions),
+      createSession(resolve(opts.modelsDir, YUNET_MODEL_FILE), sessionOptions),
+      createSession(resolve(opts.modelsDir, SFACE_MODEL_FILE), sessionOptions),
     ]);
     const engine = new VisionEngine(detector, recognizer, opts);
     await engine.warmUp();

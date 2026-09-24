@@ -77,13 +77,23 @@ const DECISION_CLASS: Record<IdentityDecision, string> = {
   unable_to_verify: 'badge badge-uncertain',
 };
 
-export function DecisionBadge({ decision }: { decision: IdentityDecision }) {
+export function DecisionBadge({ decision, livenessFailed = false }: { decision: IdentityDecision; livenessFailed?: boolean }) {
+  if (decision === 'unable_to_verify' && livenessFailed) {
+    return (
+      <span className={DECISION_CLASS[decision]} title={LIVENESS_NOT_COMPLETED_HELP}>
+        Live-person check not completed
+      </span>
+    );
+  }
   return (
     <span className={DECISION_CLASS[decision]} title={DECISION_HELP[decision]}>
       {DECISION_LABELS[decision]}
     </span>
   );
 }
+
+const LIVENESS_NOT_COMPLETED_HELP =
+  'The randomized head-movement check was not completed (for example no head movement was seen, or a photo or screen was held to the camera). This is NOT evidence of a different person.';
 
 const REVIEW_CLASS: Record<ReviewStatus, string> = {
   unreviewed: 'badge badge-warning',

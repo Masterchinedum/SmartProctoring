@@ -31,7 +31,7 @@ const ISSUE_TEXT: Record<QualityIssue, string> = {
   face_cut_off: 'face partly outside the image',
   too_dark: 'too dark',
   too_bright: 'too bright',
-  low_contrast: 'washed out',
+  low_contrast: 'low in contrast',
   blurry: 'blurry',
   face_turned: 'face turned away',
   low_detection_confidence: 'face not clearly visible',

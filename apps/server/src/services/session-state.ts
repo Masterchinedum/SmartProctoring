@@ -22,7 +22,7 @@ import {
   type ProctoringPolicy,
   type SessionStatus,
 } from '@sp/shared';
-import { and, desc, eq, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { Tx } from '../db/index.js';
 import {
@@ -120,6 +120,8 @@ export class SessionMutation {
   private cache: { exam?: Exam; org?: Organization | null; candidate?: Candidate; periods?: SessionPeriod[] } = {};
   /** What staff saw of the session before this mutation (dto.ts staffVisibleKey). */
   private readonly visibleBefore: string;
+  /** Whether the organisation had active webhooks when the session was locked (null = unknown). */
+  hasActiveWebhooks: boolean | null = null;
 
   constructor(
     readonly ctx: Ctx,
@@ -432,9 +434,17 @@ export interface SessionPreload {
 export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: SessionMutation) => Promise<T>, preload?: SessionPreload): Promise<T> {
   let mutation: SessionMutation | null = null;
   const result = await ctx.db.transaction(async (tx) => {
-    const [row] = await tx.select().from(examSessions).where(eq(examSessions.id, sessionId)).for('no key update');
-    if (!row) throw notFound('Session not found', 'session_not_found');
+    // The lock query also tells whether the organisation has active webhooks (the integration outbox hook can
+    // then skip its savepoint and lookups for the common "no webhooks" case).
+    const [locked] = await tx
+      .select({ ...getTableColumns(examSessions), hasActiveWebhooks: sql<boolean>`exists (select 1 from webhooks w where w.org_id = ${examSessions.orgId} and w.active)` })
+      .from(examSessions)
+      .where(eq(examSessions.id, sessionId))
+      .for('no key update');
+    if (!locked) throw notFound('Session not found', 'session_not_found');
+    const { hasActiveWebhooks, ...row } = locked;
     const m = new SessionMutation(ctx, tx, row, preload);
+    m.hasActiveWebhooks = hasActiveWebhooks;
     mutation = m;
     const out = await fn(m);
     await m.flush();

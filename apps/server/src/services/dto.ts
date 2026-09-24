@@ -182,7 +182,15 @@ export function toIdentityCheckDTO(row: IdentityCheck, probe: EvidenceRow | null
       periodKind: c.periodKind ?? null,
       secondsSincePreviousMatch: c.secondsSincePreviousMatch ?? null,
     },
+    livenessPassed: livenessFromContext(c as unknown as Record<string, unknown>),
   };
+}
+
+/** Checks record the live-person outcome as `livenessPassed` (resume/reconnect) or `liveness` (check-in). */
+function livenessFromContext(c: Record<string, unknown>): boolean | null {
+  if (typeof c.livenessPassed === 'boolean') return c.livenessPassed;
+  if (typeof c.liveness === 'boolean') return c.liveness;
+  return null;
 }
 
 export function toIdentityReferenceDTO(row: IdentityReference, images: EvidenceRow[]): IdentityReferenceDTO {

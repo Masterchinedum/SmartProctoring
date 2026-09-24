@@ -103,7 +103,7 @@ export function IdentityTab({ d, onOpenEvent }: { d: SessionDetailDTO; onOpenEve
                     </td>
                     <td>{TRIGGER_LABELS[c.trigger] ?? c.trigger}</td>
                     <td>
-                      <DecisionBadge decision={c.decision} />
+                      <DecisionBadge decision={c.decision} livenessFailed={c.livenessPassed === false} />
                       <div className="muted small">confidence {formatPercent(c.confidence)}</div>
                     </td>
                     <td>{formatSimilarity(c.similarity)}</td>

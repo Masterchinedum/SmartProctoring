@@ -40,8 +40,11 @@ const aadFor = (id: string) => `evidence:${id}`;
 /** Encrypt + store. Idempotent on `id` (a second upload with the same id returns duplicate=true). */
 export async function storeEvidence(ctx: EvidenceCtx, db: DbOrTx, input: StoreEvidenceInput): Promise<StoreEvidenceResult> {
   const id = input.id ?? randomUUID();
-  const existing = await db.select().from(evidence).where(eq(evidence.id, id));
-  if (existing[0]) return { row: existing[0], duplicate: true };
+  // Only a caller-provided id can already exist (idempotent client uploads); a fresh UUID cannot.
+  if (input.id) {
+    const existing = await db.select().from(evidence).where(eq(evidence.id, id));
+    if (existing[0]) return { row: existing[0], duplicate: true };
+  }
 
   const blob = ctx.keyring.encrypt(input.data, aadFor(id));
   const baseKey = evidenceStorageKey(input.orgId, input.sessionId ?? null, input.candidateId ?? null, id);

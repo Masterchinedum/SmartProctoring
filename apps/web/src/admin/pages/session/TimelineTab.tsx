@@ -166,7 +166,7 @@ function TimelineCheckRow({ check: c }: { check: IdentityCheckDTO }) {
           <span className="tl-title-row">
             <span className="tl-kind">Identity check</span>
             <span className="muted">{TRIGGER_LABELS[c.trigger] ?? c.trigger}</span>
-            <DecisionBadge decision={c.decision} />
+            <DecisionBadge decision={c.decision} livenessFailed={c.livenessPassed === false} />
             {c.similarity != null ? <span className="small muted">similarity {formatSimilarity(c.similarity)}</span> : null}
           </span>
           {issues.length ? <span className="small muted">Image quality: {issues.map(qualityIssueLabel).join(', ')}</span> : null}

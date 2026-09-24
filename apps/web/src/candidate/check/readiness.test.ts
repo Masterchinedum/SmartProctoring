@@ -57,7 +57,7 @@ describe('evaluateReadiness', () => {
   it('checks lighting and sharpness', () => {
     expect(byId(evaluateReadiness(input({ faces: [face({ brightness: 30 })] }))).lighting).toMatchObject({ ok: false, guidance: expect.stringMatching(/too dark/) });
     expect(byId(evaluateReadiness(input({ faces: [face({ brightness: 240 })] }))).lighting.guidance).toMatch(/too bright/);
-    expect(byId(evaluateReadiness(input({ faceRegion: { mean: 120, std: 5, sharpness: 60 } }))).lighting.guidance).toMatch(/washed out/);
+    expect(byId(evaluateReadiness(input({ faceRegion: { mean: 120, std: 5, sharpness: 60 } }))).lighting.guidance).toMatch(/lacks contrast/);
     expect(byId(evaluateReadiness(input({ faceRegion: { mean: 120, std: 35, sharpness: 3 } }))).sharpness).toMatchObject({ ok: false, guidance: expect.stringMatching(/blurry/) });
   });
 

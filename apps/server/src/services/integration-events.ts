@@ -68,6 +68,9 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
   const ctx = m.ctx;
   const orgId = m.session.orgId;
   try {
+    // No active webhook (checked under the session lock, withSession) and no mailer: nothing can be queued, so
+    // skip the savepoint and lookups (the common case on busy exam days).
+    if (m.hasActiveWebhooks === false && !ctx.mailer) return;
     const result = await m.tx.transaction(async (sp) => {
       const hooks = await sp
         .select({ id: webhooks.id, events: webhooks.events, minSeverity: webhooks.minSeverity })

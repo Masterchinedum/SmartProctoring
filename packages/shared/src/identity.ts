@@ -48,7 +48,7 @@ export const QUALITY_GUIDANCE: Record<QualityIssue, string> = {
   face_cut_off: 'Center your face in the picture — part of it is outside the camera view.',
   too_dark: 'Your face is too dark. Turn on a light or face a window, and avoid bright light behind you.',
   too_bright: 'The image is too bright. Move away from direct sunlight or turn down a bright light.',
-  low_contrast: 'The image is washed out. Adjust lighting so your face is evenly lit.',
+  low_contrast: 'Your face lacks contrast. Add light in front of you (a lamp or window facing you), avoid bright light behind you, and make sure your face is evenly lit.',
   blurry: 'The image is blurry. Hold still, clean the camera lens, and check the camera focus.',
   face_turned: 'Look straight at the screen.',
   low_detection_confidence: 'We can’t see your face clearly. Remove anything covering your face and improve the lighting.',

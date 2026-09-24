@@ -387,6 +387,8 @@ export interface IdentityCheckDTO {
   probeEvidence: EvidenceRefDTO | null;
   /** Context at the time: what preceded this check. */
   context: { precededBy: string[]; periodKind: PeriodKind | null; secondsSincePreviousMatch: number | null };
+  /** For check-in / resume / reconnect checks: false when the live-person (liveness) part was not passed. */
+  livenessPassed?: boolean | null;
 }
 
 export interface IdentityReferenceDTO {
