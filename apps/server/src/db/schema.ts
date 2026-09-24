@@ -261,6 +261,11 @@ export interface IdentityEngineState {
    */
   secondOpinionPending: { checkId: string; since: number } | null;
   secondOpinionVeto: { checkId: string; until: number } | null;
+  /**
+   * Per-session normalisation of mid-exam samples: 'continuous' while the conditions are those of the enrolment;
+   * 'relaxed' after a resume / reconnect / reverify check (another day, room or camera is possible).
+   */
+  normalisation: 'continuous' | 'relaxed';
 }
 
 /** A burst of identity frames being collected (IdentitySampleQuery burstId / burstIndex / burstSize). */

@@ -70,6 +70,12 @@ cookies never mix), `NODE_ENV=production` and `VISION_THREADS=2`. Their database
 | `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD` | `owner@example.com` / `e2e-owner-password-1` | Bootstrap owner used by the tests |
 | `E2E_SERVER_LOG_LEVEL` | `info` | Server log level |
 | `E2E_DEBUG` | — | `1` = verbose liveness diagnostics (per-frame server verdicts) |
+| `E2E_FACESETS_DIR` | `/tmp/claude-0/facesets` (or `SP_FACESETS_DIR`) | Public multi-image identity sets for the realistic webcam fixtures (`pnpm --filter @sp/server eval:fetch-faces`); without them scenarios 20–24 are skipped |
+| `E2E_SKIP_REALISTIC` | — | `1` = do not build the realistic fixtures in global setup |
+| `E2E_RW_ONLY` | — | Comma-separated realistic fixtures to build (e.g. `rwSwapGap,rwA_typical`) |
+| `E2E_RW_REPEAT` | `1` | Repetitions of every realistic case (the measurement run for `docs/accuracy/end-to-end.md` uses 3) |
+| `E2E_RW_LONG_MIN` | `5` | Minutes of the genuine-candidate long runs (scenario 22) |
+| `E2E_KEEP_LOGS` | — | `1` = attach the server-log slice and candidate API logs to every test, not only failed ones |
 
 ## Face images and fixtures
 
@@ -118,6 +124,50 @@ How the fake camera behaves (and how the tests rely on it):
 * A camera fixture is a Chromium launch argument, so every camera test launches its own browser
   (`lib/candidate.ts` → `launchCamera`); new contexts in that browser share the same camera.
 
+## Realistic webcam fixtures (scenarios 20–24)
+
+The studio fixtures above are sharp, well-lit 640×480 photos — the product owner's real laptop webcam produced
+failures they never showed. `lib/realistic.ts` defines fake-camera videos made from what a laptop webcam actually
+delivers, built by `scripts/make-realistic.ts` (global setup builds missing / outdated ones, ~10 min the first time,
+~5 GB in `e2e/.fixtures/realistic`, gitignored):
+
+1. Source photos come from the public identity sets (`E2E_FACESETS_DIR`, never copied into the repository).
+   Candidate **A** = deepface `p03` (`img47` on exam day; `img8` "another day": hair down, smiling, other make-up);
+   **B** = `rose_leslie img2` (a plausible look-alike: same gender and colouring, SFace 0.25–0.36 to A's photos);
+   **family**: Azure Face `Family1-Son1` (candidate) and `Family1-Dad3` (his father).
+2. The vision team's simulator (`apps/server/src/eval/webcam-sim.ts`) renders each person in a room under a
+   condition — auto-exposure, sensor noise, optics / NR blur, colour cast, JPEG — at the camera's resolution. Scenes
+   (`RW_SCENES`): `home` (laptop webcam 1280×720, inter-eye 75 px), `home480` (the same at 640×480) and `other` (another
+   room + a USB webcam 640×480, inter-eye 39 px). Scene seeds were chosen so every simulator parameter sits near the
+   middle of its range. Per condition (home scene): good = face luma 139, noise σ 2.3; typical = 106 / 4.7, blur 1.0 px,
+   JPEG 84; **dim = face luma 54, noise σ 9.4, blur 1.5 px, JPEG 79** (the server measures brightness ≈ 50, contrast
+   ≈ 8); backlit = 61 / 6.3 with a bright window; side-lit = 99 / 5.3 with a 0.18 dark/bright side ratio.
+3. The builder composes a timeline from those renders: a head-and-shoulders person layer (webcam-sim's own mask
+   geometry, located by YuNet) over the exposure-matched empty room, with continuous sway (a few px), short glances
+   (±5–8° head turns), standing up and leaving, sitting down, 0.5 s cross-dissolves (lighting changes, no-gap swaps),
+   sliding out / in, and synthetic head turns for active liveness (the nose-vs-eyes parallax warp of
+   `synth-headturn.ts` applied to the SOURCE photo before simulation). Fresh noise on every frame; 5 fps.
+
+Chromium's file camera delivers the Y4M's own size (a 1280×720 file gives the app a 720p track like a laptop
+webcam; 640×480 a VGA track) — checked in every run (`camera` column of the metrics).
+
+| Fixture(s) | Timeline |
+|---|---|
+| `rwA_{good,typical,dim,backlit,sidelit}`, `rwB_*`, `rwA_typical480`, `rwA_dim480`, `rwB_typical480`, `rwSON_typical`, `rwDAD_{typical,dim}` | one person, one condition, 6 s seamless loop with sway |
+| `rwA_typical_later` | the same shot at another moment (other noise / jitter, sway phase) — resume without replaying the check-in frames |
+| `rwA2_{typical,dim,backlit}`, `rwA2_other_{typical,dim,sidelit}` | A on another day (other photo) at home / in another room with another camera |
+| `rwSwapGap` (720p), `rwSwapGap480` | A 0–35 s; stands up and leaves (0.8 s), empty room 1 s, B sits down (0.8 s, fully in view at 37.6 s); B for 45 s |
+| `rwSwapBlend` (720p), `rwSwapSlide480`, `rwSwapDimBlend480` | no gap: 0.5 s cross-dissolve / A slides out while B slides in (both half in view) / cross-dissolve in a dim room |
+| `rwFamilySwap` (720p), `rwFamilySwapBlend480` | the son (candidate) replaced by his father, with / without a gap |
+| `rwGenuineLong` | A for 90 s (loops): typical → dim → typical → side lamp → typical, sway + glances |
+| `rwGenuineDim` | A for 60 s (loops), mostly dim, desk lamp and window light in between |
+| `rwTurnA_typical`, `rwTurnA_typical_later`, `rwTurnA_dim`, `rwTurnA2_other` | frontal 8 s, then 3 cycles of turning left / right (±~20°) |
+
+Measurements: every realistic test appends one JSON line to `e2e/.artifacts/realistic-metrics.jsonl` (tagged with
+the run id); `pnpm --filter @sp/e2e rw:report [-- --run <id> | --all]` prints the tables used in
+`docs/accuracy/end-to-end.md`. Typical measurement run:
+`E2E_RW_REPEAT=3 pnpm --filter @sp/e2e exec playwright test tests/2[0-4]-realistic-*`.
+
 ## Scenarios
 
 | # | Spec | What is verified |
@@ -141,6 +191,22 @@ How the fake camera behaves (and how the tests rely on it):
 | 17 | `17-retention-rekey` | **a:** two submitted sessions (exam retention 1 day) moved 2 days into the past; one placed under legal hold in the UI → `pnpm --filter @sp/server retention:run --dry-run` deletes nothing → `retention:run` purges the other (every evidence URL incl. the compared ID-photo copy → 410 `evidence_purged`; Identity tab, event drawer and comparison view show "Deleted under the retention policy on …"; events kept; the candidate's ID photo on file kept; `retention.purge` audit entry) and keeps the held one; hold lifted → next run purges it. **b:** dedicated instance: data under key K1 (evidence, reference and check-frame templates, ID-photo templates, access links, webhook secret) → restart with `EVIDENCE_KEY=K2`, `EVIDENCE_KEYS_OLD=K1` → `rekey --dry-run` (exit 3, every target listed) → `rekey` (exit 0, "no longer needed") → restart with K2 only: evidence bytes unchanged, access links unchanged, webhook test signed with the original secret, resume check against the reference passes, a new check-in matches the ID photo |
 | 18 | `18-integrations` | dedicated instance with SMTP + https webhook receiver. **a:** Integrations page: API key (shown once), webhook (secret shown once), "Send test" → ping verified with the function copied verbatim from `docs/INTEGRATION_API.md` (wrong secret, altered body, stale timestamp rejected), alert recipients saved, test email received. **b:** `/api/v1` with that key: 401 without it, candidate upsert by `externalId`, idempotent assignment, the candidate takes the exam (ID-photo mismatch, tab switch, staff hold/release, submit); webhooks `event.created`, `identity.mismatch`, `session.held`, `session.released`, `session.submitted` (score) signed, without images, details or similarity; a delivery answered HTTP 500 is retried after ~30 s with the same delivery id (attempt 2) and shows "Delivered 2/10" in the UI; first alert email at once, a later alert of the same session (the staff hold) waits for the 5-minute window and arrives in one combined email, another session's hold is emailed at once; emails without images or scores; session, report and events via `/api/v1` without evidence URLs or similarity scores |
 
+| 20 | `20-realistic-resume` | Candidate A checks in at home (720p, typical light), pauses, closes the browser; resumes from a new profile in typical light (other frames), dim, backlit, side-lit, VGA dim, and on **another day** (another photo of A) at home and in another room with another camera — liveness off and on. Measured: attempts, time from "Resume" to the outcome, re-prompts, resume-check decisions. Asserted: never held / never `identity_mismatch` for A, passes within 5 attempts, first attempt in typical / dim (soft). Impostors resume (B in typical / dim / backlit; the son resumes his father's exam): never passes |
+| 21 | `21-realistic-swap` | Quick swap 5 s after the exam starts: gap (leave → sit down within 2.6 s) and no gap (cross-dissolve / slide), 720p and 480p, dim, family (father replaces son). Measured: held as `identity_mismatch`, delay from "new person fully in view" to the hold screen, samples after the swap. Asserted: no finding before the swap, held before the video loops back (45 s); family: held, or at least `suspect` + non-matching checks visible to staff |
+| 22 | `22-realistic-genuine` | A for `E2E_RW_LONG_MIN` (5) minutes with lighting changes (dim, side lamp, window), sway and glances; a mostly-dim variant. Asserted: zero `identity_mismatch`, no hold; recorded: samples, decisions, lowest similarity, `identity_unverifiable` |
+| 23 | `23-realistic-liveness` | Active liveness (default 2 steps) with realistic head turns in typical, dim and another room / VGA camera: pass, attempts, time, re-prompts. A still photo (typical, dim) never passes: held as *could not verify*, never a mismatch |
+| 24 | `24-realistic-camera-test` | Staff *Camera & identity test* page with the `rwSwapGap` camera: enrol A, live comparison of A (consistent), then B sits down (suspect → confirmed); states and timings recorded |
+
+## Diagnosing failures
+
+* A failed test gets `server.log` (the main server's log lines written during the test; with 2 workers the other
+  worker's lines interleave — filter by session id) and `candidate-<n>.log` (every candidate page's identity API
+  answers: check frames with quality / measured pose / progress, check completes with outcome / liveness reasons /
+  guidance, identity samples with decision / similarity / evidence state) as test attachments in
+  `e2e/test-results/<test>/`. `E2E_KEEP_LOGS=1` attaches them to passing tests too.
+* Global setup keeps the previous runs' server logs as `e2e/.artifacts/server-<time>.log` (newest 8) instead of
+  overwriting `server.log`.
+
 ## Known limits
 
 * **Phone / object detection is not covered**: there is no suitably licensed image of a phone in the
@@ -151,7 +217,10 @@ How the fake camera behaves (and how the tests rely on it):
   page visible and focused when another tab or window is brought to the front. Fullscreen is real.
 * **Active liveness passing path uses a synthetic video** (`scripts/synth-headturn.ts`), tuned to the
   server's parallax and anti-replay rules; it is a test of the pipeline, not of liveness accuracy (see
-  `docs/accuracy/`).
+  `docs/accuracy/`). The realistic head turns (scenario 23) use the same warp before the webcam simulation.
+* **Realistic ≠ real.** Scenarios 20–24 use simulated webcam frames of public photos (one source photo per person
+  and day, so no real expression / pose change within a session), cut-out people over a synthetic room, and
+  synthetic head turns. See `docs/accuracy/end-to-end.md` for what the numbers can and cannot tell.
 * **Time is moved, not waited for**, in two places: the retention spec moves the sessions' end time 2 days back
   (evidence retention is at least 1 day), and the integrations spec moves the previous alert email's send time
   5 minutes back to see the combined email without waiting for the throttle window.

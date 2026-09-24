@@ -26,7 +26,7 @@ import { and, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { events, evidence, examSessions, identityChecks, identitySampleFrames, type ExamSession, type IdentityCheck, type IdentityCheckContext, type IdentityEngineState, type IdentitySampleFrame, type PendingBurst } from '../db/schema.js';
 import { invalidState } from '../lib/errors.js';
-import { CALIBRATION, decideIdentity, deserializeEmbeddings, hammingHex, posteriorSwap, serializeEmbeddings, type ImageAnalysis } from '../vision/index.js';
+import { advisoryGuidance, CALIBRATION, decideIdentity, deserializeEmbeddings, hammingHex, posteriorSwap, serializeEmbeddings, type ImageAnalysis } from '../vision/index.js';
 import { assertInControl } from './candidate-state.js';
 import { toHoldDTO } from './dto.js';
 import { purgeEvidenceRows, readEvidence, storeEvidence } from './evidence.js';
@@ -37,6 +37,8 @@ import {
   frameEvidence,
   nextSampleDelayMs,
   sampleLabel,
+  POOR_LIGHT_GUIDANCE,
+  poorLightSuspect,
   toEvidenceDTO,
   URGENT_TRIGGERS,
   windowSum,
@@ -87,9 +89,11 @@ function safeHamming(a: string | null, b: string | null): number {
   }
 }
 
-/** Mid-exam samples after a camera reconnect may look quite different (another camera): relaxed normalisation. */
-function comparisonContext(trigger: IdentityCheckTrigger): ComparisonContext {
-  return trigger === 'camera_reconnect' ? 'relaxed' : 'continuous';
+/** Per-session normalisation context of a mid-exam sample (identity-evidence.ts). */
+function comparisonContext(trigger: IdentityCheckTrigger, st: Pick<IdentityEngineState, 'normalisation'>): ComparisonContext {
+  // After a resume / reconnect / reverify the room, light or camera may differ from enrolment: never the tighter
+  // same-session normalisation there (docs/accuracy/identity-v2.md §9).
+  return trigger === 'camera_reconnect' || st.normalisation === 'relaxed' ? 'relaxed' : 'continuous';
 }
 
 /* =================================================================== entry point */
@@ -182,7 +186,7 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
       if (!recordOnly && m.session.status !== 'active') recordOnly = true;
 
       const sim = analysis.embedding ? scoreReference(analysis.embedding, active.embeddings) : null;
-      const fe = frameEvidence(analysis.quality, sim, env.baseline, comparisonContext(q.trigger));
+      const fe = frameEvidence(analysis.quality, sim, env.baseline, comparisonContext(q.trigger, identityState(m.session)));
 
       if (!isBurst) {
         return decideSample(m, env, {
@@ -364,7 +368,7 @@ async function decideBurst(m: SessionMutation, env: SampleEnv, pending: PendingB
     }
     const analysis = analysisFromSummary(r.analysis, embedding);
     const sim = embedding ? scoreReference(embedding, env.active.embeddings) : null;
-    return { analysis, embedding, evidence: frameEvidence(r.analysis.quality, sim, env.baseline, comparisonContext(r.trigger)), frameRow: r };
+    return { analysis, embedding, evidence: frameEvidence(r.analysis.quality, sim, env.baseline, comparisonContext(r.trigger, identityState(m.session))), frameRow: r };
   });
   const st = identityState(m.session);
   st.pendingBursts = st.pendingBursts.filter((b) => b.id !== pending.id);
@@ -417,7 +421,7 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
   const s = m.session;
   const now = m.now;
   const st0 = identityState(s);
-  const context = comparisonContext(d.trigger);
+  const context = comparisonContext(d.trigger, st0);
 
   // ---- the sample's evidence (one burst = one sample)
   let fe: FrameEvidence;
@@ -512,6 +516,12 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
     followUpInMs = r.followUpInMs;
     nextSampleInMs = r.nextSampleInMs;
     evidenceDTO = r.evidence;
+    if (r.poorLight) {
+      // Suspicion from poor light only: ask the candidate for more light (the next, faster sample may then decide).
+      const guidance = [...new Set([...(quality ? advisoryGuidance(quality) : []), POOR_LIGHT_GUIDANCE, ...row.guidance])];
+      await m.tx.update(identityChecks).set({ guidance }).where(eq(identityChecks.id, row.id));
+      row.guidance = guidance;
+    }
   }
   const evidenceCtx: IdentityCheckContext = { ...ctxInfo, evidence: { llr: fe.usable ? fe.llr : null, bucket: fe.bucket, ...evidenceDTO, calibrationVersion: CALIBRATION.version } };
   // A burst that cleanly matched while nothing was building up: its speculatively stored frame images are not kept.
@@ -555,7 +565,7 @@ async function applyEvidence(
   row: IdentityCheck,
   fe: FrameEvidence,
   dhash: string | null,
-): Promise<{ followUpInMs: number | null; nextSampleInMs: number | null; evidence: IdentityEvidenceDTO }> {
+): Promise<{ followUpInMs: number | null; nextSampleInMs: number | null; evidence: IdentityEvidenceDTO; poorLight?: boolean }> {
   const st = identityState(m.session);
   const at = row.at.getTime();
 
@@ -661,12 +671,48 @@ async function applyEvidence(
   // On hold (hold_for_review): sampling stops; the evidence that led here is in the event.
   if (held) return { followUpInMs: null, nextSampleInMs: null, evidence: toEvidenceDTO(res.acc) };
 
+  // ---- 'suspect' from poor light only (capped evidence): an uncertain observation for staff, lighting guidance
+  const poorLight = poorLightSuspect(st.evidence) && !st.openMismatchEventId;
+  if (poorLight) await notePoorLightSuspect(m, st, row);
+
   const nextSampleInMs = nextSampleDelayMs(env.policy.identity, { activeSince: st.activeSince, acc: st.evidence }, m.now);
   const faster = st.evidence.state !== 'consistent' || st.evidence.unusableStreak > 0 || st.openMismatchEventId != null;
   const followUpInMs = faster ? nextSampleInMs : null;
   st.followUpRequestedAt = followUpInMs != null ? m.now : null;
   m.setIdentityState(st);
-  return { followUpInMs, nextSampleInMs, evidence: toEvidenceDTO(st.evidence) };
+  return { followUpInMs, nextSampleInMs, evidence: toEvidenceDTO(st.evidence), poorLight };
+}
+
+
+/**
+ * The evidence window is 'suspect' only because of poor-quality (dim / backlit / small) frames: record it as an
+ * uncertain observation (identity_unverifiable, details.reason 'poor_light_suspect') — never "possible different
+ * person"; confirmation waits for a fair or good frame. Closed like any identity_unverifiable by the next clear result.
+ */
+async function notePoorLightSuspect(m: SessionMutation, st: IdentityEngineState, row: IdentityCheck): Promise<void> {
+  const at = row.at.getTime();
+  const sum = windowSum(st.evidence.window);
+  const details = { poorLightSuspect: true, evidence: sum, lastSampleAt: at, guidance: [POOR_LIGHT_GUIDANCE] };
+  if (st.openUnverifiableEventId) {
+    const [cur] = await m.tx.select().from(events).where(eq(events.id, st.openUnverifiableEventId));
+    if (cur) {
+      if (!(cur.details as { poorLightSuspect?: boolean }).poorLightSuspect || (cur.details as { evidence?: number }).evidence !== sum) await m.updateEvent(cur.id, { details: { ...cur.details, ...details } });
+      return;
+    }
+  }
+  const ev = await m.addEvent({
+    type: 'identity_unverifiable',
+    source: 'server_identity',
+    open: true,
+    startedAt: at,
+    confidence: null,
+    observation:
+      'In poor light the face could not be matched dependably with the identity reference. This is not a finding that a different person is present; more light or a clearer view will settle it.',
+    details: { reason: 'poor_light_suspect', trigger: row.trigger, similarity: row.similarity, issues: row.quality?.issues ?? [], identityCheckIds: [row.id], ...details },
+    context: { precededBy: row.context?.precededBy ?? [], periodKind: row.context?.periodKind ?? null },
+  });
+  st.openUnverifiableEventId = ev.id;
+  await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, row.id));
 }
 
 const OBSERVATIONS: [string, string][] = [

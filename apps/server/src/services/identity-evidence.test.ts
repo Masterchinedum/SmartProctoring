@@ -16,6 +16,7 @@ import {
   frameEvidence,
   identitySampleRequest,
   nextSampleDelayMs,
+  poorLightSuspect,
   windowSum,
   type EvidenceAccumulator,
   type SessionBaseline,
@@ -24,9 +25,10 @@ import {
 /* ---------------------------------------------------------------- fixtures */
 
 const GOOD: FaceQuality = { faceCount: 1, detectionScore: 0.93, interEyePx: 62, faceWidthRatio: 0.3, brightness: 125, contrast: 42, sharpness: 320, yawDeg: 2, pitchDeg: -9, cutOff: false, issues: [], usable: true };
-/** A dim room: usable, but only 'fair' / 'poor' quality for comparisons. */
-const FAIR: FaceQuality = { ...GOOD, brightness: 48, contrast: 19, sharpness: 120 };
-const POOR: FaceQuality = { ...GOOD, brightness: 34, contrast: 12, sharpness: 60, interEyePx: 29, detectionScore: 0.78 };
+/** Somewhat dim / flat light: 'fair' under the calibrated buckets (brightness 50–70, contrast 12–18). */
+const FAIR: FaceQuality = { ...GOOD, brightness: 60, contrast: 15, sharpness: 120 };
+/** A dim room: usable, but 'poor' (brightness < 50, low contrast, low detector score). */
+const POOR: FaceQuality = { ...GOOD, brightness: 34, contrast: 11, sharpness: 60, interEyePx: 29, detectionScore: 0.78 };
 const UNUSABLE: FaceQuality = { ...GOOD, brightness: 22, issues: ['too_dark'], usable: false };
 
 /** Deterministic PRNG (mulberry32) and a normal sampler. */
@@ -65,10 +67,10 @@ function run(samples: { sim: number | null; q: FaceQuality; trigger?: IdentityCh
 
 describe('per-session normalisation', () => {
   it('a drop from the person’s own level counts as evidence even above the global mismatch threshold', () => {
-    // 0.40 is above CALIBRATION.mismatch (0.30): globally nearly neutral, for a person whose own frames agree at 0.78 strong.
-    expect(0.4).toBeGreaterThan(CALIBRATION.mismatch);
-    const global = comparisonLLR(0.4, 'good', null).llr;
-    const personal = comparisonLLR(0.4, 'good', BASELINE_78).llr;
+    // 0.35 is above CALIBRATION.mismatch (0.30): globally about neutral, for a person whose own frames agree at 0.78 strong.
+    expect(0.35).toBeGreaterThan(CALIBRATION.mismatch);
+    const global = comparisonLLR(0.35, 'good', null).llr;
+    const personal = comparisonLLR(0.35, 'good', BASELINE_78).llr;
     expect(global).toBeLessThan(1.5);
     expect(personal).toBeGreaterThan(3);
     expect(personal).toBeGreaterThan(global + 2);
@@ -117,7 +119,7 @@ describe('evidence accumulator (SPRT)', () => {
     }
   });
 
-  it('a different person is confirmed within 2 samples after a track break, 2–3 routine samples otherwise', () => {
+  it('a different person is confirmed within 2 samples after a track break, 2–3 routine samples otherwise; in poor light only suspected', () => {
     const r = rng(11);
     const genuine = Array.from({ length: 40 }, () => ({ sim: r.normal(0.7, 0.07), q: GOOD }));
     const impostor = (trigger: IdentityCheckTrigger) => Array.from({ length: 6 }, (_, i) => ({ sim: r.normal(0.12, 0.08), q: GOOD, trigger: i === 0 ? trigger : ('server_request' as IdentityCheckTrigger) }));
@@ -126,9 +128,18 @@ describe('evidence accumulator (SPRT)', () => {
     const routine = run([...genuine, ...impostor('periodic')], null);
     expect(routine.confirmedAfter).not.toBeNull();
     expect(routine.confirmedAfter! - genuine.length).toBeLessThanOrEqual(3);
-    // ...also when the impostor is only seen in poor light.
-    const dim = run([...genuine, ...Array.from({ length: 6 }, () => ({ sim: r.normal(0.1, 0.08), q: POOR }))], BASELINE_78);
-    expect(dim.confirmedAfter! - genuine.length).toBeLessThanOrEqual(4);
+    // An impostor seen only in poor light is 'suspect' within 2 samples (faster sampling, lighting guidance, an uncertain
+    // observation for staff) but never confirmed: poor-only evidence is capped below the confirm threshold ...
+    const dimImpostor = Array.from({ length: 6 }, (_, i) => ({ sim: r.normal(0.05, 0.05), q: POOR, trigger: (i === 0 ? 'track_break' : 'server_request') as IdentityCheckTrigger }));
+    const dim = run([...genuine, ...dimImpostor], BASELINE_78);
+    expect(dim.confirmedAfter).toBeNull();
+    expect(dim.states.slice(genuine.length, genuine.length + 2)).toContain('suspect');
+    expect(dim.states.slice(genuine.length + 2).every((st) => st === 'suspect')).toBe(true);
+    expect(poorLightSuspect(dim.acc)).toBe(true);
+    expect(windowSum(dim.acc.window)).toBeLessThanOrEqual(CALIBRATION.sprt.maxPoorEvidence);
+    // ... until a fair or good frame of the same face arrives.
+    const lit = run([...genuine, ...dimImpostor, { sim: 0.12, q: FAIR, trigger: 'server_request' }], BASELINE_78);
+    expect(lit.confirmedAfter).toBe(genuine.length + dimImpostor.length + 1);
   });
 
   it('one sample can never confirm on its own (clamp + weight below the confirm threshold)', () => {
@@ -239,8 +250,18 @@ describe('check assessment (resume / reconnect / reverify)', () => {
 
   it('waits for enough usable frames, and all-unusable stays pending', () => {
     expect(assessCheck([ev(0.7, GOOD), ev(0.7, GOOD)]).status).toBe('pending');
-    expect(assessCheck([ev(0.7, GOOD), ev(0.7, GOOD)], { atLimit: true }).status).toBe('likely_match');
+    // At the collection limit two usable frames are assessed (not pending) — too little evidence to decide either way.
+    expect(assessCheck([ev(0.7, GOOD), ev(0.7, GOOD)], { atLimit: true }).status).toBe('uncertain');
+    expect(assessCheck([ev(0.7, GOOD), ev(0.7, GOOD), ev(0.68, GOOD)], { atLimit: true }).status).toBe('likely_match');
     expect(assessCheck(Array.from({ length: 10 }, () => ev(null, UNUSABLE))).status).toBe('pending');
+  });
+
+  it('poor-light-only evidence of a different person ends uncertain (lighting guidance), never likely_mismatch', () => {
+    const dark = assessCheck(Array.from({ length: 10 }, () => ev(0.05, POOR)));
+    expect(dark).toMatchObject({ status: 'uncertain', poorLight: true });
+    expect(dark.llr).toBeLessThanOrEqual(CALIBRATION.sprt.maxPoorEvidence);
+    // Fair / good frames of the same face still decide.
+    expect(assessCheck([...Array.from({ length: 4 }, () => ev(0.05, POOR)), ev(0.1, GOOD), ev(0.12, FAIR)]).status).toBe('likely_mismatch');
   });
 
   it('mixed clear evidence (two people) stays uncertain', () => {

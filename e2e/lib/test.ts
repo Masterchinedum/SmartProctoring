@@ -1,5 +1,5 @@
 import { test as base, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
-import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { OPEN_CANDIDATE_PAGES } from './candidate';
 import { ARTIFACTS_DIR, BASE_URL, EXTERNAL_SERVER } from './config';
@@ -64,16 +64,21 @@ export const test = base.extend<{ staffPage: (b?: Browser) => Promise<Page>; dia
       await use();
       const failed = testInfo.status !== testInfo.expectedStatus;
       if (!failed && process.env.E2E_KEEP_LOGS !== '1') return;
+      mkdirSync(testInfo.outputDir, { recursive: true });
       if (!EXTERNAL_SERVER) {
         const text = readSlice(SERVER_LOG, from, fileSize(SERVER_LOG));
         const header = `# server log lines written during "${testInfo.title}" (worker ${testInfo.workerIndex}, started ${startedAt}); other workers' tests may interleave\n`;
-        await testInfo.attach('server.log', { body: header + text, contentType: 'text/plain' });
+        const file = testInfo.outputPath('server.log');
+        writeFileSync(file, header + text);
+        await testInfo.attach('server.log', { path: file, contentType: 'text/plain' });
       }
       let i = 0;
       for (const c of OPEN_CANDIDATE_PAGES) {
         i++;
         const body = [`# candidate page ${i}: identity API answers`, ...c.apiLog, '', '# console errors / warnings', ...c.logs, '', '# HTTP errors', ...c.httpErrors].join('\n');
-        await testInfo.attach(`candidate-${i}.log`, { body, contentType: 'text/plain' });
+        const file = testInfo.outputPath(`candidate-${i}.log`);
+        writeFileSync(file, body);
+        await testInfo.attach(`candidate-${i}.log`, { path: file, contentType: 'text/plain' });
       }
     },
     { auto: true },

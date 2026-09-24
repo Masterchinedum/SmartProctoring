@@ -47,11 +47,16 @@ const SIM_HASH = createHash('sha256').update(SIM_SRC).digest('hex').slice(0, 12)
 /** Distinct rendered frames per (person, scene, condition, pose): cycled, with fresh noise on top. */
 const K_STEADY = 6;
 const K_TURN = 2;
-/** Nose shift amplitude of a full liveness turn (inter-ocular units; ≈ ±20° measured yaw, see synth-headturn.ts). */
-const TURN_AMP = 0.35;
+/**
+ * A full liveness turn: the warp amplitude (nose shift in inter-ocular units) is calibrated PER PERSON and
+ * direction so that YuNet measures ±TURN_DEG of yaw relative to the unwarped photo — what a candidate asked to
+ * "turn your head" does (a fixed amplitude gave +25° / −16° on an already slightly turned photo).
+ */
+const TURN_DEG = 25;
 /** Sideways head translation at a full turn (inter-ocular units). */
 const HEAD_SHIFT = 0.25;
-const GLANCE_AMP = 0.1;
+/** Glances: this fraction of a full turn (≈ ±6°). */
+const GLANCE_FRAC = 0.25;
 
 let vision: Vision;
 const log = (m: string) => console.log(`[make-realistic] ${m}`);
@@ -129,6 +134,41 @@ async function makeWarp(who: string, amp: number): Promise<Buffer> {
     }
   }
   return sharp(res, { raw: { width: W, height: H, channels: 3 } }).jpeg({ quality: 96 }).toBuffer();
+}
+
+/** Warp amplitudes giving +TURN_DEG (subject's left, yaw+) and −TURN_DEG of measured yaw for `who`. */
+const turnCache = new Map<string, Promise<{ left: number; right: number; yaw0: number }>>();
+function turnAmps(who: string): Promise<{ left: number; right: number; yaw0: number }> {
+  let p = turnCache.get(who);
+  if (!p) {
+    p = (async () => {
+      const yawAt = async (amp: number) => (await vision.analyze(await warpedSource(who, amp), {})).pose?.yawDeg ?? NaN;
+      const yaw0 = await yawAt(0);
+      const solve = async (dir: 1 | -1) => {
+        let lo = 0.02;
+        let hi = 0.9;
+        for (let i = 0; i < 9; i++) {
+          const mid = Math.round(((lo + hi) / 2) * 100) / 100;
+          const d = dir * ((await yawAt(dir * mid)) - yaw0);
+          if (Number.isFinite(d) && d >= TURN_DEG) hi = mid;
+          else lo = mid;
+        }
+        return dir * hi;
+      };
+      const r = { left: await solve(1), right: await solve(-1), yaw0 };
+      log(`head-turn amplitudes for ${who}: left ${r.left}, right ${r.right} (photo yaw ${yaw0.toFixed(1)}°, target ±${TURN_DEG}°)`);
+      return r;
+    })();
+    turnCache.set(who, p);
+  }
+  return p;
+}
+
+/** Warp amplitude for a normalised turn u ∈ [-1, 1] (u > 0 = subject's left), quantised to 0.01. */
+async function ampFor(who: string, u: number): Promise<number> {
+  if (Math.abs(u) < 1e-6) return 0;
+  const t = await turnAmps(who);
+  return Math.round((u > 0 ? u * t.left : -u * t.right) * 100) / 100;
 }
 
 /* ------------------------------------------------------------------------------------ renders */
@@ -317,22 +357,22 @@ function sway(t: number, ie: number, loop: number | undefined, still = false): {
   };
 }
 
-/** Short glances (looking at another part of the screen): ~every 7 s a 1.2 s head turn of ±GLANCE_AMP. */
+/** Short glances (looking at another part of the screen): ~every 7 s a 1.2 s head turn of ±GLANCE_FRAC (normalised). */
 function glance(t: number): number {
   const period = 7.3;
   const k = Math.floor(t / period);
   const u = t - k * period;
   const dir = [1, -1, 0.6, -0.5, 1, -1][k % 6]!;
   const e = u < 0.4 ? smooth(u / 0.4) : u < 1.6 ? 1 : u < 2.0 ? 1 - smooth((u - 1.6) / 0.4) : 0;
-  return Math.round((dir * GLANCE_AMP * e) / 0.05) * 0.05;
+  return Math.round((dir * GLANCE_FRAC * e) / 0.125) * 0.125;
 }
 
-/** Liveness amplitude timeline (synth-headturn.ts): frontal hold, then cycles left → centre → right → centre. */
+/** Liveness turn timeline (normalised, as synth-headturn.ts): frontal hold, then cycles left → centre → right → centre. */
 function headturnAmp(t: number, frontalSec: number, cycles: number): number {
   const keys: [number, number][] = [[0, 0], [frontalSec, 0]];
   let tt = frontalSec;
   for (let i = 0; i < cycles; i++) {
-    for (const [dur, amp] of [[1.2, TURN_AMP], [2.5, TURN_AMP], [1.2, 0], [1.5, 0], [1.2, -TURN_AMP], [2.5, -TURN_AMP], [1.2, 0], [1.5, 0]] as const) {
+    for (const [dur, amp] of [[1.2, 1], [2.5, 1], [1.2, 0], [1.5, 0], [1.2, -1], [2.5, -1], [1.2, 0], [1.5, 0]] as const) {
       tt += dur;
       keys.push([tt, amp]);
     }
@@ -362,14 +402,14 @@ async function frameAt(spec: RwFixtureSpec, W: number, H: number, seg: RwSegment
   if ('hold' in seg) {
     const l = await layerFor(seg.hold);
     const sw = sway(t, l.ie, loop, seg.motion === 'still');
-    const amp = seg.glances ? glance(t) : 0;
-    people.push({ shot: seg.hold, dx: sw.dx + (amp / TURN_AMP) * HEAD_SHIFT * l.ie, dy: sw.dy, amp, alpha: 1 });
+    const u = seg.glances ? glance(t) : 0;
+    people.push({ shot: seg.hold, dx: sw.dx + u * HEAD_SHIFT * l.ie, dy: sw.dy, amp: await ampFor(seg.hold.who, u), alpha: 1 });
     bg = await matchedRoom(seg.hold.who, seg.hold.scene, seg.hold.cond);
   } else if ('headturn' in seg) {
     const l = await layerFor(seg.headturn);
     const sw = sway(t, l.ie, loop, true);
-    const amp = Math.round(headturnAmp(tSeg, seg.frontalSec, seg.cycles) / 0.05) * 0.05;
-    people.push({ shot: seg.headturn, dx: sw.dx + (amp / TURN_AMP) * HEAD_SHIFT * l.ie, dy: sw.dy, amp, alpha: 1 });
+    const u = Math.round(headturnAmp(tSeg, seg.frontalSec, seg.cycles) / 0.125) * 0.125;
+    people.push({ shot: seg.headturn, dx: sw.dx + u * HEAD_SHIFT * l.ie, dy: sw.dy, amp: await ampFor(seg.headturn.who, u), alpha: 1 });
     bg = await matchedRoom(seg.headturn.who, seg.headturn.scene, seg.headturn.cond);
   } else if ('leave' in seg) {
     const l = await layerFor(seg.leave);

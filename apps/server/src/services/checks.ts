@@ -56,6 +56,7 @@ import {
   checkStepFrame,
   decideIdentity,
   deserializeEmbeddings,
+  advisoryGuidance,
   CALIBRATION,
   cosineSimilarity,
   guidanceForIssues,
@@ -70,7 +71,7 @@ import {
   type LivenessChallengeSpec,
   type LivenessFrame,
 } from '../vision/index.js';
-import { assessCheck, CHECK_EVIDENCE, sampleLabel, type CheckAssessment } from './identity-evidence.js';
+import { assessCheck, CHECK_EVIDENCE, POOR_LIGHT_GUIDANCE, sampleLabel, type CheckAssessment } from './identity-evidence.js';
 import { secondOpinion, secondOpinionDetails, type SecondOpinionRecord } from './identity-external.js';
 import { buildGallery, ENROL_TARGET_FRAMES, identityFrameIndexes, probeEvidence, scoreReference, type GalleryResult, type ProbeEvidence } from './identity-gallery.js';
 import { buildCandidateState, SUPERSEDED_MESSAGE } from './candidate-state.js';
@@ -562,6 +563,11 @@ function assessContinuation(analyses: readonly ImageAnalysis[], active: ActiveRe
     confidence = 0.5;
     const unusableIssues = perFrame.filter((f) => !f.usable).flatMap((f) => analyses[f.index].quality.issues);
     guidance = unusableIssues.length ? guidanceForIssues(unusableIssues) : [INCONCLUSIVE_GUIDANCE];
+    if (assessment.poorLight) {
+      // Only poor-light frames pointed away from the reference: ask for light, not "try again".
+      const advisory = perFrame.filter((f) => f.usable && f.bucket === 'poor').flatMap((f) => advisoryGuidance(analyses[f.index].quality));
+      guidance = [...new Set([...advisory, POOR_LIGHT_GUIDANCE, ...guidance])];
+    }
   }
   const pick = (idx: number[], by: (i: number) => number) => idx.reduce<number | null>((b, i) => (b == null || by(i) > by(b) ? i : b), null);
   const usableIdx = usable.map((f) => f.index);
@@ -963,7 +969,8 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
   });
   await m.addEvent({ type: 'reference_created', source: 'server_identity', details: { referenceId: refId, version: maxVersion + 1, embeddingCount: reference.gallery.length, framesAccepted: reference.accepted.length, baseline: reference.baseline } });
   m.set({ verifiedInstanceId: a.instanceId, checkAttemptsResetAt: new Date(m.now) });
-  m.setIdentityState({ ...identityState(m.session), lastMatchAt: m.now });
+  // A new reference: mid-exam samples are compared under the enrolment's own conditions.
+  m.setIdentityState({ ...identityState(m.session), lastMatchAt: m.now, normalisation: 'continuous' });
 
   let outcome: Outcome = {
     outcome: 'passed',
@@ -1079,7 +1086,7 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     mismatchCount: aggregate?.mismatchCount,
     unableCount: aggregate?.unableCount,
     evidence: aggregate
-      ? { status: aggregate.assessment.status, llr: aggregate.assessment.llr, posterior: aggregate.assessment.posterior, usableFrames: aggregate.assessment.usable, calibrationVersion: CALIBRATION.version }
+      ? { status: aggregate.assessment.status, llr: aggregate.assessment.llr, posterior: aggregate.assessment.posterior, usableFrames: aggregate.assessment.usable, poorLight: aggregate.assessment.poorLight, calibrationVersion: CALIBRATION.version }
       : undefined,
     ...(a.second ? { secondOpinion: a.second } : {}),
   };
@@ -1212,7 +1219,7 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
       at: m.now,
     });
     m.set({ reEnrollAuthorized: false, reEnrollAuthorizedBy: null });
-    return continueAfterPass(a, idRow, { checkStart, pauseStart, gapStart, similarity: aggregate?.similarity ?? null });
+    return continueAfterPass(a, idRow, { checkStart, pauseStart, gapStart, similarity: aggregate?.similarity ?? null, reEnrolled: true });
   }
 
   const agg = aggregate!;
@@ -1368,13 +1375,15 @@ async function closeGapPeriods(a: ApplyCtx, t: { checkStart: number; pauseStart:
 async function continueAfterPass(
   a: ApplyCtx,
   idRow: IdentityCheck,
-  t: { checkStart: number; pauseStart: number | null; gapStart: number | null; similarity: number | null; flagged?: boolean },
+  t: { checkStart: number; pauseStart: number | null; gapStart: number | null; similarity: number | null; flagged?: boolean; reEnrolled?: boolean },
 ): Promise<Outcome> {
   const { m, policy, check } = a;
   const purpose = check.purpose;
   const st = identityState(m.session);
   if (st.openUnverifiableEventId) await m.closeEvent(st.openUnverifiableEventId, m.now, { closedBy: 'identity_match' });
-  m.setIdentityState({ ...identityState(m.session), openUnverifiableEventId: null, lastMatchAt: t.flagged ? st.lastMatchAt : m.now });
+  // After a resume / reconnect / reverify the conditions may differ from the enrolment (another day, room or camera):
+  // mid-exam samples use the 'relaxed' normalisation from now on — unless a new reference was just enrolled.
+  m.setIdentityState({ ...identityState(m.session), openUnverifiableEventId: null, lastMatchAt: t.flagged ? st.lastMatchAt : m.now, normalisation: t.reEnrolled ? 'continuous' : 'relaxed' });
   const base: Outcome = {
     outcome: 'passed',
     message: purpose === 'resume' ? 'Identity confirmed. Welcome back — your exam continues.' : 'Identity confirmed. Your exam continues.',

@@ -73,6 +73,7 @@ export const EMPTY_IDENTITY_STATE: IdentityEngineState = {
   pendingBursts: [],
   secondOpinionPending: null,
   secondOpinionVeto: null,
+  normalisation: 'continuous',
 };
 
 export function identityState(s: Pick<ExamSession, 'identityState'>): IdentityEngineState {

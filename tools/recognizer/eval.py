@@ -22,8 +22,11 @@ Protocols
            photo j != i. Genuine = same identity; impostor = different identity; family = different identity,
            same family (Azure family photos: parents/children/spouses). Near-duplicate photo pairs (clean baseline
            similarity >= 0.97) are excluded from genuine trials.
-  checkin  enrol with the MEAN TEMPLATE of the 5 'good' check-in frames of the identity's enrolment photo (the
-           vision agent's v2 recommendation, identity-v2.md §6.1), probe with frames of the identity's other photos.
+  checkin[:<cond>]  enrol with the MEAN TEMPLATE of the 5 check-in frames (640x480, session jitter) of the identity's
+           enrolment photo rendered in <cond> (default good; >= 3 frames with a face needed, else not enrolled) -- the
+           vision agent's v2 recommendation, identity-v2.md §6.1 -- and probe with frames of the identity's other
+           photos. checkin:dim / checkin:backlit give the MATCHED-DEGRADATION case (dim room enrolment vs dim room
+           probes, where SFace impostor similarity inflates); conditions "<cond>@640x480" restrict probes to 480p.
   "3f"     suffix: probe = normalise(mean of the 3 burst frames' embeddings) of one scene (resume-check style).
   mixed    (--mixed) enrolment templates computed with the BASELINE model (existing stored templates) and probes
            with the candidate: backward compatibility without re-enrolment.
@@ -199,14 +202,17 @@ def build_trials(d: dict, E_enrol: np.ndarray, E_probe: np.ndarray, base_clean: 
     idx = {k: i for i, k in enumerate(ids)}
     kind, photo, ident, fam, condition = d["kind"], d["photo"], d["identity"], d["family"], d["condition"]
     # --- probes
-    if cond == "clean":
+    cname, _, res = cond.partition("@")
+    if cname == "clean":
         pm = kind == "clean"
     else:
-        pm = (kind == "probe") & np.isin(condition, POOLED.get(cond, (cond,)))
+        pm = (kind == "probe") & np.isin(condition, POOLED.get(cname, (cname,)))
+        if res:
+            pm &= d["resolution"] == res
         if usable_only:
             pm &= d["usable"]
     pidx = np.nonzero(pm)[0]
-    if three and cond != "clean":
+    if three and cname != "clean":
         groups = {}
         for i in pidx:
             groups.setdefault((photo[i], condition[i], d["resolution"][i], d["scene"][i]), []).append(i)
@@ -223,11 +229,14 @@ def build_trials(d: dict, E_enrol: np.ndarray, E_probe: np.ndarray, base_clean: 
     clean_of = {photo[i]: i for i in clean_idx}
     if protocol == "photo":
         enrol = [(photo[i], ident[i], fam[i], E_enrol[i][None]) for i in clean_idx]
-    else:  # checkin
-        em = (kind == "enrol") & (condition == "good")
+    else:  # checkin[:<enrolment condition>], default good light
+        econd = protocol.partition(":")[2] or "good"
+        em = (kind == "enrol") & (condition == econd)
         enrol = []
         for ph in sorted(set(photo[em])):
             g = np.nonzero(em & (photo == ph))[0]
+            if len(g) < 3:  # production needs >= 3 frames with a face to enrol (CALIBRATION.minFramesForDecision)
+                continue
             enrol.append((ph, ident[g[0]], fam[g[0]], l2n(E_enrol[g].mean(0))[None]))  # mean template (identity-v2 §6.1)
     # --- scores
     gs, gid, is_, ie, ip, ifam = [], [], [], [], [], []
@@ -343,7 +352,7 @@ def main() -> None:
     d = build_crops(Path(args.crops))
     models = [m.split("=", 1) for m in args.model]
     recipes = args.recipe or ["none"]
-    protocols = args.protocol or ["photo", "checkin"]
+    protocols = args.protocol or ["photo", "checkin", "checkin:dim", "checkin:backlit"]
     conds = args.conditions.split(",")
     cache = WORK / "eval" / "emb"
     base_path = str(SFACE_ONNX)
@@ -370,8 +379,12 @@ def main() -> None:
     report = {"generated": time.strftime("%Y-%m-%d %H:%M"), "parity": parity, "models": {n: {"path": p, "sha256": sha256_file(p)} for n, p in models},
               "usable_only": args.usable_only, "near_duplicate_threshold": NEAR_DUP, "results": {}}
     for proto in protocols:
+        pconds = conds
+        if proto.startswith("checkin:") and proto != "checkin:good":
+            ec = proto.split(":")[1]
+            pconds = [c for c in (ec, f"{ec}@640x480", "webcam_all", "good") if c.split("@")[0] in conds or c == f"{ec}@640x480"]
         for three in (False, True):
-            for cond in conds:
+            for cond in pconds:
                 if three and cond == "clean":
                     continue
                 key = f"{proto}{'-3f' if three else ''}|{cond}"

@@ -195,6 +195,9 @@ export function windowSum(window: readonly EvidenceEntry[]): number {
   return round4(windowEvidence(window));
 }
 
+/** Candidate guidance while suspicion rests on poor-light frames only. */
+export const POOR_LIGHT_GUIDANCE = 'Add light in front of you (a lamp or a window facing you) so the camera can see your face clearly.';
+
 /**
  * The window is 'suspect' only because of poor-quality samples: without their (capped) positive evidence it would not
  * be. Confirmation then waits for a fair / good frame; staff see an uncertain observation, the candidate lighting

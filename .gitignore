@@ -20,3 +20,5 @@ dump.rdb
 .scratch*/
 **/.scratch*/
 *.y4m
+__pycache__/
+*.pyc

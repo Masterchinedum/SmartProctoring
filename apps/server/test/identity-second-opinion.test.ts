@@ -177,7 +177,8 @@ describe('external verifier on (check-in, resume, suspected swap)', () => {
     const { s, c } = await started();
     await c.req('POST', '/api/candidate/pause', {});
     mock.handler = SAME;
-    const { complete } = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.44 } });
+    // 0.38 after a pause (relaxed normalisation): neither clearly the same nor clearly different => internally inconclusive.
+    const { complete } = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.38 } });
     expect(complete!.outcome, JSON.stringify(complete)).toBe('passed');
     expect(complete!.identity!.decision).toBe('match');
     const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;

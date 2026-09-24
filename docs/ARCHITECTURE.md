@@ -87,16 +87,23 @@ disconnect if `disconnectTimerBehavior='continue'`).
    thresholds (`≥0.45 match`, `<0.28 mismatch`, else `inconclusive`; ID photo `≥0.42` / `<0.24`), but escalation
    uses calibrated evidence: `sampleLLR(score, qualityBucket)` (vision/calibration.ts), after a per-session
    normalisation of the score against the baseline (services/identity-evidence.ts) — a drop from the person's own
-   level counts even above the global mismatch threshold; poor frames and checks after a pause are normalised
-   leniently. Unusable frames carry no evidence.
+   level counts even above the global mismatch threshold. The drift is the vision module's measured `GENUINE_DRIFT`:
+   'continuous' (same session) until the first resume / reconnect / reverify, 'relaxed' (another day, room or camera)
+   at those checks and for every sample after them (continuous normalisation across days caused 9–27 false alarms
+   per 1,000 h in the simulation; relaxed: 1.4, same as without normalisation). Poor frames are never labelled
+   mismatch; at checks their positive evidence is capped too (a dim-room check ends uncertain with lighting guidance,
+   never "likely different person"). Unusable frames carry no evidence.
 5. **Decisions.** *Checks* (resume / reconnect / reverify) are adaptive: every frame returns
    `CheckFrameResponse.progress` (frames wanted, running assessment, liveness step status, canComplete); the
    decision sums the (correlation-discounted) LLRs of all identity frames: likely same ⇒ pass, likely different ⇒
    `identity_mismatch` + hold / flag (also with some fair / poor frames), otherwise retry with guidance;
    `unable_to_verify` only when no usable frame came after the adaptive collection. *During the exam*, samples are
    bursts (1–5 frames within ~0.6 s, decided as ONE sample; incomplete bursts after ~3 s on the frames received)
-   feeding a per-session SPRT accumulator (`CALIBRATION.sprt`): `suspect` ⇒ faster sampling (2.5 s,
-   trigger `server_request`); `confirmed_mismatch` ⇒ `identity_mismatch` (integrity, high; confidence = posterior;
+   feeding a per-session SPRT accumulator (`CALIBRATION.sprt`, `windowEvidence`: positive evidence from poor-light
+   frames is capped below the confirm threshold): `suspect` ⇒ faster sampling (2.5 s, trigger `server_request`) —
+   when only poor-light frames point away, also an uncertain `identity_unverifiable` (details.reason
+   `poor_light_suspect`) and lighting guidance, and confirmation waits for a fair / good frame;
+   `confirmed_mismatch` ⇒ `identity_mismatch` (integrity, high; confidence = posterior;
    details: per-sample scores / LLRs / triggers, baseline, calibration version) and hold or flag per policy; strong
    genuine evidence clears the window. A track break / face return / camera reconnect / exam start drops earlier
    genuine evidence from the window. 3 unusable samples in a row ⇒ `identity_unverifiable` (uncertain) and
