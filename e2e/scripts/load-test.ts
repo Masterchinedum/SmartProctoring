@@ -11,6 +11,7 @@
  * Prints a latency table (whole run, and the steady phase after the ramp) and writes JSON to OUT
  * (default ./load-report.json).
  *
+ * 503 "server busy" answers are retried after Retry-After (BUSY_RETRIES, default 3), as the web client does.
  * Optional: STAFF_WS=<n> keeps n staff dashboards connected to /api/admin/live during the run (realtime
  * summaries are only built while someone listens); SAMPLE_SEC=<s> changes the identity-sample interval
  * (SAMPLE_SEC=1 with enough candidates saturates the vision pool: see "identity samples/s").
@@ -32,6 +33,9 @@ const ANSWER_SEC = 25;
 const FACES_DIR = process.env.FACES_DIR ?? '/tmp/claude-0/faces/deepface';
 const OUT = process.env.OUT ?? 'load-report.json';
 const STAFF_WS = Number(process.env.STAFF_WS ?? 0);
+/** 503 vision_busy responses are retried after Retry-After up to this many times (the web client retries too). */
+const BUSY_RETRIES = Number(process.env.BUSY_RETRIES ?? 3);
+const busyRetries = new Map<string, number>();
 /** The steady phase starts this long after the ramp (the last check-ins settle). */
 const STEADY_AFTER_RAMP_MS = 15_000;
 
@@ -114,11 +118,20 @@ class Candidate {
     }
     const t0 = performance.now();
     try {
-      const res = await fetch(`${BASE}/api/candidate${path}${qs}`, { method, headers, body });
-      const text = await res.text();
-      record(label, performance.now() - t0, res.status);
-      if (!res.ok) return { __error: res.status, text };
-      return text ? JSON.parse(text) : {};
+      for (let attempt = 0; ; attempt++) {
+        const res = await fetch(`${BASE}/api/candidate${path}${qs}`, { method, headers, body });
+        const text = await res.text();
+        // Like the web client: "server busy" (503 + Retry-After) is retried with the same payload. The latency
+        // recorded is what the candidate experiences (first send to final answer); retries are counted apart.
+        if (res.status === 503 && attempt < BUSY_RETRIES) {
+          busyRetries.set(label, (busyRetries.get(label) ?? 0) + 1);
+          await sleep(1000 * (Number(res.headers.get('retry-after')) || 2));
+          continue;
+        }
+        record(label, performance.now() - t0, res.status);
+        if (!res.ok) return { __error: res.status, text };
+        return text ? JSON.parse(text) : {};
+      }
     } catch (e) {
       record(label, performance.now() - t0, (e as Error).name);
       return { __error: (e as Error).name };
@@ -267,10 +280,11 @@ async function main() {
   const samples = steady.find((r) => r.label === 'POST identity sample');
   console.log(`\nchecked in ${checkedIn}/${N}, failed ${failedCheckIn}${checkInFailures.size ? ` ${JSON.stringify(Object.fromEntries(checkInFailures))}` : ''}`);
   if (samples) console.log(`identity samples/s (steady): ${samples.perSec}`);
+  if (busyRetries.size) console.log(`503 busy responses retried (as the web client does): ${JSON.stringify(Object.fromEntries(busyRetries))}`);
   if (STAFF_WS) console.log(`staff WebSocket messages: ${JSON.stringify(wsCounts)}`);
   writeFileSync(
     OUT,
-    JSON.stringify({ at: new Date().toISOString(), N, RAMP_SEC, DURATION_SEC, SAMPLE_SEC, STAFF_WS, checkedIn, failedCheckIn, checkInFailures: Object.fromEntries(checkInFailures), rows, steady, wsCounts, health }, null, 2),
+    JSON.stringify({ at: new Date().toISOString(), N, RAMP_SEC, DURATION_SEC, SAMPLE_SEC, STAFF_WS, checkedIn, failedCheckIn, checkInFailures: Object.fromEntries(checkInFailures), busyRetries: Object.fromEntries(busyRetries), rows, steady, wsCounts, health }, null, 2),
   );
 }
 

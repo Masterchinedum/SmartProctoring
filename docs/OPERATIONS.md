@@ -79,6 +79,11 @@ backups until they expire; align backup retention with the privacy notice.
 
 * `GET /api/health` → `{ ok, db, vision }` for load-balancer checks.
 * Structured JSON logs (pino) on stdout; `LOG_LEVEL` controls verbosity.
+* Capacity: a `server overloaded (event loop lagging | database pool exhausted | face analysis queue long)`
+  warning (at most one a minute, with the numbers under `loadMonitor`) means this instance is at its limit —
+  requests are queuing. Occasional warnings during check-in bursts are expected; sustained ones mean add an
+  instance or CPU (docs/PERFORMANCE.md §6). HTTP 503 `vision_busy` = the face-analysis queue is full (the
+  candidate app retries after `Retry-After`).
 * Watch for: rising `reporting_interrupted` events (network problems), `monitoring_degraded` events
   (under-powered candidate devices), and the “Detection quality” page (dismissal rate per detector —
   a rising rate signals false positives or a threshold that needs tuning).
