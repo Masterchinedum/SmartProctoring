@@ -96,13 +96,19 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   for (const w of config.warnings) app.log.warn(w);
 
   const owned: { database?: Database; vision?: VisionService; bus?: RealtimeBus; storage?: BlobStorage; rateLimitRedis?: Redis } = {};
-  const database = opts.database ?? (owned.database = createDatabase(config.databaseUrl));
+  const database = opts.database ?? (owned.database = createDatabase(config.databaseUrl, { max: config.db.poolMax, statementTimeoutMs: config.db.statementTimeoutMs }));
   if (opts.migrate !== false) await migrate(database);
 
   let vision = opts.vision;
   if (!vision) {
     const { createVisionService } = await import('./vision/index.js');
-    vision = owned.vision = await createVisionService({ modelsDir: config.modelsDir, concurrency: config.visionConcurrency || undefined });
+    // Worker-thread pool by default (VISION_WORKERS / VISION_THREADS): inference never blocks the event loop.
+    vision = owned.vision = await createVisionService({
+      modelsDir: config.modelsDir,
+      workers: config.visionWorkers ?? undefined,
+      concurrency: config.visionWorkers === 0 ? config.visionConcurrency || undefined : undefined,
+      onWorkerExit: ({ code, error }) => app.log.error({ err: error, code }, 'vision worker exited unexpectedly; restarting it'),
+    });
   }
   const storage = opts.storage ?? (owned.storage = createStorage(config.storage));
   const bus = opts.bus ?? (owned.bus = await createBus(config.redisUrl, (err) => app.log.error({ err }, 'redis bus error')));

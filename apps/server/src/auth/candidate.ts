@@ -3,7 +3,7 @@
  * `X-Client-Instance: <clientInstanceId>` header identifying the browser instance.
  */
 import type { ProctoringPolicy } from '@sp/shared';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Ctx } from '../context.js';
 import { candidates, examSessions, exams, organizations, type Candidate, type Exam, type ExamSession, type Organization } from '../db/schema.js';
@@ -13,6 +13,8 @@ import { effectivePolicy } from '../services/session-state.js';
 
 export interface CandidatePrincipal {
   session: ExamSession;
+  /** Row version of `session` as loaded (Postgres xmin): optimistic-concurrency guard for single-statement updates. */
+  sessionVersion: string;
   exam: Exam;
   org: Organization | null;
   candidate: Candidate;
@@ -49,7 +51,7 @@ export async function resolveCandidateSession(ctx: Ctx, req: FastifyRequest, tok
   const token = tokenOverride ?? bearerToken(req);
   if (!token || !TOKEN_RE.test(token)) throw new HttpError(401, 'invalid_token', 'This exam link is not valid. Check that you copied the whole link.');
   const rows = await ctx.db
-    .select({ session: examSessions, exam: exams, org: organizations, candidate: candidates })
+    .select({ session: examSessions, exam: exams, org: organizations, candidate: candidates, sessionVersion: sql<string>`${examSessions}.xmin::text` })
     .from(examSessions)
     .innerJoin(exams, eq(exams.id, examSessions.examId))
     .innerJoin(candidates, eq(candidates.id, examSessions.candidateId))
@@ -59,6 +61,7 @@ export async function resolveCandidateSession(ctx: Ctx, req: FastifyRequest, tok
   if (!row) throw new HttpError(401, 'invalid_token', 'This exam link is not valid or has been replaced. Contact your exam administrator.');
   return {
     session: row.session,
+    sessionVersion: row.sessionVersion,
     exam: row.exam,
     org: row.org,
     candidate: row.candidate,

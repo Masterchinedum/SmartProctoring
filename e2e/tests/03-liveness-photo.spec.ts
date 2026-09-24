@@ -103,8 +103,9 @@ test('active liveness: a turning head passes at check-in and at resume', async (
       page.on('response', async (r) => {
         if (/\/checks\/[^/]+\/(complete|frames)/.test(r.url())) {
           const b = await r.json().catch(() => null);
-          if (r.url().includes('/complete')) console.log(`complete: ${b?.outcome} liveness=${JSON.stringify(b?.liveness)} guidance=${JSON.stringify(b?.guidance)}`);
-          else if (DEBUG) console.log(`frame ${new URL(r.url()).searchParams.get('step')}: accepted=${b?.accepted} satisfied=${b?.stepSatisfied} measured=${JSON.stringify(b?.measured)} client=${new URL(r.url()).searchParams.get('clientYaw')}`);
+          if (r.url().includes('/complete')) {
+            if (DEBUG || b?.outcome !== 'passed') console.log(`complete: ${b?.outcome} liveness=${JSON.stringify(b?.liveness)} guidance=${JSON.stringify(b?.guidance)}`);
+          } else if (DEBUG) console.log(`frame ${new URL(r.url()).searchParams.get('step')}: accepted=${b?.accepted} satisfied=${b?.stepSatisfied} measured=${JSON.stringify(b?.measured)} client=${new URL(r.url()).searchParams.get('clientYaw')}`);
         }
       });
     logVerdicts(c.page);

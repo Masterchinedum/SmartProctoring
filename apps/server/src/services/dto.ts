@@ -391,6 +391,37 @@ export function toSessionSummaryDTO(
   };
 }
 
+/**
+ * Everything of a session row that staff can see in its SessionSummaryDTO, except values that change on every
+ * heartbeat without meaning anything new (lastHeartbeatAt, monitoring.at, the clock ticking down — the UI
+ * extrapolates remainingMs). Two rows with the same key render the same summary (up to those fields), so a
+ * mutation that leaves the key unchanged does not need a realtime update (services/session-state.ts).
+ */
+export function staffVisibleKey(s: ExamSession): string {
+  const m = s.monitoring;
+  return JSON.stringify([
+    s.status,
+    s.endReason ?? null,
+    s.connection,
+    ms(s.reportingInterruptedSince),
+    m ? [m.state, m.faces, m.label, m.open ?? [], m.lookDirection ?? null] : null,
+    s.lastIdentityDecision ?? null,
+    ms(s.lastIdentityAt),
+    s.lastIdentitySimilarity ?? null,
+    s.durationMs,
+    s.usedMs,
+    ms(s.runningSince),
+    ms(s.startedAt),
+    ms(s.endedAt),
+    s.pauseCount,
+    s.holdReason ?? null,
+    ms(s.holdSince),
+    s.holdMessage ?? null,
+    s.holdCanReverify,
+    s.legalHold,
+  ]);
+}
+
 export interface SessionSummaryQuery {
   orgId: string;
   sessionIds?: string[];

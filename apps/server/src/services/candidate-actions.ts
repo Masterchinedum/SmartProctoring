@@ -15,13 +15,13 @@ import {
 } from '@sp/shared';
 import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { answers, pauseRequests, questions, sessionCommands, type ExamSession, type Question } from '../db/schema.js';
+import { answers, examSessions, pauseRequests, questions, sessionCommands, type ExamSession, type Question } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { badRequest, conflict, invalidState, notFound, validationFailed } from '../lib/errors.js';
 import { assertInControl, buildCandidateState, instanceInControl, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { recordMultipleInstances } from './checks.js';
-import { applyInstanceUsage } from './instance-usage.js';
-import { remainingMs, sessionClock } from './dto.js';
+import { applyInstanceUsage, evaluateInstanceUsage } from './instance-usage.js';
+import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
 import { assertStatus, finalizeSession, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession } from './session-state.js';
 import { clockExpired } from '@sp/shared';
 
@@ -155,8 +155,80 @@ export async function cancelPauseRequest(ctx: Ctx, sessionId: string, instanceId
 
 /* ------------------------------------------------------------------ heartbeat */
 
-export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string, body: HeartbeatRequest, client?: { ip: string; userAgent: string }): Promise<HeartbeatResponse> {
+/** The session row as the request loaded it, with its row version (candidate auth). */
+export interface LoadedSession {
+  session: ExamSession;
+  sessionVersion: string;
+}
+
+type HeartbeatClient = { ip: string; userAgent: string };
+
+function heartbeatMonitoring(body: HeartbeatRequest, now: number): NonNullable<ExamSession['monitoring']> {
+  const mon = body.monitoring;
+  return {
+    state: mon.state,
+    faces: mon.faces,
+    label: mon.label,
+    open: mon.open.filter((t): t is EventType => (EVENT_TYPES as readonly string[]).includes(t)).slice(0, 50),
+    at: now,
+    fps: mon.fps,
+    cameraState: mon.cameraState,
+    visibility: body.visibility,
+    fullscreen: body.fullscreen,
+  };
+}
+
+function reportingInterruptedSince(body: HeartbeatRequest, s: ExamSession, now: number): Date | null {
+  // Outbox delay (browser online but uploads failing / queued): shown as "reporting interrupted since".
+  const delayed = body.outboxOldestAt != null && body.outboxSize > 0 && now - body.outboxOldestAt > OUTBOX_DELAY_MS;
+  return delayed ? new Date(Math.min(body.outboxOldestAt!, s.reportingInterruptedSince?.getTime() ?? Infinity)) : null;
+}
+
+/**
+ * The common heartbeat — nothing to deliver, nothing to open/close, no concurrent-use signal, clock not
+ * expired — as ONE conditional UPDATE instead of a locking transaction. The row must still be the version the
+ * request loaded (xmin guard); anything else (commands pending, a concurrent change, a state transition) returns
+ * null and the caller runs the full locked heartbeat, which produces exactly the same result.
+ */
+async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string, body: HeartbeatRequest, client: HeartbeatClient | undefined): Promise<HeartbeatResponse | null> {
+  const s = loaded.session;
+  const now = ctx.now();
+  if (s.activeInstanceId && s.activeInstanceId !== instanceId) return null; // superseded window
+  const inControl = instanceInControl(s, instanceId) && !TERMINAL.includes(s.status);
+  if (inControl && (s.reportingEventId || (s.status === 'active' && !s.runningSince))) return null;
+  if ((s.status === 'active' || s.status === 'paused') && clockExpired(sessionClock(s), now)) return null;
+  const usage = client ? evaluateInstanceUsage(s, instanceId, { ...client, seq: body.seq, at: now, refresh: true }) : null;
+  if (usage?.signal) return null;
+
+  const patch: Partial<typeof examSessions.$inferInsert> = { lastHeartbeatAt: new Date(now), lastHeartbeatInstanceId: instanceId, connection: 'online' };
+  if (usage?.changed) patch.instanceUsage = usage.usage;
+  if (inControl) {
+    patch.lastVerifiedHeartbeatAt = new Date(now);
+    patch.monitoring = heartbeatMonitoring(body, now);
+    if (body.currentQuestionIndex != null) patch.currentQuestionIndex = body.currentQuestionIndex;
+    patch.reportingInterruptedSince = reportingInterruptedSince(body, s, now);
+  }
+  patch.updatedAt = new Date(now);
+  const rows = await ctx.db
+    .update(examSessions)
+    .set(patch)
+    .where(and(eq(examSessions.id, s.id), sql`${examSessions}.xmin::text = ${loaded.sessionVersion}`))
+    .returning({
+      // (spelled out: drizzle renders columns unqualified in UPDATE ... RETURNING)
+      pendingCommands: sql<boolean>`exists (select 1 from session_commands c where c.session_id = exam_sessions.id and c.delivered_at is null and (c.target_instance_id is null or c.target_instance_id = ${instanceId}))`,
+    });
+  if (!rows.length || rows[0].pendingCommands) return null; // changed meanwhile / commands to deliver: full path
+  const after = { ...s, ...patch } as ExamSession;
+  ctx.live.sessionChanged(s.id, { orgId: s.orgId, visible: staffVisibleKey(after) !== staffVisibleKey(s) });
+  return { serverTime: now, status: s.status, remainingMs: remainingMs(s, now), timerRunning: s.runningSince != null, requiredCheck: requiredCheckFor(s, instanceId), commands: [] };
+}
+
+export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string, body: HeartbeatRequest, client?: HeartbeatClient, loaded?: LoadedSession): Promise<HeartbeatResponse> {
   if (body.clientInstanceId && body.clientInstanceId !== instanceId) throw badRequest('clientInstanceId does not match the X-Client-Instance header', undefined, 'instance_mismatch');
+  if (loaded && loaded.session.id === sessionId) {
+    const fast = await fastHeartbeat(ctx, loaded, instanceId, body, client);
+    if (fast) return fast;
+  }
   return withSession(ctx, sessionId, async (m) => {
     const s = m.session;
     const now = m.now;
@@ -197,20 +269,9 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
     // A signal clears verifiedInstanceId, so the block below is skipped and a reconnect check is required.
     if (client) await applyInstanceUsage(m, instanceId, { ...client, seq: body.seq, at: now, refresh: true });
     if (instanceInControl(s, instanceId) && !TERMINAL.includes(s.status)) {
-      const mon = body.monitoring;
       m.set({
         lastVerifiedHeartbeatAt: new Date(now),
-        monitoring: {
-          state: mon.state,
-          faces: mon.faces,
-          label: mon.label,
-          open: mon.open.filter((t): t is EventType => (EVENT_TYPES as readonly string[]).includes(t)).slice(0, 50),
-          at: now,
-          fps: mon.fps,
-          cameraState: mon.cameraState,
-          visibility: body.visibility,
-          fullscreen: body.fullscreen,
-        },
+        monitoring: heartbeatMonitoring(body, now),
         ...(body.currentQuestionIndex != null ? { currentQuestionIndex: body.currentQuestionIndex } : {}),
       });
       // Back after an outage: close reporting_interrupted and restart a disconnect-stopped clock.
@@ -219,9 +280,7 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
         m.set({ reportingEventId: null });
       }
       if (s.status === 'active' && !s.runningSince) m.clockStart(now);
-      // Outbox delay (browser online but uploads failing / queued): shown as "reporting interrupted since".
-      const delayed = body.outboxOldestAt != null && body.outboxSize > 0 && now - body.outboxOldestAt > OUTBOX_DELAY_MS;
-      m.set({ reportingInterruptedSince: delayed ? new Date(Math.min(body.outboxOldestAt!, s.reportingInterruptedSince?.getTime() ?? Infinity)) : null });
+      m.set({ reportingInterruptedSince: reportingInterruptedSince(body, s, now) });
     }
     // Clock expiry is enforced here as well as by the sweeper.
     if ((s.status === 'active' || s.status === 'paused') && clockExpired(sessionClock(s), now)) await finalizeSession(m, 'time_expired');

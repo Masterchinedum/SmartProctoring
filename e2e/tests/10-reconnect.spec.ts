@@ -25,11 +25,12 @@ test('reload requires a reconnect check; a second browser supersedes the first',
     await c1.page.waitForTimeout(3_000);
     await expect(c1.tid('trace-tools')).toBeVisible();
     const [download] = await Promise.all([c1.page.waitForEvent('download'), c1.tid('trace-download').click()]);
-    const lines = readFileSync((await download.path())!, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { kind: string; format?: string; obs?: { faces: unknown[] } });
-    expect(lines[0]).toMatchObject({ kind: 'meta', format: 'sp-trace/1' });
-    const obs = lines.filter((l) => l.kind === 'obs');
+    // JSONL replayable by the detection eval harness: a meta line, then the engine's FrameObservations.
+    const lines = readFileSync((await download.path())!, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { $?: string; format?: string; t?: number; faces?: unknown[] });
+    expect(lines[0]).toMatchObject({ $: 'meta', format: 'sp-trace/1' });
+    const obs = lines.filter((l) => !l.$ && Array.isArray(l.faces));
     expect(obs.length).toBeGreaterThan(5);
-    expect(obs.some((o) => o.obs?.faces.length === 1)).toBe(true);
+    expect(obs.some((o) => o.faces!.length === 1)).toBe(true);
 
     /* ---------------- reload = new instance → reconnect check */
     const reloadAt = Date.now();

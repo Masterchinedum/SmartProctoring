@@ -199,10 +199,16 @@ export const RECHECK_MESSAGE = 'Please complete a quick camera and identity chec
  * Apply one observation inside a session mutation. On a signal: `multiple_instances` event, the verified
  * instance id is cleared (reconnect check required) and a require_check command is queued. Returns the signal.
  */
+/** The verdict for a request of `instanceId` on this session, or null when the session/instance is not tracked. */
+export function evaluateInstanceUsage(s: ExamSession, instanceId: string, o: UsageObservation): UsageVerdict | null {
+  if (!TRACKED_STATUSES.includes(s.status) || !instanceInControl(s, instanceId)) return null;
+  return observeInstanceUsage(s.instanceUsage, instanceId, o);
+}
+
 export async function applyInstanceUsage(m: SessionMutation, instanceId: string, o: UsageObservation): Promise<ConcurrentUseSignal | null> {
   const s = m.session;
-  if (!TRACKED_STATUSES.includes(s.status) || !instanceInControl(s, instanceId)) return null;
-  const v = observeInstanceUsage(s.instanceUsage, instanceId, o);
+  const v = evaluateInstanceUsage(s, instanceId, o);
+  if (!v) return null;
   if (!v.signal) {
     if (v.changed) m.set({ instanceUsage: v.usage });
     return null;

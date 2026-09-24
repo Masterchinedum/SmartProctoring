@@ -95,7 +95,12 @@ test('staff hold (manual) and release without a new check', async ({ staff, staf
     await expect(c.tid('hold-screen')).toBeVisible({ timeout: 20_000 });
     await expect(c.tid('hold-screen')).toContainText('Your exam is on hold');
     await expect(c.tid('reverify-button')).toHaveCount(0);
+    await expect.poll(() => c.liveCameraTracks(), { timeout: 10_000, message: 'camera released while on hold' }).toBe(0);
+    // The exam clock is stopped while on hold.
     const clockOnHold = await c.countdownMs();
+    await c.page.waitForTimeout(6_000);
+    expect(Math.abs(clockOnHold - (await c.countdownMs()))).toBeLessThanOrEqual(1_000);
+    expect((await staff.session(s.sessionId)).summary.timerRunning).toBe(false);
 
     await sp.getByRole('button', { name: 'Release hold…' }).click();
     const rel = sp.getByRole('dialog', { name: 'Release hold' });
@@ -106,7 +111,6 @@ test('staff hold (manual) and release without a new check', async ({ staff, staf
     // The same (still verified) browser continues without a new check.
     await expect(c.tid('exam-screen')).toBeVisible({ timeout: 20_000 });
     await c.expectMonitoringActive();
-    expect(clockOnHold - (await c.countdownMs())).toBeLessThan(5_000);
     const d = await staff.session(s.sessionId);
     expect(d.summary.status).toBe('active');
     const held = d.periods.find((p) => p.kind === 'on_hold');

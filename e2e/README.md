@@ -15,8 +15,10 @@ pnpm --filter @sp/e2e fixtures                  # (re)build the fake-camera vide
 pnpm --filter @sp/e2e typecheck
 ```
 
-Runtime: ~10 minutes with the default 2 workers on a 4-core machine (~17 minutes of test time;
-the longest tests wait for real detections: a person swap, an absence, a 2-minute exam running out).
+Runtime (21 tests, 4-core machine shared with other workloads): ~9 minutes with the default 2 workers,
+~7.5 minutes with `E2E_WORKERS=3` (~18 minutes of test time; the longest tests wait for real detections:
+a person swap, an absence, a 2-minute exam running out). Global setup adds ~15 s (plus ~1 minute the
+first time, to generate the fixtures).
 
 ## Prerequisites
 
@@ -134,3 +136,8 @@ How the fake camera behaves (and how the tests rely on it):
 * The login endpoint allows 10 attempts/min per IP, so the staff API client logs in once per worker and
   staff pages reuse its cookie; only the UI-login tests type a password.
 * Test artifacts: `e2e/test-results/` (trace + screenshot on failure), server log in `e2e/.artifacts/`.
+  Playwright traces cover the staff contexts only; candidate browsers are launched separately (the camera
+  file is a launch argument), so their failures are diagnosed from the screenshot, the server log and the
+  staff API state the tests assert on.
+* Every candidate page records the camera tracks it opens (init script), and the tests assert that the
+  camera is actually released while paused / on hold (`CandidatePage.liveCameraTracks()`).

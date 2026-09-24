@@ -150,14 +150,14 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/heartbeat', { config: limit(120) }, async (req) => {
     const c = getCandidate(req);
-    return heartbeat(ctx, c.session.id, requireInstanceId(req), heartbeatRequestSchema.parse(req.body), clientMeta(req));
+    return heartbeat(ctx, c.session.id, requireInstanceId(req), heartbeatRequestSchema.parse(req.body), clientMeta(req), c);
   });
 
   app.post('/events/batch', { config: limit(240) }, async (req) => {
     const c = getCandidate(req);
     const instanceId = requireInstanceId(req);
     const body = eventBatchRequestSchema.parse(req.body);
-    return ingestEvents(ctx, c.session, c.policy, instanceId, body.events);
+    return ingestEvents(ctx, c.session, c.policy, instanceId, body.events, c);
   });
 
   app.put('/evidence/:evidenceId', { config: limit(240) }, async (req) => {
@@ -172,7 +172,7 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     const c = getCandidate(req);
     const instanceId = requireInstanceId(req);
     const q = identitySampleQuerySchema.parse(req.query);
-    return processIdentitySample(ctx, c.session, instanceId, q, jpegBody(req));
+    return processIdentitySample(ctx, c.session, instanceId, q, jpegBody(req), c);
   });
 
   app.post('/pause', { config: limit(30) }, async (req): Promise<PauseResponse> => {

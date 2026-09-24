@@ -133,6 +133,54 @@ describe('CameraManager', () => {
     cam.dispose();
   });
 
+  it('stop() while a start is still waiting for the first frames releases the new track', async () => {
+    // Regression (e2e scenario 4): the stream obtained by an in-flight start() was not yet published in
+    // the snapshot, so stop() released only the previous stream — the new track stayed live (camera on
+    // during a hold/pause, and the device kept running).
+    Object.defineProperty(HTMLMediaElement.prototype, 'readyState', { configurable: true, get: () => 0 });
+    const cam = new CameraManager();
+    const started = cam.start();
+    await vi.waitFor(() => expect(tracks).toHaveLength(1));
+    cam.stop();
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(await started).toBe(false);
+    expect(tracks[0].stop).toHaveBeenCalled();
+    expect(cam.state.state).not.toBe('live');
+    expect(cam.state.stream).toBeNull();
+    cam.dispose();
+  });
+
+  it('a re-acquire (devicechange) while the first start waits for frames stops the first track', async () => {
+    Object.defineProperty(HTMLMediaElement.prototype, 'readyState', { configurable: true, get: () => 0 });
+    const cam = new CameraManager();
+    const first = cam.start();
+    await vi.waitFor(() => expect(tracks).toHaveLength(1));
+    navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
+    await vi.waitFor(() => expect(tracks).toHaveLength(2));
+    expect(tracks[0].stop).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(7_000);
+    expect(await first).toBe(false);
+    await vi.waitFor(() => expect(cam.state.state).toBe('live'));
+    expect(tracks[1].readyState).toBe('live');
+    cam.stop();
+    expect(tracks.every((t) => t.readyState === 'ended')).toBe(true);
+    cam.dispose();
+  });
+
+  it('stop() while getUserMedia is pending discards the stream it returns', async () => {
+    let resolve!: (s: MediaStream) => void;
+    getUserMedia.mockImplementationOnce(() => new Promise<MediaStream>((r) => (resolve = r)));
+    const cam = new CameraManager();
+    const started = cam.start();
+    cam.stop();
+    const t = new FakeTrack('Integrated Camera', 'cam-1');
+    resolve(fakeStream(t));
+    expect(await started).toBe(false);
+    expect(t.stop).toHaveBeenCalled();
+    expect(cam.state.state).not.toBe('live');
+    cam.dispose();
+  });
+
   it('stop() releases the camera and does not re-acquire', async () => {
     const cam = new CameraManager();
     await cam.start();

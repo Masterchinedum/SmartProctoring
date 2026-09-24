@@ -8,6 +8,8 @@ import { defineConfig } from 'tsup';
  */
 const candidates: Record<string, string> = {
   main: 'src/main.ts',
+  // Vision worker thread entry: the pool (src/vision/pool.ts) loads dist/vision-worker.js next to the bundle.
+  'vision-worker': 'src/vision/worker.ts',
   'scripts/seed': 'src/scripts/seed.ts',
   'scripts/migrate': 'src/db/migrate-cli.ts',
   'scripts/retention': 'src/scripts/retention-cli.ts',

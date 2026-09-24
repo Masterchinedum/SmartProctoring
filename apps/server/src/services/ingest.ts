@@ -16,7 +16,7 @@ import { conflict } from '../lib/errors.js';
 import { assertInControl } from './candidate-state.js';
 import { storeEvidence } from './evidence.js';
 import { EVENT_SCREENSHOT_SHARE, sessionHasEvidenceCapacity, storageLimitError } from './session-limits.js';
-import { BLOCKING_PERIOD_KINDS, withSession } from './session-state.js';
+import { BLOCKING_PERIOD_KINDS, withSession, type SessionPreload } from './session-state.js';
 
 export const LATE_DELIVERY_MS = 30_000;
 export const MAX_EVENTS_PER_SESSION = 5000;
@@ -109,7 +109,7 @@ function periodKindAt(t: Timeline, at: number): string | null {
   return kind;
 }
 
-export async function ingestEvents(ctx: Ctx, session: ExamSession, policy: ProctoringPolicy, instanceId: string, batch: EventUpsert[]): Promise<EventBatchResponse> {
+export async function ingestEvents(ctx: Ctx, session: ExamSession, policy: ProctoringPolicy, instanceId: string, batch: EventUpsert[], preload?: SessionPreload): Promise<EventBatchResponse> {
   assertInControl(session, instanceId);
   const results: EventBatchResponse['results'] = [];
   if (batch.length === 0) return { results };
@@ -262,7 +262,7 @@ export async function ingestEvents(ctx: Ctx, session: ExamSession, policy: Proct
         } else results.push({ id: e.id, result: 'stale' });
       }
     }
-  });
+  }, preload);
   return { results };
 }
 

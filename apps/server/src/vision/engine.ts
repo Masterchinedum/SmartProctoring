@@ -1,0 +1,206 @@
+/**
+ * The analysis pipeline itself: YuNet face detection + SFace embeddings on onnxruntime-node (CPU), plus
+ * decoding, letterboxing, alignment, quality statistics and face crops.
+ *
+ * `InferenceSession.run()` of onnxruntime-node is SYNCHRONOUS: it blocks the calling JS thread for the
+ * whole inference (the intra-op pool only splits the work). So an engine must never run on the server's
+ * main thread under load: service.ts runs one engine per worker thread (worker.ts) and keeps the event loop
+ * free for HTTP / database work. Concurrent calls are safe (in-process mode overlaps decoding and inference).
+ */
+import { poseFromFivePoints } from '@sp/shared';
+import * as ort from 'onnxruntime-node';
+import { resolve } from 'node:path';
+import { alignFace, type AlignedFace } from './align';
+import { DEFAULT_DETECT_THRESHOLD, YUNET_INPUT_SIZE, decodeToDetectedFaces, interEyeDistance, packBgrPlanar, planDetectorInput } from './detect';
+import { DEFAULT_MAX_DECODE_SIDE, decodeImage, decodeRegion, encodeJpegRegion, resizeRgb, wholeImageStats, type RgbImage } from './image';
+import { SFACE_MODEL_FILE, YUNET_MODEL_FILE } from './models';
+import { assessQuality, faceRegionStats, resolveGate } from './quality';
+import type { AnalyzeOptions, DetectedFace, HeadPose, ImageAnalysis, QualityGate } from './types';
+
+export interface VisionEngineOptions {
+  /** Directory containing the two ONNX files (already resolved). */
+  modelsDir: string;
+  /** onnxruntime intra-op threads per session. */
+  threads: number;
+  /** YuNet score threshold (default 0.6). */
+  detectThreshold?: number;
+  /** Max side of the decoded working image (default 1280). */
+  maxDecodeSide?: number;
+  /** Engine-wide quality-gate override (per-call `AnalyzeOptions.gate` is applied on top). */
+  gate?: Partial<QualityGate>;
+}
+
+/** Faces this small (inter-ocular px in the sampled image) are re-sampled from the full-resolution original. */
+const MIN_ALIGN_INTER_EYE = 40;
+/** When re-sampling, no need for more than this inter-ocular distance (template is 35 px). */
+const MAX_ALIGN_INTER_EYE = 120;
+const FACE_CROP_MARGIN = 0.4;
+const FACE_CROP_MAX_SIDE = 256;
+const FACE_CROP_QUALITY = 85;
+
+export class VisionEngine {
+  private readonly gate: QualityGate;
+  private readonly detectThreshold: number;
+  private readonly maxDecodeSide: number;
+  /** Reusable detector input buffers (4.9 MB each), one per concurrent analysis (in-process mode). */
+  private readonly tensorPool: Float32Array[] = [];
+
+  private constructor(
+    private readonly detector: ort.InferenceSession,
+    private readonly recognizer: ort.InferenceSession,
+    opts: VisionEngineOptions,
+  ) {
+    this.gate = resolveGate(opts.gate);
+    this.detectThreshold = opts.detectThreshold ?? DEFAULT_DETECT_THRESHOLD;
+    this.maxDecodeSide = opts.maxDecodeSide ?? DEFAULT_MAX_DECODE_SIDE;
+  }
+
+  static async create(opts: VisionEngineOptions): Promise<VisionEngine> {
+    const sessionOptions: ort.InferenceSession.SessionOptions = {
+      logSeverityLevel: 3,
+      intraOpNumThreads: Math.max(1, Math.floor(opts.threads)),
+      interOpNumThreads: 1,
+      graphOptimizationLevel: 'all',
+      executionMode: 'sequential',
+      // Several sessions share the CPU: spin-waiting pool threads of one session starve the others (and the
+      // event loop / libvips). Measured on 4 cores: detector 15 -> 6 ms, embedder 31 -> 13 ms.
+      extra: { session: { intra_op: { allow_spinning: '0' }, inter_op: { allow_spinning: '0' } } },
+    };
+    const [detector, recognizer] = await Promise.all([
+      ort.InferenceSession.create(resolve(opts.modelsDir, YUNET_MODEL_FILE), sessionOptions),
+      ort.InferenceSession.create(resolve(opts.modelsDir, SFACE_MODEL_FILE), sessionOptions),
+    ]);
+    const engine = new VisionEngine(detector, recognizer, opts);
+    await engine.warmUp();
+    return engine;
+  }
+
+  private async warmUp(): Promise<void> {
+    const det = new Float32Array(3 * YUNET_INPUT_SIZE * YUNET_INPUT_SIZE);
+    await this.detector.run({ [this.detector.inputNames[0]]: new ort.Tensor('float32', det, [1, 3, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE]) });
+    await this.recognizer.run({ [this.recognizer.inputNames[0]]: new ort.Tensor('float32', new Float32Array(3 * 112 * 112), [1, 3, 112, 112]) });
+  }
+
+  /** Detect faces only (no alignment / embedding), in original-image coordinates, primary first. */
+  async detect(image: Buffer): Promise<DetectedFace[]> {
+    return this.detectDecoded(await decodeImage(image, this.maxDecodeSide));
+  }
+
+  async analyze(image: Buffer, opts: AnalyzeOptions = {}): Promise<ImageAnalysis> {
+    const gate = opts.gate ? resolveGate(opts.gate, this.gate) : this.gate;
+    const img = await decodeImage(image, this.maxDecodeSide);
+    const whole = wholeImageStats(img);
+    const faces = await this.detectDecoded(img);
+    const primary = faces[0] ?? null;
+
+    let aligned: AlignedFace | null = null;
+    let pose: HeadPose | null = null;
+    if (primary) {
+      const p = poseFromFivePoints(primary.landmarks);
+      pose = { yawDeg: p.yawDeg, pitchDeg: p.pitchDeg, rollDeg: p.rollDeg };
+      aligned = await this.alignPrimary(image, img, primary.landmarks, interEyeDistance(primary));
+    }
+    const stats = aligned ? faceRegionStats(aligned) : null;
+    const quality = assessQuality(
+      { width: img.origWidth, height: img.origHeight, faces, pose, stats, imageBrightness: whole.brightness, imageContrast: whole.contrast },
+      gate,
+    );
+    const embedding = opts.embed && aligned ? await this.embed(aligned) : null;
+    const faceCropJpeg = opts.faceCrop && primary ? await this.faceCrop(img, primary.box) : null;
+    return {
+      width: img.origWidth,
+      height: img.origHeight,
+      faces,
+      primary,
+      pose,
+      quality,
+      embedding,
+      dhash: whole.dhash,
+      faceCropJpeg,
+      imageBrightness: Math.round(whole.brightness * 100) / 100,
+    };
+  }
+
+  private async detectDecoded(img: RgbImage & { origWidth: number; origHeight: number }): Promise<DetectedFace[]> {
+    const plan = planDetectorInput(img.width, img.height);
+    const detImg = plan.resize ? await resizeRgb(img, plan.width, plan.height) : img;
+    const tensor = packBgrPlanar(detImg, YUNET_INPUT_SIZE, this.tensorPool.pop());
+    let outputs: ort.InferenceSession.ReturnType;
+    try {
+      outputs = await this.detector.run({
+        [this.detector.inputNames[0]]: new ort.Tensor('float32', tensor, [1, 3, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE]),
+      });
+    } finally {
+      if (this.tensorPool.length < 4) this.tensorPool.push(tensor);
+    }
+    return decodeToDetectedFaces(outputs, this.detectThreshold, detImg.width / img.origWidth, detImg.height / img.origHeight);
+  }
+
+  /**
+   * Align from the working image, or — when the working image was downscaled and the face ended up
+   * small — from a full-resolution decode of the face region.
+   */
+  private async alignPrimary(
+    image: Buffer,
+    img: RgbImage & { origWidth: number; origHeight: number; scale: number },
+    landmarksOrig: readonly { x: number; y: number }[],
+    interEyeOrig: number,
+  ): Promise<AlignedFace> {
+    if (img.scale < 1 && interEyeOrig * img.scale < MIN_ALIGN_INTER_EYE) {
+      const xs = landmarksOrig.map((p) => p.x);
+      const ys = landmarksOrig.map((p) => p.y);
+      const pad = 2.2 * interEyeOrig;
+      const left = Math.max(0, Math.floor(Math.min(...xs) - pad));
+      const top = Math.max(0, Math.floor(Math.min(...ys) - pad));
+      const right = Math.min(img.origWidth, Math.ceil(Math.max(...xs) + pad));
+      const bottom = Math.min(img.origHeight, Math.ceil(Math.max(...ys) + pad));
+      if (right - left >= 8 && bottom - top >= 8) {
+        const want = Math.min(1, MAX_ALIGN_INTER_EYE / Math.max(1, interEyeOrig));
+        const maxSide = Math.max(right - left, bottom - top) * want;
+        try {
+          const region = await decodeRegion(image, { left, top, width: right - left, height: bottom - top }, Math.max(16, Math.round(maxSide)));
+          const lm = landmarksOrig.map((p) => ({ x: (p.x - left) * region.scale, y: (p.y - top) * region.scale }));
+          return alignFace(region, lm);
+        } catch {
+          // fall back to the working image
+        }
+      }
+    }
+    return alignFace(
+      img,
+      landmarksOrig.map((p) => ({ x: p.x * img.scale, y: p.y * img.scale })),
+    );
+  }
+
+  private async embed(face: AlignedFace): Promise<Float32Array> {
+    const out = await this.recognizer.run({
+      [this.recognizer.inputNames[0]]: new ort.Tensor('float32', face.rgb, [1, 3, face.size, face.size]),
+    });
+    const t = out[this.recognizer.outputNames[0]];
+    const raw = t.data as Float32Array;
+    const e = new Float32Array(raw.length);
+    let norm = 0;
+    for (let i = 0; i < raw.length; i++) norm += raw[i] * raw[i];
+    norm = Math.sqrt(norm) || 1;
+    for (let i = 0; i < raw.length; i++) e[i] = raw[i] / norm;
+    return e;
+  }
+
+  private async faceCrop(img: RgbImage & { scale: number }, box: { x: number; y: number; w: number; h: number }): Promise<Buffer | null> {
+    const s = img.scale;
+    const side = Math.max(box.w, box.h) * (1 + 2 * FACE_CROP_MARGIN) * s;
+    const cx = (box.x + box.w / 2) * s;
+    const cy = (box.y + box.h / 2) * s;
+    const left = Math.max(0, Math.floor(cx - side / 2));
+    const top = Math.max(0, Math.floor(cy - side / 2));
+    const right = Math.min(img.width, Math.ceil(cx + side / 2));
+    const bottom = Math.min(img.height, Math.ceil(cy + side / 2));
+    if (right - left < 2 || bottom - top < 2) return null;
+    return encodeJpegRegion(img, { left, top, width: right - left, height: bottom - top }, FACE_CROP_MAX_SIDE, FACE_CROP_QUALITY);
+  }
+
+  /** Release the native sessions. The engine must be idle. */
+  async close(): Promise<void> {
+    await Promise.allSettled([this.detector.release(), this.recognizer.release()]);
+  }
+}

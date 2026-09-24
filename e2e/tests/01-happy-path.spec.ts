@@ -47,6 +47,7 @@ test('happy path: check-in, answers, pause with browser closed, resume, submit, 
     await c.pause();
     await expect(c.tid('paused-screen')).toContainText('Stopped during the pause');
     await expect(c.tid('paused-screen')).toContainText('You can close this window.');
+    await expect.poll(() => c.liveCameraTracks(), { timeout: 10_000, message: 'camera released while paused' }).toBe(0);
     const pausedAtWall = Date.now();
     const onPause = await c.countdownMs();
     expect(beforePause - onPause).toBeLessThan(8_000);

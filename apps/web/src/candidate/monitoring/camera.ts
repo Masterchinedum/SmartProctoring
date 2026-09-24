@@ -214,7 +214,11 @@ export class CameraManager {
       width: this.video.videoWidth || settings.width || 0,
       height: this.video.videoHeight || settings.height || 0,
     };
-    if (seq !== this.startSeq) return false;
+    if (seq !== this.startSeq) {
+      // Stopped or superseded while waiting for frames: never leave this stream running.
+      stream.getTracks().forEach((t) => t.stop());
+      return false;
+    }
     this.retryDelay = 1000;
     this.set({
       state: track.muted ? 'muted' : 'live',
@@ -270,6 +274,8 @@ export class CameraManager {
     }
     const s = this.snapshot.stream;
     s?.getTracks().forEach((t) => t.stop());
+    // The current track may belong to a stream that an in-flight start() has not published yet.
+    this.track?.stop();
     this.track = null;
   }
 

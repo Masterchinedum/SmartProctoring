@@ -22,7 +22,7 @@ import { toHoldDTO } from './dto.js';
 import { storeEvidence } from './evidence.js';
 import { copyEvidence, loadActiveReference, precedingContext, toIdentityResultDTO } from './identity-common.js';
 import { sessionHasEvidenceCapacity } from './session-limits.js';
-import { holdNow, identityState, withSession, type SessionMutation } from './session-state.js';
+import { holdNow, identityState, withSession, type SessionMutation, type SessionPreload } from './session-state.js';
 
 export const FOLLOW_UP_MS = 4_000;
 export const UNABLE_RETRY_MS = 10_000;
@@ -52,7 +52,7 @@ async function replay(ctx: Ctx, sessionId: string, row: IdentityCheck): Promise<
   return { result: toIdentityResultDTO(row), followUpInMs: stored.followUpInMs ?? null, status: s.status, hold: toHoldDTO(s) };
 }
 
-export async function processIdentitySample(ctx: Ctx, session: ExamSession, instanceId: string, q: SampleInput, jpeg: Buffer): Promise<IdentitySampleResponse> {
+export async function processIdentitySample(ctx: Ctx, session: ExamSession, instanceId: string, q: SampleInput, jpeg: Buffer, preload?: SessionPreload): Promise<IdentitySampleResponse> {
   const [existing] = await ctx.db
     .select()
     .from(identityChecks)
@@ -71,7 +71,7 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
       .select()
       .from(identityChecks)
       .where(and(eq(identityChecks.sessionId, session.id), eq(identityChecks.sampleId, q.sampleId)));
-    if (dup) return { row: dup, followUpInMs: ((dup.response ?? {}) as { followUpInMs?: number | null }).followUpInMs ?? null };
+    if (dup) return { row: dup, followUpInMs: ((dup.response ?? {}) as { followUpInMs?: number | null }).followUpInMs ?? null, session: m.session };
     assertInControl(m.session, instanceId);
 
     const now = m.now;
@@ -141,10 +141,11 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
     }
     const response = { followUpInMs };
     await m.tx.update(identityChecks).set({ response }).where(eq(identityChecks.id, row.id));
-    return { row: { ...row, response }, followUpInMs };
-  });
+    return { row: { ...row, response }, followUpInMs, session: m.session };
+  }, preload);
 
-  const [s] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, session.id));
+  // The session as committed by this sample (status / hold after a possible hold).
+  const s = out.session;
   return { result: toIdentityResultDTO(out.row), followUpInMs: out.followUpInMs, status: s.status, hold: toHoldDTO(s) };
 }
 

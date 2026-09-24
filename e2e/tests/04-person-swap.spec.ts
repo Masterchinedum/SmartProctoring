@@ -40,6 +40,8 @@ test('person swap mid-exam: flagged live, held, compared, released with a fresh 
     await expect(c.tid('hold-screen')).toContainText('Your exam is on hold');
     await expect(c.tid('hold-screen')).not.toContainText(/cheat|fraud|impostor/i);
     await expect(c.tid('reverify-button')).toHaveCount(0);
+    // Monitoring stopped: the camera is released (no live track left behind).
+    await expect.poll(() => c.liveCameraTracks(), { timeout: 10_000, message: 'camera released while on hold' }).toBe(0);
 
     const d = await staff.waitForSession(s.sessionId, (x) => x.summary.status === 'on_hold');
     expect(d.summary.hold?.reason).toBe('identity_mismatch');

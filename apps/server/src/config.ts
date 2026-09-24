@@ -37,7 +37,15 @@ export interface Config {
         prefix: string;
       };
   redisUrl: string | null;
+  /** Postgres pool per process (PG_POOL_MAX, default 20) and per-statement timeout (PG_STATEMENT_TIMEOUT_MS, default 60 s; 0 = off). */
+  db: { poolMax: number; statementTimeoutMs: number };
   modelsDir: string;
+  /**
+   * Vision worker threads (VISION_WORKERS; 0 = analyse on the main thread). null = derived from VISION_THREADS
+   * (total CPU threads for face analysis, default CPU count - 1) by the vision service. docs/PERFORMANCE.md.
+   */
+  visionWorkers: number | null;
+  /** In-process mode only (VISION_WORKERS=0): analyses in flight (VISION_CONCURRENCY). */
   visionConcurrency: number;
   webDistDir: string;
   bootstrap: { email: string | null; password: string | null; orgName: string };
@@ -241,8 +249,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     trustProxy,
     storage,
     redisUrl: env.REDIS_URL || null,
+    db: {
+      poolMax: Math.max(2, int(env.PG_POOL_MAX, 20)),
+      statementTimeoutMs: Math.max(0, int(env.PG_STATEMENT_TIMEOUT_MS, 60_000)),
+    },
     modelsDir: resolvePath(env.MODELS_DIR || 'models', root),
-    visionConcurrency: int(env.VISION_CONCURRENCY ?? env.VISION_THREADS, 0),
+    visionWorkers: env.VISION_WORKERS != null && env.VISION_WORKERS !== '' ? Math.max(0, int(env.VISION_WORKERS, 0)) : null,
+    visionConcurrency: int(env.VISION_CONCURRENCY, 0),
     webDistDir: resolvePath(env.WEB_DIST_DIR || '../web/dist', root),
     bootstrap: {
       email: env.BOOTSTRAP_ADMIN_EMAIL || null,

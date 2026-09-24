@@ -43,7 +43,7 @@ import {
   type SessionPeriod,
 } from '../db/schema.js';
 import { HttpError, notFound } from '../lib/errors.js';
-import { sessionClock } from './dto.js';
+import { sessionClock, staffVisibleKey } from './dto.js';
 import { gradeSession } from './grading.js';
 import { enqueueIntegrationNotifications } from './integration-events.js';
 import { mergePolicy, orgThresholds } from './org.js';
@@ -118,13 +118,21 @@ export class SessionMutation {
   private readonly pauseRequestsToPublish: string[] = [];
   private readonly afterCommit: (() => void | Promise<void>)[] = [];
   private cache: { exam?: Exam; org?: Organization | null; candidate?: Candidate; periods?: SessionPeriod[] } = {};
+  /** What staff saw of the session before this mutation (dto.ts staffVisibleKey). */
+  private readonly visibleBefore: string;
 
   constructor(
     readonly ctx: Ctx,
     readonly tx: Tx,
     public session: ExamSession,
+    preloaded: SessionPreload = {},
   ) {
     this.now = ctx.now();
+    this.visibleBefore = staffVisibleKey(session);
+    // Rows the request already loaded (candidate auth) for this very session: exam / org / candidate.
+    if (preloaded.exam?.id === session.examId) this.cache.exam = preloaded.exam;
+    if (preloaded.org !== undefined && (preloaded.org?.id ?? session.orgId) === session.orgId) this.cache.org = preloaded.org;
+    if (preloaded.candidate?.id === session.candidateId) this.cache.candidate = preloaded.candidate;
   }
 
   /** Update session fields (applied to the in-memory copy immediately and written on commit). */
@@ -197,14 +205,22 @@ export class SessionMutation {
     }
   }
 
+  /** Did this mutation change anything staff see in the session summary? */
+  get staffVisibleChange(): boolean {
+    return staffVisibleKey(this.session) !== this.visibleBefore;
+  }
+
   /** @internal */
   runAfterCommit(): void {
     const live = this.ctx.live;
     const sid = this.session.id;
-    for (const id of this.touchedEvents) live.eventChanged(id, sid);
-    for (const id of this.identityChecksToPublish) live.identityCheck(sid, id);
-    for (const id of this.pauseRequestsToPublish) live.pauseRequest(sid, id);
-    live.sessionChanged(sid);
+    const orgId = this.session.orgId;
+    // Events / identity checks / pause requests refresh the summary themselves (counts, last decision...).
+    for (const id of this.touchedEvents) live.eventChanged(id, sid, orgId);
+    for (const id of this.identityChecksToPublish) live.identityCheck(sid, id, orgId);
+    for (const id of this.pauseRequestsToPublish) live.pauseRequest(sid, id, orgId);
+    // A routine heartbeat (only timestamps changed) only keeps the summary fresh at the keepalive rate.
+    live.sessionChanged(sid, { orgId, visible: this.staffVisibleChange });
     for (const fn of this.afterCommit) {
       try {
         const r = fn();
@@ -402,16 +418,23 @@ export class SessionMutation {
   }
 }
 
+/** Rows a request already loaded for the session (e.g. candidate auth), reused instead of re-read in the mutation. */
+export interface SessionPreload {
+  exam?: Exam;
+  org?: Organization | null;
+  candidate?: Candidate;
+}
+
 /**
  * Run `fn` with the session row locked. Throws 404 if the session does not exist.
  * Notifications queued on the mutation are published after commit.
  */
-export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: SessionMutation) => Promise<T>): Promise<T> {
+export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: SessionMutation) => Promise<T>, preload?: SessionPreload): Promise<T> {
   let mutation: SessionMutation | null = null;
   const result = await ctx.db.transaction(async (tx) => {
     const [row] = await tx.select().from(examSessions).where(eq(examSessions.id, sessionId)).for('no key update');
     if (!row) throw notFound('Session not found', 'session_not_found');
-    const m = new SessionMutation(ctx, tx, row);
+    const m = new SessionMutation(ctx, tx, row, preload);
     mutation = m;
     const out = await fn(m);
     await m.flush();

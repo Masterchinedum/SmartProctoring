@@ -22,12 +22,21 @@ export interface Database {
   close(): Promise<void>;
 }
 
-export function createDatabase(url: string, opts: { max?: number; applicationName?: string } = {}): Database {
+export interface DatabaseOptions {
+  /** Pool size (PG_POOL_MAX; default 20). Sum over all instances must stay below Postgres max_connections. */
+  max?: number;
+  applicationName?: string;
+  /** Server-side statement_timeout for pooled connections (ms; 0/undefined = none). Migrations lift it. */
+  statementTimeoutMs?: number;
+}
+
+export function createDatabase(url: string, opts: DatabaseOptions = {}): Database {
   const pool = new pg.Pool({
     connectionString: url,
     max: opts.max ?? 20,
     application_name: opts.applicationName ?? 'smartproctoring',
     idleTimeoutMillis: 30_000,
+    ...(opts.statementTimeoutMs ? { statement_timeout: opts.statementTimeoutMs } : {}),
   });
   pool.on('error', (err) => {
     // Idle client errors (e.g. server restart) must not crash the process.
@@ -63,11 +72,14 @@ export function findMigrationsDir(): string {
 export async function migrate(database: Database): Promise<void> {
   const client = await database.pool.connect();
   try {
+    // Index builds on large tables may take longer than the request-oriented statement_timeout.
+    await client.query('SET statement_timeout = 0');
     await client.query('SELECT pg_advisory_lock(727274001)');
     try {
       await drizzleMigrate(drizzle(client, { schema }), { migrationsFolder: findMigrationsDir() });
     } finally {
       await client.query('SELECT pg_advisory_unlock(727274001)');
+      await client.query('RESET statement_timeout');
     }
   } finally {
     client.release();

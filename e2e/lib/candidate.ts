@@ -55,6 +55,19 @@ export async function launchPersistentCamera(fixture: FixtureName, userDataDir: 
   });
 }
 
+/** Init script: remember every camera track the page obtains (to verify that the camera is released). */
+const TRACK_CAMERA_STREAMS = `(() => {
+  const md = navigator.mediaDevices;
+  if (!md || !md.getUserMedia || window.__spTracks) return;
+  window.__spTracks = [];
+  const orig = md.getUserMedia.bind(md);
+  md.getUserMedia = async (c) => {
+    const s = await orig(c);
+    window.__spTracks.push(...s.getVideoTracks());
+    return s;
+  };
+})();`;
+
 export type CheckOutcome = 'ready' | 'passed' | 'retry' | 'hold' | 'problem' | 'failed';
 
 export class CandidatePage {
@@ -72,6 +85,7 @@ export class CandidatePage {
    */
   static async open(browser: Browser | null, link: string, opts: { context?: BrowserContext } = {}): Promise<CandidatePage> {
     const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, permissions: ['camera'] }));
+    await context.addInitScript(TRACK_CAMERA_STREAMS);
     const page = await context.newPage();
     const c = new CandidatePage(context, page);
     c.attach(page);
@@ -91,6 +105,14 @@ export class CandidatePage {
     page.on('response', (r) => {
       if (r.url().includes('/api/') && r.status() >= 400) this.httpErrors.push(`${r.status()} ${r.request().method()} ${r.url().replace(/^.*\/api/, '/api')}`);
     });
+  }
+
+  /**
+   * Camera tracks obtained by this page that are still live. The candidate app must release the camera
+   * whenever monitoring stops (pause, hold, end) — a leaked track keeps the camera (and its light) on.
+   */
+  liveCameraTracks(): Promise<number> {
+    return this.page.evaluate(() => ((window as unknown as { __spTracks?: MediaStreamTrack[] }).__spTracks ?? []).filter((t) => t.readyState === 'live').length);
   }
 
   get pageErrors(): string[] {
