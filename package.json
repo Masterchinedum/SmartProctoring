@@ -1,0 +1,19 @@
+{
+  "name": "smartproctoring",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Smart proctoring for online exams: live monitoring, identity continuity across pauses, reviewable evidence.",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@10.33.0",
+  "engines": { "node": ">=20.11" },
+  "scripts": {
+    "build": "pnpm -r --filter ./packages/** run build && pnpm --filter @sp/web run build && pnpm --filter @sp/server run build",
+    "dev": "pnpm -r --parallel --filter @sp/server --filter @sp/web run dev",
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

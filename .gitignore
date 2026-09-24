@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+coverage/
+*.log
+.env
+.env.local
+data/
+.storage/
+apps/server/storage/
+test-results/
+playwright-report/
+.eval-cache/
+eval-reports/local/
+*.tsbuildinfo
+.DS_Store
