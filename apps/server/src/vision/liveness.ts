@@ -41,12 +41,17 @@ export interface LivenessOptions {
   /** Frontal frames must be within the general quality gate's pose limits. */
   frontalPoseGate: Pick<QualityGate, 'maxAbsYawDeg' | 'minPitchDeg' | 'maxPitchDeg'>;
   /**
-   * Noise tolerance without fishing: a step passes when at least min(minFramesAgreeing, frames in the window)
-   * frames reach the required change, and the step's measurement is that k-th largest change. Webcam pose
-   * noise (within a burst: sd ~2.5 deg in good light, ~6 deg in a dim room) then cannot make a flat photo pass
-   * on one lucky frame, while a real turn held for a moment is seen in every frame (default 2).
+   * Noise tolerance without fishing: when a step's window has several (identity-consistent) frames, the step's
+   * measurement is the k-th largest change, k = min(minFramesAgreeing, frames), and it must reach
+   * `agreeingFractionOfTarget` of the target; a single frame must reach `minFractionOfTarget`. Webcam pose noise
+   * (within a burst: sd ~2.5 deg in good light, ~6 deg in a dim room) then cannot make a flat photo pass on one
+   * lucky frame, while a real turn held for a moment is seen in every frame (default 2).
+   * Monte-Carlo at 6 deg noise, 2 windows per step: a rotated flat photo passes 1.2 % (v1: best frame >= 12 deg)
+   * -> 0.006 %; a real 20 deg turn passes 99.6 % -> 98.3 % (docs/accuracy/identity-v2.md §7).
    */
   minFramesAgreeing: number;
+  /** Required fraction of the target when >= 2 frames agree (default 0.5, i.e. 10 deg of a 20 deg target). */
+  agreeingFractionOfTarget: number;
   /**
    * Frontal frames must be mutually consistent: each frontal frame against the template (mean) of the other
    * frontal frames must reach this similarity. Default: FRONTAL_MIN_SIMILARITY for the frame's quality bucket.
@@ -75,6 +80,7 @@ function frameBucket(a: ImageAnalysis): QualityBucket {
 export const LIVENESS_DEFAULTS: Readonly<LivenessOptions> = Object.freeze({
   minFractionOfTarget: 0.6,
   minFramesAgreeing: 2,
+  agreeingFractionOfTarget: 0.5,
   minFrameHamming: 2,
   clockToleranceMs: 1000,
   clientContradictionFraction: 0.5,
@@ -316,7 +322,6 @@ export function verifyLiveness(
       continue;
     }
     const action = step.action;
-    const need = requiredChange(action, spec, o);
     // k-th best frame of the window (k = min(minFramesAgreeing, identity-consistent frames)): a step passes on
     // agreeing frames, not on one noisy outlier.
     const measuredFrames = usable
@@ -324,6 +329,8 @@ export function verifyLiveness(
       .map((f) => ({ f, ...stepDelta(action, f.analysis.pose!, centre) }))
       .sort((a, b) => b.directional - a.directional);
     const k = Math.max(1, Math.min(Math.max(1, Math.floor(o.minFramesAgreeing)), measuredFrames.length));
+    const target = isHorizontal(action) ? spec.targetYawDeg : spec.targetPitchDeg;
+    const need = k >= 2 ? Math.min(requiredChange(action, spec, o), o.agreeingFractionOfTarget * target) : requiredChange(action, spec, o);
     const best: { f: LivenessFrame; measured: number; directional: number } | null = measuredFrames.length ? measuredFrames[k - 1] : null;
     if (!best) {
       setStep(step.index, false, null, 'The face in this step does not match the frontal frames');

@@ -6,7 +6,8 @@
   "scripts": {
     "test": "playwright test",
     "fixtures": "tsx scripts/build-fixtures.ts",
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "rw:report": "tsx scripts/realistic-report.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",

@@ -23,19 +23,28 @@ export interface EmbeddingRecipe {
   id: string;
   normalize: IlluminationNormalization;
   flip: boolean;
+  /** Different preprocessing for frames in the 'poor' quality bucket (calibration.ts `qualityBucket`). */
+  poor?: { normalize: IlluminationNormalization; flip: boolean };
 }
 
 /** Recipe of embedding model id 1 (the original pipeline): raw crop, single view. */
 export const RECIPE_V1: Readonly<EmbeddingRecipe> = Object.freeze({ id: 'v1-raw', normalize: 'none', flip: false });
 
 /**
- * Recipe of embedding model id 2 (identity v2): raw crop + its mirror image, normalize(e(x) + e(flip x)).
- * On the webcam simulator flip TTA separates genuine from impostor slightly better in good / fair light
- * (d' +0.03..0.07, EER in fair light 0.34 % -> 0.30 %) and is neutral in poor light; every photometric
- * normalisation tried (grey-world + stretch, gamma, CLAHE, denoise variants) made SFace WORSE in good light
- * and did not help reliably in dim light (docs/accuracy/identity-v2.md §5). Costs a second SFace run.
+ * Recipe of embedding model id 2 (identity v2), measured on the webcam simulator (docs/accuracy/identity-v2.md §5):
+ *  - good / fair frames: raw crop + its mirror image, normalize(e(x) + e(flip x)). Flip TTA separates genuine from
+ *    impostor slightly better (d' +0.03..0.07, EER in fair light 0.34 % -> 0.30 %) at the cost of a second SFace run.
+ *    Every photometric normalisation tried (grey-world + stretch, gamma, CLAHE) made SFace worse in good light.
+ *  - poor frames (dim, flat, backlit, low detector score): a 3x3 binomial denoise of the aligned crop, single view.
+ *    Sensor noise, not contrast, is what hurts SFace there: poor-bucket EER vs impostors 10.6 % -> 8.0 %, d'
+ *    2.56 -> 2.84, with good-light galleries unchanged (flip TTA did not help poor frames).
  */
-export const RECIPE_V2: Readonly<EmbeddingRecipe> = Object.freeze({ id: 'v2-flip', normalize: 'none', flip: true });
+export const RECIPE_V2: Readonly<EmbeddingRecipe> = Object.freeze({
+  id: 'v2',
+  normalize: 'none',
+  flip: true,
+  poor: Object.freeze({ normalize: 'denoise', flip: false }),
+});
 
 /** Inner face region of the 112x112 template used for statistics (eyes, nose, mouth, cheeks). */
 const R_X0 = 24;
@@ -229,7 +238,7 @@ export function flipPlanar(input: Float32Array, size: number): Float32Array {
   return out;
 }
 
-/** Views (SFace inputs) to embed for a recipe. */
+/** Views (SFace inputs) to embed for a recipe (pass `recipe.poor` for a poor-quality frame when it is set). */
 export function recipeViews(face: AlignedFace, recipe: Pick<EmbeddingRecipe, 'normalize' | 'flip'>): Float32Array[] {
   const base = normalizedInput(face, recipe.normalize);
   return recipe.flip ? [base, flipPlanar(base, face.size)] : [base];

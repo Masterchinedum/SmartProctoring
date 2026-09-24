@@ -42,12 +42,17 @@ export function skipUnlessFixtures(...names: FixtureName[]): void {
 }
 
 export async function launchCamera(fixture: FixtureName): Promise<Browser> {
+  return launchCameraFile(fixturePath(fixture));
+}
+
+/** A Chromium whose fake camera plays the given Y4M file (e.g. a realistic fixture, lib/realistic.ts). */
+export async function launchCameraFile(y4m: string): Promise<Browser> {
   return chromium.launch({
     headless: !HEADED,
     args: [
       '--use-fake-device-for-media-stream',
       '--use-fake-ui-for-media-stream',
-      `--use-file-for-fake-video-capture=${fixturePath(fixture)}`,
+      `--use-file-for-fake-video-capture=${y4m}`,
       '--autoplay-policy=no-user-gesture-required',
       // Keep timers and the camera loop running in background tabs / occluded windows.
       '--disable-background-timer-throttling',
@@ -78,24 +83,64 @@ export async function launchPersistentCamera(fixture: FixtureName, userDataDir: 
   });
 }
 
-/** Init script: remember every camera track the page obtains (to verify that the camera is released). */
-const TRACK_CAMERA_STREAMS = `(() => {
+/**
+ * Init script: remember every camera track the page obtains (to verify that the camera is released) and when
+ * each camera open resolved (`__spCamOpens`: wall-clock ms + delivered size). Chrome's file camera starts its
+ * video from frame 0 at every open, so the last open before a moment gives the fixture's timeline position.
+ */
+export const TRACK_CAMERA_STREAMS = `(() => {
   const md = navigator.mediaDevices;
   if (!md || !md.getUserMedia || window.__spTracks) return;
   window.__spTracks = [];
+  window.__spCamOpens = [];
   const orig = md.getUserMedia.bind(md);
   md.getUserMedia = async (c) => {
     const s = await orig(c);
-    window.__spTracks.push(...s.getVideoTracks());
+    const tracks = s.getVideoTracks();
+    window.__spTracks.push(...tracks);
+    if (tracks.length) {
+      const st = tracks[0].getSettings ? tracks[0].getSettings() : {};
+      window.__spCamOpens.push({ at: Date.now(), width: st.width || 0, height: st.height || 0 });
+    }
     return s;
   };
 })();`;
+
+/** Every CandidatePage of the running test (lib/test.ts attaches their API logs when a test fails). */
+export const OPEN_CANDIDATE_PAGES = new Set<CandidatePage>();
+
+const hhmmss = (t: number) => new Date(t).toISOString().slice(11, 23);
+
+/** One compact line per identity-relevant API answer (check frames / completes, identity samples). */
+async function summarizeApiResponse(url: string, status: number, body: unknown): Promise<string | null> {
+  const path = url.replace(/^.*\/api/, '/api');
+  const b = (body ?? {}) as Record<string, any>;
+  const q = new URL(url).searchParams;
+  if (/\/api\/candidate\/checks\/[^/]+\/frames/.test(path)) {
+    const qa = b.quality ?? {};
+    const pr = b.progress ?? {};
+    return `frame step=${q.get('step')} ${status} accepted=${b.accepted} usable=${qa.usable} issues=${(qa.issues ?? []).join('+') || '-'} bright=${qa.brightness?.toFixed?.(0)} contrast=${qa.contrast?.toFixed?.(1)} ie=${qa.interEyePx?.toFixed?.(0)} yaw=${qa.yawDeg?.toFixed?.(0)} sat=${b.stepSatisfied ?? '-'} measured=${b.measured ? `${b.measured.yawDeg?.toFixed(0)}/${b.measured.pitchDeg?.toFixed(0)}` : '-'} client=${q.get('clientYaw') ?? '-'} progress=${pr.frontalAccepted ?? '-'}+${pr.frontalNeeded ?? '-'} id=${pr.identity ?? '-'} steps=${(pr.steps ?? []).map((x: any) => (x.satisfied ? 1 : 0)).join('')} canComplete=${pr.canComplete ?? '-'}`;
+  }
+  if (/\/api\/candidate\/checks\/[^/]+\/complete/.test(path)) {
+    return `complete ${status} outcome=${b.outcome} identity=${b.identity?.decision}/${b.identity?.similarity?.toFixed?.(3)} liveness=${b.liveness ? `${b.liveness.passed}:${(b.liveness.reasons ?? []).join('+')}` : '-'} remaining=${b.attemptsRemaining} guidance=${JSON.stringify(b.guidance ?? [])}`;
+  }
+  if (/\/api\/candidate\/checks$/.test(path.split('?')[0]!)) {
+    return `check start ${status} purpose=${b.purpose ?? '-'} liveness=${(b.liveness?.steps ?? []).map((x: any) => x.action).join(',') || '-'} frontal=${b.frontalFramesRequired ?? '-'}/${b.maxFrontalFrames ?? '-'}`;
+  }
+  if (/\/api\/candidate\/identity\/sample/.test(path)) {
+    const r = b.result ?? {};
+    return `sample trigger=${q.get('trigger')} burst=${q.get('burstIndex') ?? '-'}/${q.get('burstSize') ?? '-'} ${status} decision=${r.decision} sim=${r.similarity?.toFixed?.(3)} issues=${(r.quality?.issues ?? []).join('+') || '-'} complete=${b.burst?.complete ?? '-'} evidence=${b.evidence ? `${b.evidence.state}:${b.evidence.swapProbability?.toFixed?.(3)}:${b.evidence.samples}` : '-'} next=${b.nextSampleInMs ?? '-'} status=${b.status}`;
+  }
+  return null;
+}
 
 export type CheckOutcome = 'ready' | 'passed' | 'retry' | 'hold' | 'problem' | 'failed';
 
 export class CandidatePage {
   readonly logs: string[] = [];
   readonly httpErrors: string[] = [];
+  /** Identity-relevant API answers (check frames, check completes, identity samples), one line each. */
+  readonly apiLog: string[] = [];
 
   private constructor(
     readonly context: BrowserContext,
@@ -111,6 +156,7 @@ export class CandidatePage {
     await context.addInitScript(TRACK_CAMERA_STREAMS);
     const page = await context.newPage();
     const c = new CandidatePage(context, page);
+    OPEN_CANDIDATE_PAGES.add(c);
     c.attach(page);
     await page.goto(new URL(link, BASE_URL).pathname + new URL(link, BASE_URL).search);
     return c;
@@ -127,7 +173,30 @@ export class CandidatePage {
     page.on('pageerror', (e) => this.logs.push(`[pageerror] ${e.message}`));
     page.on('response', (r) => {
       if (r.url().includes('/api/') && r.status() >= 400) this.httpErrors.push(`${r.status()} ${r.request().method()} ${r.url().replace(/^.*\/api/, '/api')}`);
+      if (/\/api\/candidate\/(checks|identity\/sample)/.test(r.url()) && r.request().method() === 'POST') {
+        const at = Date.now();
+        void r
+          .json()
+          .catch(() => null)
+          .then((b) => summarizeApiResponse(r.url(), r.status(), b))
+          .then((line) => {
+            if (line) this.apiLog.push(`${hhmmss(at)} ${line}`);
+            if (this.apiLog.length > 2000) this.apiLog.splice(0, 500);
+          })
+          .catch(() => undefined);
+      }
     });
+  }
+
+  /** Wall-clock times (ms) at which this page's camera opens resolved, with the delivered size. */
+  cameraOpens(): Promise<{ at: number; width: number; height: number }[]> {
+    return this.page.evaluate(() => (window as unknown as { __spCamOpens?: { at: number; width: number; height: number }[] }).__spCamOpens ?? []);
+  }
+
+  /** When the camera was last opened (the file camera's frame 0), or null. */
+  async lastCameraOpen(): Promise<{ at: number; width: number; height: number } | null> {
+    const o = await this.cameraOpens();
+    return o.length ? o[o.length - 1]! : null;
   }
 
   /**

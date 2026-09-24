@@ -9,6 +9,7 @@
  *   --no-legacy        skip the identity-v1 baseline
  *   --runs <n>         Monte-Carlo runs per session for the sequential-test simulation (default 100)
  *   --out <file>       write the JSON report
+ *   --markdown <file>  write the before/after tables as Markdown
  *   --models <dir>     model directory
  * Internal: --build-only --engine v1|v2 --shard i/n (used by the parallel workers).
  */
@@ -22,7 +23,7 @@ import { createVisionService } from '../vision/service';
 import type { VisionService } from '../vision/types';
 import { defaultFacesetsDir, loadFaceset } from './datasets';
 import { buildWebcamData, type WebcamDataOptions } from './webcam-eval';
-import { buildWebcamReport, currentPipeline, formatWebcamReport, legacyPipeline, type EngineHooks } from './webcam-report';
+import { buildWebcamReport, currentPipeline, formatWebcamMarkdown, formatWebcamReport, legacyPipeline, type EngineHooks } from './webcam-report';
 
 /**
  * The identity engine's production decision logic (per-session normalisation, check assessment), loaded
@@ -99,6 +100,7 @@ export async function runWebcamCli(argv: string[]): Promise<number> {
       'no-legacy': { type: 'boolean', default: false },
       runs: { type: 'string' },
       out: { type: 'string' },
+      markdown: { type: 'string' },
       models: { type: 'string' },
       quiet: { type: 'boolean', default: false },
     },
@@ -136,6 +138,10 @@ export async function runWebcamCli(argv: string[]): Promise<number> {
   if (values.out) {
     writeFileSync(resolve(values.out), JSON.stringify(report, null, 2) + '\n');
     log(`wrote ${resolve(values.out)}`);
+  }
+  if (values.markdown) {
+    writeFileSync(resolve(values.markdown), formatWebcamMarkdown(report) + '\n');
+    log(`wrote ${resolve(values.markdown)}`);
   }
   return 0;
 }

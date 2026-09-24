@@ -1,5 +1,10 @@
 # Identity verification — design, accuracy baseline and evaluation protocol
 
+> **Superseded calibration.** The quality gate, embedding, thresholds and decision rules described below are identity
+> **v1**. They were recalibrated for real laptop webcams (dim rooms, backlight, small faces, family-member look-alikes)
+> in **[identity-v2.md](identity-v2.md)**, which has the current numbers and the `eval:identity --webcam` harness. The
+> pipeline description, licences and the customer data protocol (§2, §3, §8) still apply.
+
 This document covers the server-side identity pipeline (`apps/server/src/vision`), the offline accuracy
 harness (`apps/server/src/eval`), the current baseline (`docs/accuracy/identity-baseline.json`) and the
 protocol customers should follow to measure accuracy on their own population.

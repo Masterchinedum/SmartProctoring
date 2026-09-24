@@ -201,7 +201,16 @@ export async function renderJob(dir: string, job: FrameJob, srcCache: Map<string
 export function pipelineKey(opts: WebcamDataOptions): string {
   const recipes = (opts.recipes ?? []).map((r) => `${r.id}:${r.normalize}:${r.flip}`).join(',');
   return createHash('sha256')
-    .update(JSON.stringify({ SIM_VERSION, recipes, gate: opts.gate ?? {}, ...(opts.engineTag ? { engine: opts.engineTag } : {}), def: `${DEFAULT_EMBEDDING_RECIPE.id}:${DEFAULT_EMBEDDING_RECIPE.normalize}:${DEFAULT_EMBEDDING_RECIPE.flip}` }))
+    .update(
+      JSON.stringify({
+        SIM_VERSION,
+        recipes,
+        gate: opts.gate ?? {},
+        ...(opts.engineTag ? { engine: opts.engineTag } : {}),
+        // The v1 engine pins its own recipe; every other configuration embeds with the current default.
+        ...(opts.engineTag === 'v1' ? {} : { def: `${DEFAULT_EMBEDDING_RECIPE.id}:${DEFAULT_EMBEDDING_RECIPE.normalize}:${DEFAULT_EMBEDDING_RECIPE.flip}:${JSON.stringify(DEFAULT_EMBEDDING_RECIPE.poor ?? null)}` }),
+      }),
+    )
     .digest('hex')
     .slice(0, 12);
 }

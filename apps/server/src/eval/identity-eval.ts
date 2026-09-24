@@ -18,7 +18,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import sharp from 'sharp';
 import { DEFAULT_IDENTITY_THRESHOLDS, IDENTITY_DECISIONS, type IdentityDecision, type IdentityThresholds, type QualityIssue } from '@sp/shared';
-import { buildReference, decideIdentity, maxSimilarity } from '../vision/identity';
+import { buildReference, decideIdentity, scoreAgainst } from '../vision/identity';
 import { QUALITY_GATE } from '../vision/quality';
 import type { ImageAnalysis, VisionService } from '../vision/types';
 
@@ -586,7 +586,8 @@ class AnalysisCache {
 }
 
 function makeTrial(kind: Trial['kind'], groups: string[], probe: ImageAnalysis, refs: Float32Array[], thresholds: IdentityThresholds): Trial {
-  const sim = probe.embedding && refs.length ? maxSimilarity(probe.embedding, refs) : null;
+  // Same score as production (identity v2): probe vs the template of the reference embeddings.
+  const sim = probe.embedding && refs.length ? scoreAgainst(probe.embedding, refs) : null;
   const d = decideIdentity(sim, probe.quality, thresholds, 'reference');
   return { kind, groups, similarity: sim, decision: d.decision, usable: probe.quality.usable && sim != null, issues: probe.quality.issues };
 }

@@ -22,8 +22,8 @@ Protocols
            photo j != i. Genuine = same identity; impostor = different identity; family = different identity,
            same family (Azure family photos: parents/children/spouses). Near-duplicate photo pairs (clean baseline
            similarity >= 0.97) are excluded from genuine trials.
-  checkin  enrol with the 5 'good' check-in frames of the identity's enrolment photo (score = max over the 5,
-           as identity.ts does), probe with frames of the identity's other photos.
+  checkin  enrol with the MEAN TEMPLATE of the 5 'good' check-in frames of the identity's enrolment photo (the
+           vision agent's v2 recommendation, identity-v2.md §6.1), probe with frames of the identity's other photos.
   "3f"     suffix: probe = normalise(mean of the 3 burst frames' embeddings) of one scene (resume-check style).
   mixed    (--mixed) enrolment templates computed with the BASELINE model (existing stored templates) and probes
            with the candidate: backward compatibility without re-enrolment.
@@ -228,7 +228,7 @@ def build_trials(d: dict, E_enrol: np.ndarray, E_probe: np.ndarray, base_clean: 
         enrol = []
         for ph in sorted(set(photo[em])):
             g = np.nonzero(em & (photo == ph))[0]
-            enrol.append((ph, ident[g[0]], fam[g[0]], E_enrol[g]))
+            enrol.append((ph, ident[g[0]], fam[g[0]], l2n(E_enrol[g].mean(0))[None]))  # mean template (identity-v2 §6.1)
     # --- scores
     gs, gid, is_, ie, ip, ifam = [], [], [], [], [], []
     for ph, idn, fm, T in enrol:
@@ -335,6 +335,7 @@ def main() -> None:
     ap.add_argument("--mixed", action="store_true", help="also evaluate baseline enrolment vs candidate probes")
     ap.add_argument("--usable-only", action="store_true", help="only probes that passed the production quality gate")
     ap.add_argument("--reps", type=int, default=400)
+    ap.add_argument("--embed-only", action="store_true", help="only fill the embedding cache (run several in parallel), then exit")
     ap.add_argument("--out", default=str(WORK / "eval" / "report"))
     ap.add_argument("--crops", default=str(WORK / "eval" / "crops.npz"))
     args = ap.parse_args()
@@ -346,6 +347,12 @@ def main() -> None:
     conds = args.conditions.split(",")
     cache = WORK / "eval" / "emb"
     base_path = str(SFACE_ONNX)
+    if args.embed_only:
+        for _, path in models:
+            for rc in recipes:
+                embed_all(d, path, rc, cache)
+        print(f"embeddings cached ({time.time() - t0:.0f}s)")
+        return
     base_raw = embed_all(d, base_path, "none", cache)
     # parity with the server: our baseline embeddings vs the TS engine's cached 'default' embeddings
     has = np.abs(d["default_emb"]).sum(1) > 0

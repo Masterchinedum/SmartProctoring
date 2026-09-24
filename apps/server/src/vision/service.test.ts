@@ -11,7 +11,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildReference, cosineSimilarity, decideIdentity, REFERENCE_INCONSISTENT_REASON } from './identity';
 import { hammingHex, VisionInputError } from './image';
 import { resolveModelsDir } from './models';
-import { QUALITY_GATE, regateQuality, resolveGate } from './quality';
+import { QUALITY_GATE, QUALITY_GATE_V1, regateQuality, resolveGate } from './quality';
+import { simulateWebcamFrame } from '../eval/webcam-sim';
 import { createVisionService, VisionBusyError, VisionClosedError, type OnnxVisionService } from './service';
 import type { ImageAnalysis } from './types';
 
@@ -218,7 +219,37 @@ describe.skipIf(!haveModels || !haveImages)('OnnxVisionService on real images', 
     await expect(small.analyze(buf)).rejects.toBeInstanceOf(VisionClosedError);
   }, 30_000);
 
+  it('identity v2: dim-room webcam frames the v1 gate refused are usable and match; an impostor in the same light does not', async () => {
+    const src = img('obama.jpg');
+    const lm = (await vision.analyze(src)).primary!.landmarks;
+    const frame = (condition: 'good' | 'dim', sceneSeed: number, source = src, landmarks = lm) =>
+      simulateWebcamFrame(source, { landmarks }, { condition, resolution: '640x480', sceneSeed, interEye720: 70 }).then((f) => f.jpeg);
+    const ref = await vision.analyze(await frame('good', 1), { embed: true });
+    for (const seed of [3, 6, 10]) {
+      const a = await vision.analyze(await frame('dim', seed), { embed: true });
+      const s = cosineSimilarity(a.embedding!, ref.embedding!);
+      expect(a.quality.usable, `seed ${seed}`).toBe(true);
+      expect(regateQuality(a.quality, a.faces, a.width, a.height, QUALITY_GATE_V1).issues, `seed ${seed}`).toContain('low_contrast');
+      expect(decideIdentity(s, a.quality).decision, `seed ${seed}`).toBe('match');
+    }
+    const bsrc = img('biden.jpg');
+    const blm = (await vision.analyze(bsrc)).primary!.landmarks;
+    for (const seed of [3, 6, 10]) {
+      const a = await vision.analyze(await frame('dim', seed, bsrc, blm), { embed: true });
+      if (!a.embedding) continue;
+      expect(decideIdentity(cosineSimilarity(a.embedding, ref.embedding!), a.quality).decision, `impostor seed ${seed}`).not.toBe('match');
+    }
+  }, 60_000);
+
+  it('ID photos skip the low-light detection pass (a face only an enhancement finds is not a usable reference)', async () => {
+    const tiny = await sharp(img('obama.jpg')).resize(130).jpeg({ quality: 3 }).toBuffer();
+    const bad = await sharp(tiny).resize(600).jpeg({ quality: 90 }).toBuffer();
+    expect((await vision.analyze(bad, { enhanceLowLight: false })).faces).toHaveLength(0);
+    expect((await vision.processIdPhoto(bad)).accepted).toBe(false);
+  });
+
   it('uses the configured gate', () => {
-    expect(QUALITY_GATE.minInterEyePx).toBe(28);
+    expect(QUALITY_GATE.minInterEyePx).toBe(20);
+    expect(QUALITY_GATE.minContrast).toBe(7);
   });
 });

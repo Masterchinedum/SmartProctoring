@@ -32,6 +32,8 @@ export interface PipelineSpec {
   enrolMin: number;
   /** Bucket of a usable frame (template scoring; for LLR). */
   bucket?: (q: FaceQuality) => QualityBucket;
+  /** Production per-comparison label (e.g. decideIdentity); default: plain thresholds. */
+  decide?: (similarity: number | null, quality: FaceQuality) => IdentityDecision;
 }
 
 export function gatePipelineQuality(gate: QualityGate): (r: FrameRecord) => FaceQuality {
@@ -230,7 +232,8 @@ export function scoreTrials(data: WebcamData, p: PipelineSpec, enrolConditions: 
       for (const x of fq) {
         const s = x.e ? frameScore(p, x.e, ref) : null;
         const ok = x.q.usable && x.e != null;
-        frameT.push({ kind, burstKey: `${ref.identity}|${ref.condition}|${b.key}`, condition: b.condition, resolution: b.resolution, enrol: ref.condition, usable: ok, similarity: s, decision: label(p, ok, s), bucket: ok ? bucketOf(x.q) : null, quality: x.q });
+        const decision = p.decide ? p.decide(ok ? s : null, x.q) : label(p, ok, s);
+        frameT.push({ kind, burstKey: `${ref.identity}|${ref.condition}|${b.key}`, condition: b.condition, resolution: b.resolution, enrol: ref.condition, usable: ok, similarity: s, decision, bucket: ok ? bucketOf(x.q) : null, quality: x.q });
       }
       let s: number | null = null;
       let decision: IdentityDecision;
@@ -244,7 +247,9 @@ export function scoreTrials(data: WebcamData, p: PipelineSpec, enrolConditions: 
         decision = agg.decision;
       } else {
         s = usable.length ? scoreAgainst(usable.map((x) => x.e!), ref.embeddings) : null;
-        decision = label(p, usable.length > 0, s);
+        const mb = modeBucket(buckets);
+        const rep = usable.find((x) => bucketOf(x.q) === mb)?.q ?? fq[0]?.q;
+        decision = p.decide && rep ? p.decide(usable.length ? s : null, usable.length ? rep : { ...rep, usable: false }) : label(p, usable.length > 0, s);
       }
       burstT.push({
         kind,

@@ -72,8 +72,9 @@ export interface Calibration {
      * Positive evidence from 'poor'-bucket samples counts at most this much in the window (`windowEvidence`).
      * Below `confirm` on purpose: poor light alone can make a session 'suspect' (faster sampling, lighting
      * guidance, staff visibility as an uncertain observation) but never a confirmed mismatch — in a dim room a
-     * genuine candidate's frames are too often unrecognisable (simulator: without the cap, 13 % of dim-room
-     * resumptions of genuine candidates alarmed within an hour). Fair/good evidence confirms as usual.
+     * genuine candidate's frames are too often unrecognisable (simulator: without the cap, 10 % of dim-room and 7 %
+     * of backlit resumptions of genuine candidates, and 3 of 754 same-session candidates, alarmed within an hour).
+     * Fair/good evidence confirms as usual.
      */
     maxPoorEvidence: number;
   };
@@ -110,11 +111,12 @@ export function windowEvidence(window: readonly WindowEntry[], maxPoorEvidence: 
  * similarity of the gallery frames), per quality bucket — for per-session normalisation of the score.
  * 'continuous': same session, other capture conditions (mid-exam; simulator: same photo, new scene / light).
  * 'relaxed': another day / room / camera (resume); measured on OTHER photos of the person, some taken years
- * apart, so it is a pessimistic bound. Impostors fall 0.76 ± 0.11 (family members) to 0.85 ± 0.1 below it.
+ * apart, so it is a pessimistic bound. Impostors fall 0.76-0.79 ± 0.11-0.14 (family members) to 0.83-0.85 ± 0.09-0.15
+ * below it. Measured on 600 / 246 / 368 (continuous) and 1,523 / 824 / 1,194 (relaxed) genuine bursts.
  */
 export const GENUINE_DRIFT: Readonly<Record<'continuous' | 'relaxed', Readonly<Record<QualityBucket, { mean: number; sd: number }>>>> = Object.freeze({
-  continuous: Object.freeze({ good: { mean: 0.02, sd: 0.04 }, fair: { mean: 0.06, sd: 0.1 }, poor: { mean: 0.23, sd: 0.2 } }),
-  relaxed: Object.freeze({ good: { mean: 0.28, sd: 0.11 }, fair: { mean: 0.3, sd: 0.11 }, poor: { mean: 0.44, sd: 0.18 } }),
+  continuous: Object.freeze({ good: { mean: 0.02, sd: 0.04 }, fair: { mean: 0.06, sd: 0.09 }, poor: { mean: 0.21, sd: 0.2 } }),
+  relaxed: Object.freeze({ good: { mean: 0.28, sd: 0.11 }, fair: { mean: 0.3, sd: 0.11 }, poor: { mean: 0.43, sd: 0.18 } }),
 });
 
 /** Weight of the uniform floor in both likelihoods (heavy, conservative tails). */
@@ -152,12 +154,13 @@ export const BUCKET_THRESHOLDS: Readonly<BucketThresholds> = Object.freeze({
  * person (another day / room / camera — the pessimistic, cross-session case; per-session normalisation narrows it
  * for mid-exam samples), impostor = everyone else incl. family members. Fitted sds are inflated by 15 %
  * (conservative tails). Fit (n): good genuine 0.666 ± 0.114 (1,518), impostor 0.098 ± 0.090 (74,656);
- * fair 0.647 ± 0.105 (764) / 0.095 ± 0.090 (35,184); poor 0.464 ± 0.175 (948) / 0.065 ± 0.096 (43,250).
+ * fair 0.647 ± 0.104 (764) / 0.095 ± 0.090 (35,184); poor 0.490 ± 0.160 (948) / 0.076 ± 0.095 (43,250) — poor frames
+ * are embedded from a denoised crop (embed-prep.ts RECIPE_V2).
  */
 export const BUCKET_MODELS: Readonly<Record<QualityBucket, Readonly<BucketModel>>> = Object.freeze({
   good: { genuine: { mean: 0.67, sd: 0.13 }, impostor: { mean: 0.1, sd: 0.1 } },
   fair: { genuine: { mean: 0.65, sd: 0.12 }, impostor: { mean: 0.1, sd: 0.1 } },
-  poor: { genuine: { mean: 0.46, sd: 0.2 }, impostor: { mean: 0.07, sd: 0.11 } },
+  poor: { genuine: { mean: 0.49, sd: 0.18 }, impostor: { mean: 0.08, sd: 0.11 } },
 });
 
 /**

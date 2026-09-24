@@ -64,10 +64,21 @@ def main() -> None:
     ap.add_argument("--enh-c2", type=int, default=32)
     ap.add_argument("--enh-blocks", type=int, default=2)
     ap.add_argument("--description", default="")
+    ap.add_argument("--alpha", type=float, default=1.0, help="WiSE-FT: theta = alpha * student + (1 - alpha) * teacher (method B: residual scaled by alpha)")
+    ap.add_argument("--checkpoint", default="best.pt")
     args = ap.parse_args()
     torch.set_num_threads(4)
     model, _ = build_student(args.method, args.train_upto, args.enh_c1, args.enh_c2, args.enh_blocks)
-    model.load_state_dict(torch.load(WORK / "runs" / args.run / "best.pt"))
+    sd = torch.load(WORK / "runs" / args.run / args.checkpoint)
+    if args.alpha != 1.0:
+        if args.method == "A":
+            teacher = build_student("A", args.train_upto)[0].state_dict()
+            sd = {k: (args.alpha * v + (1 - args.alpha) * teacher[k]) if v.is_floating_point() else v for k, v in sd.items()}
+        else:
+            sd = dict(sd)
+            for k in ("enhancer.out.weight", "enhancer.out.bias"):
+                sd[k] = sd[k] * args.alpha
+    model.load_state_dict(sd)
     model.eval()
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +96,7 @@ def main() -> None:
         "training": "label-free self-distillation for webcam robustness (tools/recognizer), public-domain US Congress portraits",
         "io": "data float32[N,3,112,112] RGB 0..255 aligned (ArcFace 112 template) -> fc1 float32[N,128] (L2-normalise)",
         "description": args.description,
+        "wise_ft_alpha": str(args.alpha),
     }
     del m.metadata_props[:]
     for k, v in meta.items():

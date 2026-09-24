@@ -6,6 +6,7 @@
 import { DEFAULT_IDENTITY_THRESHOLDS } from '@sp/shared';
 import { CALIBRATION, BUCKET_MODELS, qualityBucket, sampleLLR, type QualityBucket } from '../vision/calibration';
 import { QUALITY_GATE, QUALITY_GATE_V1, regateQuality } from '../vision/quality';
+import { decideIdentity } from '../vision/identity';
 import type { FrameRecord, WebcamData } from './webcam-eval';
 import {
   conditionTables,
@@ -46,6 +47,7 @@ export function currentPipeline(embedding = 'default'): PipelineSpec {
     scoring: 'template',
     enrolMin: CALIBRATION.minFramesForDecision,
     bucket: qualityBucket,
+    decide: (sim, q) => decideIdentity(sim, q, { ...DEFAULT_IDENTITY_THRESHOLDS, match: CALIBRATION.match, mismatch: CALIBRATION.mismatch }).decision,
   };
 }
 
@@ -57,6 +59,17 @@ export function currentPipeline(embedding = 'default'): PipelineSpec {
 export interface EngineHooks {
   comparisonLLR(similarity: number, bucket: QualityBucket, baseline: { mean: number; sd: number; n: number } | null, context: 'continuous' | 'relaxed'): { llr: number };
   assessCheck(frames: { usable: boolean; similarity: number | null; bucket: QualityBucket | null; llr: number }[], opts?: { atLimit?: boolean }): { status: string };
+}
+
+export interface PerConditionSeq {
+  falseConfirmPer1000h: number | undefined;
+  falseConfirmCrossPer1000h: number | undefined;
+  medianSamples: number | null | undefined;
+  detectedWithin3: number | undefined;
+  family3: number | undefined;
+  /** % of impostor sessions reaching 'suspect' within 3 samples / ever (40 samples). */
+  suspectWithin3: number | undefined;
+  suspectEver: number | undefined;
 }
 
 export interface CheckOutcomeRates {
@@ -85,14 +98,14 @@ export interface PipelineReport {
     impostorFamily: SequentialSimResult;
     /** Swap while the evidence window holds strong genuine evidence (just above `clear`). */
     impostorAfterGenuine?: SequentialSimResult;
-    perCondition: Record<string, { falseConfirmPer1000h: number | undefined; medianSamples: number | null | undefined; detectedWithin3: number | undefined; family3: number | undefined }>;
+    perCondition: Record<string, PerConditionSeq>;
     /** Same simulation with the identity engine's per-session normalisation ('continuous' context). */
     normalised?: {
       genuineSamePhoto: SequentialSimResult;
       genuineCrossPhoto: SequentialSimResult;
       impostor: SequentialSimResult;
       impostorFamily: SequentialSimResult;
-      perCondition: Record<string, { falseConfirmPer1000h: number | undefined; medianSamples: number | null | undefined; detectedWithin3: number | undefined; family3: number | undefined }>;
+      perCondition: Record<string, PerConditionSeq>;
     };
   };
   /** Checks decided by the identity engine's assessCheck ('relaxed' context): 3 frames, and 6 frames (adaptive). */
@@ -117,9 +130,18 @@ function simulateAll(sessions: Session[], rule: SequentialRule, sd: Record<Quali
   const perCondition: PipelineReport['sequential']['perCondition'] = {};
   for (const c of WEBCAM_CONDITIONS) {
     const gs = g(by((s) => s.kind === 'genuine_same' && s.condition === c));
+    const gx = g(by((s) => s.kind === 'genuine_cross' && s.condition === c));
     const im = i(by((s) => s.kind.startsWith('impostor') && s.condition === c));
     const fam = i(by((s) => s.kind === 'impostor_family' && s.condition === c));
-    perCondition[c] = { falseConfirmPer1000h: gs.falseConfirmPer1000h, medianSamples: im.medianSamples, detectedWithin3: im.detectedWithin?.[3], family3: fam.detectedWithin?.[3] };
+    perCondition[c] = {
+      falseConfirmPer1000h: gs.falseConfirmPer1000h,
+      falseConfirmCrossPer1000h: gx.falseConfirmPer1000h,
+      medianSamples: im.medianSamples,
+      detectedWithin3: im.detectedWithin?.[3],
+      family3: fam.detectedWithin?.[3],
+      suspectWithin3: im.suspectWithin3,
+      suspectEver: im.suspectEver,
+    };
   }
   return {
     genuineSamePhoto: g(by((s) => s.kind === 'genuine_same')),
@@ -257,11 +279,11 @@ export function formatWebcamReport(r: WebcamReport): string {
     out.push(`  swap detection: median ${s.impostor.medianSamples} samples (${s.impostor.medianSeconds} s), p90 ${s.impostor.p90Samples}, within 3 samples ${s.impostor.detectedWithin?.[3]}%, never (40 samples) ${s.impostor.notDetected}%`);
     out.push(`  family impostors: median ${s.impostorFamily.medianSamples} samples, within 3 ${s.impostorFamily.detectedWithin?.[3]}%, never ${s.impostorFamily.notDetected}%`);
     if (s.impostorAfterGenuine) out.push(`  swap after strong genuine evidence: median ${s.impostorAfterGenuine.medianSamples} samples, within 3 ${s.impostorAfterGenuine.detectedWithin?.[3]}%`);
-    out.push(`  per condition: ${Object.entries(s.perCondition).map(([c, v]) => `${c}: FA ${v.falseConfirmPer1000h}/1000h, median ${v.medianSamples}, <=3 ${v.detectedWithin3}%, family <=3 ${v.family3}%`).join(' | ')}`);
+    out.push(`  per condition: ${Object.entries(s.perCondition).map(([c, v]) => `${c}: FA ${v.falseConfirmPer1000h}/1000h (cross ${v.falseConfirmCrossPer1000h}), median ${v.medianSamples}, <=3 ${v.detectedWithin3}%, family <=3 ${v.family3}%, suspect <=3 ${v.suspectWithin3}% ever ${v.suspectEver}%`).join(' | ')}`);
     if (s.normalised) {
       const n = s.normalised;
       out.push(`  with the engine's per-session normalisation (continuous): FA same-photo ${n.genuineSamePhoto.falseConfirmPer1000h}/1000h (bad ${n.genuineSamePhoto.badSessions}/${n.genuineSamePhoto.sessions}), cross-photo ${n.genuineCrossPhoto.falseConfirmPer1000h}; swap median ${n.impostor.medianSamples} samples (${n.impostor.medianSeconds} s), <=3 ${n.impostor.detectedWithin?.[3]}%, never ${n.impostor.notDetected}%; family median ${n.impostorFamily.medianSamples}, <=3 ${n.impostorFamily.detectedWithin?.[3]}%, never ${n.impostorFamily.notDetected}%`);
-      out.push(`    per condition: ${Object.entries(n.perCondition).map(([c, v]) => `${c}: FA ${v.falseConfirmPer1000h}, median ${v.medianSamples}, <=3 ${v.detectedWithin3}%, family <=3 ${v.family3}%`).join(' | ')}`);
+      out.push(`    per condition: ${Object.entries(n.perCondition).map(([c, v]) => `${c}: FA ${v.falseConfirmPer1000h} (cross ${v.falseConfirmCrossPer1000h}), median ${v.medianSamples}, <=3 ${v.detectedWithin3}%, family <=3 ${v.family3}%, suspect <=3 ${v.suspectWithin3}%`).join(' | ')}`);
     }
     if (p.engineChecks) {
       out.push(`\nChecks decided by the identity engine (assessCheck, 'relaxed'): pass / uncertain / pending / MISMATCH %, 3 frames | 6 frames`);
@@ -275,3 +297,67 @@ export function formatWebcamReport(r: WebcamReport): string {
 }
 
 export { BUCKET_MODELS };
+
+/* ------------------------------------------------------------------------------------ markdown */
+
+const pc = (v: number | null | undefined) => (v == null ? '–' : `${v.toFixed(1)} %`);
+
+/** Markdown tables for docs/accuracy/identity-v2.md (`eval:identity --webcam --markdown <file>`). */
+export function formatWebcamMarkdown(r: WebcamReport): string {
+  const out: string[] = [];
+  const [v1, v2] = [r.pipelines.find((p) => p.pipeline.startsWith('v1')), r.pipelines.find((p) => p.pipeline.startsWith('v2'))];
+  const conds = ['good', 'typical', 'dim', 'backlit', 'sidelit'];
+  out.push(`Calibration \`${r.calibrationVersion}\`; ${r.dataset.sourcePhotos} source photos, ${r.dataset.identitiesWithTwoPlus} enrolled identities, ${r.dataset.families} families, ${r.dataset.frames} simulated frames.`);
+  out.push('');
+  out.push('**Enrolment** (5 check-in frames in the condition; a reference needs 3 usable frontal frames)');
+  out.push('');
+  out.push('| | good | typical | dim | backlit |');
+  out.push('|---|--:|--:|--:|--:|');
+  for (const p of [v1, v2]) if (p) out.push(`| ${p.pipeline} | ${['good', 'typical', 'dim', 'backlit'].map((c) => `${p.enrolment[c].ok}/${p.enrolment[c].total}`).join(' | ')} |`);
+  out.push('');
+  const table = (title: string, pick: (p: PipelineReport) => ConditionTable[], rows: string[]) => {
+    out.push(`**${title}**`);
+    out.push('');
+    out.push('| condition | pipeline | genuine same-session: match / inconcl. / unable / **mismatch** | genuine other day: match / inconcl. / unable / **mismatch** | impostor: mismatch / inconcl. / unable / **match** | family impostor: mismatch / unable / **match** |');
+    out.push('|---|---|---|---|---|---|');
+    for (const c of rows) {
+      for (const p of [v1, v2]) {
+        if (!p) continue;
+        const t = pick(p).find((x) => x.condition === c);
+        if (!t) continue;
+        const d = (x: ConditionTable['genuineSame'], m: 'mismatch' | 'match') =>
+          `${pc(x.match)} / ${pc(x.inconclusive)} / ${pc(x.unable)} / **${pc(m === 'mismatch' ? x.mismatch : x.match)}**`;
+        const imp = `${pc(t.impostor.mismatch)} / ${pc(t.impostor.inconclusive)} / ${pc(t.impostor.unable)} / **${pc(t.impostor.match)}**`;
+        const fam = `${pc(t.family.mismatch)} / ${pc(t.family.unable)} / **${pc(t.family.match)}**`;
+        out.push(`| ${c} | ${p.pipeline.split(' ')[0]} | ${d(t.genuineSame, 'mismatch')} | ${d(t.genuineCross, 'mismatch')} | ${imp} | ${fam} |`);
+      }
+    }
+    out.push('');
+  };
+  table('Per-frame decisions (reference enrolled in good or typical light)', (p) => p.frames, ['all', ...conds]);
+  table('Checks: the 3 frames of one burst decided together (v1: aggregateFrames; v2: burst template vs gallery template)', (p) => p.checks, ['all', ...conds, 'good@640x480', 'good@1280x720', 'dim@640x480', 'dim@1280x720']);
+  if (v2?.engineChecks) {
+    out.push('**Resume / reconnect checks as the identity engine decides them** (`assessCheck`, relaxed context): pass / uncertain / pending (too few usable frames) / **mismatch**, with 3 frames → 6 frames');
+    out.push('');
+    out.push('| condition | genuine same-session | genuine other day | impostor | family impostor |');
+    out.push('|---|---|---|---|---|');
+    const f = (x: CheckOutcomeRates) => `${x.pass ?? '–'} / ${x.uncertain ?? '–'} / ${x.pending ?? '–'} / **${x.mismatch ?? '–'}**`;
+    for (const [c, v] of Object.entries(v2.engineChecks)) out.push(`| ${c} | ${f(v.genuineSame.frames3)} → ${f(v.genuineSame.frames6)} | ${f(v.genuineCross.frames3)} → ${f(v.genuineCross.frames6)} | ${f(v.impostor.frames3)} → ${f(v.impostor.frames6)} | ${f(v.family.frames3)} → ${f(v.family.frames6)} |`);
+    out.push('');
+  }
+  out.push('**Swap detection during the exam** (simulated sequences, sampling every 6 s for 3 min then 15 s, bursts of 3)');
+  out.push('');
+  out.push('| condition | pipeline | false confirmed swaps / 1000 h, same session | … other day (resume) | swap confirmed ≤ 3 samples | median samples | family ≤ 3 samples | suspect ≤ 3 samples |');
+  out.push('|---|---|--:|--:|--:|--:|--:|--:|');
+  for (const c of conds) {
+    for (const p of [v1, v2]) {
+      if (!p) continue;
+      const s = p.sequential.perCondition[c];
+      out.push(`| ${c} | ${p.pipeline.split(' ')[0]} | ${s.falseConfirmPer1000h ?? '–'} | ${s.falseConfirmCrossPer1000h ?? '–'} | ${pc(s.detectedWithin3)} | ${s.medianSamples ?? 'never (median)'} | ${pc(s.family3)} | ${pc(s.suspectWithin3)} |`);
+    }
+    const n = v2?.sequential.normalised?.perCondition[c];
+    if (n) out.push(`| ${c} | v2 + session normalisation | ${n.falseConfirmPer1000h ?? '–'} | ${n.falseConfirmCrossPer1000h ?? '–'} | ${pc(n.detectedWithin3)} | ${n.medianSamples ?? 'never (median)'} | ${pc(n.family3)} | ${pc(n.suspectWithin3)} |`);
+  }
+  out.push('');
+  return out.join('\n');
+}

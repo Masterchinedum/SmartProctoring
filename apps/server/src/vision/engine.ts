@@ -19,6 +19,7 @@ import { removeInitializersFromInputs } from './onnx-model';
 import { DEFAULT_EMBEDDING_RECIPE } from './embeddings';
 import { combineViews, l2normalize, recipeViews, type EmbeddingRecipe } from './embed-prep';
 import { assessQuality, faceRegionStats, resolveGate } from './quality';
+import { qualityBucket } from './calibration';
 import type { AnalyzeOptions, DetectedFace, HeadPose, ImageAnalysis, QualityGate } from './types';
 
 export interface VisionEngineOptions {
@@ -151,7 +152,7 @@ export class VisionEngine {
       { width: img.origWidth, height: img.origHeight, faces, pose, stats, imageBrightness: whole.brightness, imageContrast: whole.contrast },
       gate,
     );
-    const embedding = opts.embed && aligned ? await this.embedRecipe(aligned, this.recipe) : null;
+    const embedding = opts.embed && aligned ? await this.embedRecipe(aligned, this.recipe.poor && qualityBucket(quality) === 'poor' ? { ...this.recipe, ...this.recipe.poor } : this.recipe) : null;
     let embeddingVariants: Record<string, Float32Array> | undefined;
     if (opts.embeddingVariants?.length && aligned) {
       embeddingVariants = {};
