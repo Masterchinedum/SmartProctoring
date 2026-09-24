@@ -23,6 +23,20 @@ export {
   REFERENCE_INCONSISTENT_REASON,
   type ComparisonTarget,
 } from './identity';
+export {
+  CALIBRATION,
+  BUCKET_MODELS,
+  BUCKET_THRESHOLDS,
+  LLR_TAIL_EPS,
+  qualityBucket,
+  sampleLLR,
+  rawLLR,
+  posteriorSwap,
+  type QualityBucket,
+  type BucketModel,
+  type BucketThresholds,
+  type Calibration,
+} from './calibration';
 export { verifyLiveness, checkStepFrame, stepDelta, LIVENESS_DEFAULTS, LIVENESS_REASONS, type LivenessOptions } from './liveness';
 export {
   QUALITY_GATE,
