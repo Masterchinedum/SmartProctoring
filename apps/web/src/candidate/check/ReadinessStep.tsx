@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { isVirtualCameraLabel } from '@sp/detection';
 import { useController, useSnapshot } from '../context';
 import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
-import { allRequiredPass, evaluateReadiness, ReadinessSmoother, type ReadinessItem } from './readiness';
+import { allRequiredPass, evaluateReadiness, ReadinessSmoother, warnings, type ReadinessItem } from './readiness';
 import { useFrameAnalysis } from './useFrameAnalysis';
 
 /**
@@ -51,6 +51,8 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
   const analysisUnavailable = !vs.loading && !vs.vision?.face;
   const ready = camera.state === 'live' && (analysisUnavailable ? true : allRequiredPass(shown));
   const firstFailing = shown.find((i) => i.required && !i.ok);
+  // Borderline picture: the candidate may continue (the server judges usability and guides live), with advice.
+  const warn = ready && !analysisUnavailable ? warnings(shown).filter((w) => w.id !== 'real_camera') : [];
 
   return (
     <div className="stack">
@@ -58,7 +60,7 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
       {intro && <p>{intro}</p>}
       <p className="muted">
         Sit where you will take the exam, in a well-lit place, with your face in the middle of the picture. The preview is mirrored like a mirror; nothing is recorded
-        at this step.
+        at this step. Only a working camera and your face (alone in view) are required to continue — the other items are advice.
       </p>
       <div className="cand-setup">
         <div className="stack">
@@ -119,6 +121,10 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
           <div role="status" aria-atomic="true" className="cand-live-slot" data-testid="readiness-status">
             {firstFailing && !analysisUnavailable ? (
               <p className="cand-guidance">{firstFailing.guidance}</p>
+            ) : ready && !analysisUnavailable && warn.length > 0 ? (
+              <p className="cand-guidance" data-testid="readiness-warning">
+                You can continue. For the best result: {warn[0].guidance}
+              </p>
             ) : ready && !analysisUnavailable ? (
               <p className="cand-status-ok">All checks passed. Select Continue.</p>
             ) : null}

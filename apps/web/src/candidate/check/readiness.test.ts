@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FaceObservation } from '@sp/shared';
-import { allRequiredPass, evaluateReadiness, ReadinessSmoother, type ReadinessInput } from './readiness';
+import { allRequiredPass, evaluateReadiness, ReadinessSmoother, warnings, type ReadinessInput } from './readiness';
 
 function face(p: Partial<FaceObservation> = {}): FaceObservation {
   return { box: { x: 0.35, y: 0.25, w: 0.3, h: 0.4 }, score: 0.9, yaw: 2, pitch: -3, roll: 0, gazeX: 0, gazeY: 0, visibility: 0.95, cutOff: false, brightness: 120, ...p };
@@ -59,6 +59,21 @@ describe('evaluateReadiness', () => {
     expect(byId(evaluateReadiness(input({ faces: [face({ brightness: 240 })] }))).lighting.guidance).toMatch(/too bright/);
     expect(byId(evaluateReadiness(input({ faceRegion: { mean: 120, std: 5, sharpness: 60 } }))).lighting.guidance).toMatch(/lacks contrast/);
     expect(byId(evaluateReadiness(input({ faceRegion: { mean: 120, std: 35, sharpness: 3 } }))).sharpness).toMatchObject({ ok: false, guidance: expect.stringMatching(/blurry/) });
+  });
+
+  it('only warns (does not block) about size / position, lighting and sharpness — the server judges usability', () => {
+    for (const bad of [
+      input({ faces: [face({ brightness: 30 })] }),
+      input({ faceRegion: { mean: 120, std: 5, sharpness: 2 } }),
+      input({ faces: [face({ box: { x: 0.45, y: 0.4, w: 0.1, h: 0.14 } })] }),
+    ]) {
+      const items = evaluateReadiness(bad);
+      expect(allRequiredPass(items)).toBe(true);
+      expect(warnings(items).length).toBeGreaterThan(0);
+    }
+    // … but a camera without frames or no single face still blocks.
+    expect(allRequiredPass(evaluateReadiness(input({ faces: [] })))).toBe(false);
+    expect(allRequiredPass(evaluateReadiness(input({ framesFlowing: false })))).toBe(false);
   });
 
   it('only warns about a virtual camera', () => {

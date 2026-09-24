@@ -14,8 +14,8 @@ import { buildIdentityComparison } from '../src/services/reports-identity.js';
 import { SELFTEST_TTL_MS } from '../src/services/identity-selftest.js';
 import { CALIBRATION } from '../src/vision/index.js';
 import { json, staffApi } from './admin/fixtures.js';
-import { burst, consent, DEVICE, hb, runCheck, sample, startCheck, startedSession } from './flow.js';
-import { createTestEnv, type CandidateClient, type TestEnv } from './helpers.js';
+import { burst, consent, hb, runCheck, sample, startCheck, startedSession } from './flow.js';
+import { createTestEnv, type TestEnv } from './helpers.js';
 
 let env: TestEnv;
 beforeAll(async () => {
@@ -421,5 +421,3 @@ describe('staff identity self-test', () => {
   });
 });
 
-void DEVICE;
-void ({} as CandidateClient);

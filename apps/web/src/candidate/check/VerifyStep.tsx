@@ -1,23 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createLivenessTracker } from '@sp/detection';
+import { createLivenessTracker, type LivenessProgress } from '@sp/detection';
 import type { CheckFrameResponse, CheckPurpose, CompleteCheckResponse, DeviceInfo, FaceObservation, LivenessStep, StartCheckResponse } from '@sp/shared';
 import { classifyApiError, type CandidateApi } from '../api';
 import { errorMessage, useController, useSnapshot } from '../context';
 import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
-import { captureJpeg } from '../monitoring/frames';
+import { captureFaceCrop } from '../monitoring/frames';
+import { AdaptiveCheck } from './adaptive';
 import { CheckProgress } from './progress';
 import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrameAnalysis';
 
 /**
- * Live-person + identity check. Sends un-mirrored JPEG frames to the server, which is authoritative:
- *  1. `frontalFramesRequired` frontal frames (identity reference / comparison),
- *  2. if the challenge has liveness steps: ~2 frames per step while the candidate follows the
- *     randomized head-movement instructions (verified server-side from facial-landmark parallax,
- *     which a flat photo cannot produce),
- *  3. POST complete → passed / retry / held / failed.
+ * Live-person + identity check. Sends un-mirrored, face-centred JPEG crops at the camera's native resolution
+ * to the server, which is authoritative. Adaptive (AdaptiveCheck):
+ *  1. frontal frames while the server wants more (CheckFrameResponse.progress.frontalNeeded; v1 servers:
+ *     frontalFramesRequired), with the server's guidance shown live;
+ *  2. if the challenge has liveness steps: frames at the PEAK of each head movement (liveness tracker),
+ *     the server's per-step verdict before moving on, and an in-place re-prompt ("a little further") for a
+ *     step it did not accept — never a restart of the whole check;
+ *  3. POST complete as soon as the server can decide (progress.canComplete) → passed / retry / held / failed.
  */
 
+/** Frames captured at the peak of each head movement (one more per in-place re-prompt, 3 in total per step). */
 export const FRAMES_PER_STEP = 2;
+export const MAX_FRAMES_PER_STEP = 3;
 /**
  * Client-side "frontal" gate: relative to the candidate's calibrated centre pose when known (camera
  * placement varies), otherwise a margin inside the server's quality gate (|yaw| ≤ 25°,
@@ -35,8 +40,7 @@ export function isFrontal(face: Pose, centre: Pose | null): boolean {
   return Math.abs(face.yaw) <= FRONTAL_MAX_YAW && face.pitch >= FRONTAL_PITCH_RANGE_ABS[0] && face.pitch <= FRONTAL_PITCH_RANGE_ABS[1];
 }
 
-const MIN_CAPTURE_SPACING_MS = 350;
-const JPEG_QUALITY = 0.85;
+const MIN_CAPTURE_SPACING_MS = 300;
 
 type Phase = 'starting' | 'frontal' | 'liveness' | 'completing' | 'expired' | 'error';
 
@@ -61,7 +65,11 @@ interface StepView {
   message: string;
   progress: number;
   problem: string | null;
+  stage: NonNullable<LivenessProgress['stage']>;
+  holdProgress: number;
 }
+
+type Tracker = ReturnType<typeof createLivenessTracker>;
 
 export function VerifyStep({
   purpose,
@@ -78,22 +86,22 @@ export function VerifyStep({
   const [check, setCheck] = useState<StartCheckResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [guidance, setGuidance] = useState<string[]>([]);
-  const [frontalCount, setFrontalCount] = useState(0);
+  const [frontal, setFrontal] = useState<{ accepted: number; wanted: number }>({ accepted: 0, wanted: 0 });
   const [stepView, setStepView] = useState<StepView | null>(null);
-  const [stepsDone, setStepsDone] = useState(0);
+  const [stepsDone, setStepsDone] = useState<number[]>([]);
+  const [overall, setOverall] = useState(0);
   const [attempt, setAttempt] = useState(0);
 
   // Mutable run state (read inside the analysis callback).
   const run = useRef({
     check: null as StartCheckResponse | null,
+    adaptive: null as AdaptiveCheck | null,
     phase: 'starting' as Phase,
     inflight: 0,
     uploads: [] as Promise<unknown>[],
     lastCaptureAt: 0,
-    frontalAccepted: 0,
-    frontalSent: 0,
-    perStep: new Map<number, number>(),
-    tracker: null as ReturnType<typeof createLivenessTracker> | null,
+    tracker: null as Tracker | null,
+    trackerCentred: false,
     completing: false,
     cancelled: false,
     /** The candidate's own straight-ahead pose from calibration (for the frontal-frame gate). */
@@ -103,9 +111,22 @@ export function VerifyStep({
   });
 
   const setPhaseBoth = (p: Phase) => {
+    if (run.current.phase === p) return;
     run.current.phase = p;
     setPhase(p);
   };
+
+  const refreshProgress = useCallback(() => {
+    const r = run.current;
+    const a = r.adaptive;
+    if (!a) return;
+    const p = a.progress;
+    setFrontal({ accepted: a.acceptedFrontal(), wanted: p ? p.frontalAccepted + p.frontalNeeded : a.required });
+    const done = (r.check?.liveness?.steps ?? []).filter((s) => a.isStepSatisfied(s.index)).map((s) => s.index);
+    const trackerDone = r.tracker?.current().done ?? false;
+    setStepsDone(done);
+    setOverall(trackerDone && !a.wantsFrontal() ? 1 : a.overall(done.length));
+  }, []);
 
   /* ---------------------------------------------------------------- start */
   // Stop uploads when the step really unmounts (StrictMode's simulated remount re-arms it).
@@ -125,23 +146,24 @@ export function VerifyStep({
     if (startRef.current?.key !== key) {
       r.cancelled = false;
       r.check = null;
+      r.adaptive = null;
       r.inflight = 0;
       r.uploads = [];
       r.lastCaptureAt = 0;
-      r.frontalAccepted = 0;
-      r.frontalSent = 0;
-      r.perStep = new Map();
       r.tracker = null;
+      r.trackerCentred = false;
       r.completing = false;
       const b = ctrl.currentBaseline();
       r.centre = b && b.samples > 0 ? { yaw: b.yaw, pitch: b.pitch } : null;
       r.progress.start(performance.now());
-      setFrontalCount(0);
-      setStepsDone(0);
+      setFrontal({ accepted: 0, wanted: 0 });
+      setStepsDone([]);
       setStepView(null);
       setGuidance([]);
+      setOverall(0);
       setError(null);
-      setPhaseBoth('starting');
+      r.phase = 'starting';
+      setPhase('starting');
       startRef.current = {
         key,
         promise: (async () => ctrl.api.startCheck({ purpose, clientInstanceId: ctrl.instanceId, device: await deviceInfo(ctrl) }))(),
@@ -151,13 +173,23 @@ export function VerifyStep({
       (res) => {
         if (!alive || r.check) return;
         r.check = res;
+        r.adaptive = new AdaptiveCheck(res);
         r.progress.start(performance.now());
         setCheck(res);
         if (res.liveness) {
-          r.tracker = createLivenessTracker({ steps: res.liveness.steps, targetYawDeg: res.liveness.targetYawDeg, targetPitchDeg: res.liveness.targetPitchDeg });
+          r.tracker = createLivenessTracker({
+            steps: res.liveness.steps,
+            targetYawDeg: res.liveness.targetYawDeg,
+            targetPitchDeg: res.liveness.targetPitchDeg,
+            framesPerStep: FRAMES_PER_STEP,
+            maxFramesPerStep: MAX_FRAMES_PER_STEP,
+            awaitVerdict: true,
+          });
         }
-        setPhaseBoth(res.frontalFramesRequired > 0 ? 'frontal' : res.liveness ? 'liveness' : 'completing');
-        if (res.frontalFramesRequired <= 0 && !res.liveness) void complete();
+        refreshProgress();
+        const next = r.adaptive.phase(!r.tracker, 0);
+        if (next === 'complete') void completeRef.current();
+        else setPhaseBoth(next);
       },
       async (e: unknown) => {
         if (!alive) return;
@@ -188,39 +220,47 @@ export function VerifyStep({
       }
     }, 500);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [check, ctrl]);
 
   /* ---------------------------------------------------------------- upload */
   const upload = useCallback(
-    (
-      step: number | 'frontal',
-      face: Pick<FaceObservation, 'yaw' | 'pitch'> | null,
-      api: CandidateApi,
-      onDone: (res: CheckFrameResponse) => void,
-      onFail?: () => void,
-    ) => {
+    (step: number | 'frontal', face: Pick<FaceObservation, 'yaw' | 'pitch' | 'box'> | null, api: CandidateApi, onDone: (res: CheckFrameResponse) => void, onFail?: () => void) => {
       const r = run.current;
       const c = r.check;
       if (!c) return;
       const capturedAt = ctrl.clock.now();
       r.lastCaptureAt = performance.now();
       r.inflight++;
+      // Crop at once (the face box belongs to the frame just analysed); encoding / sending happen after.
+      const cropping = captureFaceCrop(ctrl.camera.video, face?.box ?? null);
       const p = (async () => {
         try {
-          const jpeg = await captureJpeg(ctrl.camera.video, JPEG_QUALITY);
-          if (!jpeg || r.cancelled) {
+          const crop = await cropping;
+          if (!crop || r.cancelled) {
             onFail?.();
             return;
           }
           // Transient failures (network, server busy) are retried with the same image and timestamp.
           for (let attempt = 0; ; attempt++) {
             try {
-              const res = await api.uploadCheckFrame(c.checkId, jpeg, {
+              const res = await api.uploadCheckFrame(c.checkId, crop.blob, {
                 step,
                 capturedAt,
                 nonce: c.liveness?.nonce ?? null,
                 clientYaw: face && Number.isFinite(face.yaw) ? face.yaw : null,
                 clientPitch: face && Number.isFinite(face.pitch) ? face.pitch : null,
+              });
+              ctrl.debug.checkFrame({
+                at: Date.now(),
+                step,
+                accepted: res.accepted,
+                guidance: res.guidance ?? [],
+                quality: res.quality ?? null,
+                stepSatisfied: res.stepSatisfied,
+                measured: res.measured,
+                progress: res.progress,
+                crop: { width: crop.rect.width, height: crop.rect.height, face: crop.rect.face },
               });
               if (!r.cancelled) onDone(res);
               return;
@@ -235,11 +275,12 @@ export function VerifyStep({
               }
               if (code === 'too_many_frames') {
                 // The server has all the frames it will take: let it decide on what it has.
-                void completeRef.current();
+                if (r.adaptive) r.adaptive.framesExhausted = true;
+                onFail?.();
                 return;
               }
               if (kind === 'invalid_state' || kind === 'client' || kind === 'invalid_link' || kind === 'superseded') {
-                // Challenge closed, too many frames, or frame refused: stop this attempt.
+                // Challenge closed or frame refused: stop this attempt.
                 r.cancelled = true;
                 setError(errorMessage(e));
                 setPhaseBoth('error');
@@ -257,10 +298,13 @@ export function VerifyStep({
           }
         } finally {
           r.inflight--;
+          // The last answer may be what allows completion.
+          if (r.inflight === 0 && !r.cancelled && !r.completing) advance();
         }
       })();
       r.uploads.push(p);
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [ctrl],
   );
 
@@ -274,6 +318,7 @@ export function VerifyStep({
     if (r.cancelled) return;
     try {
       const res = await ctrl.api.completeCheck(r.check.checkId);
+      ctrl.debug.checkOutcome(res);
       if (r.cancelled) return;
       onResult(res, r.check);
     } catch (e) {
@@ -284,8 +329,35 @@ export function VerifyStep({
       setError(errorMessage(e));
       setPhaseBoth('error');
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctrl, onResult]);
   completeRef.current = complete;
+
+  /** Re-evaluate what comes next (after an answer or a tracker change). */
+  const advance = useCallback(() => {
+    const r = run.current;
+    const a = r.adaptive;
+    if (!a || r.cancelled || r.completing) return;
+    // A step whose frames are all answered gets the server's verdict (re-prompt in place if not accepted).
+    const tr = r.tracker;
+    const cur = tr?.current();
+    if (tr && cur && cur.stage === 'verify' && !cur.done && a.stepSettled(cur.stepIndex)) {
+      tr.verdict(cur.stepIndex, a.isStepSatisfied(cur.stepIndex));
+    }
+    refreshProgress();
+    const next = a.phase(tr ? tr.current().done : true, r.inflight);
+    if (next === 'complete') {
+      if (r.inflight === 0) void completeRef.current();
+      return;
+    }
+    if (next === 'liveness' && tr && !r.trackerCentred) {
+      // The server measures the head turns relative to the frontal frames: use the same centre.
+      r.trackerCentred = true;
+      const c = a.frontalCentre();
+      if (c) tr.setCentre(c);
+    }
+    setPhaseBoth(next);
+  }, [refreshProgress]);
 
   /* ---------------------------------------------------------------- give up gracefully */
   // Hand the attempt to the server when nothing progresses (e.g. a photo cannot turn its head, or the
@@ -302,13 +374,15 @@ export function VerifyStep({
 
   /* ---------------------------------------------------------------- per frame */
   const onFrame = useCallback(
-    (a: FrameAnalysis) => {
+    (fa: FrameAnalysis) => {
       const r = run.current;
-      const c = r.check;
-      if (!c || r.cancelled || r.completing) return;
-      const faces = plausibleFaces(a.faces);
+      const a = r.adaptive;
+      if (!r.check || !a || r.cancelled || r.completing) return;
+      const faces = plausibleFaces(fa.faces);
       const face = faces.length === 1 ? faces[0] : null;
       const spacedOk = performance.now() - r.lastCaptureAt >= MIN_CAPTURE_SPACING_MS;
+      advance();
+      if (r.completing) return;
 
       if (r.phase === 'frontal') {
         if (!face) {
@@ -319,65 +393,75 @@ export function VerifyStep({
           setGuidance(['Look straight at the screen.']);
           return;
         }
-        if (r.inflight === 0 && spacedOk && r.frontalSent - r.frontalAccepted < 1 && r.frontalAccepted < c.frontalFramesRequired) {
-          r.frontalSent++;
-          upload('frontal', face, ctrl.api, (res) => {
-            if (res.accepted) {
-              r.frontalAccepted++;
-              r.progress.accepted(performance.now());
-              setFrontalCount(r.frontalAccepted);
-              setGuidance([]);
-              if (r.frontalAccepted >= c.frontalFramesRequired) {
-                if (r.tracker) setPhaseBoth('liveness');
-                else void complete();
-              }
-            } else {
-              r.frontalSent = r.frontalAccepted; // allow another attempt
-              setGuidance(res.guidance.length ? res.guidance : ['Please look straight at the camera and hold still.']);
-              // The image keeps failing the quality gate (e.g. too dark): let the server record
-              // "unable to verify" and return its guidance rather than retrying endlessly.
-              if (r.progress.frontalRejected()) void complete();
-            }
-          }, () => {
-            r.frontalSent = r.frontalAccepted;
-          });
+        if (r.inflight === 0 && spacedOk && a.wantsFrontal()) {
+          a.frontalSentOne();
+          const pose = { yaw: face.yaw, pitch: face.pitch };
+          upload(
+            'frontal',
+            face,
+            ctrl.api,
+            (res) => {
+              a.frontalResult(res, pose);
+              if (res.accepted) r.progress.accepted(performance.now());
+              // The server's guidance while it wants more frames (e.g. "Add light in front of you").
+              setGuidance(res.accepted ? [] : res.guidance.length ? res.guidance : ['Please look straight at the camera and hold still.']);
+            },
+            () => a.frontalFailed(),
+          );
         }
         return;
       }
 
       if (r.phase === 'liveness' && r.tracker) {
-        // The tracker measures each step relative to the centre pose it captures itself.
-        const prog = r.tracker.update(face, faces.length, a.t);
-        r.progress.liveness(prog.stepIndex, prog.progress ?? 0, performance.now());
-        const steps: LivenessStep[] = c.liveness?.steps ?? [];
+        const tr = r.tracker;
+        const prog = tr.update(face, faces.length, fa.t);
+        r.progress.liveness(prog.stepIndex, prog.stage === 'verify' ? 1 : (prog.progress ?? 0), performance.now());
+        const steps: LivenessStep[] = r.check.liveness?.steps ?? [];
         const step = steps.find((s) => s.index === prog.stepIndex) ?? steps[Math.min(steps.length - 1, Math.max(0, prog.stepIndex))];
-        setStepView({ index: prog.stepIndex, action: String(prog.action ?? step?.action ?? 'center'), message: prog.message || step?.instruction || '', progress: prog.progress ?? 0, problem: prog.problem ?? null });
-        const doneSteps = steps.filter((s) => (r.perStep.get(s.index) ?? 0) >= FRAMES_PER_STEP).length;
-        setStepsDone(doneSteps);
+        setStepView({
+          index: prog.stepIndex,
+          action: String(prog.action ?? step?.action ?? 'center'),
+          message: prog.message || step?.instruction || '',
+          progress: prog.progress ?? 0,
+          problem: prog.problem ?? null,
+          stage: prog.stage ?? 'move',
+          holdProgress: prog.holdProgress ?? 0,
+        });
         if (prog.done) {
-          if (r.inflight === 0) void complete();
+          advance();
           return;
         }
         if (face && prog.readyToCapture && spacedOk && r.inflight < 2) {
           const idx = prog.stepIndex;
-          r.perStep.set(idx, (r.perStep.get(idx) ?? 0) + 1);
-          r.tracker.markCaptured(a.t);
+          tr.markCaptured(fa.t);
           r.progress.captured(performance.now());
-          upload(idx, face, ctrl.api, (res) => {
-            if (!res.accepted && res.guidance.length) setGuidance(res.guidance);
-            else setGuidance([]);
-          });
+          a.stepSentOne(idx);
+          upload(
+            idx,
+            face,
+            ctrl.api,
+            (res) => {
+              a.stepResult(idx, res);
+              const g = res.accepted ? [] : res.guidance;
+              setGuidance(g);
+              advance();
+            },
+            () => {
+              a.stepFailed(idx);
+              advance();
+            },
+          );
         }
       }
     },
-    [ctrl, upload, complete],
+    [ctrl, upload, advance],
   );
 
   const vs = useFrameAnalysis(phase === 'frontal' || phase === 'liveness', onFrame, 120);
 
   /* ---------------------------------------------------------------- fallback without in-browser analysis */
   // If the face model cannot run in this browser, pace the candidate with timed instructions and let
-  // the server (which is authoritative anyway) verify the frames.
+  // the server (which is authoritative anyway) verify the full frames.
   const noVision = !vs.loading && !vs.vision?.face;
   useEffect(() => {
     if (!noVision || (phase !== 'frontal' && phase !== 'liveness')) return;
@@ -387,66 +471,70 @@ export function VerifyStep({
     let stepStartedAt = performance.now();
     let shotsThisStep = 0;
     const id = setInterval(() => {
-      const c = r.check;
-      if (!c || r.cancelled || r.completing) return;
+      const a = r.adaptive;
+      if (!r.check || !a || r.cancelled || r.completing) return;
       if (r.phase === 'frontal') {
         setGuidance(['Look straight at the screen and hold still.']);
-        if (r.inflight === 0 && r.frontalAccepted < c.frontalFramesRequired) {
-          upload('frontal', null, ctrl.api, (res) => {
-            if (res.accepted) {
-              r.frontalAccepted++;
-              r.progress.accepted(performance.now());
-              setFrontalCount(r.frontalAccepted);
-              if (r.frontalAccepted >= c.frontalFramesRequired) {
-                stepStartedAt = performance.now();
-                if (steps.length) setPhaseBoth('liveness');
-                else void complete();
-              }
-            } else {
-              setGuidance(res.guidance.length ? res.guidance : ['Please look straight at the camera and hold still.']);
-              if (r.progress.frontalRejected()) void complete();
-            }
-          });
-        }
+        if (r.inflight === 0 && a.wantsFrontal()) {
+          a.frontalSentOne();
+          upload(
+            'frontal',
+            null,
+            ctrl.api,
+            (res) => {
+              a.frontalResult(res);
+              if (res.accepted) r.progress.accepted(performance.now());
+              else setGuidance(res.guidance.length ? res.guidance : ['Please look straight at the camera and hold still.']);
+              stepStartedAt = performance.now();
+            },
+            () => a.frontalFailed(),
+          );
+        } else if (r.inflight === 0) advanceNoVision();
         return;
       }
       const step = steps[stepPos];
       if (!step) {
-        if (r.inflight === 0) void complete();
+        if (r.inflight === 0) void completeRef.current();
         return;
       }
       const elapsed = performance.now() - stepStartedAt;
-      setStepView({ index: step.index, action: step.action, message: step.instruction, progress: Math.min(1, elapsed / 3000), problem: null });
+      setStepView({ index: step.index, action: step.action, message: step.instruction, progress: Math.min(1, elapsed / 3000), problem: null, stage: 'move', holdProgress: 0 });
       if (elapsed > 1800 + shotsThisStep * 900 && shotsThisStep < FRAMES_PER_STEP) {
         shotsThisStep++;
-        r.perStep.set(step.index, shotsThisStep);
         r.progress.captured(performance.now());
-        upload(step.index, null, ctrl.api, () => undefined);
+        a.stepSentOne(step.index);
+        upload(step.index, null, ctrl.api, (res) => a.stepResult(step.index, res), () => a.stepFailed(step.index));
       }
       if (shotsThisStep >= FRAMES_PER_STEP && elapsed > 3200) {
         stepPos++;
         shotsThisStep = 0;
         stepStartedAt = performance.now();
-        setStepsDone(stepPos);
+        refreshProgress();
       }
     }, 300);
+    const advanceNoVision = () => {
+      const a = r.adaptive;
+      if (!a) return;
+      const next = a.phase(stepPos >= steps.length, r.inflight);
+      if (next === 'complete') void completeRef.current();
+      else setPhaseBoth(next);
+    };
     return () => clearInterval(id);
-  }, [noVision, phase, upload, complete, ctrl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [noVision, phase, upload, ctrl, refreshProgress]);
 
   /* ---------------------------------------------------------------- render */
   const steps = check?.liveness?.steps ?? [];
-  const totalUnits = (check?.frontalFramesRequired ?? 0) + steps.length;
-  const doneUnits = Math.min(frontalCount, check?.frontalFramesRequired ?? 0) + stepsDone;
-  const overall = totalUnits > 0 ? doneUnits / totalUnits : 0;
-
   let headline = 'Preparing the check…';
   let arrow: string | null = null;
   if (phase === 'frontal') headline = 'Look straight at the screen and hold still';
   if (phase === 'liveness' && stepView) {
     headline = stepView.message;
-    arrow = ARROWS[stepView.action] ?? null;
+    arrow = stepView.stage === 'verify' ? null : (ARROWS[stepView.action] ?? null);
   }
   if (phase === 'completing') headline = 'Checking…';
+  const holding = phase === 'liveness' && stepView?.stage === 'hold';
+  const reprompt = phase === 'liveness' && stepView?.stage === 'retry';
 
   if (phase === 'expired' || phase === 'error') {
     return (
@@ -466,7 +554,7 @@ export function VerifyStep({
   }
 
   return (
-    <div className="stack" data-testid="verify-step" data-phase={phase}>
+    <div className="stack" data-testid="verify-step" data-phase={phase} data-stage={phase === 'liveness' ? (stepView?.stage ?? 'move') : undefined}>
       <ScreenHeading title="Identity check">{check?.liveness ? 'Live-person and identity check' : 'Identity check'}</ScreenHeading>
       <p className="muted">
         {check?.liveness
@@ -481,7 +569,7 @@ export function VerifyStep({
           label="Your camera preview (mirrored)"
           overlay={
             arrow ? (
-              <div className={`cand-arrow cand-arrow-${stepView?.action}`} aria-hidden="true">
+              <div className={`cand-arrow cand-arrow-${stepView?.action}${holding ? ' cand-arrow-hold' : ''}`} aria-hidden="true">
                 {arrow}
               </div>
             ) : null
@@ -489,23 +577,41 @@ export function VerifyStep({
         />
         <div className="stack">
           {/* The current instruction as text, announced politely when it changes (the arrows are decorative). */}
-          <div className="cand-instruction" role="status" aria-live="polite" aria-atomic="true" data-testid="verify-instruction">
+          <div className={`cand-instruction${holding ? ' cand-instruction-hold' : ''}`} role="status" aria-live="polite" aria-atomic="true" data-testid="verify-instruction">
             {arrow && <span className="cand-instruction-arrow" aria-hidden="true">{arrow}</span>}
             <span>{headline}</span>
           </div>
-          {phase === 'liveness' && stepView && (
-            <div className="cand-progress cand-progress-step" role="progressbar" aria-label="Current step" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stepView.progress * 100)}>
+          {reprompt && (
+            <p className="cand-guidance" data-testid="verify-reprompt">
+              Almost there — turn your head a little further in the same direction and hold it for a moment.
+            </p>
+          )}
+          {phase === 'liveness' && stepView && stepView.stage !== 'verify' && (
+            <div className="cand-progress cand-progress-step" role="progressbar" aria-label="Head movement" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stepView.progress * 100)} data-testid="verify-step-progress">
               <div className="cand-progress-bar" style={{ width: `${Math.round(Math.min(1, stepView.progress) * 100)}%` }} />
+            </div>
+          )}
+          {holding && stepView && (
+            <div className="cand-hold" data-testid="verify-hold">
+              <span>Hold still</span>
+              <div className="cand-progress cand-progress-hold" role="progressbar" aria-label="Hold still" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stepView.holdProgress * 100)}>
+                <div className="cand-progress-bar" style={{ width: `${Math.round(stepView.holdProgress * 100)}%` }} />
+              </div>
             </div>
           )}
           <div className="cand-progress" role="progressbar" aria-label="Overall progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(overall * 100)}>
             <div className="cand-progress-bar" style={{ width: `${Math.round(overall * 100)}%` }} />
           </div>
+          {phase === 'frontal' && frontal.wanted > 0 && (
+            <p className="muted small" data-testid="verify-frontal-progress">
+              Pictures of your face: {Math.min(frontal.accepted, frontal.wanted)} of {frontal.wanted}
+            </p>
+          )}
           {steps.length > 0 && (
             <ol className="cand-steps">
-              <StepItem state={frontalCount >= (check?.frontalFramesRequired ?? 0) ? 'done' : phase === 'frontal' ? 'current' : ''}>Pictures of your face for the identity check</StepItem>
+              <StepItem state={frontal.accepted >= Math.max(1, check?.frontalFramesRequired ?? 0) ? 'done' : phase === 'frontal' ? 'current' : ''}>Pictures of your face for the identity check</StepItem>
               {steps.map((s) => (
-                <StepItem key={s.index} state={(run.current.perStep.get(s.index) ?? 0) >= FRAMES_PER_STEP ? 'done' : stepView?.index === s.index && phase === 'liveness' ? 'current' : ''}>
+                <StepItem key={s.index} state={stepsDone.includes(s.index) ? 'done' : stepView?.index === s.index && phase === 'liveness' ? 'current' : ''}>
                   {s.instruction}
                 </StepItem>
               ))}

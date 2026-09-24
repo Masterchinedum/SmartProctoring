@@ -2,8 +2,11 @@ import { QUALITY_GUIDANCE, type CameraState, type FaceObservation, type FrameMet
 
 /**
  * Readiness checklist evaluated live on the camera preview before any check is sent to the server.
- * Thresholds are a little stricter than the server's identity quality gate (inter-eye ≥ 28 px,
- * face brightness 40..220, |yaw| ≤ 25°) so a frame that passes here is very likely usable there.
+ * Only a working camera and exactly one face BLOCK; size / position, lighting and sharpness are WARNINGS with
+ * guidance — the server judges whether an image is usable (and guides the candidate live during the check),
+ * so a borderline room never stops a genuine candidate at this step. The warning thresholds are a little
+ * stricter than the server's identity quality gate (inter-eye ≥ 28 px, face brightness 40..220,
+ * |yaw| ≤ 25°) so a frame without warnings is very likely usable there.
  */
 
 export type ReadinessItemId = 'frames' | 'one_face' | 'size_position' | 'lighting' | 'sharpness' | 'real_camera';
@@ -12,7 +15,7 @@ export interface ReadinessItem {
   id: ReadinessItemId;
   label: string;
   ok: boolean;
-  /** Blocking items must pass; others are warnings. */
+  /** Blocking items must pass (camera frames, exactly one face); others are warnings. */
   required: boolean;
   /** Guidance shown while the item fails. */
   guidance: string;
@@ -102,15 +105,15 @@ export function evaluateReadiness(inp: ReadinessInput): ReadinessItem[] {
       id: 'size_position',
       label: 'Face is close enough and centred',
       ok: live && sizeOk,
-      required: true,
+      required: false,
       guidance: face ? sizeGuidance : 'Sit in front of the camera so your face is in the middle of the picture.',
     },
-    { id: 'lighting', label: 'Lighting is good', ok: live && lightOk, required: true, guidance: lightGuidance },
+    { id: 'lighting', label: 'Lighting is good', ok: live && lightOk, required: false, guidance: lightGuidance },
     {
       id: 'sharpness',
       label: 'Image is sharp',
       ok: live && sharpOk,
-      required: true,
+      required: false,
       guidance: face ? QUALITY_GUIDANCE.blurry : 'Sharpness is checked once your face is visible.',
     },
     {
@@ -153,4 +156,9 @@ export class ReadinessSmoother {
 
 export function allRequiredPass(items: ReadinessItem[]): boolean {
   return items.every((i) => !i.required || i.ok);
+}
+
+/** Warnings (non-blocking items) currently failing — shown with their guidance, the candidate may continue. */
+export function warnings(items: ReadinessItem[]): ReadinessItem[] {
+  return items.filter((i) => !i.required && !i.ok);
 }
