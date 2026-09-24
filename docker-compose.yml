@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: proctor
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: proctor
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -31,12 +31,13 @@ services:
         condition: service_started
     env_file: .env
     environment:
-      DATABASE_URL: postgres://proctor:${POSTGRES_PASSWORD:-change-me}@postgres:5432/proctor
+      DATABASE_URL: postgres://proctor:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/proctor
       REDIS_URL: redis://redis:6379
       STORAGE_DRIVER: ${STORAGE_DRIVER:-fs}
       STORAGE_DIR: /data/evidence
     ports:
-      - "8080:8080"
+      # Bound to localhost: publish through your TLS reverse proxy (camera access requires HTTPS).
+      - "127.0.0.1:8080:8080"
     volumes:
       - evidence:/data/evidence
 

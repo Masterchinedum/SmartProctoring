@@ -10,7 +10,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 The app listens on `:8080` and serves both the API and the web app. Put it behind a TLS-terminating
-reverse proxy (camera access requires HTTPS in browsers) and set `PUBLIC_URL`, `TRUST_PROXY=true`,
+reverse proxy (camera access requires HTTPS in browsers) and set `PUBLIC_URL`, `TRUST_PROXY=<your proxy addresses, e.g. loopback,uniquelocal>` (never `true`),
 `COOKIE_SECURE=true`. WebSockets must be proxied for `/api/admin/live`.
 
 Database migrations run automatically at start-up. On first start, if no staff user exists, the

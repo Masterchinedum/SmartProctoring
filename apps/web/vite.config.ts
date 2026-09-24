@@ -26,7 +26,7 @@ export default defineConfig(() => {
         '/api': { target: process.env.API_URL ?? 'http://127.0.0.1:8080', changeOrigin: true, ws: true },
       },
     },
-    build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },
+    build: { outDir: 'dist', sourcemap: process.env.WEB_SOURCEMAP === '1', chunkSizeWarningLimit: 1500 },
     test: { environment: 'jsdom' },
   };
 });
