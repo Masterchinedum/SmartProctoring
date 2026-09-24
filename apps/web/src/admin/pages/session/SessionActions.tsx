@@ -19,7 +19,7 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
   const [dialog, setDialog] = useState<Dialog>(null);
   const [link, setLink] = useState<string | null>(null);
   const terminal = s.status === 'submitted' || s.status === 'terminated';
-  const legalHold = (s as { legalHold?: boolean }).legalHold;
+  const legalHold = s.legalHold;
   const accessLink = link ?? s.accessLink;
 
   const done = (res?: SessionSummaryDTO) => {

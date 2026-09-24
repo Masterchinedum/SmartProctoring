@@ -1,6 +1,7 @@
 /**
  * Shared helpers for the staff API route files (src/routes/admin/*.ts).
  */
+import { DEFAULT_POLICY } from '@sp/shared';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -92,6 +93,28 @@ export async function loadOrgRow(ctx: Pick<Ctx, 'db'>, orgId: string): Promise<O
   const [org] = await ctx.db.select().from(organizations).where(eq(organizations.id, orgId));
   if (!org) throw notFound('Organisation not found');
   return org;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v != null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * Keep only keys the proctoring-policy schema knows (recursively), so stored partial policies never
+ * accumulate unknown fields. Values are validated separately (resolvePolicy / mergePolicy throw ZodError).
+ */
+export function sanitizePolicyInput(input: unknown): Record<string, unknown> {
+  const walk = (inp: unknown, tmpl: unknown): unknown => {
+    if (!isPlainObject(inp) || !isPlainObject(tmpl)) return inp;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(inp)) {
+      if (!(k in tmpl) || v === undefined) continue;
+      out[k] = isPlainObject(tmpl[k]) ? walk(v, tmpl[k]) : v;
+    }
+    return out;
+  };
+  const res = walk(input ?? {}, DEFAULT_POLICY);
+  return isPlainObject(res) ? res : {};
 }
 
 /** Headers for responses that carry personal data and must never be cached or sniffed. */

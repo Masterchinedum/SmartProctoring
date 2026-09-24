@@ -29,7 +29,7 @@ export interface ReadinessInput {
 }
 
 export const READINESS_THRESHOLDS = {
-  minFaceWidth: 0.16,
+  minFaceWidth: 0.13,
   maxFaceWidth: 0.75,
   centreX: [0.22, 0.78] as const,
   centreY: [0.18, 0.82] as const,

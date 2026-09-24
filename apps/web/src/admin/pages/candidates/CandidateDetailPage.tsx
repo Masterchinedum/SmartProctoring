@@ -8,7 +8,7 @@ import { useAuth } from '../../auth';
 import { formatDateTime } from '../../lib/format';
 import { ACCEPTED_IMAGE_TYPES, fileToJpeg } from '../../lib/image';
 import { StatusBadge } from '../../components/Badges';
-import { EmptyState, ErrorState, KeyValueTable, Loading, PageHeader } from '../../components/Common';
+import { EmptyState, ErrorState, Loading, PageHeader } from '../../components/Common';
 import { EvidenceImage } from '../../components/EvidenceImage';
 import { Lightbox } from '../../components/Lightbox';
 import { ConfirmDialog } from '../../components/Modal';
@@ -215,14 +215,6 @@ function IdPhotoPanel({ candidate: c, canEdit }: { candidate: CandidateDTO; canE
           ) : null}
           <QualitySummary q={result.quality} />
         </div>
-      ) : null}
-      {result && !result.accepted ? (
-        <KeyValueTable
-          rows={[
-            ['Faces found', result.quality.faceCount],
-            ['Usable', result.quality.usable ? 'Yes' : 'No'],
-          ]}
-        />
       ) : null}
       {lightbox && photo ? <Lightbox items={[{ evidence: photo, caption: `ID photo — ${c.name}` }]} index={0} onClose={() => setLightbox(false)} /> : null}
       {confirmRemove ? (

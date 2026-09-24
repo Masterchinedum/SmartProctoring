@@ -49,7 +49,7 @@ async function main(): Promise<number> {
     console.log(
       [
         'Usage: eval:identity (--dataset <dir> | --pairs <csv> [--images <dir>]) [--perturb] [--only a,b] [--size 640]',
-        '       [--match 0.40 --mismatch 0.28 --confirmations 2] [--interval 30] [--models <dir>] [--no-anonymize] [--out report.json]',
+        '       [--match 0.45 --mismatch 0.28 --confirmations 2] [--interval 30] [--models <dir>] [--no-anonymize] [--out report.json]',
         '',
         `Perturbations: ${PERTURBATIONS.map((p) => p.name).join(', ')}`,
       ].join('\n'),

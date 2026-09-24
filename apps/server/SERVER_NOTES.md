@@ -34,7 +34,8 @@ src/
   routes/public.ts     /api/health, /api/public/privacy-notice
   routes/candidate/*   /api/candidate/*
   routes/admin/index.ts  EMPTY plugin owned by the admin-API agent (registered with prefix /api/admin)
-  jobs/sweeper.ts      heartbeat timeouts, clock expiry, stale checks (advisory-lock guarded)
+  jobs/runner.ts       JobRunner (ctx.jobs): periodic jobs, each run guarded by a pg advisory lock
+  jobs/sweeper.ts      heartbeat timeouts, clock expiry, stale checks (sweepOnce(ctx) for tests)
   scripts/seed.ts      demo data
   vision/**, eval/**   vision agent
 ```
@@ -75,6 +76,29 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
 * Access link display: `accessLinkFor(ctx, sessionRow)`.
 * Encrypted AADs in use: `evidence:<evidenceId>`, `access-token:<sessionId>`, `idphoto:<candidateId>`,
   `reference:<referenceId>`, `frame:<frameId>`.
+
+## Background jobs
+`ctx.jobs.register({ name, intervalMs, runAtStart?, run: (ctx) => Promise })` from any plugin; jobs start on
+`onReady` when jobs are enabled (SWEEPER_ENABLED, default on outside tests). app.ts registers `sweeper` (5 s) and
+`retention` (hourly, calls services/retention.ts `runRetentionExclusive`) — do not start a second scheduler.
+
+## Candidate-side services (for reference)
+checks.ts (start/frames/complete: liveness, reference, ID photo, resume/reconnect/reverify, re-enrolment),
+identity-samples.ts (mid-exam aggregation, camera_feed_suspect), ingest.ts (events batch, evidence PUT),
+candidate-actions.ts (consent, start, answers, heartbeat + command queue, pause, submit),
+candidate-state.ts (CandidateSessionState, instanceInControl).
+
+## Behaviour notes (candidate side)
+* Questions/answers are served only to the in-control instance (activeInstanceId == verifiedInstanceId == X-Client-Instance)
+  of an ACTIVE exam (and after submission for review) — never while paused / on hold.
+* Answers/identity samples captured before the current pause/hold started are still accepted (late delivery).
+* Client events: rejected before check-in, inside paused/on_hold periods and after the end; spans running into a
+  pause are cut at the pause start (`details.endClampedBy`). Network outages (`reporting_interrupted`,
+  'disconnected' periods) do NOT block events — the outbox delivers them late (`deliveredLate`).
+* multiple_instances: recorded at check start when another live instance is on a different device (UA / camera
+  hash); for the same device (likely a reload) only if the old window heartbeats after being superseded.
+* Server-side updates of events never change `version` (that sequence belongs to the reporting client).
+* Error codes the web client relies on: 401 invalid_token, 409 superseded, 409 check_required, 409 invalid_state.
 
 ## Tests
 `pnpm --filter @sp/server test` (vitest, real Postgres at 127.0.0.1:5432, user postgres). `test/global-setup.ts`

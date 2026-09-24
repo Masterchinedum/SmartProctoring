@@ -2,7 +2,7 @@
  * Session state machine primitives.
  *
  * Every change to a session runs inside `withSession(ctx, sessionId, fn)`: a transaction holding a row
- * lock on exam_sessions (SELECT ... FOR UPDATE), so heartbeats, sweeper, candidate and staff actions
+ * lock on exam_sessions (SELECT ... FOR NO KEY UPDATE — does not block FK inserts elsewhere), so heartbeats, sweeper, candidate and staff actions
  * are serialised per session and safe across several server instances. Realtime notifications are
  * queued on the mutation and published after COMMIT.
  */
@@ -328,10 +328,11 @@ export class SessionMutation {
     return row;
   }
 
+  /** Server-side update. Does not change `version` (that sequence belongs to the reporting client). */
   async updateEvent(id: string, fields: Partial<typeof events.$inferInsert>): Promise<EventRow | null> {
     const [row] = await this.tx
       .update(events)
-      .set({ ...fields, receivedAt: new Date(this.now), version: sql`${events.version} + 1` })
+      .set({ ...fields, receivedAt: new Date(this.now) })
       .where(and(eq(events.id, id), eq(events.sessionId, this.session.id)))
       .returning();
     if (row) this.touchEvent(row.id);
@@ -403,7 +404,7 @@ export class SessionMutation {
 export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: SessionMutation) => Promise<T>): Promise<T> {
   let mutation: SessionMutation | null = null;
   const result = await ctx.db.transaction(async (tx) => {
-    const [row] = await tx.select().from(examSessions).where(eq(examSessions.id, sessionId)).for('update');
+    const [row] = await tx.select().from(examSessions).where(eq(examSessions.id, sessionId)).for('no key update');
     if (!row) throw notFound('Session not found', 'session_not_found');
     const m = new SessionMutation(ctx, tx, row);
     mutation = m;
@@ -494,7 +495,9 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
  */
 export async function finalizeSession(m: SessionMutation, endReason: EndReason, opts: { by?: string | null; note?: string | null } = {}): Promise<void> {
   if (TERMINAL.includes(m.session.status)) return;
-  const at = m.now;
+  // Time expiry is recorded at the moment the clock ran out (the sweeper may run a few seconds later).
+  const rs = m.session.runningSince?.getTime();
+  const at = endReason === 'time_expired' && rs != null ? Math.max(rs, Math.min(m.now, rs + m.session.durationMs - m.session.usedMs)) : m.now;
   m.clockStop(at);
   const status: SessionStatus = endReason === 'staff_terminated' ? 'terminated' : 'submitted';
   await m.closeOpenEvents(at, 'session_end');
@@ -508,17 +511,16 @@ export async function finalizeSession(m: SessionMutation, endReason: EndReason, 
     status,
     endReason,
     endedAt: new Date(at),
-    connection: m.session.connection === 'online' ? 'online' : m.session.connection,
     reportingInterruptedSince: null,
     reportingEventId: null,
     holdCanReverify: false,
   });
   if (endReason === 'time_expired') await m.addEvent({ type: 'session_expired', startedAt: at });
   if (status === 'terminated') {
-    await m.addEvent({ type: 'session_terminated', source: 'staff', details: { reason: opts.note ?? null, by: opts.by ?? null } });
+    await m.addEvent({ type: 'session_terminated', source: 'staff', startedAt: at, details: { reason: opts.note ?? null, by: opts.by ?? null } });
     await m.enqueueCommand({ kind: 'terminated', message: 'Your exam was ended by an administrator.' });
   } else {
-    await m.addEvent({ type: 'session_submitted', startedAt: at, source: endReason === 'staff_submitted' ? 'server_system' : 'server_system', details: { endReason, by: opts.by ?? null, note: opts.note ?? null } });
+    await m.addEvent({ type: 'session_submitted', startedAt: at, source: 'server_system', details: { endReason, by: opts.by ?? null, note: opts.note ?? null } });
     if (endReason !== 'candidate_submitted') await m.enqueueCommand({ kind: 'submitted', reason: endReason });
   }
   if (wasStarted) {

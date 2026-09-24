@@ -137,7 +137,7 @@ export function facesFromMediapipe(
     const cutOff = outX / bw > CUTOFF_MARGIN || outY / bh > CUTOFF_MARGIN || inFrame < 0.9;
     const x0 = clamp(minX, 0, 1);
     const y0 = clamp(minY, 0, 1);
-    const box: NormBox = { x: x0, y: y0, w: Math.max(0, clamp(maxX, 0, 1) - x0), h: Math.max(0, clamp(maxY, 0, 1) - y0) };
+    const box: NormBox = { x: round4(x0), y: round4(y0), w: round4(Math.max(0, clamp(maxX, 0, 1) - x0)), h: round4(Math.max(0, clamp(maxY, 0, 1) - y0)) };
     const blend = result.faceBlendshapes?.[i]?.categories;
     const gaze = blend && blend.length ? gazeFromBlendshapes(blend) : { gazeX: 0, gazeY: 0 };
     let visibility = inFrame;
@@ -202,7 +202,7 @@ export function objectsFromMediapipe(
       const y0 = clamp(bb.originY / H, 0, 1);
       const x1 = clamp((bb.originX + bb.width) / W, 0, 1);
       const y1 = clamp((bb.originY + bb.height) / H, 0, 1);
-      box = { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+      box = { x: round4(x0), y: round4(y0), w: round4(Math.max(0, x1 - x0)), h: round4(Math.max(0, y1 - y0)) };
     }
     out.push({ label: best.categoryName.trim().toLowerCase(), score: round3(clamp01(best.score)), box });
   }
@@ -211,4 +211,8 @@ export function objectsFromMediapipe(
 
 function round3(v: number): number {
   return Math.round(v * 1000) / 1000;
+}
+
+function round4(v: number): number {
+  return Math.round(v * 10000) / 10000;
 }

@@ -28,6 +28,12 @@ export interface LivenessOptions {
   clientContradictionFraction: number;
   /** A 'center' step frame must be within this many degrees of the frontal pose (default 12). */
   centerToleranceDeg: number;
+  /**
+   * Only the first N frames of each step (in the order given — pass frames in server receipt order)
+   * are considered (default 3). Five-point pose jitters by several degrees frame to frame, so letting
+   * a client submit unlimited frames per step would let a flat photo "fish" for a noisy outlier.
+   */
+  maxFramesPerStep: number;
   /** Frontal frames must be within the general quality gate's pose limits. */
   frontalPoseGate: Pick<QualityGate, 'maxAbsYawDeg' | 'minPitchDeg' | 'maxPitchDeg'>;
 }
@@ -39,6 +45,7 @@ export const LIVENESS_DEFAULTS: Readonly<LivenessOptions> = Object.freeze({
   clockToleranceMs: 1000,
   clientContradictionFraction: 0.5,
   centerToleranceDeg: 12,
+  maxFramesPerStep: 3,
   frontalPoseGate: { maxAbsYawDeg: QUALITY_GATE.maxAbsYawDeg, minPitchDeg: QUALITY_GATE.minPitchDeg, maxPitchDeg: QUALITY_GATE.maxPitchDeg },
 });
 
@@ -206,7 +213,7 @@ export function verifyLiveness(
 
   const qualifying = new Map<number, LivenessFrame>();
   for (const step of specSteps) {
-    const stepFrames = frames.filter((f) => f.step === step.index);
+    const stepFrames = frames.filter((f) => f.step === step.index).slice(0, Math.max(1, o.maxFramesPerStep));
     if (stepFrames.length === 0) {
       setStep(step.index, false, null, 'No frame was captured for this step');
       continue;

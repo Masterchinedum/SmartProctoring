@@ -78,13 +78,18 @@ export function createBrowserSignalTracker(
     return { confidence: 1, details, observation };
   }
 
+  /** Long spans get a progress update once per elapsed minute. */
+  function minutesKey(st: SpanStats, t: number): string {
+    return String(Math.floor((t - st.segStart) / 60000));
+  }
+
   function openSpan(type: EventType, startedAt: number, t: number, out: EpisodeUpdate[]): void {
     const wasMerge = book.wouldMerge(type, startedAt);
     if (!wasMerge || !stats[type]) stats[type] = { count: 0, totalMs: 0, segStart: startedAt };
     const st = stats[type]!;
     st.count++;
     st.segStart = startedAt;
-    const { update } = book.begin(type, type, startedAt, t, describe(type, st, null, t));
+    const { update } = book.begin(type, type, startedAt, t, describe(type, st, null, t), minutesKey(st, t));
     out.push(update);
   }
 
@@ -122,7 +127,7 @@ export function createBrowserSignalTracker(
     for (const type of ['tab_hidden', 'window_unfocused', 'fullscreen_exited'] as EventType[]) {
       const st = stats[type];
       if (st && book.isOpen(type)) {
-        const u = book.touch(type, t, String(Math.floor((t - st.segStart) / 60000)), () => describe(type, st, null, t));
+        const u = book.touch(type, t, minutesKey(st, t), () => describe(type, st, null, t));
         if (u) out.push(u);
       }
     }

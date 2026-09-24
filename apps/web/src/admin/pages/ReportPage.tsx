@@ -8,6 +8,7 @@ import { DECISION_LABELS, END_REASON_LABELS, PERIOD_LABELS, STATUS_LABELS } from
 import { CategoryBadge, DecisionBadge, ReviewBadge, SeverityBadge } from '../components/Badges';
 import { ErrorState, Loading } from '../components/Common';
 import { EvidenceImage } from '../components/EvidenceImage';
+import { readableReason } from './session/TimelineTab';
 
 export function ReportPage() {
   const { id = '' } = useParams();
@@ -122,7 +123,7 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
                   <td>{formatDateTime(p.startedAt)}</td>
                   <td>{p.endedAt ? formatDateTime(p.endedAt) : 'ongoing'}</td>
                   <td>{formatDuration((p.endedAt ?? r.generatedAt) - p.startedAt)}</td>
-                  <td>{p.reason ?? ''}</td>
+                  <td>{p.reason ? readableReason(p.reason) : ''}</td>
                 </tr>
               ))}
             </tbody>

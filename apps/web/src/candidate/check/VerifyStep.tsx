@@ -17,8 +17,9 @@ import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrame
  */
 
 export const FRAMES_PER_STEP = 2;
-const FRONTAL_MAX_YAW = 14;
-const FRONTAL_MAX_PITCH = 16;
+/** Client-side "frontal" gate, a margin inside the server's quality gate (|yaw| ≤ 25°, −35° ≤ pitch ≤ 25°). */
+const FRONTAL_MAX_YAW = 18;
+const FRONTAL_PITCH_RANGE = [-28, 18] as const;
 const MIN_CAPTURE_SPACING_MS = 350;
 const JPEG_QUALITY = 0.85;
 
@@ -88,28 +89,45 @@ export function VerifyStep({
   };
 
   /* ---------------------------------------------------------------- start */
+  // Stop uploads when the step really unmounts (StrictMode's simulated remount re-arms it).
+  useEffect(() => {
+    run.current.cancelled = false;
+    return () => {
+      run.current.cancelled = true;
+    };
+  }, []);
+
+  // One server check per attempt — idempotent across StrictMode's double effect invocation.
+  const startRef = useRef<{ key: string; promise: Promise<StartCheckResponse> } | null>(null);
   useEffect(() => {
     const r = run.current;
-    r.cancelled = false;
-    r.check = null;
-    r.inflight = 0;
-    r.uploads = [];
-    r.lastCaptureAt = 0;
-    r.frontalAccepted = 0;
-    r.frontalSent = 0;
-    r.perStep = new Map();
-    r.tracker = null;
-    r.completing = false;
-    setFrontalCount(0);
-    setStepsDone(0);
-    setStepView(null);
-    setGuidance([]);
-    setError(null);
-    setPhaseBoth('starting');
-    (async () => {
-      try {
-        const res = await ctrl.api.startCheck({ purpose, clientInstanceId: ctrl.instanceId, device: await deviceInfo(ctrl) });
-        if (r.cancelled) return;
+    const key = `${purpose}:${attempt}`;
+    let alive = true;
+    if (startRef.current?.key !== key) {
+      r.cancelled = false;
+      r.check = null;
+      r.inflight = 0;
+      r.uploads = [];
+      r.lastCaptureAt = 0;
+      r.frontalAccepted = 0;
+      r.frontalSent = 0;
+      r.perStep = new Map();
+      r.tracker = null;
+      r.completing = false;
+      setFrontalCount(0);
+      setStepsDone(0);
+      setStepView(null);
+      setGuidance([]);
+      setError(null);
+      setPhaseBoth('starting');
+      startRef.current = {
+        key,
+        promise: (async () => ctrl.api.startCheck({ purpose, clientInstanceId: ctrl.instanceId, device: await deviceInfo(ctrl) }))(),
+      };
+    }
+    startRef.current.promise.then(
+      (res) => {
+        if (!alive || r.check) return;
         r.check = res;
         setCheck(res);
         if (res.liveness) {
@@ -117,8 +135,9 @@ export function VerifyStep({
         }
         setPhaseBoth(res.frontalFramesRequired > 0 ? 'frontal' : res.liveness ? 'liveness' : 'completing');
         if (res.frontalFramesRequired <= 0 && !res.liveness) void complete();
-      } catch (e) {
-        if (r.cancelled) return;
+      },
+      async (e: unknown) => {
+        if (!alive) return;
         const kind = classifyApiError(e);
         if (kind === 'invalid_state') {
           // The session moved on (e.g. already verified, or on hold): refresh and let the app route.
@@ -126,10 +145,10 @@ export function VerifyStep({
         }
         setError(errorMessage(e));
         setPhaseBoth('error');
-      }
-    })();
+      },
+    );
     return () => {
-      r.cancelled = true;
+      alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt, purpose]);
@@ -150,7 +169,13 @@ export function VerifyStep({
 
   /* ---------------------------------------------------------------- upload */
   const upload = useCallback(
-    (step: number | 'frontal', face: Pick<FaceObservation, 'yaw' | 'pitch'> | null, api: CandidateApi, onDone: (res: CheckFrameResponse) => void) => {
+    (
+      step: number | 'frontal',
+      face: Pick<FaceObservation, 'yaw' | 'pitch'> | null,
+      api: CandidateApi,
+      onDone: (res: CheckFrameResponse) => void,
+      onFail?: () => void,
+    ) => {
       const r = run.current;
       const c = r.check;
       if (!c) return;
@@ -160,26 +185,47 @@ export function VerifyStep({
       const p = (async () => {
         try {
           const jpeg = await captureJpeg(ctrl.camera.video, JPEG_QUALITY);
-          if (!jpeg || r.cancelled) return;
-          const res = await api.uploadCheckFrame(c.checkId, jpeg, {
-            step,
-            capturedAt,
-            nonce: c.liveness?.nonce ?? null,
-            clientYaw: face && Number.isFinite(face.yaw) ? face.yaw : null,
-            clientPitch: face && Number.isFinite(face.pitch) ? face.pitch : null,
-          });
-          if (r.cancelled) return;
-          onDone(res);
-        } catch (e) {
-          if (r.cancelled) return;
-          const kind = classifyApiError(e);
-          if (kind === 'invalid_state' || kind === 'client') {
-            // Challenge expired/closed or frame refused: stop this attempt.
-            r.cancelled = true;
-            setError(errorMessage(e));
-            setPhaseBoth('error');
-          } else {
-            setGuidance(['Connection problem while sending the image — retrying…']);
+          if (!jpeg || r.cancelled) {
+            onFail?.();
+            return;
+          }
+          // Transient failures (network, server busy) are retried with the same image and timestamp.
+          for (let attempt = 0; ; attempt++) {
+            try {
+              const res = await api.uploadCheckFrame(c.checkId, jpeg, {
+                step,
+                capturedAt,
+                nonce: c.liveness?.nonce ?? null,
+                clientYaw: face && Number.isFinite(face.yaw) ? face.yaw : null,
+                clientPitch: face && Number.isFinite(face.pitch) ? face.pitch : null,
+              });
+              if (!r.cancelled) onDone(res);
+              return;
+            } catch (e) {
+              if (r.cancelled) return;
+              const kind = classifyApiError(e);
+              const code = (e as { code?: string }).code;
+              if (code === 'check_expired') {
+                r.cancelled = true;
+                setPhaseBoth('expired');
+                return;
+              }
+              if (kind === 'invalid_state' || kind === 'client' || code === 'too_many_frames' || kind === 'invalid_link' || kind === 'superseded') {
+                // Challenge closed, too many frames, or frame refused: stop this attempt.
+                r.cancelled = true;
+                setError(errorMessage(e));
+                setPhaseBoth('error');
+                return;
+              }
+              if (attempt >= 3) {
+                setGuidance(['We could not send the picture. Check your internet connection.']);
+                onFail?.();
+                return;
+              }
+              setGuidance(['Connection problem while sending the picture — retrying…']);
+              await new Promise((res) => setTimeout(res, 1000 * (attempt + 1)));
+              if (r.cancelled) return;
+            }
           }
         } finally {
           r.inflight--;
@@ -226,7 +272,7 @@ export function VerifyStep({
           setGuidance([faces.length > 1 ? 'Make sure only you are in view of the camera.' : 'We can’t see your face. Sit in front of the camera.']);
           return;
         }
-        if (Math.abs(face.yaw) > FRONTAL_MAX_YAW || Math.abs(face.pitch) > FRONTAL_MAX_PITCH) {
+        if (Math.abs(face.yaw) > FRONTAL_MAX_YAW || face.pitch < FRONTAL_PITCH_RANGE[0] || face.pitch > FRONTAL_PITCH_RANGE[1]) {
           setGuidance(['Look straight at the screen.']);
           return;
         }
@@ -245,6 +291,8 @@ export function VerifyStep({
               r.frontalSent = r.frontalAccepted; // allow another attempt
               setGuidance(res.guidance.length ? res.guidance : ['Please look straight at the camera and hold still.']);
             }
+          }, () => {
+            r.frontalSent = r.frontalAccepted;
           });
         }
         return;

@@ -524,7 +524,9 @@ export class Outbox {
       try {
         res = await sender.identitySample(s.id, blob.data, { trigger: s.trigger, capturedAt: s.capturedAt });
       } catch (e) {
-        if (this.permanent(e)) {
+        // A sample the server will not take in the current state (e.g. captured after a pause began)
+        // is only meaningful in near real time: drop it rather than retry forever.
+        if (this.permanent(e) || classifyApiError(e) === 'invalid_state') {
           await this.removeSample(s.id);
           this.opts.onDropped?.('sample', s.id, String((e as Error).message));
           continue;
@@ -615,7 +617,7 @@ export class Outbox {
   kick(): void {
     if (!this.running) return;
     // While healthy deliver promptly; while failing, wait for the backoff timer (or 'online').
-    if (this.backoffMs === 0) this.schedule(this.opts.kickDelayMs ?? 150);
+    if (this.backoffMs === 0) this.schedule(this.opts.kickDelayMs ?? 400);
   }
 
   private changed(): void {

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { EVENT_CATALOG, type IdentityComparisonDTO, type TimelineItemDTO } from '@sp/shared';
+import type { IdentityComparisonDTO, TimelineItemDTO } from '@sp/shared';
 import { api, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { offsetLabel, precedingFacts, scalePosition } from '../lib/compare';
@@ -104,9 +104,6 @@ function ReviewerGuidance({ type }: { type: string }) {
           This event means the system <strong>could not verify</strong> identity — typically due to lighting, distance, blur or face angle. It is not a mismatch.
         </div>
       ) : null}
-      {EVENT_CATALOG[type as keyof typeof EVENT_CATALOG]?.reviewerNote ? (
-        <div className="small muted">Note: {EVENT_CATALOG[type as keyof typeof EVENT_CATALOG].reviewerNote}</div>
-      ) : null}
     </div>
   );
 }
@@ -157,7 +154,13 @@ function ProbesColumn({ c }: { c: IdentityComparisonDTO }) {
         <div className="compare-images">
           {probes.map((p) => (
             <figure key={p.check.id} className={`compare-figure probe-${p.check.decision}`}>
-              <EvidenceImage evidence={p.image} size="large" onOpen={p.image ? () => setOpen(withImg.indexOf(p)) : undefined} />
+              {p.image ? (
+                <EvidenceImage evidence={p.image} size="large" onOpen={() => setOpen(withImg.indexOf(p))} />
+              ) : (
+                <div className="evidence evidence-large evidence-missing" title="Images of routine samples that matched are not stored (data minimisation)">
+                  <span>Image not kept — routine samples that match are not stored</span>
+                </div>
+              )}
               <figcaption className="small stack-tight">
                 <div>
                   <strong>{formatTime(p.check.at)}</strong> · {TRIGGER_LABELS[p.check.trigger] ?? p.check.trigger}
@@ -240,7 +243,7 @@ function SurroundingTimeline({ items, eventStart, eventId }: { items: TimelineIt
             <span className="fact-q">{f.question}</span>{' '}
             {f.item ? (
               <strong>
-                Yes — {offsetLabel(f.item.at, eventStart)} before ({formatTime(f.item.at)})
+                Yes — {offsetLabel(f.item.at, eventStart).replace(/^[−+]/, '')} {f.item.at <= eventStart ? 'before' : 'after'} ({formatTime(f.item.at)})
               </strong>
             ) : (
               <span className="muted">Not in the ±10 minute window</span>

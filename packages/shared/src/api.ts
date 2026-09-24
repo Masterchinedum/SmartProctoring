@@ -371,6 +371,8 @@ export interface SessionSummaryDTO {
   pendingPauseRequest: PauseRequestDTO | null;
   hold: HoldDTO | null;
   accessLink: string | null;
+  /** Evidence retention purge suspended (POST /sessions/:id/legal-hold). Optional for backwards compatibility. */
+  legalHold?: boolean;
 }
 
 export interface IdentityCheckDTO {
@@ -574,6 +576,8 @@ export interface AssignmentDTO {
   candidateId: string;
   candidateName: string;
   accessLink: string;
+  /** true when the candidate already had a not-yet-finished session for this exam (no new session was created; its link is returned). */
+  existing?: boolean;
 }
 
 /** PUT /api/admin/candidates/:id/id-photo  body image/jpeg  => { accepted, quality, guidance } */

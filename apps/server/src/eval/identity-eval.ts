@@ -66,7 +66,10 @@ export function loadFolderDataset(dir: string, opts: { anonymize?: boolean } = {
     if (files.length === 0) return;
     const subject = opts.anonymize === false ? sd : `s${String(si + 1).padStart(2, '0')}`;
     subjects.push(subject);
-    const tagged = files.map((f) => ({ f, conditions: parseConditions(f) }));
+    // Reference images first (then natural file order), so "i01" is always an enrolment image.
+    const tagged = files
+      .map((f) => ({ f, conditions: parseConditions(f) }))
+      .sort((a, b) => Number(b.conditions.includes('reference')) - Number(a.conditions.includes('reference')));
     const hasRef = tagged.some((t) => t.conditions.includes('reference'));
     tagged.forEach((t, ii) => {
       images.push({
@@ -204,6 +207,11 @@ function faceGeometry(a: ImageAnalysis) {
 export const PERTURBATIONS: Perturbation[] = [
   { name: 'dim', description: 'Dim room: brightness x0.35', apply: (b) => sharp(b).linear(0.35, 0).jpeg({ quality: JPEG_Q }).toBuffer() },
   { name: 'very_dark', description: 'Very dark: brightness x0.15', apply: (b) => sharp(b).linear(0.15, 0).jpeg({ quality: JPEG_Q }).toBuffer() },
+  {
+    name: 'low_light',
+    description: 'Low light with auto-gain: brightness x0.5 plus sensor noise sigma=8',
+    apply: async (b) => addNoise(await sharp(b).linear(0.5, 0).jpeg({ quality: JPEG_Q }).toBuffer(), 8, 4321),
+  },
   { name: 'overexposed', description: 'Overexposed: x1.8 + 40', apply: (b) => sharp(b).linear(1.8, 40).jpeg({ quality: JPEG_Q }).toBuffer() },
   { name: 'gamma_dark', description: 'Gamma 2.0 (dark mid-tones, e.g. backlit)', apply: (b) => mapPixels(b, (v) => 255 * Math.pow(v / 255, 2.0)) },
   { name: 'gamma_bright', description: 'Gamma 0.5 (washed-out mid-tones)', apply: (b) => mapPixels(b, (v) => 255 * Math.pow(v / 255, 0.5)) },
@@ -325,6 +333,8 @@ export interface GroupReport {
     /** Same, among probes that passed the quality gate. */
     falseMismatchRateUsable: number;
     similarity: Distribution;
+    /** Similarity of probes that passed the quality gate (the ones decisions are made on). */
+    similarityUsable: Distribution;
   };
   impostor: OutcomeRates & {
     /** Impostor probes decided 'match' (missed swap). */
@@ -332,6 +342,7 @@ export interface GroupReport {
     /** Impostor probes decided 'mismatch' (swap detected per sample). */
     detectionRate: number;
     similarity: Distribution;
+    similarityUsable: Distribution;
   };
   /** Most frequent quality issues among genuine probes that were unable_to_verify. */
   topIssues: { issue: QualityIssue; count: number }[];
@@ -489,16 +500,29 @@ export function groupReport(group: string, trials: Trial[], opts: { description?
   const imp = trials.filter((t) => t.kind === 'impostor');
   const g = outcomeRates(gen);
   const i = outcomeRates(imp);
-  const genSims = gen.map((t) => t.similarity).filter((s): s is number => s != null);
-  const impSims = imp.map((t) => t.similarity).filter((s): s is number => s != null);
+  const sims = (list: Trial[]) => list.map((t) => t.similarity).filter((s): s is number => s != null);
+  const genSims = sims(gen);
+  const impSims = sims(imp);
   const usableGen = gen.filter((t) => t.usable).length;
   const issueCounts = new Map<QualityIssue, number>();
   for (const t of gen) if (t.decision === 'unable_to_verify') for (const is of t.issues) issueCounts.set(is, (issueCounts.get(is) ?? 0) + 1);
   return {
     group,
     description: opts.description,
-    genuine: { ...g, falseMismatchRate: g.rates.mismatch, falseMismatchRateUsable: usableGen ? r4(g.mismatch / usableGen)! : 0, similarity: distribution(genSims) },
-    impostor: { ...i, falseMatchRate: i.rates.match, detectionRate: i.rates.mismatch, similarity: distribution(impSims) },
+    genuine: {
+      ...g,
+      falseMismatchRate: g.rates.mismatch,
+      falseMismatchRateUsable: usableGen ? r4(g.mismatch / usableGen)! : 0,
+      similarity: distribution(genSims),
+      similarityUsable: distribution(sims(gen.filter((t) => t.usable))),
+    },
+    impostor: {
+      ...i,
+      falseMatchRate: i.rates.match,
+      detectionRate: i.rates.mismatch,
+      similarity: distribution(impSims),
+      similarityUsable: distribution(sims(imp.filter((t) => t.usable))),
+    },
     topIssues: [...issueCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([issue, count]) => ({ issue, count })),
     eer: computeEer(genSims, impSims),
     roc: rocPoints(genSims, impSims, ROC_THRESHOLDS),
@@ -691,12 +715,21 @@ export async function runPairsEval(vision: VisionService, csvPath: string, image
       const pb = join(dir, pair.b);
       images.add(pa);
       images.add(pb);
-      const ref = await cache.get(pa, null);
+      // A pair is unordered: enrol whichever image passes the quality gate (file_x preferred).
+      let probePath = pb;
+      let ref = await cache.get(pa, null);
+      if (!ref || !ref.embedding || !ref.quality.usable) {
+        const alt = await cache.get(pb, null);
+        if (alt && alt.embedding && alt.quality.usable) {
+          ref = alt;
+          probePath = pa;
+        }
+      }
       if (!ref || !ref.embedding || !ref.quality.usable) {
         if (!variant) skipped++;
         continue;
       }
-      const probe = await cache.get(pb, variant);
+      const probe = await cache.get(probePath, variant);
       if (!probe) continue;
       trials.push(makeTrial(pair.same ? 'genuine' : 'impostor', variant ? [`perturb:${variant.name}`] : ['all'], probe, [ref.embedding], thresholds));
     }
@@ -715,7 +748,7 @@ export async function runPairsEval(vision: VisionService, csvPath: string, image
     },
     groups: assembleGroups(trials, perts, opts, thresholds),
     notes: [
-      'Each pair enrols file_x as a single-image reference (it must pass the quality gate; otherwise the pair is counted as an enrolment failure) and probes with file_y.',
+      'Each pair enrols one image as a single-image reference (file_x, or file_y if file_x fails the quality gate; pairs where neither passes are enrolment failures) and probes with the other.',
     ],
   };
 }
@@ -742,7 +775,7 @@ export function formatReport(report: EvalReport): string {
   out.push('');
   out.push(
     table(
-      ['group', 'gen n', 'match', 'inconcl', 'unable', 'FALSE MISMATCH', 'imp n', 'FALSE MATCH', 'swap det.', 'inconcl', 'unable', 'gen sim p05/med', 'imp sim med/max', 'EER'],
+      ['group', 'gen n', 'match', 'inconcl', 'unable', 'FALSE MISMATCH', 'imp n', 'FALSE MATCH', 'swap det.', 'inconcl', 'unable', 'gen usable min/med', 'imp usable med/max', 'EER'],
       report.groups.map((g) => [
         g.group,
         String(g.genuine.n),
@@ -755,8 +788,8 @@ export function formatReport(report: EvalReport): string {
         pct(g.impostor.detectionRate),
         pct(g.impostor.rates.inconclusive),
         pct(g.impostor.rates.unable_to_verify),
-        `${fmt(g.genuine.similarity.p05)}/${fmt(g.genuine.similarity.median)}`,
-        `${fmt(g.impostor.similarity.median)}/${fmt(g.impostor.similarity.max)}`,
+        `${fmt(g.genuine.similarityUsable.min)}/${fmt(g.genuine.similarityUsable.median)}`,
+        `${fmt(g.impostor.similarityUsable.median)}/${fmt(g.impostor.similarityUsable.max)}`,
         g.eer ? pct(g.eer.eer) : '-',
       ]),
     ),

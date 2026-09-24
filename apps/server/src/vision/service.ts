@@ -16,7 +16,7 @@ import { DEFAULT_MAX_DECODE_SIDE, decodeImage, decodeRegion, encodeJpegRegion, r
 import { resolveModelsDir, SFACE_MODEL_FILE, YUNET_MODEL_FILE } from './models';
 import { assessQuality, faceRegionStats, resolveGate } from './quality';
 import { processIdPhoto } from './id-photo';
-import type { AnalyzeOptions, HeadPose, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate } from './types';
+import type { AnalyzeOptions, DetectedFace, HeadPose, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate } from './types';
 
 export interface VisionServiceOptions {
   /** Directory containing the two ONNX files (default: MODELS_DIR or apps/server/models). */
@@ -187,13 +187,16 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
     return processIdPhoto(this, image);
   }
 
-  /** Detect faces only (no alignment / embedding). Exposed for tools and tests. */
-  async detect(image: Buffer) {
-    const img = await decodeImage(image, this.opts.maxDecodeSide);
-    return this.detectDecoded(img);
+  /** Detect faces only (no alignment / embedding), in original-image coordinates, primary first. */
+  async detect(image: Buffer): Promise<DetectedFace[]> {
+    if (this.closed) throw new VisionClosedError();
+    return this.limiter.run(async () => {
+      if (this.closed) throw new VisionClosedError();
+      return this.detectDecoded(await decodeImage(image, this.opts.maxDecodeSide));
+    });
   }
 
-  private async detectDecoded(img: RgbImage & { origWidth: number; origHeight: number }) {
+  private async detectDecoded(img: RgbImage & { origWidth: number; origHeight: number }): Promise<DetectedFace[]> {
     const plan = planDetectorInput(img.width, img.height);
     const detImg = plan.resize ? await resizeRgb(img, plan.width, plan.height) : img;
     const tensor = packBgrPlanar(detImg, YUNET_INPUT_SIZE, this.tensorPool.pop());

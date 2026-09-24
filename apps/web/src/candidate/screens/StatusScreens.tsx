@@ -117,10 +117,10 @@ export function PausedScreen({ onResume }: { onResume: () => void }) {
               <dt>Paused</dt>
               <dd>{pausedAt ? formatDateTime(pausedAt) : 'Yes'}</dd>
             </div>
-            {req?.reason && (
+            {(req?.reason ?? snap.pauseReasonLocal) && (
               <div>
                 <dt>Your reason</dt>
-                <dd>{req.reason}</dd>
+                <dd>{req?.reason ?? snap.pauseReasonLocal}</dd>
               </div>
             )}
             <div>

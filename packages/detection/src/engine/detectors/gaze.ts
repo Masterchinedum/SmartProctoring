@@ -1,5 +1,5 @@
 import type { GazeDirection } from '@sp/shared';
-import { awayThresholds, directionOf, directionText, type AwayThresholds, type DetectorHost, type TickContext } from '../context';
+import { angleDiff, attentionAngle, awayThresholds, directionOfAngle, directionText, meanAngle, type AwayThresholds, type DetectorHost, type TickContext } from '../context';
 import { dur, Span, type FlushReason } from '../span';
 import { clamp01, round } from '../../util/math';
 
@@ -7,6 +7,8 @@ import { clamp01, round } from '../../util/math';
 const GLANCE_GAP_MS = 350;
 const MAX_GLANCES = 64;
 const MAX_LISTED = 30;
+/** Glances within this angle (deg, in threshold-normalised space) count as "the same direction". */
+const SAME_DIRECTION_TOL_DEG = 30;
 
 interface Glance {
   start: number;
@@ -19,6 +21,8 @@ interface Glance {
   qualified: boolean;
   sustained: boolean;
   dir: GazeDirection;
+  /** Angle of the mean attention vector (see context.attentionAngle). */
+  ang: number;
   /** Which pattern episode this glance was attributed to. */
   attr: 'offscreen' | 'repeated' | null;
   /** Belonged to a pattern episode that has closed — never counted again. */
@@ -30,6 +34,9 @@ interface Pattern {
   key: string;
   open: boolean;
   startedAt: number;
+  /** Same-direction patterns: mean angle and direction bucket of the triggering glances. */
+  ang: number;
+  dir: GazeDirection;
   /** Most recent attributed glances (bounded). */
   glances: Glance[];
   /** Total attributed glances and first glance start (the list above is bounded). */
@@ -47,8 +54,8 @@ function attach(pat: Pattern, g: Glance): void {
   if (pat.glances.length > MAX_PATTERN_GLANCES) pat.glances.shift();
 }
 
-function newPattern(key: string, startedAt: number): Pattern {
-  return { key, open: false, startedAt, glances: [], count: 0, firstStart: startedAt };
+function newPattern(key: string, startedAt: number, ang = 0, dir: GazeDirection = 'left'): Pattern {
+  return { key, open: false, startedAt, ang, dir, glances: [], count: 0, firstStart: startedAt };
 }
 
 /**
@@ -61,8 +68,10 @@ function newPattern(key: string, startedAt: number): Pattern {
  *   lasted glanceMinSec — shorter glances are ignored entirely. Qualification happens while the
  *   candidate is still looking away, so the snapshot requested at that moment shows the behaviour.
  * - offscreen_attention_pattern: ≥ sameDirectionCount qualifying glances or sustained looks toward the
- *   same 8-way direction bucket within repeatedLookAwayWindowSec. One episode per direction; every
- *   further glance in that direction updates it with a 'peak' snapshot request.
+ *   same direction (attention vectors within 30° of each other in threshold-normalised space, so a spot
+ *   near the boundary of two 8-way buckets is still one direction) within repeatedLookAwayWindowSec.
+ *   One episode per direction (details.direction = 8-way bucket of the mean); every further glance
+ *   toward it updates the episode with a 'peak' snapshot request.
  * - repeated_looking_away: ≥ repeatedLookAwayCount qualifying SHORT glances (< lookAwaySec) within the
  *   window, counting only glances not attributed to an offscreen pattern.
  *
@@ -86,6 +95,7 @@ export class GazeDetector {
   private current: Glance | null = null;
   private glances: Glance[] = [];
   private repeated: Pattern = newPattern('repeated_looking_away', 0);
+  /** Same-direction patterns keyed by direction bucket. */
   private offscreen = new Map<GazeDirection, Pattern>();
   private lastScore = 1;
 
@@ -124,7 +134,7 @@ export class GazeDetector {
     const away = assess ? ctx.away : null;
     if (assess && ctx.primary) this.lastScore = ctx.primary.score;
     if (away && ctx.direction) {
-      if (!this.sustained.deb.active && this.sustained.deb.runStart === null) this.resetSustainedStats();
+      if (this.sustained.deb.idle) this.resetSustainedStats();
       this.dirCounts.set(ctx.direction, (this.dirCounts.get(ctx.direction) ?? 0) + 1);
       if (Math.abs(ctx.yawOff) > Math.abs(this.maxYawOff)) this.maxYawOff = ctx.yawOff;
       if (Math.abs(ctx.pitchOff) > Math.abs(this.maxPitchOff)) this.maxPitchOff = ctx.pitchOff;
@@ -186,7 +196,7 @@ export class GazeDetector {
       if (g0 && t - g0.lastAway > GLANCE_GAP_MS) this.finalize(g0, g0.firstNonAway ?? g0.lastAway);
       let g = this.current;
       if (!g) {
-        g = { start: t, lastAway: t, firstNonAway: null, end: null, sumH: 0, sumV: 0, n: 0, qualified: false, sustained: false, dir: 'left', attr: null, consumed: false, owner: null };
+        g = { start: t, lastAway: t, firstNonAway: null, end: null, sumH: 0, sumV: 0, n: 0, qualified: false, sustained: false, dir: 'left', ang: 0, attr: null, consumed: false, owner: null };
         this.current = g;
       }
       g.lastAway = t;
@@ -214,10 +224,26 @@ export class GazeDetector {
     if (this.current === g) this.current = null;
   }
 
+  /** Open same-direction pattern whose direction is within tolerance of `ang` (closest first). */
+  private openOffscreenNear(ang: number): Pattern | null {
+    let best: Pattern | null = null;
+    let bestD = Infinity;
+    for (const p of this.offscreen.values()) {
+      if (!p.open) continue;
+      const d = angleDiff(p.ang, ang);
+      if (d <= SAME_DIRECTION_TOL_DEG && d < bestD) {
+        best = p;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
   private qualify(g: Glance, t: number): void {
     const p = this.host.policy;
     g.qualified = true;
-    g.dir = directionOf(g.sumH / g.n, g.sumV / g.n, this.th);
+    g.ang = attentionAngle(g.sumH / g.n, g.sumV / g.n, this.th);
+    g.dir = directionOfAngle(g.ang);
     this.glances.push(g);
     const windowMs = p.repeatedLookAwayWindowSec * 1000;
     // Bounded history: drop finished glances outside the window, cap the length.
@@ -227,16 +253,18 @@ export class GazeDetector {
     const inWindow = (x: Glance) => !x.consumed && x.start >= t - windowMs;
 
     // Same-direction pattern (more specific) first.
-    let pat = this.offscreen.get(g.dir);
-    if (pat?.open) {
+    let pat = this.openOffscreenNear(g.ang);
+    if (pat) {
       g.attr = 'offscreen';
       attach(pat, g);
       this.touchPattern(pat, t, true);
     } else {
-      const same = this.glances.filter((x) => inWindow(x) && x.dir === g.dir && x.attr !== 'offscreen');
+      const same = this.glances.filter((x) => inWindow(x) && x.attr !== 'offscreen' && angleDiff(x.ang, g.ang) <= SAME_DIRECTION_TOL_DEG);
       if (same.length >= p.sameDirectionCount) {
-        pat = newPattern(`offscreen_attention_pattern:${g.dir}`, same[0].start);
-        this.offscreen.set(g.dir, pat);
+        const ang = meanAngle(same.map((x) => x.ang));
+        const dir = directionOfAngle(ang);
+        pat = newPattern(`offscreen_attention_pattern:${dir}`, same[0].start, ang, dir);
+        this.offscreen.set(dir, pat);
         for (const x of same) {
           x.attr = 'offscreen';
           attach(pat, x);
@@ -253,7 +281,7 @@ export class GazeDetector {
       this.touchPattern(this.repeated, t, false);
       return;
     }
-    const pool = this.glances.filter((x) => inWindow(x) && !x.sustained && x.attr === null && !this.offscreen.get(x.dir)?.open);
+    const pool = this.glances.filter((x) => inWindow(x) && !x.sustained && x.attr === null && !this.openOffscreenNear(x.ang));
     if (pool.length >= p.repeatedLookAwayCount) {
       this.repeated = newPattern('repeated_looking_away', pool[0].start);
       for (const x of pool) {
@@ -335,7 +363,7 @@ export class GazeDetector {
     };
     let observation: string;
     if (isOff) {
-      const dir = gl[0]?.dir ?? 'left';
+      const dir = pat.dir;
       details.direction = dir;
       observation = `The candidate repeatedly looked in the same direction (${directionText(dir)}): ${n} times within ${dur(spanSec)}.`;
     } else {

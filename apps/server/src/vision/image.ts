@@ -54,7 +54,7 @@ export async function orientedSize(input: Buffer): Promise<{ width: number; heig
  * and downscaling so that max(width, height) <= maxSide.
  */
 export async function decodeImage(input: Buffer, maxSide = DEFAULT_MAX_DECODE_SIDE): Promise<DecodedImage> {
-  if (!Buffer.isBuffer(input) || input.length === 0) throw new VisionInputError('Empty image');
+  if (!Buffer.isBuffer(input) || input.length === 0) throw new VisionInputError('Image must be a non-empty Buffer');
   const { width: origWidth, height: origHeight } = await orientedSize(input);
   const scale = Math.min(1, maxSide / Math.max(origWidth, origHeight));
   let pipeline = sharp(input, SHARP_INPUT).rotate();

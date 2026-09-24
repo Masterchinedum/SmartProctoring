@@ -140,7 +140,7 @@ export class CoveredDetector {
   step(ctx: TickContext): void {
     const v = ctx.live && ctx.frame ? ctx.covered : null;
     if (v && ctx.frame) {
-      if (!this.span.deb.active && this.span.deb.runStart === null) {
+      if (this.span.deb.idle) {
         this.minLuma = Infinity;
         this.maxContrast = 0;
       }
@@ -240,7 +240,7 @@ export class LightingDetector {
   step(ctx: TickContext): void {
     const v = ctx.live && ctx.frame && !ctx.covered ? ctx.lightingBad : null;
     if (v && ctx.frame) {
-      if (!this.span.deb.active && this.span.deb.runStart === null) this.resetStats();
+      if (this.span.deb.idle) this.resetStats();
       const isDark = ctx.frameDark || ctx.faceDark;
       if (isDark) this.dark++;
       else this.bright++;
@@ -311,7 +311,7 @@ export class DegradedDetector {
   step(ctx: TickContext): void {
     const v = ctx.live ? ctx.fps < K.lowFps : null;
     if (v) {
-      if (!this.span.deb.active && this.span.deb.runStart === null) {
+      if (this.span.deb.idle) {
         this.minFps = Infinity;
         this.fpsSum = 0;
         this.fpsN = 0;

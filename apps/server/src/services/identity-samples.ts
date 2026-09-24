@@ -223,7 +223,6 @@ async function aggregate(m: SessionMutation, row: IdentityCheck, analysis: Image
         if (o.policyHold) {
           m.setIdentityState(st);
           await holdNow(m, { reason: 'identity_mismatch', source: 'server_identity', details: { eventId: evId, trigger: row.trigger } });
-          m.set({ verifiedInstanceId: null });
           return null;
         }
       } else {

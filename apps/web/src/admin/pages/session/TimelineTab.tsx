@@ -4,7 +4,7 @@ import type { EventDTO, IdentityCheckDTO } from '@sp/shared';
 import { api, shouldRetry } from '../../api/client';
 import { qk } from '../../api/queries';
 import { filterTimeline, filtersActive, presentTypes, type EventFilterState } from '../../lib/filters';
-import { formatPercent, formatSimilarity, formatTime } from '../../lib/format';
+import { formatPercent, formatSimilarity, formatTime, humanizeKey } from '../../lib/format';
 import { contextLabel, PERIOD_LABELS, qualityIssueLabel, TRIGGER_LABELS } from '../../lib/labels';
 import { groupCounts, groupTimeline, type TimelineGroup } from '../../lib/timeline';
 import { CategoryBadge, CategoryCounts, DecisionBadge, ReviewBadge, SeverityBadge } from '../../components/Badges';
@@ -57,6 +57,11 @@ export function TimelineTab({
   );
 }
 
+/** Machine reasons such as 'initial_check' become 'Initial check'; free text is shown as typed. */
+export function readableReason(r: string): string {
+  return /^[a-z0-9_]+$/.test(r) ? humanizeKey(r) : r;
+}
+
 function sectionTitle(g: TimelineGroup): string {
   if (!g.period) {
     if (g.position === 'before') return 'Before the exam';
@@ -70,7 +75,7 @@ function TimelineSection({ group, onOpenEvent, filtered }: { group: TimelineGrou
   const p = group.period;
   const observed = p ? p.observed : true;
   const counts = groupCounts(group.entries);
-  const metaEntries = p ? Object.entries(p.meta ?? {}).filter(([, v]) => v !== null && v !== undefined && v !== '') : [];
+  const metaEntries = p ? Object.entries(p.meta ?? {}).filter(([k, v]) => v !== null && v !== undefined && v !== '' && !/Id$|^id$/.test(k)) : [];
   return (
     <section className={`tl-section ${p ? (observed ? 'observed' : 'unobserved') : 'outside'} tl-kind-${p?.kind ?? 'none'}`}>
       <header className="tl-band">
@@ -87,7 +92,7 @@ function TimelineSection({ group, onOpenEvent, filtered }: { group: TimelineGrou
           {counts.integrity + counts.uncertain + counts.technical > 0 ? <CategoryCounts counts={counts} compact /> : null}
         </div>
         {p && !observed ? <div className="tl-band-note">Unobserved: no observations are made about this period.</div> : null}
-        {p?.reason ? <div className="tl-band-reason small">Reason: {p.reason}</div> : null}
+        {p?.reason ? <div className="tl-band-reason small">Reason: {readableReason(p.reason)}</div> : null}
         {metaEntries.length ? (
           <div className="tl-band-meta small muted">
             <KeyValueTable data={Object.fromEntries(metaEntries)} />

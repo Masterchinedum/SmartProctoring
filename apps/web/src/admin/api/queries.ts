@@ -39,8 +39,34 @@ export const qk = {
 
 /* ------------------------------------------------------------------ cache patching (realtime + mutations) */
 
+/** Event types that open/close periods: the timeline's period bands must be refetched when they arrive. */
+const PERIOD_EVENT_TYPES = new Set<string>([
+  'session_started',
+  'session_paused',
+  'session_resumed',
+  'session_held',
+  'hold_released',
+  'session_submitted',
+  'session_expired',
+  'session_terminated',
+  'unobserved_period',
+  'reporting_interrupted',
+  'checkin_completed',
+]);
+
+function refreshSessionStructure(qc: QueryClient, sessionId: string): void {
+  void qc.invalidateQueries({ queryKey: qk.session(sessionId), exact: true });
+  void qc.invalidateQueries({ queryKey: qk.timeline(sessionId) });
+  void qc.invalidateQueries({ queryKey: qk.report(sessionId) });
+}
+
 export function applySessionSummary(qc: QueryClient, s: SessionSummaryDTO): void {
   const receivedAt = Date.now();
+  const prev = qc.getQueryData<SessionDetailDTO>(qk.session(s.id))?.summary;
+  if (prev && (prev.status !== s.status || prev.connection !== s.connection || prev.pauseCount !== s.pauseCount)) {
+    // Periods (pause / disconnect / hold bands) changed server-side.
+    refreshSessionStructure(qc, s.id);
+  }
   qc.setQueryData<DashboardState>(qk.dashboard, (old) => (old ? { ...old, sessions: upsertSession(old.sessions, { ...s, receivedAt }) } : old));
   qc.setQueryData<SessionDetailDTO>(qk.session(s.id), (old) => (old ? { ...old, summary: s } : old));
   const replaceIn = <T extends { items: SessionSummaryDTO[] }>(old: T | undefined): T | undefined =>
@@ -70,6 +96,7 @@ export function applyEvent(qc: QueryClient, ev: EventDTO, names?: { candidateNam
   qc.setQueryData<EventDTO>(qk.event(ev.id), (old) => (old ? ev : old));
   qc.setQueryData<{ items: TimelineItemDTO[] }>(qk.timeline(ev.sessionId), (old) => (old ? { items: upsertTimelineEvent(old.items, ev) } : old));
   qc.setQueryData<{ items: EventDTO[] }>(qk.sessionEvents(ev.sessionId), (old) => (old ? { items: upsertEvent(old.items, ev) } : old));
+  if (names && PERIOD_EVENT_TYPES.has(ev.type)) refreshSessionStructure(qc, ev.sessionId);
   return { isNew };
 }
 

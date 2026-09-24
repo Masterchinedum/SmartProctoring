@@ -209,11 +209,37 @@ const SECTORS: GazeDirection[] = ['right', 'down_right', 'down', 'down_left', 'l
  * candidate's left). Axes are normalised by their thresholds so diagonals mean "comparably far on both".
  */
 export function directionOf(h: number, v: number, th: AwayThresholds): GazeDirection {
+  return directionOfAngle(attentionAngle(h, v, th));
+}
+
+/** Angle (deg) of the threshold-normalised attention vector: 0 = left, 90 = up, ±180 = right, −90 = down. */
+export function attentionAngle(h: number, v: number, th: AwayThresholds): number {
   const x = h / th.yaw;
   const y = v / (v < 0 ? th.down : th.up);
-  const ang = (Math.atan2(y, x) * 180) / Math.PI; // 0 = left, 90 = up, ±180 = right, −90 = down
-  const idx = Math.round(ang / 45) + 4; // 0..8 (−180° → 0, 0° → 4, 180° → 8)
+  return (Math.atan2(y, x) * 180) / Math.PI;
+}
+
+export function directionOfAngle(angDeg: number): GazeDirection {
+  const a = ((((angDeg + 180) % 360) + 360) % 360) - 180;
+  const idx = Math.round(a / 45) + 4; // 0..8 (−180° → 0, 0° → 4, 180° → 8)
   return SECTORS[Math.max(0, Math.min(8, idx))];
+}
+
+/** Smallest absolute difference between two angles (deg). */
+export function angleDiff(a: number, b: number): number {
+  const d = Math.abs((((a - b) % 360) + 360) % 360);
+  return d > 180 ? 360 - d : d;
+}
+
+/** Circular mean of angles (deg). */
+export function meanAngle(angles: readonly number[]): number {
+  let x = 0;
+  let y = 0;
+  for (const a of angles) {
+    x += Math.cos((a * Math.PI) / 180);
+    y += Math.sin((a * Math.PI) / 180);
+  }
+  return (Math.atan2(y, x) * 180) / Math.PI;
 }
 
 const DIRECTION_TEXT: Record<GazeDirection, string> = {

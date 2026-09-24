@@ -7,7 +7,7 @@ import { qk } from '../../api/queries';
 import { useAuth } from '../../auth';
 import { formatDuration } from '../../lib/format';
 import { QUESTION_TYPE_LABELS } from '../../lib/examForm';
-import { ALL_POLICY_FIELDS, changedFromDefault, formatPolicyValue, getPath } from '../../lib/policyForm';
+import { ALL_POLICY_FIELDS, changedFromDefault, formatPolicyValue, getPath, POLICY_GROUPS } from '../../lib/policyForm';
 import { CategoryCounts, ConnectionBadge, StatusBadge } from '../../components/Badges';
 import { CopyButton, EmptyState, ErrorState, Loading, PageHeader } from '../../components/Common';
 import { ConfirmDialog } from '../../components/Modal';
@@ -193,9 +193,10 @@ function PolicySummary({ exam }: { exam: ExamDTO }) {
         <ul className="small changed-list">
           {changed.map((path) => {
             const f = ALL_POLICY_FIELDS.find((x) => x.path === path)!;
+            const group = POLICY_GROUPS.find((g) => g.fields.includes(f));
             return (
               <li key={path}>
-                {f.label}: <strong>{formatPolicyValue(f, getPath(p, path))}</strong>
+                <span className="muted">{group?.title} ›</span> {f.label}: <strong>{formatPolicyValue(f, getPath(p, path))}</strong>
               </li>
             );
           })}
@@ -270,7 +271,14 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
             <tbody>
               {results.map((r) => (
                 <tr key={r.sessionId}>
-                  <td>{r.candidateName}</td>
+                  <td>
+                    {r.candidateName}
+                    {r.existing ? (
+                      <span className="badge" title="The candidate already had an unfinished session for this exam; its existing link is shown.">
+                        existing session
+                      </span>
+                    ) : null}
+                  </td>
                   <td className="mono small break">{r.accessLink}</td>
                   <td>
                     <CopyButton text={r.accessLink} />

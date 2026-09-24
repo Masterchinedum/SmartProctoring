@@ -10,6 +10,7 @@ import { periodDurationMs } from '../../lib/timeline';
 import { EmptyState, KeyValueTable } from '../../components/Common';
 import { NoteList } from '../../components/EventDetail';
 import { LiveDuration } from '../../components/Time';
+import { readableReason } from './TimelineTab';
 
 export function PeriodsTab({ d }: { d: SessionDetailDTO }) {
   const now = useNow(d.periods.some((p) => p.endedAt == null));
@@ -51,7 +52,7 @@ export function PeriodsTab({ d }: { d: SessionDetailDTO }) {
                   <LiveDuration from={p.startedAt} to={p.endedAt} ongoingLabel={false} />
                 </td>
                 <td className="small">
-                  {p.reason ? <div>{p.reason}</div> : null}
+                  {p.reason ? <div>{readableReason(p.reason)}</div> : null}
                   {Object.keys(p.meta ?? {}).length ? <KeyValueTable data={p.meta} /> : !p.reason ? <span className="muted">—</span> : null}
                 </td>
               </tr>

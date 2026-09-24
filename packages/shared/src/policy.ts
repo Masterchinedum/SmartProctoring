@@ -142,11 +142,11 @@ export const DEFAULT_POLICY: ProctoringPolicy = resolvePolicy({});
 /** Server-side identity decision thresholds (cosine similarity, SFace 128-d). Org-configurable. */
 export const identityThresholdsSchema = z.object({
   /** >= match => same person. */
-  match: z.number().default(0.4),
+  match: z.number().default(0.45),
   /** < mismatch => evidence of a different person (only if quality gate passed). Between = inconclusive. */
   mismatch: z.number().default(0.28),
   /** ID photos are older / different capture; slightly more lenient. */
-  idPhotoMatch: z.number().default(0.36),
+  idPhotoMatch: z.number().default(0.42),
   idPhotoMismatch: z.number().default(0.24),
   /** Consecutive quality mismatches required before raising identity_mismatch during an active exam. */
   mismatchConfirmations: z.number().int().min(1).default(2),

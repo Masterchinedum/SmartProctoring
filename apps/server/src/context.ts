@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from './config.js';
 import type { Database, Db } from './db/index.js';
+import type { JobRunner } from './jobs/runner.js';
 import type { Keyring } from './lib/crypto.js';
 import type { BlobStorage } from './lib/storage.js';
 import type { RealtimeBus } from './realtime/bus.js';
@@ -24,4 +25,6 @@ export interface Ctx {
   log: FastifyBaseLogger;
   /** Throttled realtime publishing for staff dashboards. */
   live: LiveNotifier;
+  /** Periodic background jobs (advisory-lock guarded). Register with ctx.jobs.register({...}). */
+  jobs: JobRunner;
 }

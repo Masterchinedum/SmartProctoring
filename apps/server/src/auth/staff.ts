@@ -72,8 +72,9 @@ function allowedOrigins(ctx: Ctx, req: FastifyRequest): string[] {
 export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHandler {
   return async function (this: unknown, req: FastifyRequest, _reply: FastifyReply) {
     const ctx = req.server.ctx;
-    // CSRF defence in depth (cookie is SameSite=Lax): state-changing requests must come from our origin.
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    // CSRF / cross-site WebSocket defence in depth (cookie is SameSite=Lax): state-changing requests and
+    // WebSocket upgrades must come from our own origin when the browser says where they come from.
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) || req.headers.upgrade?.toLowerCase() === 'websocket') {
       const origin = req.headers.origin;
       if (origin && !allowedOrigins(ctx, req).includes(origin)) throw forbidden('Cross-origin request refused', 'bad_origin');
     }

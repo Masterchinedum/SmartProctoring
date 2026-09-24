@@ -90,7 +90,7 @@ export class MovementDetector {
       const ratio = b.faceWidth > 0 ? f.box.w / b.faceWidth : 1;
       v = shift > K.farCentre || ratio < K.farWidthMin || ratio > K.farWidthMax;
       if (v) {
-        if (!this.far.active && this.far.runStart === null && !this.open) this.resetFarStats();
+        if (this.far.idle && !this.open) this.resetFarStats();
         this.maxShift = Math.max(this.maxShift, shift);
         this.minRatio = Math.min(this.minRatio, ratio);
         this.maxRatio = Math.max(this.maxRatio, ratio);

@@ -9,21 +9,26 @@ const REPLAY_KEY = 'camera_feed_suspect:replay';
 
 /** Replay detection parameters. */
 export const REPLAY = {
+  /** History sampling period. */
   sampleMs: 1000,
   /** ~10 minutes of 1 Hz samples. */
   capacity: 600,
-  /** Query length (most recent samples). */
-  querySamples: 6,
-  /** Per-sample match tolerance (bits of 64). */
+  /** Query length (most recent 1 Hz samples). */
+  querySamples: 12,
+  /** Per-sample match tolerance (bits of 64); raised in noisy scenes to noise floor + 2. */
   matchBits: 4,
-  /** A consecutive-sample change above this counts as motion. */
-  motionBits: 4,
-  /** Motion transitions required inside the query (static scenes carry no evidence). */
-  minMotionTransitions: 2,
+  /** Motion content required in the query: Σ max(0, consecutive distance − noise floor − 1) (bits). */
+  minMotionBits: 16,
+  /** The best alignment's total distance must be ≤ this × the typical (10th percentile) other alignment … */
+  discrimination: 0.4,
+  /** … and at least this many bits better (absolute margin). */
+  minMarginBits: 16,
+  /** Each earlier sample may match any recent full-rate frame within ± this (loop phase offset). */
+  phaseTolMs: 600,
   /** The matched earlier run must start at least this long before the query. */
   minLagMs: 15000,
-  /** Consecutive matching evaluations needed to open. */
-  confirmEvaluations: 2,
+  /** Consecutive matching evaluations (at a consistent lag, ±1 sample) needed to open. */
+  confirmEvaluations: 3,
   /** Close after this long without a match. */
   clearMs: 10000,
 } as const;
@@ -34,11 +39,22 @@ export const REPLAY = {
  * (a) 'virtual_camera_label' — the active camera's label matches virtual-camera software (or, with lower
  *     confidence, a phone-as-webcam app). Opens immediately on setCameraInfo; closes when the camera
  *     changes. Re-opened after a flush if the same camera is still in use.
- * (b) 'repeating_footage' — ~1 Hz dHash history (bounded ring, ~10 min). When the most recent 6 samples
- *     contain motion (≥ 2 consecutive changes > 4 bits) and each is within 4 bits of the corresponding
- *     sample of a contiguous earlier run that started ≥ 15 s before, on 2 consecutive evaluations, the
- *     footage is repeating. A still person / static scene never matches (no motion); a frozen feed has no
- *     motion either. Once open, any continued match keeps it open; closes after 10 s without a match.
+ * (b) 'repeating_footage' — ~1 Hz dHash history (bounded ring, ~10 min). When the most recent 12 samples
+ *     contain motion (accumulated consecutive-sample change above the noise floor) and every one of them
+ *     matches (≤ 4 bits, more in noisy scenes) the corresponding sample of a contiguous earlier run that
+ *     started ≥ 15 s before — on 3 consecutive evaluations at the same lag — the footage is repeating. A replayed loop is not sampled at the same phase in every
+ *     iteration, so each earlier sample is compared with the recent full-rate frames within ±0.6 s of the
+ *     corresponding query time. A still person / static scene never matches (no motion); a frozen feed
+ *     has no motion either; a live person who happens to repeat one movement does not produce 3+ matching
+ *     motion changes at the same relative timing. Once open, any continued match keeps it open; closes
+ *     after 10 s without a match.
+ *     Robustness to camera noise: thresholds adapt to the scene's dHash noise floor (25th percentile of
+ *     consecutive-sample distances), and the best earlier alignment must be DISCRIMINATIVE — its total
+ *     distance ≤ 0.4 × the 10th percentile of all other alignments (excluding other loop iterations) and
+ *     ≥ 16 bits better. In live footage many alignments fit about equally well (static periods) or none
+ *     does; a coincidental repeat of one or two movements does not persist for 3 evaluations with enough
+ *     motion. This is stricter than a plain "6 samples within 4 bits" rule on purpose: dHash noise on
+ *     flat backgrounds alone can flip 3–5 bits between frames.
  */
 export class FeedDetector {
   // virtual label
@@ -56,10 +72,15 @@ export class FeedDetector {
   private lastSample = -Infinity;
   private streak = 0;
   private streakStart = 0;
+  private streakLag = 0;
   private replayOpen = false;
   private lastMatch = 0;
   private lagMs = 0;
   private matches = 0;
+  /** Recent full-rate frames (t, hash) covering the query span plus the phase tolerance. */
+  private recent: { t: number; hi: number; lo: number }[] = [];
+  /** Recent consecutive 1 Hz sample distances (noise floor estimate). */
+  private consec: number[] = [];
 
   constructor(private host: DetectorHost) {}
 
@@ -91,9 +112,13 @@ export class FeedDetector {
     const t = ctx.t;
     if (!this.virtualOpen && this.cls.kind !== 'none') this.openVirtual(t);
     if (this.replayOpen && t - this.lastMatch >= REPLAY.clearMs + REPLAY.sampleMs) this.closeReplay(t, this.lastMatch);
-    if (!ctx.live || !ctx.frame || ctx.covered || t - this.lastSample < REPLAY.sampleMs * 0.9) return;
+    if (!ctx.live || !ctx.frame || ctx.covered) return;
     const h = parseHash64(ctx.frame.dhash);
     if (!h) return;
+    this.recent.push({ t, hi: h[0], lo: h[1] });
+    const keepMs = (REPLAY.querySamples + 1) * REPLAY.sampleMs + 2 * REPLAY.phaseTolMs;
+    while (this.recent.length > 0 && this.recent[0].t < t - keepMs) this.recent.shift();
+    if (t - this.lastSample < REPLAY.sampleMs * 0.9) return;
     this.lastSample = t;
     this.push(h[0], h[1], t);
     this.evaluate(t);
@@ -106,6 +131,8 @@ export class FeedDetector {
     this.len = 0;
     this.lastSample = -Infinity;
     this.streak = 0;
+    this.recent = [];
+    this.consec = [];
   }
 
   flush(t: number, reason: FlushReason): void {
@@ -164,6 +191,7 @@ export class FeedDetector {
     else this.head = (this.head + 1) % cap;
   }
 
+  /** Hamming distance between history samples i and j (0 = oldest). */
   private dist(i: number, j: number): number {
     const cap = REPLAY.capacity;
     const a = (this.head + i) % cap;
@@ -175,39 +203,89 @@ export class FeedDetector {
     return this.ts[(this.head + i) % REPLAY.capacity];
   }
 
+  private noiseFloor(): number {
+    if (this.consec.length < 10) return 0;
+    const sorted = [...this.consec].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length * 0.25)];
+  }
+
   private evaluate(t: number): void {
     const Q = REPLAY.querySamples;
-    if (this.len < Q * 2 + 2) return;
+    if (this.len >= 2) {
+      this.consec.push(this.dist(this.len - 2, this.len - 1));
+      if (this.consec.length > 120) this.consec.shift();
+    }
+    if (this.len < Q * 2 + 5) return;
+    const floor = this.noiseFloor();
+    const matchThr = Math.max(REPLAY.matchBits, floor + 2);
     const q0 = this.len - Q;
     let motion = 0;
-    for (let i = q0; i < this.len - 1; i++) if (this.dist(i, i + 1) > REPLAY.motionBits) motion++;
-    const needMotion = !this.replayOpen;
-    if (needMotion && motion < REPLAY.minMotionTransitions) {
+    for (let i = q0; i < this.len - 1; i++) motion += Math.max(0, this.dist(i, i + 1) - floor - 1);
+    if (!this.replayOpen && motion < REPLAY.minMotionBits) {
       this.streak = 0;
       return;
     }
+    // Candidate recent frames per query position (phase tolerance).
+    const near: { hi: number; lo: number }[][] = [];
+    for (let k = 0; k < Q; k++) {
+      const qt = this.time(q0 + k);
+      near.push(this.recent.filter((r) => Math.abs(r.t - qt) <= REPLAY.phaseTolMs));
+    }
+    if (near.some((n) => n.length === 0)) return;
+    const cap = REPLAY.capacity;
+    const dk = (j: number, k: number): number => {
+      const a = (this.head + j + k) % cap;
+      const hi = this.hi[a];
+      const lo = this.lo[a];
+      let m = 64;
+      for (const r of near[k]) {
+        const d = popcount32((hi ^ r.hi) >>> 0) + popcount32((lo ^ r.lo) >>> 0);
+        if (d < m) m = d;
+      }
+      return m;
+    };
+    // Total distance of every eligible earlier alignment.
     const latestStart = this.time(q0) - REPLAY.minLagMs;
-    let found = -1;
-    // Most recent earlier run first.
+    const totals: { j: number; total: number; worst: number }[] = [];
     for (let j = q0 - Q; j >= 0; j--) {
       if (this.time(j) > latestStart) continue;
-      let ok = true;
-      for (let i = 0; i < Q; i++) {
-        if (this.dist(j + i, q0 + i) > REPLAY.matchBits) {
-          ok = false;
-          break;
-        }
+      let total = 0;
+      let worst = 0;
+      for (let k = 0; k < Q; k++) {
+        const d = dk(j, k);
+        total += d;
+        if (d > worst) worst = d;
       }
-      if (ok) {
-        found = j;
-        break;
-      }
+      totals.push({ j, total, worst });
     }
-    if (found < 0) {
+    let best: { j: number; total: number; worst: number } | null = null;
+    for (const c of totals) if (c.worst <= matchThr && (!best || c.total < best.total)) best = c;
+    if (!best) {
       this.streak = 0;
       return;
     }
-    this.lagMs = this.time(q0) - this.time(found);
+    if (!this.replayOpen) {
+      // Discrimination: exclude alignments at multiples of the lag (other loop iterations).
+      const lag = q0 - best.j;
+      const others = totals
+        .filter((c) => {
+          const l = q0 - c.j;
+          const n = Math.max(1, Math.round(l / lag));
+          return Math.abs(l - n * lag) > 2;
+        })
+        .map((c) => c.total)
+        .sort((a, b) => a - b);
+      const ref = others.length >= 10 ? others[Math.floor(others.length * 0.1)] : null;
+      if (ref === null || best.total > REPLAY.discrimination * ref || ref - best.total < REPLAY.minMarginBits) {
+        this.streak = 0;
+        return;
+      }
+      // Consecutive confirmations must agree on the lag (±1 sample).
+      const lagSamples = q0 - best.j;
+      if (this.streak > 0 && Math.abs(lagSamples - this.streakLag) > 1) this.streak = 0;
+      this.streakLag = lagSamples;
+    }
+    this.lagMs = this.time(q0) - this.time(best.j);
     this.lastMatch = t;
     this.matches++;
     if (this.replayOpen) {

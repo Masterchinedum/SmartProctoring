@@ -288,6 +288,14 @@ export function MonitoringLine({ s }: { s: SessionSummaryDTO }) {
   if (s.status === 'invited' || s.status === 'ready') return <div className="sc-monitor muted">{s.status === 'ready' ? 'Check-in passed — not started yet' : 'Has not started the readiness check'}</div>;
   if (!m) return <div className="sc-monitor muted">No monitoring status received yet</div>;
   const stale = now - m.at > 15_000;
+  if (s.connection !== 'online') {
+    return (
+      <div className="sc-monitor muted">
+        <span className="mon-dot mon-dot-off" aria-hidden />
+        Not reporting — last status “{m.label || 'Monitoring'}” {formatDuration(now - m.at)} ago
+      </div>
+    );
+  }
   return (
     <div className={`sc-monitor mon-${m.state}`}>
       <span className={`mon-dot mon-dot-${m.state}`} aria-hidden />
@@ -364,7 +372,7 @@ function FlagsFeed({ events, flash }: { events: LiveEventDTO[]; flash: Set<strin
                 className={`feed-item feed-${e.category}${flash.has(e.id) ? ' flash' : ''}`}
                 onClick={() => navigate(`/admin/sessions/${e.sessionId}?event=${encodeURIComponent(e.id)}`)}
               >
-                <EvidenceImage evidence={e.evidence.find((x) => x.kind === 'event_screenshot') ?? e.evidence[0] ?? null} size="thumb" alt="" />
+                {e.evidence.length ? <EvidenceImage evidence={e.evidence.find((x) => x.kind === 'event_screenshot') ?? e.evidence[0]} size="thumb" alt="" /> : null}
                 <div className="feed-body">
                   <div className="feed-title">
                     <CategoryBadge category={e.category} />

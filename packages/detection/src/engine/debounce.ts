@@ -41,12 +41,20 @@ export class Debouncer {
   private runTrue = 0;
   private runTotal = 0;
   private scoreSum = 0;
+  /** Run statistics are kept readable until the next step after a clear (for the close description). */
+  private pendingReset = false;
 
   constructor(public p: DebounceParams) {
     this.win = new TickWindow(32);
   }
 
+  /** No episode and no run building (a finished run counts as idle). */
+  get idle(): boolean {
+    return !this.active && (this.runStart === null || this.pendingReset);
+  }
+
   step(t: number, v: boolean | null, score = 1): DebounceEvent {
+    if (this.pendingReset) this.resetRun();
     this.lastFeed = t;
     const p = this.p;
     if (!this.active) {
@@ -91,7 +99,7 @@ export class Debouncer {
     if (t - this.firstOff >= p.clearMs) {
       const endedAt = this.firstOff;
       this.active = false;
-      this.resetRun();
+      this.pendingReset = true;
       return { kind: 'clear', endedAt };
     }
     return null;
@@ -105,13 +113,13 @@ export class Debouncer {
     if (!this.active || t - this.lastFeed < maxSilenceMs) return null;
     const endedAt = this.firstOff ?? this.lastTrue;
     this.active = false;
-    this.resetRun();
+    this.pendingReset = true;
     return { kind: 'clear', endedAt };
   }
 
   /** Time the pending/ongoing run has lasted (0 when idle without a run). */
   runDuration(t: number): number {
-    return this.runStart === null ? 0 : t - this.runStart;
+    return this.runStart === null || this.pendingReset ? 0 : t - this.runStart;
   }
 
   /** Fraction of assessable ticks in the current run where the condition held. */
@@ -147,6 +155,7 @@ export class Debouncer {
   }
 
   private resetRun(): void {
+    this.pendingReset = false;
     this.runStart = null;
     this.firstOff = null;
     this.lastTrue = -Infinity;

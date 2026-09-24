@@ -5,10 +5,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CATEGORY_LABELS, EVENT_CATALOG, type EventDTO, type EvidenceRefDTO, type NoteDTO, type ReviewStatus } from '@sp/shared';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { applyEvent, qk } from '../api/queries';
-import { formatDateTime, formatPercent, humanizeKey } from '../lib/format';
-import { contextLabel, SOURCE_LABELS } from '../lib/labels';
+import { formatDateTime, formatPercent } from '../lib/format';
+import { contextLabel, PERIOD_LABELS, SOURCE_LABELS, TRIGGER_LABELS } from '../lib/labels';
 import { CategoryBadge, ReviewBadge, SeverityBadge } from './Badges';
-import { EmptyState, ErrorState, KeyValueTable, Loading } from './Common';
+import { ErrorState, KeyValueTable, Loading } from './Common';
 import { EvidenceImage } from './EvidenceImage';
 import { Lightbox, type LightboxItem } from './Lightbox';
 import { Clock, LiveDuration, RelativeTime } from './Time';
@@ -151,7 +151,15 @@ export function ConfidenceBar({ value }: { value: number }) {
 
 export function EventContext({ context }: { context: Record<string, unknown> }) {
   const precededBy = Array.isArray(context.precededBy) ? (context.precededBy as unknown[]).map(String) : [];
-  const rest = Object.fromEntries(Object.entries(context).filter(([k]) => k !== 'precededBy'));
+  const rest = Object.fromEntries(
+    Object.entries(context)
+      .filter(([k]) => k !== 'precededBy')
+      .map(([k, v]) => {
+        if (k === 'trigger' && typeof v === 'string') return [k, (TRIGGER_LABELS as Record<string, string>)[v] ?? v];
+        if (k === 'periodKind' && typeof v === 'string') return ['during', (PERIOD_LABELS as Record<string, string>)[v] ?? v];
+        return [k, v];
+      }),
+  );
   if (precededBy.length === 0 && Object.keys(rest).length === 0) return <div className="muted small">No surrounding context recorded.</div>;
   return (
     <div className="stack">
@@ -237,6 +245,10 @@ export function ReviewPanel({ event }: { event: EventDTO }) {
           </button>
         ))}
       </div>
+      <div className="muted small">
+        <strong>Reviewed</strong>: you checked the evidence and the observation stands. <strong>Dismissed</strong>: a false positive (e.g. a poster detected as a
+        face). Neither is a finding of misconduct.
+      </div>
       {m.isError ? <div className="banner banner-danger">{errorMessage(m.error)}</div> : null}
     </div>
   );
@@ -295,9 +307,3 @@ export function NoteList({ notes, empty, showEventLink }: { notes: NoteDTO[]; em
     </ul>
   );
 }
-
-export function EmptyEvents() {
-  return <EmptyState title="No events match these filters" />;
-}
-
-export { humanizeKey };

@@ -209,7 +209,7 @@ export function ContactLine() {
   if (!contact) return null;
   return (
     <p className="muted small">
-      Need help? Contact your exam administrator: <strong>{contact}</strong>
+      Questions or problems? Contact <strong>{contact}</strong>.
     </p>
   );
 }

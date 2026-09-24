@@ -5,7 +5,6 @@
 import {
   ACCESS_LINK_PATH,
   clockRemainingMs,
-  EVENT_CATALOG,
   type EventDTO,
   type EvidenceRefDTO,
   type ExamClock,
@@ -137,7 +136,6 @@ export function toEventDTO(
 ): EventDTO {
   const startedAt = msReq(row.startedAt);
   const endedAt = ms(row.endedAt);
-  const catalog = EVENT_CATALOG[row.type];
   return {
     id: row.id,
     sessionId: row.sessionId,
@@ -151,7 +149,7 @@ export function toEventDTO(
     startedAt,
     endedAt,
     durationMs: endedAt != null ? Math.max(0, endedAt - startedAt) : null,
-    confidence: row.confidence ?? (catalog?.span ? null : null),
+    confidence: row.confidence ?? null,
     details: row.details ?? {},
     context: row.context ?? {},
     evidence: (extra.evidence ?? []).slice().sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime()).map(toEvidenceRefDTO),
@@ -387,6 +385,7 @@ export function toSessionSummaryDTO(
     pendingPauseRequest: input.pendingPauseRequest ? toPauseRequestDTO(input.pendingPauseRequest) : null,
     hold: toHoldDTO(s),
     accessLink: accessLinkFor(ctx, s),
+    legalHold: s.legalHold,
   };
 }
 

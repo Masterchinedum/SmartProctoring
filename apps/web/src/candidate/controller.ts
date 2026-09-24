@@ -67,6 +67,8 @@ export interface ControllerSnapshot {
   timeUp: boolean;
   /** Local time we observed the pause (for the paused screen). */
   pausedAtLocal: number | null;
+  /** Reason the candidate gave for a pause requested from this browser. */
+  pauseReasonLocal: string | null;
   answersReady: boolean;
 }
 
@@ -74,6 +76,7 @@ type Listener = () => void;
 
 const BASELINE_KEY = (sessionId: string) => `sp:baseline:${sessionId}`;
 const PAUSED_AT_KEY = (sessionId: string) => `sp:pausedAt:${sessionId}`;
+const PAUSE_REASON_KEY = (sessionId: string) => `sp:pauseReason:${sessionId}`;
 
 function lsGet<T>(key: string): T | null {
   try {
@@ -148,6 +151,7 @@ export class CandidateController {
       toasts: [],
       timeUp: false,
       pausedAtLocal: null,
+      pauseReasonLocal: null,
       answersReady: false,
     };
     this.camera.subscribe((c) => this.patch({ camera: c }));
@@ -251,16 +255,22 @@ export class CandidateController {
     const prev = this.snap.state;
     const sid = state.session.id;
     let pausedAtLocal = this.snap.pausedAtLocal;
+    let pauseReasonLocal = this.snap.pauseReasonLocal;
     if (state.session.status === 'paused') {
       if (prev?.session.status === 'active' || pausedAtLocal == null) {
         pausedAtLocal = prev?.session.status === 'active' ? Date.now() : (lsGet<number>(PAUSED_AT_KEY(sid)) ?? null);
         if (pausedAtLocal) lsSet(PAUSED_AT_KEY(sid), pausedAtLocal);
       }
-    } else if (state.session.status === 'active') {
+      pauseReasonLocal = lsGet<string>(PAUSE_REASON_KEY(sid));
+    } else if (state.session.status === 'active' && state.session.pauseRequest?.status !== 'pending') {
       pausedAtLocal = null;
-      lsSet(PAUSED_AT_KEY(sid), null);
+      pauseReasonLocal = null;
+      if (prev?.session.status === 'paused') {
+        lsSet(PAUSED_AT_KEY(sid), null);
+        lsSet(PAUSE_REASON_KEY(sid), null);
+      }
     }
-    this.patch({ state, pausedAtLocal, timeUp: false });
+    this.patch({ state, pausedAtLocal, pauseReasonLocal, timeUp: false });
 
     await this.ensureOutbox(sid);
     if (state.questions && (state.session.status === 'active' || state.session.status === 'paused' || state.session.status === 'on_hold')) {
@@ -581,6 +591,7 @@ export class CandidateController {
     if (!s) throw new Error('No session');
     const needsApproval = s.exam.policy.pause.requireApproval;
     await this.answers?.flushPending();
+    lsSet(PAUSE_REASON_KEY(s.session.id), reason?.trim() || null);
     if (!needsApproval) {
       await this.stopMonitoring('pause', { flush: true, stopCamera: false });
     } else {

@@ -40,7 +40,7 @@ export class MultiplePeopleDetector {
   step(ctx: TickContext): void {
     if (!this.host.policy.enabled.multiplePeople) return;
     const t = ctx.t;
-    if (!this.open && !this.faces.active && !this.persons.active && this.faces.runStart === null && this.persons.runStart === null) {
+    if (!this.open && this.faces.idle && this.persons.idle) {
       this.maxFaces = 0;
       this.maxPersons = 0;
     }
@@ -203,7 +203,7 @@ export class ObstructionDetector {
       }
     }
     if (v && reason) {
-      if (!this.span.deb.active && this.span.deb.runStart === null) {
+      if (this.span.deb.idle) {
         this.counts = { cut_off: 0, low_visibility: 0, person_without_face: 0 };
         this.minVis = 1;
       }

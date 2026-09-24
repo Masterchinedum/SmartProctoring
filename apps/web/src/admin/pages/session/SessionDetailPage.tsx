@@ -105,7 +105,7 @@ function findCachedEvent(timeline: { items: TimelineItemDTO[] } | undefined, eve
 function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: number }) {
   const s = d.summary;
   const terminal = s.status === 'submitted' || s.status === 'terminated';
-  const legalHold = (s as { legalHold?: boolean }).legalHold;
+  const legalHold = s.legalHold;
   return (
     <div className="card session-header">
       <div className="sh-top">

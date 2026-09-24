@@ -23,8 +23,9 @@ const ARTICLE: Record<string, string> = { book: 'a book', laptop: 'a laptop', tv
  * phone_detected ('cell phone' ≥ phoneMinConfidence) and unauthorized_object ('book', 'laptop', 'tv'
  * ≥ objectMinConfidence; one episode per label). The object detector runs at ~1 Hz: only ticks where
  * it ran (obs.objects !== null) are counted — other ticks are neither presence nor absence. Onset needs
- * the object in ≥ 60% of detector ticks over ≥ objectPersistSec with ≥ 2 hits (a single-frame false
- * detection never flags; one missed detection inside an episode is tolerated). If the detector stops
+ * the object in ≥ 60% of detector ticks over ≥ objectPersistSec with ≥ 3 hits (isolated one-frame false
+ * detections never flag, even two of them a couple of seconds apart; one missed detection inside an
+ * episode is tolerated). If the detector stops
  * running for 6 s the open episode is closed at the last observation.
  */
 export class ObjectDetector {
@@ -32,7 +33,7 @@ export class ObjectDetector {
 
   constructor(private host: DetectorHost) {
     const p = host.policy;
-    const params = { onsetMs: p.objectPersistSec * 1000, clearMs: Math.max(p.clearSec * 1000, 2500), minFraction: 0.6, gapTolMs: 2500, minTicks: 2 };
+    const params = { onsetMs: p.objectPersistSec * 1000, clearMs: Math.max(p.clearSec * 1000, 2500), minFraction: 0.6, gapTolMs: 2500, minTicks: 3 };
     const make = (label: string, type: EventType, key: string, minScore: () => number): Tracked => {
       const tr: Tracked = {
         label,
@@ -89,10 +90,10 @@ export class ObjectDetector {
       const v = ctx.visionOk ? best > 0 : null;
       const sp = tr.span;
       if (v !== null) {
-        if (!sp.deb.active && sp.deb.runStart === null && v) {
+        if (sp.deb.idle && v) {
           tr.maxScore = tr.sumScore = tr.hits = tr.ticks = 0;
         }
-        if (sp.deb.active || sp.deb.runStart !== null || v) tr.ticks++;
+        if (!sp.deb.idle || v) tr.ticks++;
         if (v) {
           tr.hits++;
           tr.sumScore += best;

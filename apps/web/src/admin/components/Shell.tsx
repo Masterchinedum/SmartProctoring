@@ -69,9 +69,10 @@ export function Shell({ children }: { children: ReactNode }) {
           <div className="user-name" title={user.email}>
             {user.name}
           </div>
-          <div className="muted small">
-            {ROLE_LABELS[user.role]} · {user.email}
+          <div className="muted small user-email" title={user.email}>
+            {user.email}
           </div>
+          <div className="muted small">{ROLE_LABELS[user.role]}</div>
           <button type="button" className="btn btn-sm" onClick={logout} disabled={loggingOut}>
             {loggingOut ? 'Signing out…' : 'Sign out'}
           </button>
@@ -105,7 +106,7 @@ export function LiveBanner() {
   return (
     <div className="banner banner-warning live-banner no-print" role="status">
       <span className="pulse-dot warn" aria-hidden />
-      Live updates disconnected — retrying{secs != null && secs > 0 ? ` in ${secs}s` : '…'} Data shown may be out of date.
+      Live updates disconnected — retrying{secs != null && secs > 0 ? ` in ${secs}s.` : '…'} Data shown may be out of date.
       <button type="button" className="btn btn-sm" onClick={reconnectNow}>
         Retry now
       </button>

@@ -34,6 +34,7 @@ import {
   checkFrames,
   checks,
   deviceRecords,
+  events,
   evidence,
   examSessions,
   exams,
@@ -134,17 +135,25 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
     const other = s.lastHeartbeatInstanceId && s.lastHeartbeatInstanceId !== instanceId ? s.lastHeartbeatInstanceId : null;
     const otherLive = other && s.lastHeartbeatAt && m.now - s.lastHeartbeatAt.getTime() <= timeoutMs && ['ready', 'active', 'paused', 'on_hold'].includes(s.status);
     if (otherLive) {
-      await m.addEvent({
-        type: 'multiple_instances',
-        details: {
-          previousInstanceId: other,
-          newInstanceId: instanceId,
+      // A different device/browser while the other one is live => recorded now. The same device is most
+      // likely a page reload; it is recorded only if the old window proves to be alive (see heartbeat()).
+      const [prevDevice] = await m.tx
+        .select({ userAgent: deviceRecords.userAgent, cameraIdHash: deviceRecords.cameraIdHash })
+        .from(deviceRecords)
+        .where(and(eq(deviceRecords.sessionId, s.id), eq(deviceRecords.clientInstanceId, other)))
+        .orderBy(desc(deviceRecords.at))
+        .limit(1);
+      const differentDevice =
+        !prevDevice || prevDevice.userAgent !== (body.device.userAgent ?? '') || (!!prevDevice.cameraIdHash && !!body.device.cameraIdHash && prevDevice.cameraIdHash !== body.device.cameraIdHash);
+      if (differentDevice) {
+        await recordMultipleInstances(m, other, instanceId, {
           purpose: required,
           previousLastHeartbeatAt: s.lastHeartbeatAt!.getTime(),
           cameraLabel: body.device.cameraLabel,
           userAgent: body.device.userAgent,
-        },
-      });
+          detectedBy: 'different_device',
+        });
+      }
     }
     for (const target of new Set([s.activeInstanceId, other].filter((x): x is string => !!x && x !== instanceId))) {
       await m.enqueueCommand({ kind: 'superseded', message: SUPERSEDED_MESSAGE }, target);
@@ -199,6 +208,17 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
       frontalFramesRequired: frontalFramesRequired(required),
     };
   });
+}
+
+/** Record a multiple_instances observation once per superseded instance. */
+export async function recordMultipleInstances(m: SessionMutation, previousInstanceId: string, newInstanceId: string, details: Record<string, unknown>): Promise<void> {
+  const [dup] = await m.tx
+    .select({ id: events.id })
+    .from(events)
+    .where(and(eq(events.sessionId, m.session.id), eq(events.type, 'multiple_instances'), sql`${events.details}->>'previousInstanceId' = ${previousInstanceId}`))
+    .limit(1);
+  if (dup) return;
+  await m.addEvent({ type: 'multiple_instances', details: { previousInstanceId, newInstanceId, ...details } });
 }
 
 /* =================================================================== frames */
@@ -540,6 +560,7 @@ async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string
     });
     if (why.identity) await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, why.identity.id));
     await holdNow(m, { reason: 'identity_unverifiable', details: { purpose: check.purpose, attempts: used } });
+    if (check.purpose !== 'initial') m.set({ verifiedInstanceId: a.instanceId });
     return { outcome: 'held', message: m.session.holdMessage ?? '', guidance: why.guidance, identity: why.identity, idPhoto: null, attemptsRemaining: 0 };
   }
   return { outcome: 'retry', message: why.message, guidance: why.guidance, identity: why.identity, idPhoto: null, attemptsRemaining: max - used };
@@ -855,7 +876,8 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     if (policy.identity.onMismatch === 'hold_for_review') {
       await closeGapPeriods(a, { checkStart, pauseStart, gapStart });
       await holdNow(m, { reason: 'identity_mismatch', source: 'server_identity', details: { eventId: ev.id, purpose } });
-      m.set({ verifiedInstanceId: null });
+      // The person staff will review is at this browser: if staff release without a fresh check, it continues here.
+      m.set({ verifiedInstanceId: a.instanceId });
       return { outcome: 'held', message: m.session.holdMessage ?? '', guidance: [], identity: idRow, idPhoto: null, attemptsRemaining: 0 };
     }
     // flag_only: the observation is recorded; the exam continues.

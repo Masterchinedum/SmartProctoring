@@ -330,7 +330,7 @@ export class MonitoringRuntime {
           this.deps.onFatal?.(kind);
           return;
         }
-        if (kind === 'client') return; // rejected (e.g. unusable image) — nothing to retry
+        if (kind === 'client' || kind === 'invalid_state') return; // refused in this state / unusable — nothing to retry
         // Offline or server trouble: keep it for later delivery with its original timestamp.
         await this.deps.outbox.putSample({ id: sampleId, trigger, capturedAt, jpeg: blob });
       }

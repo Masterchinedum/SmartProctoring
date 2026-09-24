@@ -80,7 +80,7 @@ disconnect if `disconnectTimerBehavior='continue'`).
    landmarks (|yaw| ≤ 25°), cut-off. Failing ⇒ `unable_to_verify` + guidance strings.
 3. Similarity-transform align to 112×112 (ArcFace 5-point template) → SFace → L2-normalised 128-d.
 4. Compare to reference = **max cosine similarity** over the reference embeddings.
-   Thresholds (org-configurable, `DEFAULT_IDENTITY_THRESHOLDS`): `≥0.40 match`, `<0.28 mismatch`, else `inconclusive`.
+   Thresholds (org-configurable, `DEFAULT_IDENTITY_THRESHOLDS`): `≥0.45 match`, `<0.28 mismatch`, else `inconclusive` (ID photo: `≥0.42` / `<0.24`). Calibration: docs/accuracy/identity.md.
 5. **Decision aggregation** (active exam): one mismatch ⇒ ask the client for a follow-up sample
    (`followUpInMs`); `mismatchConfirmations` (2) consecutive quality mismatches ⇒ open
    `identity_mismatch` event (integrity, high) with probe + reference evidence and context

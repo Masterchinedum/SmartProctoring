@@ -20,7 +20,9 @@ import { authRoutes } from './routes/auth.js';
 import { candidateRoutes } from './routes/candidate/index.js';
 import { publicRoutes } from './routes/public.js';
 import { bootstrapAdmin } from './services/bootstrap.js';
-import { startSweeper, type Sweeper } from './jobs/sweeper.js';
+import { JobRunner } from './jobs/runner.js';
+import { sweeperJob } from './jobs/sweeper.js';
+import { DEFAULT_RETENTION_INTERVAL_MS, runRetentionExclusive } from './services/retention.js';
 import type { VisionService } from './vision/types.js';
 
 export interface BuildAppOptions {
@@ -70,7 +72,19 @@ const CSP = [
 export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInstance> {
   const config = opts.config ?? loadConfig();
   const app = Fastify({
-    logger: opts.logger ?? { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie'] },
+    logger: opts.logger ?? {
+      level: config.logLevel,
+      redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-client-instance"]'],
+      serializers: {
+        // Never log candidate access tokens (e.g. /api/public/privacy-notice?token=...).
+        req: (req: { method: string; url: string; hostname?: string; ip?: string }) => ({
+          method: req.method,
+          url: req.url.replace(/([?&]token=)[^&]+/i, '$1[redacted]'),
+          host: req.hostname,
+          remoteAddress: req.ip,
+        }),
+      },
+    },
     trustProxy: config.trustProxy,
     bodyLimit: 2 * 1024 * 1024,
     genReqId: () => Math.random().toString(36).slice(2, 12),
@@ -100,8 +114,23 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     bus,
     now: opts.now ?? (() => Date.now()),
     log: app.log,
-  } as Omit<Ctx, 'live'> as Ctx;
+  } as Omit<Ctx, 'live' | 'jobs'> as Ctx;
   ctx.live = new LiveNotifier(ctx);
+  ctx.jobs = new JobRunner(ctx);
+  ctx.jobs.register(sweeperJob(config.sweeperIntervalMs));
+  // Hourly evidence / event-metadata retention (services/retention.ts). Also runnable via `retention:run`.
+  ctx.jobs.register({
+    name: 'retention',
+    intervalMs: DEFAULT_RETENTION_INTERVAL_MS,
+    runAtStart: true,
+    async run(c) {
+      const summary = await runRetentionExclusive(c);
+      if (summary && (summary.sessionsEvidencePurged || summary.sessionsEventMetadataPurged || summary.failures.length)) {
+        const { sessions: _omit, ...rest } = summary;
+        c.log.info({ retention: rest }, 'retention run completed');
+      }
+    },
+  });
   app.decorate('ctx', ctx);
   app.decorateRequest('staff', null);
 
@@ -136,7 +165,10 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     if (err instanceof ZodError) {
       return reply.status(400).send({ error: 'validation_failed', message: 'Request validation failed', details: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
     }
-    const e = err as { statusCode?: number; code?: string; message: string; error?: string };
+    const e = err as { statusCode?: number; code?: string; message: string; error?: string; name?: string };
+    if (e.name === 'VisionInputError') return reply.status(400).send({ error: 'invalid_image', message: 'The image could not be read. Please try again.' });
+    if (e.name === 'VisionBusyError') return reply.status(503).header('Retry-After', '2').send({ error: 'vision_busy', message: 'The server is busy analysing images. Please retry in a moment.' });
+    if (e.code === 'FST_ERR_CTP_EMPTY_JSON_BODY') return reply.status(400).send({ error: 'validation_failed', message: 'Request body is required' });
     if (e.statusCode === 429) return reply.status(429).send({ error: 'rate_limited', message: e.message });
     if (e.code === 'FST_ERR_CTP_BODY_TOO_LARGE' || e.statusCode === 413) return reply.status(413).send({ error: 'payload_too_large', message: 'Request body is too large' });
     if (e.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE' || e.statusCode === 415) return reply.status(415).send({ error: 'unsupported_media_type', message: e.message });
@@ -158,6 +190,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       root: config.webDistDir,
       index: false,
       wildcard: true,
+      cacheControl: false,
       setHeaders(res, path) {
         if (path.includes(`${join('/', 'assets', '/')}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
         else if (path.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
@@ -178,16 +211,15 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     return reply.sendFile('index.html');
   });
 
-  let sweeper: Sweeper | null = null;
   if (opts.bootstrap !== false) await bootstrapAdmin(ctx);
   if (opts.jobs ?? config.sweeperEnabled) {
     app.addHook('onReady', async () => {
-      sweeper = startSweeper(ctx);
+      ctx.jobs.start();
     });
   }
 
   app.addHook('onClose', async () => {
-    sweeper?.stop();
+    await ctx.jobs.stop();
     ctx.live.close();
     await owned.bus?.close();
     await owned.vision?.close();
