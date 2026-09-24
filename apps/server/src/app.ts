@@ -1,0 +1,199 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import fastifyCookie from '@fastify/cookie';
+import fastifyRateLimit from '@fastify/rate-limit';
+import fastifyStatic from '@fastify/static';
+import fastifyWebsocket from '@fastify/websocket';
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import { ZodError } from 'zod';
+import { loadConfig, type Config } from './config.js';
+import type { Ctx } from './context.js';
+import { createDatabase, migrate, type Database } from './db/index.js';
+import { createKeyring } from './lib/crypto.js';
+import { HttpError } from './lib/errors.js';
+import { createStorage, type BlobStorage } from './lib/storage.js';
+import { createBus, type RealtimeBus } from './realtime/bus.js';
+import { liveRoute } from './realtime/live-route.js';
+import { LiveNotifier } from './realtime/notifier.js';
+import { adminRoutes } from './routes/admin/index.js';
+import { authRoutes } from './routes/auth.js';
+import { candidateRoutes } from './routes/candidate/index.js';
+import { publicRoutes } from './routes/public.js';
+import { bootstrapAdmin } from './services/bootstrap.js';
+import { startSweeper, type Sweeper } from './jobs/sweeper.js';
+import type { VisionService } from './vision/types.js';
+
+export interface BuildAppOptions {
+  config?: Config;
+  /** Existing database (pool + drizzle). Created from config.databaseUrl when omitted (and closed with the app). */
+  database?: Database;
+  vision?: VisionService;
+  storage?: BlobStorage;
+  bus?: RealtimeBus;
+  /** Clock override (tests). */
+  now?: () => number;
+  /** Fastify logger option (default: pino at config.logLevel). */
+  logger?: FastifyServerOptions['logger'];
+  /** Apply migrations at startup (default true). */
+  migrate?: boolean;
+  /** Start background jobs (default config.sweeperEnabled). */
+  jobs?: boolean;
+  /** Create the bootstrap owner from BOOTSTRAP_ADMIN_* when no staff exist (default true). */
+  bootstrap?: boolean;
+  /** Serve the web app from config.webDistDir (default true). */
+  serveWeb?: boolean;
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    ctx: Ctx;
+  }
+}
+
+export const JPEG_BODY_LIMIT = 1024 * 1024;
+
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' blob: data:",
+  "media-src 'self' blob: mediastream:",
+  "connect-src 'self' ws: wss: blob: data:",
+  "worker-src 'self' blob:",
+  "font-src 'self' data:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInstance> {
+  const config = opts.config ?? loadConfig();
+  const app = Fastify({
+    logger: opts.logger ?? { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie'] },
+    trustProxy: config.trustProxy,
+    bodyLimit: 2 * 1024 * 1024,
+    genReqId: () => Math.random().toString(36).slice(2, 12),
+  });
+  for (const w of config.warnings) app.log.warn(w);
+
+  const owned: { database?: Database; vision?: VisionService; bus?: RealtimeBus; storage?: BlobStorage } = {};
+  const database = opts.database ?? (owned.database = createDatabase(config.databaseUrl));
+  if (opts.migrate !== false) await migrate(database);
+
+  let vision = opts.vision;
+  if (!vision) {
+    const { createVisionService } = await import('./vision/index.js');
+    vision = owned.vision = await createVisionService({ modelsDir: config.modelsDir, concurrency: config.visionConcurrency || undefined });
+  }
+  const storage = opts.storage ?? (owned.storage = createStorage(config.storage));
+  const bus = opts.bus ?? (owned.bus = await createBus(config.redisUrl, (err) => app.log.error({ err }, 'redis bus error')));
+  const keyring = createKeyring(config.evidenceKey, config.evidenceKeysOld);
+
+  const ctx = {
+    config,
+    database,
+    db: database.db,
+    vision,
+    storage,
+    keyring,
+    bus,
+    now: opts.now ?? (() => Date.now()),
+    log: app.log,
+  } as Omit<Ctx, 'live'> as Ctx;
+  ctx.live = new LiveNotifier(ctx);
+  app.decorate('ctx', ctx);
+  app.decorateRequest('staff', null);
+
+  await app.register(fastifyCookie, { secret: config.sessionSecret });
+  await app.register(fastifyRateLimit, {
+    global: false,
+    ...(config.redisUrl ? {} : {}),
+    errorResponseBuilder: (_req, context) => ({
+      statusCode: 429,
+      error: 'rate_limited',
+      message: `Too many requests. Try again in ${Math.ceil(context.ttl / 1000)} s.`,
+    }),
+  });
+  await app.register(fastifyWebsocket, { options: { maxPayload: 64 * 1024 } });
+
+  app.addContentTypeParser(['image/jpeg', 'image/jpg'], { parseAs: 'buffer', bodyLimit: JPEG_BODY_LIMIT }, (_req, body, done) => done(null, body));
+
+  app.addHook('onSend', async (req, reply, payload) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('Referrer-Policy', 'no-referrer');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('Cross-Origin-Opener-Policy', 'same-origin');
+    reply.header('Permissions-Policy', 'camera=(self), microphone=(), geolocation=(), payment=(), usb=()');
+    reply.header('Content-Security-Policy', CSP);
+    if (config.cookieSecure) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    if (req.url.startsWith('/api/') && !reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
+    return payload;
+  });
+
+  app.setErrorHandler((err, req, reply) => {
+    if (err instanceof HttpError) return reply.status(err.statusCode).send(err.toBody());
+    if (err instanceof ZodError) {
+      return reply.status(400).send({ error: 'validation_failed', message: 'Request validation failed', details: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
+    }
+    const e = err as { statusCode?: number; code?: string; message: string; error?: string };
+    if (e.statusCode === 429) return reply.status(429).send({ error: 'rate_limited', message: e.message });
+    if (e.code === 'FST_ERR_CTP_BODY_TOO_LARGE' || e.statusCode === 413) return reply.status(413).send({ error: 'payload_too_large', message: 'Request body is too large' });
+    if (e.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE' || e.statusCode === 415) return reply.status(415).send({ error: 'unsupported_media_type', message: e.message });
+    if (e.statusCode && e.statusCode >= 400 && e.statusCode < 500) return reply.status(e.statusCode).send({ error: e.code ?? 'bad_request', message: e.message });
+    req.log.error({ err }, 'unhandled error');
+    return reply.status(500).send({ error: 'internal_error', message: 'An unexpected error occurred' });
+  });
+
+  await app.register(publicRoutes, { prefix: '/api' });
+  await app.register(authRoutes, { prefix: '/api/auth' });
+  await app.register(candidateRoutes, { prefix: '/api/candidate' });
+  await app.register(liveRoute);
+  await app.register(adminRoutes, { prefix: '/api/admin' });
+
+  const webIndex = join(config.webDistDir, 'index.html');
+  const serveWeb = opts.serveWeb !== false && existsSync(webIndex);
+  if (serveWeb) {
+    await app.register(fastifyStatic, {
+      root: config.webDistDir,
+      index: false,
+      wildcard: true,
+      setHeaders(res, path) {
+        if (path.includes(`${join('/', 'assets', '/')}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        else if (path.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+        else res.setHeader('Cache-Control', 'public, max-age=86400');
+      },
+    });
+  } else if (opts.serveWeb !== false) {
+    app.log.info(`web app not found at ${config.webDistDir} (build apps/web to serve it from this server)`);
+  }
+
+  app.setNotFoundHandler((req, reply) => {
+    const path = req.url.split('?')[0];
+    if (path.startsWith('/api/') || path === '/api' || !serveWeb || (req.method !== 'GET' && req.method !== 'HEAD')) {
+      return reply.status(404).send({ error: 'not_found', message: `Route ${req.method} ${path} not found` });
+    }
+    // SPA fallback: client-side routes (/take/:token, /admin/...) get index.html.
+    reply.header('Cache-Control', 'no-cache');
+    return reply.sendFile('index.html');
+  });
+
+  let sweeper: Sweeper | null = null;
+  if (opts.bootstrap !== false) await bootstrapAdmin(ctx);
+  if (opts.jobs ?? config.sweeperEnabled) {
+    app.addHook('onReady', async () => {
+      sweeper = startSweeper(ctx);
+    });
+  }
+
+  app.addHook('onClose', async () => {
+    sweeper?.stop();
+    ctx.live.close();
+    await owned.bus?.close();
+    await owned.vision?.close();
+    await owned.storage?.close?.();
+    await owned.database?.close();
+  });
+
+  return app;
+}

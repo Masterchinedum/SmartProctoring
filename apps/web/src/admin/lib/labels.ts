@@ -1,0 +1,186 @@
+import {
+  EVENT_CATALOG,
+  type ConnectionStatus,
+  type EndReason,
+  type EventCategory,
+  type EventSource,
+  type EventType,
+  type HoldReason,
+  type IdentityCheckTrigger,
+  type IdentityDecision,
+  type PeriodKind,
+  type QualityIssue,
+  type ReviewStatus,
+  type SessionStatus,
+  type Severity,
+  type StaffRole,
+} from '@sp/shared';
+import { humanizeKey } from './format';
+
+/** Staff-facing wording. Observational, never accusatory. */
+
+export const STATUS_LABELS: Record<SessionStatus, string> = {
+  invited: 'Invited',
+  ready: 'Ready to start',
+  active: 'Active',
+  paused: 'Paused',
+  on_hold: 'On hold',
+  submitted: 'Submitted',
+  terminated: 'Terminated',
+};
+
+export const CONNECTION_LABELS: Record<ConnectionStatus, string> = {
+  online: 'Online',
+  offline: 'Disconnected',
+  never_connected: 'Not connected yet',
+};
+
+export const DECISION_LABELS: Record<IdentityDecision, string> = {
+  match: 'Same person',
+  mismatch: 'Possible different person',
+  inconclusive: 'Inconclusive',
+  unable_to_verify: 'Could not verify (image quality)',
+};
+
+export const DECISION_HELP: Record<IdentityDecision, string> = {
+  match: 'The face matched the protected identity reference.',
+  mismatch: 'The image was clear enough to compare and the face was not similar to the reference. This is an observation for human review, not a conclusion.',
+  inconclusive: 'The image was usable but the similarity was in the grey zone between the match and mismatch thresholds.',
+  unable_to_verify: 'The image was not clear enough for a dependable comparison (e.g. lighting, distance, blur, angle). This is NOT evidence of a different person.',
+};
+
+export const TRIGGER_LABELS: Record<IdentityCheckTrigger, string> = {
+  check_in: 'Check-in',
+  resume: 'Resume after pause',
+  reconnect: 'Reconnect (new browser)',
+  reverify: 'Re-verification',
+  periodic: 'Routine sample',
+  face_return: 'Face returned to view',
+  camera_reconnect: 'Camera reconnected',
+  after_multiple_people: 'After multiple people',
+  after_obstruction: 'After obstruction',
+  follow_up: 'Follow-up sample',
+  id_photo: 'ID photo comparison',
+};
+
+export const PERIOD_LABELS: Record<PeriodKind, string> = {
+  check_in: 'Readiness check',
+  active: 'Active',
+  paused: 'Paused',
+  disconnected: 'Disconnected',
+  on_hold: 'On hold',
+  resume_check: 'Resume check',
+};
+
+export const HOLD_REASON_LABELS: Record<HoldReason, string> = {
+  identity_mismatch: 'Possible different person — awaiting review',
+  identity_unverifiable: 'Identity could not be verified after repeated attempts',
+  id_photo_mismatch: 'Live image did not match the approved ID photo',
+  pause_limit: 'Pause exceeded the maximum allowed duration',
+  staff: 'Placed on hold by staff',
+};
+
+export const END_REASON_LABELS: Record<EndReason, string> = {
+  candidate_submitted: 'Submitted by candidate',
+  time_expired: 'Time expired (auto-submitted)',
+  staff_submitted: 'Submitted by staff',
+  staff_terminated: 'Terminated by staff',
+};
+
+export const CATEGORY_SHORT: Record<EventCategory, string> = {
+  integrity: 'Integrity',
+  uncertain: 'Uncertain',
+  neutral: 'Session change',
+  technical: 'Technical',
+};
+
+export const SEVERITY_LABELS: Record<Severity, string> = { info: 'Info', low: 'Low', medium: 'Medium', high: 'High' };
+
+export const REVIEW_LABELS: Record<ReviewStatus, string> = {
+  unreviewed: 'Unreviewed',
+  reviewed: 'Reviewed',
+  dismissed: 'Dismissed (false positive)',
+};
+
+export const SOURCE_LABELS: Record<EventSource, string> = {
+  client_vision: 'Camera analysis (candidate browser)',
+  client_browser: 'Exam page (candidate browser)',
+  server_identity: 'Identity verification (server)',
+  server_system: 'System',
+  staff: 'Staff action',
+};
+
+export const ROLE_LABELS: Record<StaffRole, string> = { owner: 'Owner', admin: 'Administrator', reviewer: 'Reviewer' };
+
+export const QUALITY_ISSUE_LABELS: Record<QualityIssue, string> = {
+  no_face: 'No face found',
+  multiple_faces: 'More than one face',
+  face_too_small: 'Face too small / far away',
+  face_cut_off: 'Face cut off at the edge',
+  too_dark: 'Too dark',
+  too_bright: 'Too bright',
+  low_contrast: 'Low contrast',
+  blurry: 'Blurry',
+  face_turned: 'Face turned away',
+  low_detection_confidence: 'Face unclear',
+};
+
+export function qualityIssueLabel(issue: string): string {
+  return (QUALITY_ISSUE_LABELS as Record<string, string>)[issue] ?? humanizeKey(issue);
+}
+
+export function eventTypeTitle(type: string): string {
+  return (EVENT_CATALOG as Record<string, { title: string }>)[type]?.title ?? humanizeKey(type);
+}
+
+/** Labels for `context.precededBy` entries (event types or free-form keys such as 'face_absence'). */
+const CONTEXT_LABELS: Record<string, string> = {
+  pause: 'Exam was paused',
+  paused: 'Exam was paused',
+  session_paused: 'Exam was paused',
+  session_resumed: 'Exam was resumed',
+  resume: 'Exam was resumed',
+  face_absence: 'Face left the camera view',
+  face_absent: 'Face left the camera view',
+  candidate_absent: 'Face left the camera view',
+  camera_reconnect: 'Camera reconnected',
+  camera_disconnected: 'Camera disconnected',
+  camera_changed: 'Camera changed',
+  reconnect: 'Browser reconnected',
+  disconnected: 'Connection was lost',
+  reporting_interrupted: 'Live reporting was interrupted',
+  multiple_people: 'More than one person was in view',
+  face_obstructed: 'Face was obstructed',
+  camera_covered: 'Camera view was blocked',
+  hold: 'Exam was on hold',
+  on_hold: 'Exam was on hold',
+  hold_released: 'Hold was released',
+};
+
+export function contextLabel(key: string): string {
+  if (CONTEXT_LABELS[key]) return CONTEXT_LABELS[key];
+  if ((EVENT_CATALOG as Record<string, unknown>)[key]) return `Preceded by: ${eventTypeTitle(key)}`;
+  return humanizeKey(key);
+}
+
+/** Context keys that matter for a possible person swap (highlighted in the comparison view). */
+export const SWAP_CONTEXT_TYPES: EventType[] = [
+  'session_paused',
+  'session_resumed',
+  'candidate_absent',
+  'camera_disconnected',
+  'camera_permission_lost',
+  'camera_changed',
+  'camera_covered',
+  'face_obstructed',
+  'multiple_people',
+  'reporting_interrupted',
+  'unobserved_period',
+  'multiple_instances',
+];
+
+export function decisionCategory(decision: IdentityDecision): EventCategory {
+  if (decision === 'mismatch') return 'integrity';
+  if (decision === 'match') return 'neutral';
+  return 'uncertain';
+}

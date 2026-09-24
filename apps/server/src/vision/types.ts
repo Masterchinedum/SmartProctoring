@@ -89,3 +89,65 @@ export interface LivenessChallengeSpec {
 }
 
 export type { IdentityThresholds, LivenessResultDTO };
+
+/* ------------------------------------------------------------------------------------------------
+ * Additive extensions (everything above is the original contract and is unchanged).
+ * ---------------------------------------------------------------------------------------------- */
+
+/** Thresholds of the image-quality gate. See `QUALITY_GATE` / `ID_PHOTO_QUALITY_GATE` in quality.ts. */
+export interface QualityGate {
+  /** Primary face detector score below this => `low_detection_confidence`. */
+  minDetectionScore: number;
+  /** Inter-ocular distance (original-image pixels) below this => `face_too_small`. */
+  minInterEyePx: number;
+  /** Face-region mean luminance outside [min, max] => `too_dark` / `too_bright`. */
+  minBrightness: number;
+  maxBrightness: number;
+  /** Face-region luminance std-dev below this => `low_contrast`. */
+  minContrast: number;
+  /** Contrast-normalised variance of Laplacian on the aligned crop below this => `blurry`. */
+  minSharpness: number;
+  /** |yaw| / |pitch| above these (degrees) => `face_turned`. */
+  maxAbsYawDeg: number;
+  maxAbsPitchDeg: number;
+  /** A second face at least this fraction of the primary face's width => `multiple_faces`. */
+  secondaryFaceSizeRatio: number;
+  /** Fraction of the face box allowed outside the image before it counts as cut off. */
+  cutOffTolerance: number;
+}
+
+/** Result of processing an uploaded ID photo (relaxed gate; see id-photo.ts). */
+export interface IdPhotoResult {
+  accepted: boolean;
+  /** Analysis with `quality` evaluated against the ID-photo gate; `embedding` set when a face was found. */
+  analysis: ImageAnalysis;
+  quality: FaceQuality;
+  guidance: string[];
+}
+
+/** Per-frame decision inside an aggregate. */
+export interface FrameDecision extends IdentityComparison {
+  index: number;
+  usable: boolean;
+}
+
+/** Aggregate of several probe frames compared with a reference (resume / reconnect checks). */
+export interface FrameAggregateResult extends IdentityComparison {
+  frames: FrameDecision[];
+  matchCount: number;
+  mismatchCount: number;
+  inconclusiveCount: number;
+  unableCount: number;
+  usableCount: number;
+  /** Over usable frames with a similarity; null when there are none. */
+  minSimilarity: number | null;
+  maxSimilarity: number | null;
+  medianSimilarity: number | null;
+  /** Index (into the input) of the frame best suited as evidence for the decision; null if no face at all. */
+  bestProbeIndex: number | null;
+}
+
+/** Anything that can analyze images (the ONNX service or the FakeVisionService). */
+export interface IdPhotoCapableVisionService extends VisionService {
+  processIdPhoto(image: Buffer): Promise<IdPhotoResult>;
+}

@@ -1,0 +1,85 @@
+/**
+ * Candidate authentication: `Authorization: Bearer <accessToken>` (from the invite link) plus the
+ * `X-Client-Instance: <clientInstanceId>` header identifying the browser instance.
+ */
+import type { ProctoringPolicy } from '@sp/shared';
+import { eq } from 'drizzle-orm';
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { Ctx } from '../context.js';
+import { candidates, examSessions, exams, organizations, type Candidate, type Exam, type ExamSession, type Organization } from '../db/schema.js';
+import { sha256Hex } from '../lib/crypto.js';
+import { badRequest, HttpError } from '../lib/errors.js';
+import { effectivePolicy } from '../services/session-state.js';
+
+export interface CandidatePrincipal {
+  session: ExamSession;
+  exam: Exam;
+  org: Organization | null;
+  candidate: Candidate;
+  policy: ProctoringPolicy;
+  /** X-Client-Instance header (validated), or null if absent. */
+  instanceId: string | null;
+}
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    candidateAuth: CandidatePrincipal | null;
+  }
+}
+
+const TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
+const INSTANCE_RE = /^[A-Za-z0-9._:-]{8,100}$/;
+
+export function bearerToken(req: FastifyRequest): string | null {
+  const h = req.headers.authorization;
+  if (!h) return null;
+  const m = /^Bearer\s+(.+)$/i.exec(h.trim());
+  return m ? m[1].trim() : null;
+}
+
+export function instanceIdFrom(req: FastifyRequest): string | null {
+  const raw = req.headers['x-client-instance'];
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  if (!v) return null;
+  if (!INSTANCE_RE.test(v)) throw badRequest('Invalid X-Client-Instance header', undefined, 'invalid_instance');
+  return v;
+}
+
+export async function resolveCandidateSession(ctx: Ctx, req: FastifyRequest, tokenOverride?: string | null): Promise<CandidatePrincipal> {
+  const token = tokenOverride ?? bearerToken(req);
+  if (!token || !TOKEN_RE.test(token)) throw new HttpError(401, 'invalid_token', 'This exam link is not valid. Check that you copied the whole link.');
+  const rows = await ctx.db
+    .select({ session: examSessions, exam: exams, org: organizations, candidate: candidates })
+    .from(examSessions)
+    .innerJoin(exams, eq(exams.id, examSessions.examId))
+    .innerJoin(candidates, eq(candidates.id, examSessions.candidateId))
+    .leftJoin(organizations, eq(organizations.id, examSessions.orgId))
+    .where(eq(examSessions.accessTokenHash, sha256Hex(token)));
+  const row = rows[0];
+  if (!row) throw new HttpError(401, 'invalid_token', 'This exam link is not valid or has been replaced. Contact your exam administrator.');
+  return {
+    session: row.session,
+    exam: row.exam,
+    org: row.org,
+    candidate: row.candidate,
+    policy: effectivePolicy(row.session, row.exam, row.org),
+    instanceId: instanceIdFrom(req),
+  };
+}
+
+/** preHandler for /api/candidate/* routes. */
+export async function candidateAuth(req: FastifyRequest, _reply: FastifyReply): Promise<void> {
+  req.candidateAuth = await resolveCandidateSession(req.server.ctx, req);
+}
+
+export function getCandidate(req: FastifyRequest): CandidatePrincipal {
+  if (!req.candidateAuth) throw new HttpError(401, 'invalid_token', 'Missing exam access token');
+  return req.candidateAuth;
+}
+
+/** The X-Client-Instance header is mandatory for anything but reading the session. */
+export function requireInstanceId(req: FastifyRequest): string {
+  const id = getCandidate(req).instanceId;
+  if (!id) throw badRequest('Missing X-Client-Instance header', undefined, 'missing_instance');
+  return id;
+}
