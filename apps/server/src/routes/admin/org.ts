@@ -28,7 +28,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { getStaff, requireStaff, revokeStaffSessions } from '../../auth/staff.js';
 import type { DbOrTx } from '../../db/index.js';
-import { auditLog, organizations, staffUsers, type Organization, type OrgSettings } from '../../db/schema.js';
+import { apiKeys, auditLog, organizations, staffUsers, type Organization, type OrgSettings } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { hashPassword } from '../../lib/crypto.js';
 import { badRequest, conflict, forbidden, notFound, validationFailed } from '../../lib/errors.js';
@@ -51,6 +51,9 @@ export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
     defaultPolicy: mergePolicy(undefined, s.defaultPolicy as Record<string, unknown>),
     privacyContact: s.privacyContact,
     identityThresholds: { ...s.identityThresholds },
+    abandonAfterDays: s.abandonAfterDays,
+    alertRecipients: [...s.alertRecipients],
+    emailAlerts: { ...s.emailAlerts },
   };
 }
 
@@ -95,6 +98,12 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         const provided = Object.fromEntries(Object.entries(body.identityThresholds).filter(([, v]) => v !== undefined));
         stored.identityThresholds = { ...(stored.identityThresholds ?? {}), ...provided } as OrgSettings['identityThresholds'];
       }
+      if (body.abandonAfterDays !== undefined) stored.abandonAfterDays = body.abandonAfterDays;
+      if (body.alertRecipients !== undefined) stored.alertRecipients = [...new Set(body.alertRecipients.map((e) => e.trim().toLowerCase()))];
+      if (body.emailAlerts !== undefined) {
+        const provided = Object.fromEntries(Object.entries(body.emailAlerts).filter(([, v]) => v !== undefined));
+        stored.emailAlerts = { ...cur.emailAlerts, ...(stored.emailAlerts ?? {}), ...provided };
+      }
       if (body.defaultPolicy !== undefined) {
         const policy = sanitizePolicyInput(body.defaultPolicy);
         mergePolicy(undefined, policy); // throws ZodError (400) with field paths when invalid
@@ -133,6 +142,9 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
           ...(changed.includes('identityThresholds') ? { identityThresholds: { from: cur.identityThresholds, to: next.identityThresholds } } : {}),
           ...(changed.includes('evidenceRetentionDays') ? { evidenceRetentionDays: { from: cur.evidenceRetentionDays, to: next.evidenceRetentionDays } } : {}),
           ...(changed.includes('eventRetentionDays') ? { eventRetentionDays: { from: cur.eventRetentionDays, to: next.eventRetentionDays } } : {}),
+          ...(changed.includes('abandonAfterDays') ? { abandonAfterDays: { from: cur.abandonAfterDays, to: next.abandonAfterDays } } : {}),
+          ...(changed.includes('alertRecipients') ? { alertRecipients: { count: next.alertRecipients.length } } : {}),
+          ...(changed.includes('emailAlerts') ? { emailAlerts: next.emailAlerts } : {}),
         },
         ip: req.ip,
         at: now,
@@ -256,9 +268,10 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
     const [[{ total }], rows] = await Promise.all([
       ctx.db.select({ total: sql<number>`count(*)::int` }).from(auditLog).where(where),
       ctx.db
-        .select({ entry: auditLog, actorName: staffUsers.name })
+        .select({ entry: auditLog, actorName: staffUsers.name, apiKeyName: apiKeys.name })
         .from(auditLog)
         .leftJoin(staffUsers, and(eq(auditLog.actorType, 'staff'), eq(staffUsers.id, auditLog.actorId)))
+        .leftJoin(apiKeys, and(eq(auditLog.actorType, 'api_key'), eq(apiKeys.id, auditLog.actorId)))
         .where(where)
         .orderBy(desc(auditLog.at), desc(auditLog.id))
         .limit(q.limit)
@@ -266,12 +279,12 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
     ]);
     return {
       total,
-      items: rows.map(({ entry, actorName }) => ({
+      items: rows.map(({ entry, actorName, apiKeyName }) => ({
         id: entry.id,
         at: entry.at.getTime(),
         actorType: entry.actorType,
         actorId: entry.actorId ?? null,
-        actorName: entry.actorType === 'system' ? 'System' : (actorName ?? null),
+        actorName: entry.actorType === 'system' ? 'System' : entry.actorType === 'api_key' ? (apiKeyName ? `API key “${apiKeyName}”` : 'API key') : (actorName ?? null),
         action: entry.action,
         targetType: entry.targetType,
         targetId: entry.targetId ?? null,

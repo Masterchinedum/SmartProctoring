@@ -79,6 +79,53 @@ export function episodeToUpsert(ep: EpisodeUpdate, instanceId: string): EventUps
   };
 }
 
+/** Importance of identity-sample triggers when several are waiting (only the most important is kept). */
+export const SAMPLE_PRIORITY: Record<IdentityCheckTrigger, number> = {
+  follow_up: 6,
+  camera_reconnect: 5,
+  after_multiple_people: 4,
+  face_return: 3,
+  after_obstruction: 2,
+  periodic: 1,
+  check_in: 0,
+  resume: 0,
+  reconnect: 0,
+  reverify: 0,
+  id_photo: 0,
+};
+
+/**
+ * Holds an identity-sample request until it can be captured (another sample in flight, or no video
+ * frame yet). The engine has already consumed the trigger, so it must not be lost; stale requests
+ * expire because the situation they describe has passed.
+ */
+export class SampleTriggerQueue {
+  private pending: { trigger: IdentityCheckTrigger; at: number } | null = null;
+
+  constructor(private readonly maxAgeMs = 20_000) {}
+
+  push(trigger: IdentityCheckTrigger, now: number): void {
+    if (!this.pending || SAMPLE_PRIORITY[trigger] > SAMPLE_PRIORITY[this.pending.trigger]) this.pending = { trigger, at: now };
+  }
+
+  /** The waiting trigger (removed from the queue), or null if none / expired. */
+  take(now: number): IdentityCheckTrigger | null {
+    const p = this.pending;
+    this.pending = null;
+    if (!p) return null;
+    if (p.trigger !== 'follow_up' && now - p.at > this.maxAgeMs) return null;
+    return p.trigger;
+  }
+
+  get size(): number {
+    return this.pending ? 1 : 0;
+  }
+
+  clear(): void {
+    this.pending = null;
+  }
+}
+
 type Engine = ReturnType<typeof createMonitoringEngine>;
 
 /** Maps a host stop reason onto the engine's flush reasons. */
@@ -109,6 +156,7 @@ export class MonitoringRuntime {
   private degraded: { id: string; version: number; startedAt: number; reason: string } | null = null;
   private followUpTimer: ReturnType<typeof setTimeout> | null = null;
   private sampleInFlight = false;
+  private readonly sampleQueue = new SampleTriggerQueue();
   private readonly removers: (() => void)[] = [];
   private readonly pendingWrites = new Set<Promise<void>>();
 
@@ -250,6 +298,7 @@ export class MonitoringRuntime {
 
     // Browser signal tracker runs regardless of the camera.
     this.pushEpisodes(this.tracker.tick(t));
+    this.pumpSamples();
 
     const stale = nowMs - this.lastIngestAt >= MIN_INGEST_INTERVAL_MS;
     let obs: FrameObservation | null = null;
@@ -302,7 +351,7 @@ export class MonitoringRuntime {
     }
     this.pushEpisodes(out.episodes ?? []);
     for (const s of out.signals ?? []) {
-      if (s.kind === 'identity_sample') void this.takeIdentitySample(s.trigger);
+      if (s.kind === 'identity_sample') this.requestSample(s.trigger);
       else this.deps.onSignal?.(s);
     }
   }
@@ -330,14 +379,28 @@ export class MonitoringRuntime {
 
   /* ------------------------------------------------------------------ identity samples */
 
-  private async takeIdentitySample(trigger: IdentityCheckTrigger): Promise<void> {
-    if (!this.running || this.sampleInFlight) return;
+  /** Queue an identity sample; it is captured as soon as the camera and the previous sample allow. */
+  private requestSample(trigger: IdentityCheckTrigger): void {
+    this.sampleQueue.push(trigger, Date.now());
+    this.pumpSamples();
+  }
+
+  private pumpSamples(): void {
+    if (!this.running || this.sampleInFlight || this.sampleQueue.size === 0) return;
     if (!this.deps.camera.isVideoReady()) return;
+    const trigger = this.sampleQueue.take(Date.now());
+    if (trigger) void this.takeIdentitySample(trigger);
+  }
+
+  private async takeIdentitySample(trigger: IdentityCheckTrigger): Promise<void> {
     this.sampleInFlight = true;
     try {
       const capturedAt = this.now();
       const blob = await captureJpeg(this.deps.camera.video, 0.85);
-      if (!blob) return;
+      if (!blob) {
+        this.sampleQueue.push(trigger, Date.now()); // try again on the next tick
+        return;
+      }
       const sampleId = uuid();
       try {
         const res = await this.deps.api.identitySample(sampleId, blob, { trigger, capturedAt });
@@ -363,11 +426,23 @@ export class MonitoringRuntime {
       this.deps.onHold?.();
       return;
     }
+    const r = res.result;
+    if (r?.decision === 'unable_to_verify' && r.guidance?.length) {
+      // Non-blocking guidance: the image was not usable for a dependable comparison.
+      this.deps.onSignal?.({
+        kind: 'candidate_prompt',
+        key: 'identity_guidance',
+        severity: 'info',
+        message: `We couldn’t confirm your identity from the camera image. ${r.guidance.join(' ')}`,
+      });
+    } else if (r?.decision === 'match') {
+      this.deps.onSignal?.({ kind: 'candidate_prompt_clear', key: 'identity_guidance' });
+    }
     if (res.followUpInMs != null && this.running) {
       if (this.followUpTimer) clearTimeout(this.followUpTimer);
       this.followUpTimer = setTimeout(() => {
         this.followUpTimer = null;
-        void this.takeIdentitySample('follow_up');
+        this.requestSample('follow_up');
       }, Math.max(500, res.followUpInMs));
     }
   }
@@ -468,6 +543,7 @@ export class MonitoringRuntime {
     this.loopTimer = null;
     if (this.followUpTimer) clearTimeout(this.followUpTimer);
     this.followUpTimer = null;
+    this.sampleQueue.clear();
     for (const r of this.removers.splice(0)) r();
     this.unsubCamera?.();
     this.unsubCamera = null;

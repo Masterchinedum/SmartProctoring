@@ -481,3 +481,11 @@ details.policy-group > summary h3 { display: inline-flex; }
   .observed-bar, .ob-seg, .cat-dot, .badge { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   a { color: inherit; text-decoration: none; }
 }
+
+/* ---- Integrations page (API keys, webhooks, email alerts) */
+.integrations-page fieldset { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px 12px; margin: 0; }
+.integrations-page fieldset legend, .admin-modal fieldset legend { padding: 0 6px; font-weight: 600; }
+.admin-modal fieldset { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px 12px; margin: 0; }
+.secret-box { display: block; font-family: var(--mono); font-size: 13px; word-break: break-all; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); user-select: all; }
+.break-all { word-break: break-all; }
+.payload-json { max-height: 320px; }

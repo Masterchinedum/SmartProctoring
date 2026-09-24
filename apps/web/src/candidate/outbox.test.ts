@@ -147,7 +147,64 @@ describe.each([
     });
     const res = await box.flushOnce(sender);
     expect(res.remaining).toBe(0);
-    expect(onDropped).toHaveBeenCalledWith('answer', 'bad', 'bad');
+    expect(onDropped).toHaveBeenCalledWith('answer', 'bad', expect.stringContaining('validation_failed'));
+  });
+
+  it('drops an answer the server refuses in the current state (409) without blocking events or screenshots', async () => {
+    const onDropped = vi.fn();
+    box.close();
+    box = await Outbox.open({ namespace: nextNs(), memory, onDropped });
+    const id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    await box.putAnswer({ questionId: 'late', value: 'x', clientSeq: 9, answeredAt: 100 });
+    await box.putEvent(ev(id, 1));
+    await box.putEvidence({ id: 'shot', eventId: id, capturedAt: 5, reason: 'onset', jpeg: jpeg() });
+    const { sender, calls } = makeSender({
+      saveAnswer: () => {
+        throw new CandidateApiError(409, 'exam_ended', 'Answers cannot be saved right now');
+      },
+    });
+    const res = await box.flushOnce(sender);
+    expect(res.remaining).toBe(0);
+    expect(calls.map((c) => c.kind)).toEqual(['answer', 'events', 'evidence']);
+    expect(onDropped).toHaveBeenCalledWith('answer', 'late', expect.stringContaining('exam_ended'));
+    // The local copy of the answer is kept (not pending any more).
+    expect(await box.getAnswers()).toEqual([expect.objectContaining({ questionId: 'late', value: 'x', pending: false })]);
+  });
+
+  it('delivers events even while answers keep failing transiently, then reports the failure', async () => {
+    await box.putAnswer({ questionId: 'q', value: 'x', clientSeq: 1, answeredAt: 1 });
+    await box.putEvent(ev('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 1));
+    await box.putSample({ id: 's', trigger: 'periodic', capturedAt: 3, jpeg: jpeg() });
+    const { sender, calls } = makeSender({
+      saveAnswer: () => {
+        throw new CandidateApiError(503, 'unavailable', 'busy');
+      },
+    });
+    await expect(box.flushOnce(sender)).rejects.toThrow('busy');
+    expect(calls.map((c) => c.kind)).toEqual(['answer', 'events', 'sample']);
+    expect(box.stats()).toMatchObject({ size: 1, pendingAnswers: 1 });
+  });
+
+  it('keeps answers when this browser has not passed the check yet (409 check_required)', async () => {
+    await box.putAnswer({ questionId: 'q', value: 'x', clientSeq: 1, answeredAt: 1 });
+    const { sender } = makeSender({
+      saveAnswer: () => {
+        throw new CandidateApiError(409, 'check_required', 'check first');
+      },
+    });
+    await expect(box.flushOnce(sender)).rejects.toThrow('check first');
+    expect(box.stats().pendingAnswers).toBe(1);
+  });
+
+  it('drops identity samples the server refuses in the current state', async () => {
+    await box.putSample({ id: 's1', trigger: 'face_return', capturedAt: 3, jpeg: jpeg() });
+    const { sender } = makeSender({
+      identitySample: () => {
+        throw new CandidateApiError(409, 'invalid_state', 'The exam is not active');
+      },
+    });
+    const res = await box.flushOnce(sender);
+    expect(res.remaining).toBe(0);
   });
 
   it('isolates an invalid event when a batch is refused', async () => {

@@ -23,6 +23,7 @@ import type { Ctx } from '../src/context.js';
 import { createDatabase } from '../src/db/index.js';
 import { candidates, staffUsers, type Candidate, type Exam, type Organization, type Question, type StaffUser } from '../src/db/schema.js';
 import { hashPassword } from '../src/lib/crypto.js';
+import type { Mailer } from '../src/lib/mailer.js';
 import { FsStorage } from '../src/lib/storage.js';
 import { LocalBus } from '../src/realtime/bus.js';
 import { createExam } from '../src/services/exams.js';
@@ -103,6 +104,8 @@ export interface TestEnvOptions {
   env?: Record<string, string>;
   /** Default fake-camera spec. */
   defaultSpec?: FakeImageSpec;
+  /** Outgoing email (e.g. a MemoryMailer); default none (email alerts unavailable). */
+  mailer?: Mailer | null;
 }
 
 export async function createTestEnv(opts: TestEnvOptions = {}): Promise<TestEnv> {
@@ -134,7 +137,7 @@ export async function createTestEnv(opts: TestEnvOptions = {}): Promise<TestEnv>
   const clock = new TestClock();
   const vision = new FakeVisionService({ defaultSpec: opts.defaultSpec ?? { person: 'alice' } });
   const storage = new FsStorage(storageDir);
-  const app = await buildApp({ config, database, vision, storage, bus: new LocalBus(), now: clock.now, migrate: false, jobs: false, bootstrap: false, serveWeb: false });
+  const app = await buildApp({ config, database, vision, storage, bus: new LocalBus(), now: clock.now, migrate: false, jobs: false, bootstrap: false, serveWeb: false, mailer: opts.mailer ?? null });
   await app.ready();
   const ctx = app.ctx;
   const db = ctx.db;

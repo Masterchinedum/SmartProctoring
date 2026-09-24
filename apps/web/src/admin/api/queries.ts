@@ -3,6 +3,7 @@ import type {
   EventDTO,
   IdentityCheckDTO,
   LiveEventDTO,
+  NoteDTO,
   PauseRequestDTO,
   SessionDetailDTO,
   SessionSummaryDTO,
@@ -35,6 +36,10 @@ export const qk = {
   users: ['users'] as const,
   audit: (p: object) => ['audit', p] as const,
   quality: (p: object) => ['quality', p] as const,
+  integrationStatus: ['integrations', 'status'] as const,
+  apiKeys: ['integrations', 'api-keys'] as const,
+  webhooks: ['integrations', 'webhooks'] as const,
+  webhookDeliveries: (id: string) => ['integrations', 'webhooks', id, 'deliveries'] as const,
 };
 
 /* ------------------------------------------------------------------ cache patching (realtime + mutations) */
@@ -68,9 +73,12 @@ export function applySessionSummary(qc: QueryClient, s: SessionSummaryDTO): void
     refreshSessionStructure(qc, s.id);
   }
   qc.setQueryData<DashboardState>(qk.dashboard, (old) => (old ? { ...old, sessions: upsertSession(old.sessions, { ...s, receivedAt }) } : old));
-  qc.setQueryData<SessionDetailDTO>(qk.session(s.id), (old) => (old ? { ...old, summary: s } : old));
+  // The access link is only sent to admins on the detail / exam-assignment responses (never over the WebSocket
+  // or in action results): keep the one already loaded when an update arrives without it.
+  const keepLink = (prevSummary: SessionSummaryDTO | undefined): SessionSummaryDTO => (s.accessLink == null && prevSummary?.accessLink ? { ...s, accessLink: prevSummary.accessLink } : s);
+  qc.setQueryData<SessionDetailDTO>(qk.session(s.id), (old) => (old ? { ...old, summary: keepLink(old.summary) } : old));
   const replaceIn = <T extends { items: SessionSummaryDTO[] }>(old: T | undefined): T | undefined =>
-    old && old.items.some((x) => x.id === s.id) ? { ...old, items: old.items.map((x) => (x.id === s.id ? s : x)) } : old;
+    old && old.items.some((x) => x.id === s.id) ? { ...old, items: old.items.map((x) => (x.id === s.id ? keepLink(x) : x)) } : old;
   qc.setQueriesData<Paged<SessionSummaryDTO>>({ queryKey: qk.sessionsAll }, replaceIn);
   qc.setQueriesData<{ items: SessionSummaryDTO[] }>({ queryKey: qk.examSessions(s.exam.id) }, replaceIn);
 }
@@ -107,6 +115,14 @@ export function applyIdentityCheck(qc: QueryClient, sessionId: string, check: Id
     const others = old.identityChecks.filter((c) => c.id !== check.id);
     return { ...old, identityChecks: [...others, check].sort((a, b) => a.at - b.at) };
   });
+}
+
+/** A session note (realtime 'note' message, or the author's own POST result): appended once. */
+export function applyNote(qc: QueryClient, sessionId: string, note: NoteDTO): void {
+  qc.setQueryData<SessionDetailDTO>(qk.session(sessionId), (old) =>
+    old && !old.notes.some((n) => n.id === note.id) ? { ...old, notes: [...old.notes, note].sort((a, b) => a.createdAt - b.createdAt) } : old,
+  );
+  void qc.invalidateQueries({ queryKey: qk.report(sessionId) });
 }
 
 export function applyPauseRequestMessage(qc: QueryClient, sessionId: string, request: PauseRequestDTO): void {

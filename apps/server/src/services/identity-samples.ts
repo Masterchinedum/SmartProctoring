@@ -21,6 +21,7 @@ import { assertInControl } from './candidate-state.js';
 import { toHoldDTO } from './dto.js';
 import { storeEvidence } from './evidence.js';
 import { copyEvidence, loadActiveReference, precedingContext, toIdentityResultDTO } from './identity-common.js';
+import { sessionHasEvidenceCapacity } from './session-limits.js';
 import { holdNow, identityState, withSession, type SessionMutation } from './session-state.js';
 
 export const FOLLOW_UP_MS = 4_000;
@@ -98,7 +99,10 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
     };
 
     const checkId = randomUUID();
-    const keep = cmp.decision !== 'match' || policy.evidence.keepMatchingIdentitySamples;
+    const wantImages = cmp.decision !== 'match' || policy.evidence.keepMatchingIdentitySamples;
+    // Over the per-session storage budget the sample is still compared and decided; only its images are not kept.
+    const keep = wantImages && (await sessionHasEvidenceCapacity(ctx, m.tx, s.id, { items: 2, bytes: jpeg.length + (analysis.faceCropJpeg?.length ?? 0) }));
+    if (wantImages && !keep) (context as Record<string, unknown>).evidenceSkipped = 'storage_limit';
     let probeId: string | null = null;
     let frameId: string | null = null;
     if (keep) {

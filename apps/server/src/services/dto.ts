@@ -360,6 +360,8 @@ export function toSessionSummaryDTO(
     candidate: Pick<Candidate, 'id' | 'name' | 'email' | 'externalId'>;
     counts?: SessionCounts;
     pendingPauseRequest?: PauseRequest | null;
+    /** The access link is a bearer credential: only for admin+ on explicit detail / assignment responses. */
+    includeAccessLink?: boolean;
   },
   now: number,
 ): SessionSummaryDTO {
@@ -384,7 +386,7 @@ export function toSessionSummaryDTO(
     counts: input.counts ?? { ...ZERO_COUNTS },
     pendingPauseRequest: input.pendingPauseRequest ? toPauseRequestDTO(input.pendingPauseRequest) : null,
     hold: toHoldDTO(s),
-    accessLink: accessLinkFor(ctx, s),
+    accessLink: input.includeAccessLink ? accessLinkFor(ctx, s) : null,
     legalHold: s.legalHold,
   };
 }
@@ -396,6 +398,11 @@ export interface SessionSummaryQuery {
   limit?: number;
   offset?: number;
   orderBy?: SQL[];
+  /**
+   * Include the candidate access link (a bearer credential). Default false: summaries are also broadcast over
+   * the staff WebSocket and returned to reviewers. Set only for admin+ on explicit detail / assignment responses.
+   */
+  includeAccessLink?: boolean;
 }
 
 /**
@@ -428,7 +435,11 @@ export async function loadSessionSummaries(ctx: Pick<Ctx, 'config' | 'keyring' |
   const pendingBySession = new Map(pending.map((p) => [p.sessionId, p]));
   const now = ctx.now();
   return rows.map((r) =>
-    toSessionSummaryDTO(ctx, { session: r.session, exam: r.exam, candidate: r.candidate, counts: counts.get(r.session.id), pendingPauseRequest: pendingBySession.get(r.session.id) ?? null }, now),
+    toSessionSummaryDTO(
+      ctx,
+      { session: r.session, exam: r.exam, candidate: r.candidate, counts: counts.get(r.session.id), pendingPauseRequest: pendingBySession.get(r.session.id) ?? null, includeAccessLink: q.includeAccessLink === true },
+      now,
+    ),
   );
 }
 

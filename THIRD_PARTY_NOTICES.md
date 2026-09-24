@@ -58,6 +58,7 @@ Full text: https://www.apache.org/licenses/LICENSE-2.0 — the models and librar
 | drizzle-orm | Apache-2.0 | |
 | pg | MIT | |
 | ioredis | MIT | optional (multi-instance realtime) |
+| nodemailer | MIT-0 | optional (email alerts over SMTP) |
 | zod | MIT | |
 | pino | MIT | |
 | react, react-dom, react-router-dom | MIT | |

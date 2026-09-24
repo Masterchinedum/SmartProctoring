@@ -66,6 +66,14 @@ backups until they expire; align backup retention with the privacy notice.
 Runs hourly inside the server. To run manually: `pnpm --filter @sp/server retention:run`.
 See `docs/PRIVACY.md` §4 for the rules (legal hold, tombstones).
 
+Retention starts when a session ends. Sessions that can never end on their own — invited, ready, paused,
+on hold, or active with the exam clock stopped (disconnect policy `stop`) — are closed by the hourly
+`abandoned-sessions` job once they have had no candidate or staff activity for the organisation's
+**Settings → Retention → “Close unfinished sessions after … days”** (`abandonAfterDays`, default 30):
+status *terminated*, end reason *closed after inactivity* (`abandoned`), no score (answers are kept), a
+neutral timeline entry and an audit entry `session.abandoned`. Retention then runs from that end time.
+Candidates who still need the exam get a new assignment (a new link).
+
 ## 7. Runbooks
 
 **Candidate is on hold for a possible different person.** Open the session → Identity tab or the
@@ -87,3 +95,45 @@ and remaining time preserved. The gap appears in the timeline as an unobserved �
 **A candidate needs more time (accommodation or technical loss).** Open the session → *Extend time*
 and enter the minutes and a reason. The extension applies to that session only, is shown on the
 timeline as a neutral "Time extended" entry and is audit-logged.
+
+**A webhook shows “Disabled after repeated failures”.** The receiving endpoint failed
+`WEBHOOK_DISABLE_AFTER_FAILURES` (default 20) consecutive attempts over at least an hour; the audit log has
+`webhook.auto_disabled` and the alert recipients were emailed. Open **Integrations → Webhooks →
+Deliveries** to see the last HTTP status / error (e.g. `HTTP 500`, `Connection refused`, TLS problem,
+`not a public address`). Fix the receiver, use **Send test**, then **Enable**: notifications that waited
+(up to 72 h) are delivered, each with its original delivery id so the receiver can drop duplicates.
+Individual deliveries can be re-sent with **Redeliver**.
+
+**The receiver rejects our signature.** It must compute the HMAC over the raw body bytes (not re-serialised
+JSON) with the current secret (`whsec_…`), and its clock must be within 5 minutes. After **New secret**
+the old secret stops working immediately — update the receiver at the same time.
+
+**Email alerts do not arrive.** Integrations → Email alerts shows whether SMTP is configured; use **Send
+test email** (a 502 shows the SMTP server's answer). Check SPF/DKIM for `SMTP_FROM` and the recipients'
+spam folders. Alerts are throttled to one email per session per 5 minutes (later ones are combined);
+failed sends are retried for about 50 minutes.
+
+**An API key was leaked.** Integrations → API keys → **Revoke** (effective immediately), create a new key
+and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) shows what the key did.
+
+## 8. Integrations configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SMTP_HOST` | unset | Enables email alerts. Unset = the staff app shows email alerts as unavailable. |
+| `SMTP_PORT` | 587 (465 if `SMTP_SECURE=true`) | SMTP port. |
+| `SMTP_SECURE` | `true` when port 465 | `true` = implicit TLS; `false` = STARTTLS when offered. |
+| `SMTP_USER` / `SMTP_PASSWORD` | unset | SMTP authentication. |
+| `SMTP_FROM` | — (required with `SMTP_HOST`) | From header, e.g. `SmartProctoring <proctoring-alerts@example.com>`. |
+| `WEBHOOK_ALLOW_PRIVATE_NETWORKS` | `false` in production, `true` otherwise | Allow webhook URLs on localhost / private networks and plain `http://`… only for development. In production webhooks must be `https://` and resolve to public addresses (checked when saved and again at connect time). |
+| `WEBHOOK_DISABLE_AFTER_FAILURES` | 20 | Consecutive failed attempts (spanning ≥ 1 h) before a webhook is disabled. |
+| `API_RATE_LIMIT_PER_MINUTE` | 600 | Integration API requests per minute per API key (429 above). With several instances and no shared rate-limit store the limit applies per instance. |
+
+Background jobs (advisory-lock guarded, one instance at a time): `webhooks` every 5 s (plus immediately
+after a change), `email-alerts` every 10 s, `abandoned-sessions` hourly. Webhook attempts have a 10 s
+timeout and are retried after 30 s, 1 min, 2 min, 5 min, 15 min, 30 min, 1 h, 2 h and 6 h (10 attempts).
+Delivery records and queued alert emails contain candidate names and are deleted after 30 days.
+Customer-facing documentation of the API and webhooks: `docs/INTEGRATION_API.md`.
+
+Outbound network: allow egress to your SMTP server and to the webhook receivers. Webhook requests come
+from the server's own IP with `User-Agent: SmartProctoring-Webhooks/1.0`.

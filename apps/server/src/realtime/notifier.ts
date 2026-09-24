@@ -1,4 +1,4 @@
-import type { LiveMessage } from '@sp/shared';
+import type { LiveMessage, NoteDTO } from '@sp/shared';
 import { eq } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { candidates, events, examSessions, exams, pauseRequests } from '../db/schema.js';
@@ -99,6 +99,20 @@ export class LiveNotifier {
         this.sessionChanged(sessionId);
       } catch (err) {
         this.fail('identity_check', err);
+      }
+    })();
+  }
+
+  /** A session note was added: pushed to the org's staff, and the session summary refreshed. */
+  sessionNote(sessionId: string, note: NoteDTO): void {
+    if (this.closed) return;
+    void (async () => {
+      try {
+        const [row] = await this.ctx.db.select({ orgId: examSessions.orgId }).from(examSessions).where(eq(examSessions.id, sessionId));
+        if (row) this.publish(row.orgId, { type: 'note', sessionId, note });
+        this.sessionChanged(sessionId);
+      } catch (err) {
+        this.fail('note', err);
       }
     })();
   }

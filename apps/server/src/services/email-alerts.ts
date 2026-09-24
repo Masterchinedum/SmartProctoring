@@ -35,6 +35,7 @@ export const HOLD_REASON_SENTENCES: Record<HoldReason, string> = {
   id_photo_mismatch: 'the live image may not match the approved ID photo and needs review',
   pause_limit: 'the pause was longer than the exam rules allow',
   staff: 'a staff member placed it on hold',
+  id_photo_unverifiable: 'the live image could not be compared dependably with the approved ID photo (image quality; not evidence of a different person)',
 };
 
 export function alertKindEnabled(s: Pick<OrgSettings, 'emailAlerts'>, kind: EmailAlertKind): boolean {

@@ -161,6 +161,7 @@ describe('settings validation', () => {
     name: 'Org',
     evidenceRetentionDays: '30',
     eventRetentionDays: '365',
+    abandonAfterDays: '30',
     privacyContact: 'privacy@example.com',
     match: '0.4',
     mismatch: '0.28',
@@ -176,6 +177,8 @@ describe('settings validation', () => {
     expect(validateSettingsDraft({ ...ok, evidenceRetentionDays: '2.5' }).evidenceRetentionDays).toBeDefined();
     expect(validateSettingsDraft({ ...ok, mismatchConfirmations: '0' }).mismatchConfirmations).toBeDefined();
     expect(validateSettingsDraft({ ...ok, name: ' ' }).name).toBe('Required');
+    expect(validateSettingsDraft({ ...ok, abandonAfterDays: '0' }).abandonAfterDays).toBeDefined();
+    expect(validateSettingsDraft({ ...ok, abandonAfterDays: '7.5' }).abandonAfterDays).toBeDefined();
   });
 });
 

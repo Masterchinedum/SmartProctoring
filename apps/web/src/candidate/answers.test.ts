@@ -80,6 +80,15 @@ describe('AnswerStore', () => {
     expect(rec.value).toBe('b');
   });
 
+  it('stamps answers with the supplied (server-synced) clock', async () => {
+    const box = await openBox();
+    const store = new AnswerStore(box, { debounceMs: 10, now: () => 1_000_000 });
+    await store.restore(null);
+    store.set('q', 'x');
+    await store.flushPending();
+    expect((await box.getAnswers())[0].answeredAt).toBe(1_000_000);
+  });
+
   it('counts answered questions', async () => {
     const box = await openBox();
     const store = new AnswerStore(box);

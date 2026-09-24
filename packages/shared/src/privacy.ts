@@ -1,6 +1,6 @@
 import type { PrivacyNoticeDTO } from './api';
 
-export const PRIVACY_NOTICE_VERSION = '2026-09-01';
+export const PRIVACY_NOTICE_VERSION = '2026-09-24';
 
 /** Builds the candidate-facing notice of what is monitored and what evidence is kept. */
 export function buildPrivacyNotice(opts: { retentionDays: number; contact: string; orgName: string; idPhotoComparison: boolean }): PrivacyNoticeDTO {
@@ -19,6 +19,7 @@ export function buildPrivacyNotice(opts: { retentionDays: number; contact: strin
     stored: [
       'A protected identity reference derived from your face (a numeric template plus reference images), encrypted at rest.',
       'Webcam screenshots taken only at moments when something was observed (for example, a second person in view), encrypted at rest.',
+      'The camera images taken during the readiness check and the checks when you resume or reconnect, and identity images taken during the exam that did not clearly match your identity reference, encrypted at rest as evidence for review.',
       'A timeline of observations, pauses, resumes, identity checks and technical events.',
     ],
     notStored: [
@@ -37,7 +38,7 @@ export function buildPrivacyNotice(opts: { retentionDays: number; contact: strin
       },
       {
         heading: 'How long it is kept',
-        body: `Screenshots and identity references are deleted ${opts.retentionDays} days after your exam ends, unless a review is still open. Your identity reference is never used for any other exam or purpose.`,
+        body: `Screenshots, check images and identity references are deleted ${opts.retentionDays} days after your exam ends, unless they are subject to a legal hold (for example an open appeal). Your identity reference is never used for any other exam or purpose.`,
       },
       {
         heading: 'Pausing',

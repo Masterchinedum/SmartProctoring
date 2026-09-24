@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { DEFAULT_IDENTITY_THRESHOLDS, DEFAULT_POLICY, type OrgSettingsDTO } from '@sp/shared';
 import { api, errorMessage, shouldRetry } from '../api/client';
@@ -18,6 +19,7 @@ interface Draft {
   name: string;
   evidenceRetentionDays: string;
   eventRetentionDays: string;
+  abandonAfterDays: string;
   privacyContact: string;
   match: string;
   mismatch: string;
@@ -31,6 +33,7 @@ function toDraft(s: OrgSettingsDTO): Draft {
     name: s.name,
     evidenceRetentionDays: String(s.evidenceRetentionDays),
     eventRetentionDays: String(s.eventRetentionDays),
+    abandonAfterDays: String(s.abandonAfterDays),
     privacyContact: s.privacyContact,
     match: String(s.identityThresholds.match),
     mismatch: String(s.identityThresholds.mismatch),
@@ -48,6 +51,7 @@ export function validateSettingsDraft(d: Draft): Record<string, string> {
   if (!d.name.trim()) e.name = 'Required';
   if (!int(d.evidenceRetentionDays) || +d.evidenceRetentionDays < 1 || +d.evidenceRetentionDays > 3650) e.evidenceRetentionDays = 'Whole number of days, 1–3650';
   if (!int(d.eventRetentionDays) || +d.eventRetentionDays < 30 || +d.eventRetentionDays > 3650) e.eventRetentionDays = 'Whole number of days, 30–3650';
+  if (!int(d.abandonAfterDays) || +d.abandonAfterDays < 1 || +d.abandonAfterDays > 3650) e.abandonAfterDays = 'Whole number of days, 1–3650';
   for (const k of ['match', 'mismatch', 'idPhotoMatch', 'idPhotoMismatch'] as const) if (!unit(d[k])) e[k] = 'A number between 0 and 1';
   if (!e.match && !e.mismatch && +d.mismatch >= +d.match) e.mismatch = 'Must be lower than the match threshold';
   if (!e.idPhotoMatch && !e.idPhotoMismatch && +d.idPhotoMismatch >= +d.idPhotoMatch) e.idPhotoMismatch = 'Must be lower than the ID-photo match threshold';
@@ -81,6 +85,7 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
         name: d.name.trim(),
         evidenceRetentionDays: Number(d.evidenceRetentionDays),
         eventRetentionDays: Number(d.eventRetentionDays),
+        abandonAfterDays: Number(d.abandonAfterDays),
         privacyContact: d.privacyContact.trim(),
         defaultPolicy: policy,
         identityThresholds: {
@@ -115,7 +120,15 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
         if (!hasErrors) m.mutate();
       }}
     >
-      <PageHeader title="Settings" subtitle="Organisation-wide defaults. Individual exams can override the proctoring policy and evidence retention." />
+      <PageHeader
+        title="Settings"
+        subtitle="Organisation-wide defaults. Individual exams can override the proctoring policy and evidence retention."
+        actions={
+          <Link className="btn" to="/admin/integrations">
+            Integrations: API keys, webhooks, email alerts ›
+          </Link>
+        }
+      />
       <section className="card stack">
         <h2>Organisation</h2>
         <div className="grid-2">
@@ -133,6 +146,12 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
             'Sessions under legal hold are not purged. Exams may set their own period.',
           )}
           {field('eventRetentionDays', 'Keep event records (without images) for (days)', { type: 'number', min: 30, max: 3650, step: 1 })}
+          {field(
+            'abandonAfterDays',
+            'Close unfinished sessions after this many days without activity',
+            { type: 'number', min: 1, max: 3650, step: 1 },
+            'Invited, ready, paused or on-hold sessions (and started sessions whose timer is stopped) with no candidate or staff activity are closed as “closed after inactivity” — no score, answers kept — so the retention periods above can apply.',
+          )}
         </div>
       </section>
       <section className="card stack">

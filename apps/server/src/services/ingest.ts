@@ -5,6 +5,8 @@
  * newer than the stored one (out-of-order delivery from the offline outbox is safe). Category, severity
  * and title always come from EVENT_CATALOG. Events that start inside a paused/held period, before
  * check-in or after the end are rejected; an episode running into a pause is cut at the pause start.
+ * Episodes of a replaced browser instance (delivered late by the new one) are cut at the reconnect gap.
+ * Screenshots count against the per-session storage budget and link only to events of the same session.
  */
 import { EVENT_CATALOG, isClientReportable, type EventBatchResponse, type EventType, type EventUpsert, type EvidenceUploadResponse, type ProctoringPolicy } from '@sp/shared';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -13,6 +15,7 @@ import { events, evidence, sessionPeriods, type EventRow, type ExamSession, type
 import { conflict } from '../lib/errors.js';
 import { assertInControl } from './candidate-state.js';
 import { storeEvidence } from './evidence.js';
+import { EVENT_SCREENSHOT_SHARE, sessionHasEvidenceCapacity, storageLimitError } from './session-limits.js';
 import { BLOCKING_PERIOD_KINDS, withSession } from './session-state.js';
 
 export const LATE_DELIVERY_MS = 30_000;
@@ -75,6 +78,23 @@ function nextBlockStart(t: Timeline, from: number): number | null {
     if (!BLOCKING_PERIOD_KINDS.includes(p.kind)) continue;
     const s = p.startedAt.getTime();
     if (s > from && (best == null || s < best)) best = s;
+  }
+  return best;
+}
+
+/**
+ * Episodes reported by a browser instance that is no longer in control (e.g. the previous page's outbox
+ * flushed by the new one) end where that instance's observation ended: at the start of the 'disconnected'
+ * period of the reconnect that replaced it (or, if the episode started inside that gap, at its end).
+ */
+function replacedInstanceBoundary(t: Timeline, from: number): number | null {
+  let best: number | null = null;
+  for (const p of t.periods) {
+    if (p.kind !== 'disconnected') continue;
+    const s = p.startedAt.getTime();
+    const e = p.endedAt?.getTime() ?? null;
+    const b = s > from ? s : e != null && from < e ? e : null;
+    if (b != null && (best == null || b < best)) best = b;
   }
   return best;
 }
@@ -167,6 +187,19 @@ export async function ingestEvents(ctx: Ctx, session: ExamSession, policy: Proct
         endedAt = block;
         clamped = 'unobserved_period';
       }
+      // Late updates from a browser instance that was replaced (not the one in control) never extend past
+      // the reconnect gap, and never stay open: that instance can no longer close them.
+      const reporter = prev?.clientInstanceId ?? e.clientInstanceId ?? instanceId;
+      if (reporter !== instanceId && cat.span) {
+        const b = replacedInstanceBoundary(t, e.startedAt);
+        if (b != null && (endedAt == null || endedAt > b)) {
+          endedAt = b;
+          clamped = 'instance_replaced';
+        } else if (endedAt == null) {
+          endedAt = Math.max(e.startedAt, prev?.endedAt?.getTime() ?? e.startedAt);
+          clamped = 'instance_replaced';
+        }
+      }
       if (t.endedAt != null && (endedAt == null || endedAt > t.endedAt)) {
         endedAt = t.endedAt;
         clamped = clamped ?? 'session_end';
@@ -257,8 +290,20 @@ export async function uploadEventEvidence(ctx: Ctx, session: ExamSession, policy
   }
   const [{ total }] = await ctx.db.select({ total: sql<number>`count(*)::int` }).from(evidence).where(and(eq(evidence.sessionId, session.id), eq(evidence.kind, 'event_screenshot')));
   if (total >= MAX_EVIDENCE_PER_SESSION) return { stored: false, duplicate: false };
-  if (q.eventId) {
-    const [{ perEvent }] = await ctx.db.select({ perEvent: sql<number>`count(*)::int` }).from(evidence).where(eq(evidence.eventId, q.eventId));
+  // Per-session storage budget (config.sessionLimits); screenshots may use only part of it (session-limits.ts).
+  if (!(await sessionHasEvidenceCapacity(ctx, ctx.db, session.id, { items: 1, bytes: jpeg.length }, EVENT_SCREENSHOT_SHARE))) throw storageLimitError();
+  // The event link and its per-event quota are scoped to THIS session: an event id of another session is
+  // never linked (the screenshot is kept unlinked) and cannot consume that event's quota.
+  let eventId: string | null = q.eventId ?? null;
+  if (eventId) {
+    const [ev] = await ctx.db.select({ sessionId: events.sessionId }).from(events).where(eq(events.id, eventId));
+    if (ev && ev.sessionId !== session.id) eventId = null;
+  }
+  if (eventId) {
+    const [{ perEvent }] = await ctx.db
+      .select({ perEvent: sql<number>`count(*)::int` })
+      .from(evidence)
+      .where(and(eq(evidence.eventId, eventId), eq(evidence.sessionId, session.id)));
     if (perEvent >= policy.evidence.maxScreenshotsPerEvent + 2) return { stored: false, duplicate: false };
   }
   const { duplicate } = await storeEvidence(ctx, ctx.db, {
@@ -266,15 +311,15 @@ export async function uploadEventEvidence(ctx: Ctx, session: ExamSession, policy
     orgId: session.orgId,
     sessionId: session.id,
     candidateId: session.candidateId,
-    eventId: q.eventId ?? null,
+    eventId,
     kind: 'event_screenshot',
     reason: q.reason ?? null,
     capturedAt,
     data: jpeg,
     clientInstanceId: instanceId,
   });
-  if (q.eventId) {
-    const [ev] = await ctx.db.select({ id: events.id, sessionId: events.sessionId }).from(events).where(eq(events.id, q.eventId));
+  if (eventId) {
+    const [ev] = await ctx.db.select({ id: events.id, sessionId: events.sessionId }).from(events).where(eq(events.id, eventId));
     if (ev && ev.sessionId === session.id) ctx.live.eventChanged(ev.id, session.id);
   }
   return { stored: true, duplicate };

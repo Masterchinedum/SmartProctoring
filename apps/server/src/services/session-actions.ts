@@ -177,8 +177,12 @@ export async function releaseHold(ctx: Ctx, sessionId: string, actor: Actor, opt
   return summary(ctx, sessionId);
 }
 
+/**
+ * Session fields reset when a hold ends. A re-enrolment authorisation only ever applies to the reverify check
+ * of the hold it was given for: releasing without a check (or passing the check) revokes it.
+ */
 export function clearedHold() {
-  return { holdReason: null, holdSince: null, holdMessage: null, holdCanReverify: false, holdPrevStatus: null } as const;
+  return { holdReason: null, holdSince: null, holdMessage: null, holdCanReverify: false, holdPrevStatus: null, reEnrollAuthorized: false, reEnrollAuthorizedBy: null } as const;
 }
 
 /* ------------------------------------------------------------------ ending */

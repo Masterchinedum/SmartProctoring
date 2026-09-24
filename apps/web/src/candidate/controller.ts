@@ -329,7 +329,8 @@ export class CandidateController {
   private async ensureAnswers(state: CandidateSessionState): Promise<void> {
     if (this.answers || !this.outbox) return;
     if (!this.answersRestoring) {
-      const store = new AnswerStore(this.outbox);
+      // answeredAt uses the server-synced clock: the server compares it with pause / hold start times.
+      const store = new AnswerStore(this.outbox, { now: () => this.clock.now() });
       this.answersRestoring = store.restore(state.answers).then(() => {
         this.answers = store;
         this.currentQuestionIndex = state.session.currentQuestionIndex ?? 0;
@@ -597,28 +598,26 @@ export class CandidateController {
    * Request a pause. Without approval: monitoring is closed out and delivered first, then the pause
    * is requested. With approval: the request is sent and monitoring continues until approval.
    */
+  /**
+   * Request a pause. Monitoring keeps running until the server confirms the pause: a refused or
+   * failed request (reason missing, limit reached, offline) leaves no unobserved gap, and with
+   * approval required monitoring continues until `pause_approved` arrives via the heartbeat.
+   */
   async requestPause(reason?: string): Promise<PauseResponse> {
     const s = this.snap.state;
     if (!s) throw new Error('No session');
-    const needsApproval = s.exam.policy.pause.requireApproval;
     await this.answers?.flushPending();
-    await this.heartbeatNow();
-    lsSet(PAUSE_REASON_KEY(s.session.id), reason?.trim() || null);
-    if (!needsApproval) {
-      await this.stopMonitoring('pause', { flush: true, stopCamera: false });
-    } else {
-      await this.outbox?.flushNow(FLUSH_BEFORE_TRANSITION_MS, 'answers');
+    await this.heartbeatNow(); // the server records the current question before the pause
+    await this.outbox?.flushNow(FLUSH_BEFORE_TRANSITION_MS, 'answers');
+    const res = await this.api.pause(reason);
+    if (res.outcome === 'paused') {
+      lsSet(PAUSE_REASON_KEY(s.session.id), reason?.trim() || null);
+      await this.stopMonitoring('pause', { flush: true, stopCamera: true });
+    } else if (res.outcome === 'pending_approval') {
+      lsSet(PAUSE_REASON_KEY(s.session.id), reason?.trim() || null);
     }
-    try {
-      const res = await this.api.pause(reason);
-      if (res.outcome === 'paused') this.camera.stop();
-      await this.applyState(res.state);
-      return res;
-    } catch (e) {
-      // Pause failed (e.g. offline): keep monitoring.
-      this.syncServices();
-      throw e;
-    }
+    await this.applyState(res.state);
+    return res;
   }
 
   async cancelPause(): Promise<void> {
@@ -626,7 +625,10 @@ export class CandidateController {
     await this.applyState(data, timing);
   }
 
-  /** Submit the exam after delivering all answers. Throws with a candidate-facing message on failure. */
+  /**
+   * Submit the exam after delivering all answers. Monitoring is closed out only once the server has
+   * accepted the submission. Throws with a candidate-facing message on failure.
+   */
   async submit(): Promise<void> {
     if (this.transitioning) return;
     this.transitioning = true;
@@ -638,14 +640,9 @@ export class CandidateController {
           'Some of your answers have not reached the server yet because the connection is interrupted. They are saved on this device. Please check your connection and try submitting again.',
         );
       }
+      const { data, timing } = await this.api.submit();
       await this.stopMonitoring('submit', { flush: true, stopCamera: true });
-      try {
-        const { data, timing } = await this.api.submit();
-        await this.applyState(data, timing);
-      } catch (e) {
-        this.syncServices(); // resume monitoring if the submit did not go through
-        throw e;
-      }
+      await this.applyState(data, timing);
     } finally {
       this.transitioning = false;
     }

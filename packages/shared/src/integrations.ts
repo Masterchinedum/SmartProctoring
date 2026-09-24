@@ -253,7 +253,7 @@ export interface IntegrationSessionDTO {
   /** Event counts (dismissed events excluded from the category counts). */
   counts: { integrity: number; uncertain: number; technical: number; unreviewed: number; open: number; highSeverity: number };
   hold: HoldDTO | null;
-  /** The candidate's access link (null once unavailable). */
+  /** The candidate's access link — GET /sessions/:id only (null in lists and once unavailable). */
   accessLink: string | null;
   staffUrl: string;
 }

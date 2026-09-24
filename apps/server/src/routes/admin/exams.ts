@@ -28,7 +28,7 @@ import {
 } from '@sp/shared';
 import { and, desc, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
-import { getStaff, requireStaff } from '../../auth/staff.js';
+import { getStaff, requireStaff, roleAtLeast } from '../../auth/staff.js';
 import type { DbOrTx, Tx } from '../../db/index.js';
 import { candidates, examSessions, exams, questions, type Exam, type Organization, type Question } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
@@ -306,7 +306,14 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
     const id = idParam(req, 'id', 'Exam', 'exam_not_found');
     await loadScopedExam(ctx.db, staff.orgId, id);
     return {
-      items: await loadSessionSummaries(ctx, ctx.db, { orgId: staff.orgId, where: eq(examSessions.examId, id), orderBy: [desc(examSessions.createdAt), desc(examSessions.id)], limit: EXAM_SESSIONS_LIMIT }),
+      // The exam's assignment list: admins copy access links from here (reviewers never receive them).
+      items: await loadSessionSummaries(ctx, ctx.db, {
+        orgId: staff.orgId,
+        where: eq(examSessions.examId, id),
+        orderBy: [desc(examSessions.createdAt), desc(examSessions.id)],
+        limit: EXAM_SESSIONS_LIMIT,
+        includeAccessLink: roleAtLeast(staff.role, 'admin'),
+      }),
     };
   });
 

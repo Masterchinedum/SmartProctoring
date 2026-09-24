@@ -3,7 +3,7 @@ import { QueryClient } from '@tanstack/react-query';
 import type { EventDTO, SessionDetailDTO, TimelineItemDTO } from '@sp/shared';
 import { makeCheck, makeEvent, makePeriod, makeSession } from '../test/fixtures';
 import { toDashboardState, type DashboardState } from '../lib/liveState';
-import { applyEvent, applyIdentityCheck, applyPauseRequestMessage, applySessionSummary, qk } from './queries';
+import { applyEvent, applyIdentityCheck, applyNote, applyPauseRequestMessage, applySessionSummary, qk } from './queries';
 
 function setup() {
   const qc = new QueryClient();
@@ -54,6 +54,22 @@ describe('realtime cache patching', () => {
     applyPauseRequestMessage(qc, 'S1', { ...req, status: 'approved' });
     expect(qc.getQueryData<DashboardState>(qk.dashboard)!.sessions[0].pendingPauseRequest).toBeNull();
     expect(qc.getQueryData<SessionDetailDTO>(qk.session('S1'))!.pauseRequests).toHaveLength(1);
+  });
+
+  it('keeps the access link an admin loaded when a realtime summary (which never carries it) arrives', () => {
+    const { qc, s } = setup();
+    qc.setQueryData<SessionDetailDTO>(qk.session('S1'), (old) => ({ ...old!, summary: { ...s, accessLink: 'http://exam.test/take/abc' } }));
+    applySessionSummary(qc, { ...s, accessLink: null, pauseCount: 3 });
+    const d = qc.getQueryData<SessionDetailDTO>(qk.session('S1'))!;
+    expect(d.summary).toMatchObject({ pauseCount: 3, accessLink: 'http://exam.test/take/abc' });
+  });
+
+  it('appends realtime session notes once (the author also gets the POST result)', () => {
+    const { qc } = setup();
+    const note = { id: 'n1', sessionId: 'S1', eventId: null, authorId: 'u1', authorName: 'Rev', text: 'hi', createdAt: 10 };
+    applyNote(qc, 'S1', note);
+    applyNote(qc, 'S1', note);
+    expect(qc.getQueryData<SessionDetailDTO>(qk.session('S1'))!.notes).toEqual([note]);
   });
 
   it('marks the timeline stale when periods change', async () => {

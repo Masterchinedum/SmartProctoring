@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { NoteDTO, SessionDetailDTO } from '@sp/shared';
 import { api, errorMessage } from '../../api/client';
-import { qk } from '../../api/queries';
+import { applyNote } from '../../api/queries';
 import { useNow } from '../../lib/clock';
 import { formatDateTime, formatDuration } from '../../lib/format';
 import { PERIOD_LABELS } from '../../lib/labels';
@@ -134,7 +134,7 @@ export function NotesTab({ d, onOpenEvent }: { d: SessionDetailDTO; onOpenEvent:
   const m = useMutation({
     mutationFn: () => api.addSessionNote(d.summary.id, text.trim()),
     onSuccess: (note: NoteDTO) => {
-      qc.setQueryData<SessionDetailDTO>(qk.session(d.summary.id), (old) => (old ? { ...old, notes: [...old.notes, note] } : old));
+      applyNote(qc, d.summary.id, note); // de-duplicated with the realtime 'note' message
       setText('');
     },
   });

@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useQueryClient } from '@tanstack/react-query';
 import type { LiveMessage } from '@sp/shared';
 import { setServerTime } from '../lib/clock';
-import { applyEvent, applyIdentityCheck, applyPauseRequestMessage, applySessionSummary, qk } from './queries';
+import { applyEvent, applyIdentityCheck, applyNote, applyPauseRequestMessage, applySessionSummary, qk } from './queries';
 
 /**
  * Staff realtime channel: one WebSocket to /api/admin/live per tab. Every LiveMessage is applied to the
@@ -81,6 +81,9 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           break;
         case 'pause_request':
           applyPauseRequestMessage(qc, msg.sessionId, msg.request);
+          break;
+        case 'note':
+          applyNote(qc, msg.sessionId, msg.note);
           break;
         default:
           return;

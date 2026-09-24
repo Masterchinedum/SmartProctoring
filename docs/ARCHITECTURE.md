@@ -167,4 +167,28 @@ continuous video. Candidate references are per-session and never reused across e
 
 `DATABASE_URL`, `PORT` (8080), `PUBLIC_URL`, `EVIDENCE_KEY` (base64 32 bytes), `SESSION_SECRET`,
 `STORAGE_DRIVER` (`fs`|`s3`), `STORAGE_DIR`, `S3_*`, `REDIS_URL` (optional), `VISION_THREADS`,
-`BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD`, `WEB_DIST_DIR`.
+`BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD`, `WEB_DIST_DIR`. Integrations (optional):
+`SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` (email alerts),
+`WEBHOOK_ALLOW_PRIVATE_NETWORKS` (dev only), `WEBHOOK_DISABLE_AFTER_FAILURES`, `API_RATE_LIMIT_PER_MINUTE`.
+
+## 11. Integrations
+
+* **Integration API** `/api/v1/*` (`routes/v1`), authenticated with organisation API keys
+  (`Authorization: Bearer sp_live_…`, only sha256 stored, audit actor `api_key`, per-key rate limit):
+  exams, candidate upsert by `externalId`, assignments (access links), session summaries, the staff
+  report and event list **without evidence URLs**. Customer documentation: `docs/INTEGRATION_API.md`.
+* **Webhooks**: a durable outbox. `withSession()` calls `services/integration-events.ts` inside the
+  session transaction (savepoint), so every event touched by any mutation — candidate ingest, identity
+  engine, staff actions, sweeper expiry/timeouts, abandonment — becomes `webhook_deliveries` rows
+  exactly once (unique `(webhook, dedupeKey)`). The `webhooks` job signs
+  (`X-SmartProctoring-Signature: t=…,v1=HMAC-SHA256(secret, t.body)`) and POSTs them through an SSRF
+  guard (DNS pinned at connect time; private ranges refused in production), retries with backoff up to
+  10 attempts and disables endpoints that keep failing. Payloads never contain images or face data.
+* **Email alerts** (optional SMTP): the same hook queues `email_alerts` rows (holds, pause requests,
+  high-severity events per org toggles); the `email-alerts` job sends at most one email per session per
+  5 minutes (digest), plain text + simple HTML with a link to the staff app, never images.
+* **Abandoned sessions**: the hourly `abandoned-sessions` job closes sessions that can never end on
+  their own (invited / ready / paused / on hold, or active with the clock stopped) after the org's
+  `abandonAfterDays` without activity: status `terminated`, endReason `abandoned` (staff-facing
+  `SessionEndReason`), no score, a neutral `session_terminated` event, audit `session.abandoned`;
+  retention then applies from the end time.

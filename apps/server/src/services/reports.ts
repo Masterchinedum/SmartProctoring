@@ -58,6 +58,7 @@ const HOLD_REASON_TEXT: Record<HoldReason, string> = {
   id_photo_mismatch: 'the live image may not match the approved ID photo',
   pause_limit: 'the pause was longer than the exam rules allow',
   staff: 'a staff member placed it on hold',
+  id_photo_unverifiable: 'the live image could not be compared dependably with the approved ID photo (not evidence of a different person)',
 };
 
 const DETECTOR_LABELS: Record<keyof ProctoringPolicy['detection']['enabled'], string> = {
@@ -263,36 +264,101 @@ interface IdentitySummaryInput {
   endAt: number;
 }
 
+/** How far before an identity observation the report looks for what preceded it. */
+export const PRECEDING_WINDOW_MS = 5 * 60_000;
+
+type PrecedingKind = 'pause' | 'hold' | 'disconnection' | 'camera_reconnect' | 'camera_change' | 'face_absence' | 'multiple_people';
+
+/** The event's own context (identity trigger, check purpose, precededBy tags from identity-common) -> kinds. */
+const OWN_CONTEXT_KIND: Record<string, PrecedingKind> = {
+  resume: 'pause',
+  pause: 'pause',
+  reverify: 'hold',
+  hold: 'hold',
+  reconnect: 'disconnection',
+  disconnection: 'disconnection',
+  camera_reconnect: 'camera_reconnect',
+  camera_disconnect: 'camera_reconnect',
+  camera_change: 'camera_change',
+  face_return: 'face_absence',
+  face_absence: 'face_absence',
+  after_multiple_people: 'multiple_people',
+  multiple_people: 'multiple_people',
+};
+
+/** Said when the event's own context names a check but the timeline window has nothing to anchor on. */
+const CHECK_FALLBACK: Record<string, string> = {
+  resume: 'at the resume check after a pause',
+  reconnect: 'when the exam was reopened in a new browser window',
+  reverify: 'at the re-verification check after a hold',
+};
+
+export interface PrecedingSubject {
+  startedAt: number;
+  context?: Record<string, unknown>;
+  details?: Record<string, unknown>;
+}
+
 /**
- * What happened just before `at` that makes a swap more plausible (factual phrase, or null).
- * The most recent occurrence wins; occurrences within a minute of it are ranked (a resume outranks a camera
- * change recorded during the same check), and a simultaneous camera change is mentioned as a qualifier.
+ * What happened just before an identity observation that makes a swap more plausible (factual phrase, or null).
+ * The event's own context is preferred (context.trigger, details.purpose, context.precededBy); among the
+ * candidates within PRECEDING_WINDOW_MS before the event, the end of a paused period ranks highest, then a
+ * hold release, a disconnection (browser reopened), a camera reconnection, a camera change, the face returning,
+ * and more than one person in view. A camera change at the same moment is mentioned as a qualifier.
  */
-export function precedingContext(items: TimelineItemDTO[], at: number, clock: Clock, windowMs = 15 * 60_000): string | null {
-  const found: { at: number; rank: number; phrase: string; camera: boolean }[] = [];
-  const consider = (t: number | null | undefined, rank: number, phrase: string, camera = false) => {
-    if (t == null || t > at + 1000 || t < at - windowMs) return;
-    found.push({ at: t, rank, phrase, camera });
-  };
-  for (const i of items) {
-    if (i.kind === 'event') {
-      const e = i.event;
-      if (e.type === 'session_resumed') consider(e.startedAt, 9, `after the resume at ${clock.time(e.startedAt)}`);
-      else if (e.type === 'hold_released') consider(e.startedAt, 8, `after the hold was released at ${clock.time(e.startedAt)}`);
-      else if (e.type === 'multiple_instances') consider(e.startedAt, 6, `after the exam was opened in another browser at ${clock.time(e.startedAt)}`);
-      else if ((e.type === 'camera_disconnected' || e.type === 'camera_permission_lost') && e.endedAt != null) consider(e.endedAt, 5, `after the camera reconnected at ${clock.time(e.endedAt)}`);
-      else if (e.type === 'candidate_absent' && e.endedAt != null) consider(e.endedAt, 4, `after the face returned to view at ${clock.time(e.endedAt)}`);
-      else if (e.type === 'multiple_people' && e.endedAt != null) consider(e.endedAt, 3, `after more than one person was in view at ${clock.time(e.startedAt)}`);
-      else if (e.type === 'camera_changed') consider(e.startedAt, 1, `after the camera changed at ${clock.time(e.startedAt)}`, true);
-    } else if (i.kind === 'period' && i.period.kind === 'disconnected' && i.period.endedAt != null) {
-      consider(i.period.endedAt, 7, `after the exam was reopened at ${clock.time(i.period.endedAt)}`);
-    }
+export function precedingContext(items: TimelineItemDTO[], subject: PrecedingSubject | number, clock: Clock, windowMs = PRECEDING_WINDOW_MS): string | null {
+  const ev: PrecedingSubject = typeof subject === 'number' ? { startedAt: subject } : subject;
+  const at = ev.startedAt;
+  const ctx = ev.context ?? {};
+  const details = ev.details ?? {};
+  const checkPurpose = [str(ctx.trigger), str(details.purpose)].find((x): x is string => x != null && x in CHECK_FALLBACK) ?? null;
+  const own = new Set<PrecedingKind>();
+  for (const tag of [str(ctx.trigger), str(details.purpose), str(details.trigger), ...(Array.isArray(ctx.precededBy) ? ctx.precededBy : [])]) {
+    const k = typeof tag === 'string' ? OWN_CONTEXT_KIND[tag] : undefined;
+    if (k) own.add(k);
   }
-  if (found.length === 0) return null;
-  const latest = Math.max(...found.map((f) => f.at));
-  const recent = found.filter((f) => f.at >= latest - 60_000).sort((a, b) => b.rank - a.rank || b.at - a.at);
-  const best = recent[0];
-  return !best.camera && recent.some((f) => f.camera) ? `${best.phrase} with a different camera` : best.phrase;
+
+  const found: { kind: PrecedingKind; at: number; rank: number; phrase: string }[] = [];
+  const consider = (kind: PrecedingKind, t: number | null | undefined, rank: number, phrase: string) => {
+    if (t == null || t > at + 1000 || t < at - windowMs) return;
+    found.push({ kind, at: t, rank, phrase });
+  };
+  const resumes = items.flatMap((i) => (i.kind === 'event' && i.event.type === 'session_resumed' ? [i.event.startedAt] : []));
+  for (const i of items) {
+    if (i.kind === 'period') {
+      const p = i.period;
+      if (p.endedAt == null) continue;
+      if (p.kind === 'paused') {
+        // A failed resume check has no session_resumed to anchor on: the end of the paused period is the anchor.
+        const resumedAt = resumes.find((r) => r >= p.endedAt! - 1000 && r <= p.endedAt! + windowMs && r <= at + 1000);
+        const phrase =
+          checkPurpose === 'resume'
+            ? `at the resume check after the pause that began at ${clock.time(p.startedAt)}`
+            : resumedAt != null
+              ? `after the resume at ${clock.time(resumedAt)}`
+              : `after the pause that began at ${clock.time(p.startedAt)}`;
+        consider('pause', p.endedAt, 10, phrase);
+      } else if (p.kind === 'disconnected') {
+        consider('disconnection', p.endedAt, 8, `${checkPurpose === 'reconnect' ? 'when' : 'after'} the exam was reopened at ${clock.time(p.endedAt)}`);
+      }
+      continue;
+    }
+    if (i.kind !== 'event') continue;
+    const e = i.event;
+    if (e.type === 'hold_released') consider('hold', e.startedAt, 9, `${checkPurpose === 'reverify' ? 'at the re-verification check after' : 'after'} the hold was released at ${clock.time(e.startedAt)}`);
+    else if (e.type === 'multiple_instances') consider('disconnection', e.startedAt, 7, `after the exam was opened in another browser at ${clock.time(e.startedAt)}`);
+    else if ((e.type === 'camera_disconnected' || e.type === 'camera_permission_lost') && e.endedAt != null) consider('camera_reconnect', e.endedAt, 6, `after the camera reconnected at ${clock.time(e.endedAt)}`);
+    else if (e.type === 'camera_changed') consider('camera_change', e.startedAt, 5, `after the camera changed at ${clock.time(e.startedAt)}`);
+    else if (e.type === 'candidate_absent' && e.endedAt != null) consider('face_absence', e.endedAt, 4, `after the face returned to view at ${clock.time(e.endedAt)}`);
+    else if (e.type === 'multiple_people' && e.endedAt != null) consider('multiple_people', e.endedAt, 3, `after more than one person was in view at ${clock.time(e.startedAt)}`);
+  }
+
+  const preferred = own.size ? found.filter((f) => own.has(f.kind)) : [];
+  const pool = preferred.length ? preferred : checkPurpose ? [] : found;
+  if (pool.length === 0) return checkPurpose ? CHECK_FALLBACK[checkPurpose] : null;
+  const best = [...pool].sort((a, b) => b.rank - a.rank || b.at - a.at)[0];
+  const cameraToo = best.kind !== 'camera_change' && found.some((f) => f.kind === 'camera_change' && Math.abs(f.at - best.at) <= 60_000);
+  return cameraToo ? `${best.phrase} with a different camera` : best.phrase;
 }
 
 function heldAfter(events: EventDTO[], at: number, endAt: number): boolean {
@@ -313,16 +379,24 @@ export function identitySummary(input: IdentitySummaryInput): string {
   }
 
   if (openMismatch.length > 0) {
-    const first = openMismatch[0];
+    // A mismatch recorded at a staff-authorised re-enrolment is reported separately (staff chose to re-enrol).
+    const reEnrolled = openMismatch.filter((e) => e.details.reEnrolled === true);
+    const regular = openMismatch.filter((e) => e.details.reEnrolled !== true);
+    const reEnrollText = reEnrolled.length
+      ? `At the re-enrolment authorised by an administrator at ${clock.time(reEnrolled[0].startedAt)}, the person enrolled did not match the previous identity reference; the new reference was created as authorised and the previous one is kept for comparison.`
+      : '';
+    if (regular.length === 0) return reEnrollText;
+    const first = regular[0];
     const idPhotoCase = first.details.trigger === 'id_photo' || first.details.against === 'id_photo' || checks.some((c) => c.trigger === 'id_photo' && c.decision === 'mismatch' && Math.abs(c.at - first.startedAt) < 5 * 60_000);
     const outcome = heldAfter(events, first.startedAt, input.endAt) ? 'this was held for review' : 'this was flagged for review';
-    if (idPhotoCase && refs.length <= 1 && openMismatch.length === 1) {
+    const withReEnroll = (s: string) => (reEnrollText ? `${s} ${reEnrollText}` : s);
+    if (idPhotoCase && refs.length <= 1 && regular.length === 1) {
       const sim = input.idPhoto?.similarity != null ? ` (similarity ${input.idPhoto.similarity.toFixed(2)})` : '';
-      return `The person at check-in may not match the approved ID photo${sim}; ${outcome}.`;
+      return withReEnroll(`The person at check-in may not match the approved ID photo${sim}; ${outcome}.`);
     }
-    const ctxPhrase = precedingContext(input.items, first.startedAt, clock) ?? `at ${clock.time(first.startedAt)}`;
-    const times = openMismatch.length > 1 ? ` on ${plural(openMismatch.length, 'occasion')}, first` : '';
-    return `A different face may have appeared${times} ${ctxPhrase}; ${outcome}.`;
+    const ctxPhrase = precedingContext(input.items, first, clock) ?? `at ${clock.time(first.startedAt)}`;
+    const times = regular.length > 1 ? ` on ${plural(regular.length, 'occasion')}, first` : '';
+    return withReEnroll(`A different face may have appeared${times} ${ctxPhrase}; ${outcome}.`);
   }
 
   const count = (pred: (c: IdentityCheckDTO) => boolean) => checks.filter((c) => c.decision === 'match' && pred(c)).length;
@@ -462,6 +536,10 @@ export function buildObservations(input: ObservationInput): string[] {
   for (const e of evs.filter((x) => x.type === 'identity_mismatch')) {
     const sim = typeof e.details.minSimilarity === 'number' ? ` (lowest similarity ${e.details.minSimilarity.toFixed(2)})` : typeof e.details.similarity === 'number' ? ` (similarity ${e.details.similarity.toFixed(2)})` : '';
     const dur = eventDuration(e, endAt);
+    if (e.details.reEnrolled === true) {
+      out.push(`At the re-enrolment authorised by an administrator at ${clock.time(e.startedAt)}, the person did not match the previous identity reference${sim}; a new reference was created as authorised; ${reviewPhrase(e)}.`);
+      continue;
+    }
     out.push(`A different face may have appeared at ${clock.time(e.startedAt)}${dur > 0 ? ` for ${formatDuration(dur)}` : ''}${sim}; ${reviewPhrase(e)}.`);
   }
   for (const e of evs.filter((x) => x.type === 'identity_unverifiable' && x.review.status !== 'dismissed')) {

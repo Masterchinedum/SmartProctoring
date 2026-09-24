@@ -209,12 +209,18 @@ export function HoldScreen({ onReverify }: { onReverify: () => void }) {
 
 /* ------------------------------------------------------------------ ended */
 
-const END_TEXT: Record<EndReason, string> = {
+const END_TEXT: Record<EndReason | 'abandoned', string> = {
   candidate_submitted: 'You submitted your exam.',
   time_expired: 'The exam time ran out, and your saved answers were submitted automatically.',
   staff_submitted: 'Your exam was submitted by the exam administrator.',
   staff_terminated: 'Your exam was ended by the exam administrator.',
+  abandoned: 'This exam was closed because it was not continued for a long time. Your saved answers are kept.',
 };
+
+function endText(reason: string | null, terminated: boolean): string {
+  if (reason && reason in END_TEXT) return END_TEXT[reason as keyof typeof END_TEXT];
+  return terminated ? END_TEXT.staff_terminated : END_TEXT.candidate_submitted;
+}
 
 export function EndedScreen() {
   const snap = useSnapshot();
@@ -230,7 +236,7 @@ export function EndedScreen() {
       <main className="stack">
         <section className="card stack" data-testid="ended-screen" data-status={state.session.status}>
           <h1>{terminated ? 'Your exam has ended' : 'Your exam has been submitted'}</h1>
-          <p className="cand-lead">{state.session.endReason ? END_TEXT[state.session.endReason] : terminated ? END_TEXT.staff_terminated : END_TEXT.candidate_submitted}</p>
+          <p className="cand-lead">{endText(state.session.endReason, terminated)}</p>
           {!terminated && <p>Thank you. Monitoring has stopped and your camera is off. You can close this window.</p>}
           {terminated && <p>Monitoring has stopped and your camera is off. If you have questions about this, contact your exam administrator.</p>}
           {pending > 0 && (

@@ -3,6 +3,7 @@ import { candidatesRoutes } from './candidates.js';
 import { eventRoutes } from './events.js';
 import { evidenceRoutes } from './evidence.js';
 import { examRoutes } from './exams.js';
+import { integrationRoutes } from './integrations.js';
 import { metricsRoutes } from './metrics.js';
 import { orgRoutes } from './org.js';
 import { sessionRoutes } from './sessions.js';
@@ -23,6 +24,7 @@ import { sessionRoutes } from './sessions.js';
  *   candidates.ts  candidates CRUD, approved ID photos
  *   org.ts         organisation settings, staff users, audit log
  *   metrics.ts     detection quality, offline evaluation uploads
+ *   integrations.ts  API keys, webhooks (+ deliveries), email-alert test, integration status
  */
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(sessionRoutes);
@@ -32,6 +34,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(candidatesRoutes);
   await app.register(orgRoutes);
   await app.register(metricsRoutes);
+  await app.register(integrationRoutes);
 };
 
 export default adminRoutes;

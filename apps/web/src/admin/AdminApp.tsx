@@ -21,6 +21,7 @@ import { CandidateDetailPage } from './pages/candidates/CandidateDetailPage';
 import { QualityPage } from './pages/QualityPage';
 import { AuditLogPage } from './pages/AuditLogPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { IntegrationsPage } from './pages/IntegrationsPage';
 import { UsersPage } from './pages/UsersPage';
 import './admin.css';
 
@@ -44,6 +45,7 @@ export default function AdminApp() {
         <Route path="quality" element={<QualityPage />} />
         <Route path="audit" element={<AdminOnly><AuditLogPage /></AdminOnly>} />
         <Route path="settings" element={<AdminOnly><SettingsPage /></AdminOnly>} />
+        <Route path="integrations" element={<AdminOnly><IntegrationsPage /></AdminOnly>} />
         <Route path="users" element={<AdminOnly><UsersPage /></AdminOnly>} />
         <Route path="*" element={<EmptyState title="Page not found">This page does not exist.</EmptyState>} />
       </Route>

@@ -36,10 +36,19 @@ const INTRO: Record<CheckPurpose, { title: string; body: string[] } | null> = {
   },
 };
 
+/** Reconnect before the exam has started (e.g. reload on the "ready" screen). */
+const READY_RECONNECT_INTRO = {
+  title: 'Continue to your exam',
+  body: [
+    'You completed the camera and identity checks earlier, but this browser window has not been verified yet — for example because the page was reloaded or opened on another device.',
+    'Please repeat the check. Your exam has not started yet, and no time has been used.',
+  ],
+};
+
 export function CheckFlow({ purpose, onCancel }: { purpose: CheckPurpose; onCancel?: () => void }) {
   const ctrl = useController();
   const snap = useSnapshot();
-  const intro = INTRO[purpose];
+  const intro = purpose === 'reconnect' && snap.state?.session.status === 'ready' ? READY_RECONNECT_INTRO : INTRO[purpose];
   const [step, setStep] = useState<Step>(intro ? 'intro' : 'camera');
   const [result, setResult] = useState<{ res: CompleteCheckResponse; check: StartCheckResponse } | null>(null);
   const [verifyKey, setVerifyKey] = useState(0);

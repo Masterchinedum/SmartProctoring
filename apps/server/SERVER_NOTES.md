@@ -38,6 +38,15 @@ src/
   services/retention.ts  evidence & event-metadata retention (hourly job + retention-cli)
   jobs/runner.ts       JobRunner (ctx.jobs): periodic jobs, each run guarded by a pg advisory lock
   jobs/sweeper.ts      heartbeat timeouts, clock expiry, stale checks (sweepOnce(ctx) for tests)
+  jobs/integrations.ts registers the webhooks (5 s), email-alerts (10 s) and abandoned-sessions (hourly) jobs
+  auth/api-key.ts      organisation API keys (Bearer sp_live_…; sha256 only) — requireApiKey / getApiKey
+  routes/v1/*          /api/v1/* integration API (docs/INTEGRATION_API.md)
+  routes/admin/integrations.ts  /api/admin api-keys, webhooks (+ deliveries), email-alerts/test, integrations/status
+  services/integration-events.ts  outbox hook called by withSession() (webhook + email rows in the same tx)
+  services/webhooks.ts webhook outbox delivery (claim/lease, HMAC signature, backoff, auto-disable, housekeeping)
+  services/email-alerts.ts  alert email queue + per-session 5-min digest; lib/mailer.ts (SMTP / MemoryMailer)
+  services/abandonment.ts  closes never-ending sessions after org abandonAfterDays (endReason 'abandoned')
+  lib/net-guard.ts     SSRF guard (public-address classification, connect-time DNS check) + guarded POST
   scripts/seed.ts      demo data
   vision/**, eval/**   vision agent
 ```
@@ -77,12 +86,29 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
   idPhotoEvidenceId, idPhotoQuality, idPhotoApprovedAt/By. The candidate check decrypts with the same AAD.
 * Access link display: `accessLinkFor(ctx, sessionRow)`.
 * Encrypted AADs in use: `evidence:<evidenceId>`, `access-token:<sessionId>`, `idphoto:<candidateId>`,
-  `reference:<referenceId>`, `frame:<frameId>`.
+  `reference:<referenceId>`, `frame:<frameId>`, `webhook-secret:<webhookId>`.
 
 ## Background jobs
 `ctx.jobs.register({ name, intervalMs, runAtStart?, run: (ctx) => Promise })` from any plugin; jobs start on
 `onReady` when jobs are enabled (SWEEPER_ENABLED, default on outside tests). app.ts registers `sweeper` (5 s) and
 `retention` (hourly, calls services/retention.ts `runRetentionExclusive`) — do not start a second scheduler.
+jobs/integrations.ts adds `webhooks`, `email-alerts` and `abandoned-sessions`. Tests call the job bodies directly:
+`deliverDueWebhooks(ctx)`, `sendDueEmailAlerts(ctx)`, `closeAbandonedSessions(ctx)` (jobs are off in tests, so the
+after-commit "kicks" are no-ops).
+
+## Integrations (webhooks, email alerts, API keys)
+* Outbox: `withSession()` runs `enqueueIntegrationNotifications(m)` after `m.flush()` inside the session
+  transaction (in a savepoint: a failure is logged and never breaks the proctoring change). It maps the events
+  touched by the mutation (`m.touchedEventIds`; "created" = `firstReceivedAt == m.now`) to webhook notifications
+  and email alerts. So any NEW code path that changes events must go through a SessionMutation (addEvent /
+  updateEvent / closeEvent / touchEvent) — then webhooks and emails follow automatically, including sweeper paths.
+* Webhook payloads / emails: identifiers, catalog titles/observations, links (`PUBLIC_URL/admin/sessions/:id`);
+  never images, event `details`, similarity scores or staff free-text notes.
+* `finalizeSession(m, 'abandoned', …)` = status terminated, no grading, neutral `session_terminated`
+  (details.reason 'abandoned_after_inactivity'). Staff DTOs carry `SessionEndReason` (incl. 'abandoned'); the
+  candidate state maps it to `endReason: null` (EndReason contract unchanged).
+* Tests: `createTestEnv({ mailer: new MemoryMailer() })` enables email alerts; `env.ctx.config.webhooks` can be
+  tweaked per test (allowPrivateNetworks is true outside production, so a local http receiver works).
 
 ## Candidate-side services (for reference)
 checks.ts (start/frames/complete: liveness, reference, ID photo, resume/reconnect/reverify, re-enrolment),
@@ -100,7 +126,24 @@ candidate-state.ts (CandidateSessionState, instanceInControl).
 * multiple_instances: recorded at check start when another live instance is on a different device (UA / camera
   hash); for the same device (likely a reload) only if the old window heartbeats after being superseded.
 * Server-side updates of events never change `version` (that sequence belongs to the reporting client).
+* Reconnect (new browser instance): the old instance's still-open client events are closed at the gap start
+  (`details.closedBy='instance_replaced'`); late updates reported by a non-active instance are clamped at the
+  'disconnected' period (`details.endClampedBy='instance_replaced'`) and never stay open.
+* Re-enrolment (`reEnrollAuthorized`) is honoured ONLY by the reverify check of the hold it was given for
+  (checks.ts `reEnrollmentApplies`); any new hold, a release without check or passing the check clears it. A
+  re-enrolled person who does not match the old reference still gets an `identity_mismatch` (details.reEnrolled).
+* Per-session caps (config.sessionLimits / SESSION_MAX_EVIDENCE_ITEMS, SESSION_MAX_EVIDENCE_MB,
+  SESSION_MAX_CHECKS_PER_HOUR): 413 `storage_limit` (screenshots may use 80 % of the budget; check frames the
+  rest; identity samples are still decided but their images are not stored), 429 `too_many_checks`.
 * Error codes the web client relies on: 401 invalid_token, 409 superseded, 409 check_required, 409 invalid_state.
+
+## Staff-side notes
+* `SessionSummaryDTO.accessLink` is null everywhere (lists, dashboard, WS, action results) except the admin+
+  session detail and the admin+ exam-assignment list (`loadSessionSummaries({ includeAccessLink })`).
+* WS `/api/admin/live` re-validates the staff session every 60 s and before delivering broadcasts when the last
+  check is > 5 s old; closes with code 4401 after logout / revocation / disable. Session notes are pushed as
+  `{ type: 'note' }` messages.
+* Logs never contain candidate tokens: `/take/<token>`, `?token=` and Authorization are redacted (lib/log-redact.ts).
 
 ## Tests
 `pnpm --filter @sp/server test` (vitest, real Postgres at 127.0.0.1:5432, user postgres). `test/global-setup.ts`

@@ -1,7 +1,7 @@
 import {
   EVENT_CATALOG,
   type ConnectionStatus,
-  type EndReason,
+  type SessionEndReason,
   type EventCategory,
   type EventSource,
   type EventType,
@@ -75,16 +75,18 @@ export const PERIOD_LABELS: Record<PeriodKind, string> = {
 export const HOLD_REASON_LABELS: Record<HoldReason, string> = {
   identity_mismatch: 'Possible different person — awaiting review',
   identity_unverifiable: 'Identity could not be verified after repeated attempts',
-  id_photo_mismatch: 'Live image did not match the approved ID photo',
+  id_photo_mismatch: 'Live image may not match the approved ID photo',
   pause_limit: 'Pause exceeded the maximum allowed duration',
   staff: 'Placed on hold by staff',
+  id_photo_unverifiable: 'Could not be verified against the approved ID photo (image unclear — not a mismatch)',
 };
 
-export const END_REASON_LABELS: Record<EndReason, string> = {
+export const END_REASON_LABELS: Record<SessionEndReason, string> = {
   candidate_submitted: 'Submitted by candidate',
   time_expired: 'Time expired (auto-submitted)',
   staff_submitted: 'Submitted by staff',
   staff_terminated: 'Terminated by staff',
+  abandoned: 'Closed after inactivity (no score)',
 };
 
 export const CATEGORY_SHORT: Record<EventCategory, string> = {

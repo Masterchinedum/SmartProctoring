@@ -43,6 +43,7 @@ import {
   organizations,
   type Check,
   type CheckLivenessSpec,
+  type EventRow,
   type EvidenceRow,
   type ExamSession,
   type IdentityCheck,
@@ -57,6 +58,7 @@ import {
   decideIdentity,
   deserializeEmbeddings,
   maxSimilarity,
+  REFERENCE_MIN_FRAMES,
   serializeEmbeddings,
   verifyLiveness,
   type FrameAggregateResult,
@@ -69,6 +71,7 @@ import { readEvidence, storeEvidence } from './evidence.js';
 import { copyEvidence, frameAad, frameToAnalysis, idPhotoAad, loadActiveReference, precedingContext, referenceAad, summarizeAnalysis, toIdentityResultDTO, type ActiveReference } from './identity-common.js';
 import { clearedHold } from './session-actions.js';
 import { orgThresholds } from './org.js';
+import { assertCheckRate, assertSessionEvidenceCapacity } from './session-limits.js';
 import { effectivePolicy, holdNow, identityState, requiredCheckFor, withSession, type SessionMutation } from './session-state.js';
 
 export const CHECK_TTL_MS = 3 * 60_000;
@@ -82,9 +85,25 @@ const BRIGHTNESS_CHANGE = 45;
 
 const TRIGGER_FOR: Record<CheckPurpose, IdentityCheckTrigger> = { initial: 'check_in', resume: 'resume', reconnect: 'reconnect', reverify: 'reverify' };
 
-export function frontalFramesRequired(purpose: CheckPurpose): number {
-  return purpose === 'initial' ? 3 : 2;
+/**
+ * Frontal frames the client must upload. A check that builds a reference (initial, or a staff-authorised
+ * re-enrolment) needs REFERENCE_MIN_FRAMES clear frontal frames even when the liveness challenge (whose
+ * 'center' step adds frontal frames) is turned off; a comparison needs 2.
+ */
+export function frontalFramesRequired(purpose: CheckPurpose, buildsReference = purpose === 'initial'): number {
+  return buildsReference ? Math.max(3, REFERENCE_MIN_FRAMES) : 2;
 }
+
+/**
+ * A staff re-enrolment authorisation applies ONLY to the reverify check of the hold it was given for
+ * (release with reEnroll=true keeps the session on hold with holdCanReverify). It is never honoured for
+ * resume / reconnect checks, even if a stale flag were left on the row.
+ */
+export function reEnrollmentApplies(s: Pick<ExamSession, 'status' | 'holdCanReverify' | 'reEnrollAuthorized'>, purpose: CheckPurpose): boolean {
+  return purpose === 'reverify' && s.status === 'on_hold' && s.holdCanReverify && s.reEnrollAuthorized;
+}
+
+const CLIENT_EVENT_SOURCES = ['client_browser', 'client_vision'] as const;
 
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -129,6 +148,7 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
     const max = policy.identity.maxVerificationAttempts;
     const failed = await failedAttempts(m.tx, s, required);
     if (failed >= max) throw conflict('attempts_exhausted', 'No verification attempts remain; an administrator will review your exam.');
+    await assertCheckRate(ctx, m.tx, s.id, m.now);
 
     // Expire any other open check of this session.
     await m.tx.update(checks).set({ status: 'expired', completedAt: new Date(m.now) }).where(and(eq(checks.sessionId, s.id), eq(checks.status, 'open')));
@@ -208,7 +228,7 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
         ? { challengeId: spec.challengeId, nonce, steps: spec.steps, expiresAt, targetYawDeg: spec.targetYawDeg, targetPitchDeg: spec.targetPitchDeg }
         : null,
       attemptsRemaining: max - failed,
-      frontalFramesRequired: frontalFramesRequired(required),
+      frontalFramesRequired: frontalFramesRequired(required, required === 'initial' || reEnrollmentApplies(s, required)),
     };
   });
 }
@@ -281,6 +301,7 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
 
   const capturedAt = q.capturedAt != null && Number.isFinite(q.capturedAt) ? q.capturedAt : now;
   const wantCrop = step === 'frontal' || action === 'center';
+  await assertSessionEvidenceCapacity(ctx, ctx.db, sessionId, { items: wantCrop ? 2 : 1, bytes: jpeg.length });
   const analysis = await ctx.vision.analyze(jpeg, { embed: true, faceCrop: wantCrop });
 
   const frameId = randomUUID();
@@ -449,7 +470,8 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
   let aggregate: FrameAggregateResult | null = null;
   let active: ActiveReference | null = null;
   const purpose = check.purpose;
-  const reEnroll = purpose !== 'initial' && s0.reEnrollAuthorized;
+  // Re-checked under the lock in applyContinuation (the authorisation may change meanwhile).
+  const reEnroll = reEnrollmentApplies(s0, purpose);
   if (purpose === 'initial' || reEnroll) reference = buildReference(frontalAnalyses, thresholds);
   if (purpose !== 'initial') {
     active = await loadActiveReference(ctx, ctx.db, sessionId);
@@ -573,6 +595,8 @@ async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string
       context: { checkId: check.id },
     });
     if (why.identity) await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, why.identity.id));
+    // The replaced browser stopped observing when the gap began; its open episodes end there, not at the hold.
+    if (check.purpose === 'reconnect') await closeReplacedInstanceEvents(m, a.instanceId, reconnectGapStart(m.session, check));
     await holdNow(m, { reason: 'identity_unverifiable', details: { purpose: check.purpose, attempts: used } });
     if (check.purpose !== 'initial') m.set({ verifiedInstanceId: a.instanceId });
     return { outcome: 'held', message: m.session.holdMessage ?? '', guidance: why.guidance, identity: why.identity, idPhoto: null, attemptsRemaining: 0 };
@@ -638,7 +662,12 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     frameEvidenceId: images[1]?.id ?? null,
     context: { precededBy: [], periodKind: 'check_in', secondsSincePreviousMatch: null, referenceCreated: true },
   });
-  await m.addEvent({ type: 'checkin_completed', details: { checkId: a.check.id, livenessSteps: liveness?.steps.length ?? 0, liveness: liveness ? 'passed' : 'off' } });
+  await m.addEvent({
+    type: 'checkin_completed',
+    // The catalog text mentions the live-person check; say accurately when the exam rules turned it off.
+    observation: liveness ? undefined : 'The camera readiness check was completed; the live-person check is disabled by the exam rules.',
+    details: { checkId: a.check.id, livenessSteps: liveness?.steps.length ?? 0, liveness: liveness ? 'passed' : 'off' },
+  });
   await m.addEvent({ type: 'reference_created', source: 'server_identity', details: { referenceId: refId, version: maxVersion + 1, embeddingCount: reference.embeddings.length } });
   m.set({ verifiedInstanceId: a.instanceId, checkAttemptsResetAt: new Date(m.now) });
   m.setIdentityState({ ...identityState(m.session), lastMatchAt: m.now });
@@ -690,7 +719,9 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
       }
     }
     if (policy.identity.idPhotoComparison === 'required' && a.idPhoto.decision !== 'match') {
-      await holdNow(m, { reason: 'id_photo_mismatch', details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity } });
+      // Inconclusive / unable to verify is NOT a mismatch: a distinct reason so staff and candidate are told the truth.
+      const reason = a.idPhoto.decision === 'mismatch' ? 'id_photo_mismatch' : 'id_photo_unverifiable';
+      await holdNow(m, { reason, details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity } });
       outcome = { ...outcome, outcome: 'held', message: m.session.holdMessage ?? '' };
     }
   }
@@ -740,7 +771,7 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
   const checkStart = check.issuedAt.getTime();
   const open = await m.openPeriodRow();
   const pauseStart = s.status === 'paused' && open?.kind === 'paused' ? open.startedAt.getTime() : null;
-  const gapStart = purpose === 'reconnect' ? Math.min(s.lastVerifiedHeartbeatAt?.getTime() ?? checkStart, checkStart) : null;
+  const gapStart = purpose === 'reconnect' ? reconnectGapStart(s, check) : null;
   const pre = await precedingContext(m.tx, s.id, checkStart, TRIGGER_FOR[purpose]);
   const st = identityState(s);
   const context = {
@@ -755,11 +786,13 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     unableCount: aggregate?.unableCount,
   };
   const quality = aggregate?.bestProbeIndex != null ? a.prepared.frontal[aggregate.bestProbeIndex]?.analysis.quality : (a.prepared.frontal[0]?.analysis.quality ?? null);
-  const reEnroll = s.reEnrollAuthorized && !!a.reference;
+  // Only the reverify check of a hold released with reEnroll=true may replace the reference (see reEnrollmentApplies).
+  const reEnroll = reEnrollmentApplies(s, purpose) && !!a.reference;
 
   if (!a.livenessOk) {
+    const decision: IdentityDecision = aggregate?.decision === 'match' ? 'inconclusive' : (aggregate?.decision ?? 'unable_to_verify');
     const idRow = await insertIdentityCheck(a, {
-      decision: aggregate?.decision === 'match' ? 'inconclusive' : (aggregate?.decision ?? 'unable_to_verify'),
+      decision,
       similarity: aggregate?.similarity ?? null,
       confidence: aggregate?.confidence ?? 1,
       quality,
@@ -767,6 +800,18 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
       referenceId: a.active?.ref.id ?? null,
       context,
     });
+    // A failed liveness challenge must not hide frames that clearly show a different person: record the
+    // observation with before/after images and apply the mismatch policy (a re-enrolment is judged when it passes).
+    if (decision === 'mismatch' && !reEnroll && a.active) {
+      const ev = await recordReferenceMismatch(a, idRow, { context, environmentNotes: [], extraDetails: { livenessPassed: false } });
+      if (policy.identity.onMismatch === 'hold_for_review') {
+        await closeGapPeriods(a, { checkStart, pauseStart, gapStart });
+        await holdNow(m, { reason: 'identity_mismatch', source: 'server_identity', details: { eventId: ev.id, purpose, livenessPassed: false } });
+        m.set({ verifiedInstanceId: a.instanceId });
+        return { outcome: 'held', message: m.session.holdMessage ?? '', guidance: [], identity: idRow, idPhoto: null, attemptsRemaining: 0 };
+      }
+      // flag_only: recorded; the live-person check still has to be repeated before the exam continues.
+    }
     return retryOrHold(a, { message: LIVENESS_RETRY_MESSAGE, guidance: liveness?.reasons ?? [], identity: idRow, reason: 'liveness_failed' });
   }
 
@@ -782,6 +827,30 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     }
     const refId = randomUUID();
     const old = a.active?.ref ?? null;
+    // Staff authorised a new reference, but reviewers must still see when the person enrolled now does not
+    // match the previous reference: record it (before/after images) against the OLD reference, then re-enrol.
+    let reEnrollMismatchEventId: string | null = null;
+    if (old && aggregate?.decision === 'mismatch') {
+      const mmRow = await insertIdentityCheck(a, {
+        decision: 'mismatch',
+        similarity: aggregate.similarity,
+        confidence: aggregate.confidence,
+        quality,
+        guidance: [],
+        referenceId: old.id,
+        context: { ...context, reEnrollment: true },
+      });
+      const ev = await recordReferenceMismatch(a, mmRow, {
+        context: { ...context, reEnrolled: true },
+        environmentNotes: env.notes,
+        // Starts when the check began, while the previous reference was still the one in force.
+        startedAt: checkStart,
+        observation:
+          'At the re-enrolment authorised by an administrator, the person in view did not match the previous identity reference. A new reference was created as authorised; the previous one is kept for comparison.',
+        extraDetails: { reEnrolled: true, authorizedBy: s.reEnrollAuthorizedBy, newReferenceId: refId },
+      });
+      reEnrollMismatchEventId = ev.id;
+    }
     const [{ maxVersion }] = await m.tx
       .select({ maxVersion: sql<number>`coalesce(max(${identityReferences.version}), 0)::int` })
       .from(identityReferences)
@@ -822,7 +891,16 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
       type: 'reference_created',
       source: 'server_identity',
       observation: 'A new identity reference was established after an administrator authorised re-enrolment. The previous reference is kept.',
-      details: { referenceId: refId, version: maxVersion + 1, reEnrollment: true, previousReferenceId: old?.id ?? null, authorizedBy: s.reEnrollAuthorizedBy, similarityToPrevious: aggregate?.similarity ?? null },
+      details: {
+        referenceId: refId,
+        version: maxVersion + 1,
+        reEnrollment: true,
+        previousReferenceId: old?.id ?? null,
+        authorizedBy: s.reEnrollAuthorizedBy,
+        similarityToPrevious: aggregate?.similarity ?? null,
+        decisionAgainstPrevious: aggregate?.decision ?? null,
+        mismatchEventId: reEnrollMismatchEventId,
+      },
     });
     await audit(m.tx, {
       orgId: s.orgId,
@@ -831,7 +909,7 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
       action: 'reference.re_enrolled',
       targetType: 'session',
       targetId: s.id,
-      meta: { newReferenceId: refId, previousReferenceId: old?.id ?? null, checkId: check.id },
+      meta: { newReferenceId: refId, previousReferenceId: old?.id ?? null, checkId: check.id, decisionAgainstPrevious: aggregate?.decision ?? null, mismatchEventId: reEnrollMismatchEventId },
       at: m.now,
     });
     m.set({ reEnrollAuthorized: false, reEnrollAuthorizedBy: null });
@@ -861,32 +939,7 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
 
   if (agg.decision === 'mismatch') {
     const idRow = await insertIdentityCheck(a, { decision: 'mismatch', ...baseFields });
-    const ev = await m.addEvent({
-      type: 'identity_mismatch',
-      source: 'server_identity',
-      confidence: agg.confidence,
-      observation:
-        purpose === 'resume'
-          ? 'A different face may have appeared after the pause: the person at the resume check did not match the identity reference.'
-          : purpose === 'reconnect'
-            ? 'A different face may have appeared after the browser reconnected: the person at the check did not match the identity reference.'
-            : 'The person at the re-verification check did not match the identity reference.',
-      details: {
-        against: 'reference',
-        purpose,
-        similarity: agg.similarity,
-        minSimilarity: agg.minSimilarity,
-        maxSimilarity: agg.maxSimilarity,
-        frames: { match: agg.matchCount, mismatch: agg.mismatchCount, inconclusive: agg.inconclusiveCount, unable: agg.unableCount },
-        thresholds: { match: a.thresholds.match, mismatch: a.thresholds.mismatch },
-        identityCheckIds: [idRow.id],
-        referenceId: a.active?.ref.id ?? null,
-      },
-      context: { ...context, trigger: TRIGGER_FOR[purpose], environmentNotes: env.notes },
-    });
-    const probe = await storePair(a, a.probeImages, 'identity_probe', { identityCheckId: idRow.id, eventId: ev.id });
-    await m.tx.update(identityChecks).set({ eventId: ev.id, probeEvidenceId: probe[0]?.id ?? null, frameEvidenceId: probe[1]?.id ?? null }).where(eq(identityChecks.id, idRow.id));
-    await linkReferenceImages(a, ev.id);
+    const ev = await recordReferenceMismatch(a, idRow, { context, environmentNotes: env.notes });
     if (policy.identity.onMismatch === 'hold_for_review') {
       await closeGapPeriods(a, { checkStart, pauseStart, gapStart });
       await holdNow(m, { reason: 'identity_mismatch', source: 'server_identity', details: { eventId: ev.id, purpose } });
@@ -908,6 +961,79 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
   return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance, identity: idRow, reason: agg.decision });
 }
 
+/**
+ * Record an identity_mismatch observation of this check against the ACTIVE (previous) reference, with
+ * before/after images: the probe frame of this check and copies of the reference images.
+ */
+async function recordReferenceMismatch(
+  a: ApplyCtx,
+  idRow: IdentityCheck,
+  o: { context: Record<string, unknown>; environmentNotes: string[]; startedAt?: number; observation?: string; extraDetails?: Record<string, unknown> },
+): Promise<EventRow> {
+  const { m, check } = a;
+  const agg = a.aggregate!;
+  const purpose = check.purpose;
+  const ev = await m.addEvent({
+    type: 'identity_mismatch',
+    source: 'server_identity',
+    startedAt: o.startedAt,
+    confidence: agg.confidence,
+    observation:
+      o.observation ??
+      (purpose === 'resume'
+        ? 'A different face may have appeared after the pause: the person at the resume check did not match the identity reference.'
+        : purpose === 'reconnect'
+          ? 'A different face may have appeared after the browser reconnected: the person at the check did not match the identity reference.'
+          : 'The person at the re-verification check did not match the identity reference.'),
+    details: {
+      against: 'reference',
+      purpose,
+      similarity: agg.similarity,
+      minSimilarity: agg.minSimilarity,
+      maxSimilarity: agg.maxSimilarity,
+      frames: { match: agg.matchCount, mismatch: agg.mismatchCount, inconclusive: agg.inconclusiveCount, unable: agg.unableCount },
+      thresholds: { match: a.thresholds.match, mismatch: a.thresholds.mismatch },
+      identityCheckIds: [idRow.id],
+      referenceId: a.active?.ref.id ?? null,
+      ...(o.extraDetails ?? {}),
+    },
+    context: { ...o.context, trigger: TRIGGER_FOR[purpose], environmentNotes: o.environmentNotes },
+  });
+  const probe = await storePair(a, a.probeImages, 'identity_probe', { identityCheckId: idRow.id, eventId: ev.id });
+  await m.tx.update(identityChecks).set({ eventId: ev.id, probeEvidenceId: probe[0]?.id ?? null, frameEvidenceId: probe[1]?.id ?? null }).where(eq(identityChecks.id, idRow.id));
+  await linkReferenceImages(a, ev.id);
+  return ev;
+}
+
+/** Start of the unobserved gap a reconnect check closes: the last verified heartbeat of the previous browser. */
+function reconnectGapStart(s: Pick<ExamSession, 'lastVerifiedHeartbeatAt'>, check: Pick<Check, 'issuedAt'>): number {
+  const checkStart = check.issuedAt.getTime();
+  return Math.min(s.lastVerifiedHeartbeatAt?.getTime() ?? checkStart, checkStart);
+}
+
+/**
+ * A new browser instance replaced the previous one (reconnect): episodes the previous instance reported and
+ * left open can never be closed by it, so they end where its observation ended (the gap start) instead of
+ * spanning the unobserved gap and the rest of the exam. Server-owned events are not touched.
+ */
+export async function closeReplacedInstanceEvents(m: SessionMutation, newInstanceId: string, at: number): Promise<number> {
+  const open = await m.tx
+    .select({ id: events.id, startedAt: events.startedAt, details: events.details, clientInstanceId: events.clientInstanceId })
+    .from(events)
+    .where(and(eq(events.sessionId, m.session.id), eq(events.status, 'open'), inArray(events.source, [...CLIENT_EVENT_SOURCES])));
+  let n = 0;
+  for (const e of open) {
+    if (e.clientInstanceId === newInstanceId) continue;
+    await m.updateEvent(e.id, {
+      status: 'closed',
+      endedAt: new Date(Math.max(e.startedAt.getTime(), at)),
+      details: { ...e.details, closedBy: 'instance_replaced', replacedByInstanceId: newInstanceId },
+    });
+    n++;
+  }
+  return n;
+}
+
 async function linkReferenceImages(a: ApplyCtx, eventId: string) {
   const ids = a.active?.ref.imageEvidenceIds ?? [];
   if (!ids.length) return;
@@ -919,6 +1045,8 @@ async function linkReferenceImages(a: ApplyCtx, eventId: string) {
 async function closeGapPeriods(a: ApplyCtx, t: { checkStart: number; pauseStart: number | null; gapStart: number | null }) {
   const { m } = a;
   const open = await m.openPeriodRow();
+  // Open episodes of the replaced browser end at the gap start (details.closedBy = 'instance_replaced').
+  if (a.check.purpose === 'reconnect') await closeReplacedInstanceEvents(m, a.instanceId, t.gapStart ?? t.checkStart);
   if (a.check.purpose === 'reconnect' && open?.kind === 'active') {
     const gs = t.gapStart ?? t.checkStart;
     await m.closeOpenPeriod(gs);

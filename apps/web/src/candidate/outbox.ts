@@ -230,6 +230,11 @@ class FatalDeliveryError extends Error {
 
 const EVENT_BATCH = 200;
 
+function errorText(e: unknown): string {
+  if (e && typeof e === 'object' && 'code' in e) return `${String((e as { code: unknown }).code)}: ${String((e as { message?: unknown }).message ?? '')}`;
+  return e instanceof Error ? e.message : String(e);
+}
+
 async function toArrayBuffer(body: Blob | ArrayBuffer | Uint8Array): Promise<ArrayBuffer> {
   if (body instanceof ArrayBuffer) return body;
   if (body instanceof Uint8Array) return body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer;
@@ -437,31 +442,58 @@ export class Outbox {
   /* ---------------------------------------------------------------- delivery */
 
   /**
-   * One delivery pass over everything queued. Answers first (most important), then events, then
-   * evidence (after events so the event exists server-side), then identity samples.
-   * Throws on the first transient failure; permanently rejected items are dropped.
+   * One delivery pass over everything queued. Each kind is delivered independently (a failing answer
+   * never holds back events or screenshots, and vice versa): answers first (most important), then
+   * events, then evidence (after events so the event exists server-side), then identity samples.
+   * Within a kind the pass stops at the first transient failure; permanently rejected items are
+   * dropped (reported via onDropped). The first transient error is rethrown at the end so the worker
+   * backs off.
    */
   async flushOnce(sender: OutboxSender): Promise<{ delivered: number; remaining: number }> {
     let delivered = 0;
+    let transient: unknown = null;
+    const run = async (deliver: () => Promise<number>) => {
+      try {
+        delivered += await deliver();
+      } catch (e) {
+        if (e instanceof FatalDeliveryError) throw e;
+        transient ??= e;
+      }
+    };
+    await run(() => this.flushAnswers(sender));
+    await run(() => this.flushEvents(sender));
+    await run(() => this.flushEvidence(sender));
+    await run(() => this.flushSamples(sender));
+    if (delivered > 0) this.lastDeliveredAt = this.now();
+    this.emit();
+    if (transient) throw transient;
+    return { delivered, remaining: this.pendingIndex.size };
+  }
 
-    // Answers
+  private async flushAnswers(sender: OutboxSender): Promise<number> {
+    let n = 0;
     const answers = (await this.backend.getAll('answers')).filter((a) => a.pending).sort((a, b) => (a.enqueuedAt ?? 0) - (b.enqueuedAt ?? 0));
     for (const a of answers) {
       try {
         await sender.saveAnswer(a.questionId, { value: a.value, clientSeq: a.clientSeq, answeredAt: a.answeredAt });
       } catch (e) {
-        if (this.permanent(e)) {
+        // An answer the server will not take in the current state (e.g. saved after the exam was
+        // paused, held or ended) is dropped from the queue; the local copy is kept.
+        if (this.permanent(e, 'answer')) {
           await this.markAnswerDelivered(a.questionId, a.clientSeq);
-          this.opts.onDropped?.('answer', a.questionId, String((e as Error).message));
+          this.opts.onDropped?.('answer', a.questionId, errorText(e));
           continue;
         }
         throw e;
       }
       await this.markAnswerDelivered(a.questionId, a.clientSeq);
-      delivered++;
+      n++;
     }
+    return n;
+  }
 
-    // Events (batched)
+  private async flushEvents(sender: OutboxSender): Promise<number> {
+    let n = 0;
     const events = (await this.backend.getAll('events')).sort((a, b) => a.enqueuedAt - b.enqueuedAt || a.upsert.startedAt - b.upsert.startedAt);
     for (let i = 0; i < events.length; i += EVENT_BATCH) {
       const batch = events.slice(i, i + EVENT_BATCH);
@@ -469,25 +501,28 @@ export class Outbox {
       try {
         res = await sender.sendEvents(batch.map((r) => r.upsert));
       } catch (e) {
-        if (!this.permanent(e)) throw e;
+        if (!this.permanent(e, 'event')) throw e;
         // The batch as a whole was refused (e.g. one invalid item): isolate the bad item(s).
         for (const r of batch) {
           try {
             const single = await sender.sendEvents([r.upsert]);
             await this.applyEventResults([r], single);
-            delivered++;
+            n++;
           } catch (e2) {
-            if (!this.permanent(e2)) throw e2;
+            if (!this.permanent(e2, 'event')) throw e2;
             await this.removeEventIfVersion(r.id, r.upsert.version);
-            this.opts.onDropped?.('event', r.id, String((e2 as Error).message));
+            this.opts.onDropped?.('event', r.id, errorText(e2));
           }
         }
         continue;
       }
-      delivered += await this.applyEventResults(batch, res);
+      n += await this.applyEventResults(batch, res);
     }
+    return n;
+  }
 
-    // Evidence
+  private async flushEvidence(sender: OutboxSender): Promise<number> {
+    let n = 0;
     const evidence = (await this.backend.getAll('evidence')).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
     for (const ev of evidence) {
       if (this.pendingIndex.has(`event:${ev.eventId}`)) continue; // its event has not been accepted yet
@@ -499,20 +534,23 @@ export class Outbox {
       try {
         await sender.uploadEvidence(ev.id, blob.data, { eventId: ev.eventId, capturedAt: ev.capturedAt, reason: ev.reason });
       } catch (e) {
-        if (this.permanent(e)) {
+        if (this.permanent(e, 'evidence')) {
           await this.removeEvidence(ev.id);
-          this.opts.onDropped?.('evidence', ev.id, String((e as Error).message));
+          this.opts.onDropped?.('evidence', ev.id, errorText(e));
           continue;
         }
         throw e;
       }
       await this.removeEvidence(ev.id);
-      delivered++;
+      n++;
       this.lastDeliveredAt = this.now();
       this.emit();
     }
+    return n;
+  }
 
-    // Identity samples
+  private async flushSamples(sender: OutboxSender): Promise<number> {
+    let n = 0;
     const samples = (await this.backend.getAll('samples')).sort((a, b) => a.capturedAt - b.capturedAt);
     for (const s of samples) {
       const blob = await this.backend.get('blobs', s.id);
@@ -526,15 +564,15 @@ export class Outbox {
       } catch (e) {
         // A sample the server will not take in the current state (e.g. captured after a pause began)
         // is only meaningful in near real time: drop it rather than retry forever.
-        if (this.permanent(e) || classifyApiError(e) === 'invalid_state') {
+        if (this.permanent(e, 'sample')) {
           await this.removeSample(s.id);
-          this.opts.onDropped?.('sample', s.id, String((e as Error).message));
+          this.opts.onDropped?.('sample', s.id, errorText(e));
           continue;
         }
         throw e;
       }
       await this.removeSample(s.id);
-      delivered++;
+      n++;
       this.emit();
       try {
         this.opts.onSampleResult?.(s, res);
@@ -542,10 +580,7 @@ export class Outbox {
         /* ignore */
       }
     }
-
-    if (delivered > 0) this.lastDeliveredAt = this.now();
-    this.emit();
-    return { delivered, remaining: this.pendingIndex.size };
+    return n;
   }
 
   private async applyEventResults(batch: EventRecord[], res: EventBatchResponse | null): Promise<number> {
@@ -581,10 +616,18 @@ export class Outbox {
   }
 
   /** Classify a delivery error: true => drop the item, false => keep & retry. Fatal errors throw. */
-  private permanent(e: unknown): boolean {
+  /**
+   * Classify a delivery error: true => drop the item, false => keep & retry. Errors that end this
+   * page's ability to report (invalid link, superseded) throw FatalDeliveryError.
+   * `invalid_state` (409: exam paused/held/ended) is permanent for answers and identity samples — the
+   * server applies its own late-delivery rules and will not accept them later either.
+   */
+  private permanent(e: unknown, item: 'answer' | 'event' | 'evidence' | 'sample'): boolean {
     const kind = classifyApiError(e);
     if (kind === 'invalid_link' || kind === 'superseded') throw new FatalDeliveryError(kind);
-    return kind === 'client';
+    if (kind === 'client') return true;
+    if (kind === 'invalid_state' && (item === 'answer' || item === 'sample')) return true;
+    return false;
   }
 
   /* ---------------------------------------------------------------- worker */

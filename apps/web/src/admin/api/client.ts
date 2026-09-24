@@ -1,8 +1,11 @@
 import type {
   ApiError as ApiErrorBody,
+  ApiKeyDTO,
   AssignmentDTO,
   AuditLogEntryDTO,
   CandidateDTO,
+  CreatedApiKeyDTO,
+  CreatedWebhookDTO,
   DashboardDTO,
   DetectionQualityDTO,
   EventDTO,
@@ -10,6 +13,7 @@ import type {
   ExamInput,
   IdentityComparisonDTO,
   IdPhotoUploadResponse,
+  IntegrationStatusDTO,
   LiveEventDTO,
   NoteDTO,
   OrgSettingsDTO,
@@ -21,6 +25,10 @@ import type {
   StaffRole,
   StaffUserDTO,
   TimelineItemDTO,
+  WebhookDTO,
+  WebhookDeliveryDTO,
+  WebhookInput,
+  WebhookUpdate,
 } from '@sp/shared';
 
 /** Error thrown for any non-2xx response. `code` is the machine code from the ApiError body. */
@@ -214,6 +222,22 @@ export const api = {
     request<StaffUserDTO>('PUT', `${A}/users/${enc(id)}`, { body: patch }),
   auditLog: (p: { limit: number; offset: number; action?: string }) => request<Paged<AuditLogEntryDTO>>('GET', `${A}/audit-log`, { query: { ...p } }),
   detectionQuality: (p: { from?: number; to?: number }) => request<DetectionQualityDTO>('GET', `${A}/metrics/detection-quality`, { query: { ...p } }),
+
+  // ---- integrations (API keys, webhooks, email alerts)
+  integrationStatus: () => request<IntegrationStatusDTO>('GET', `${A}/integrations/status`),
+  apiKeys: () => request<{ items: ApiKeyDTO[] }>('GET', `${A}/api-keys`),
+  createApiKey: (name: string) => request<CreatedApiKeyDTO>('POST', `${A}/api-keys`, { body: { name } }),
+  revokeApiKey: (id: string) => request<ApiKeyDTO>('POST', `${A}/api-keys/${enc(id)}/revoke`),
+  webhooks: () => request<{ items: WebhookDTO[] }>('GET', `${A}/webhooks`),
+  createWebhook: (input: WebhookInput) => request<CreatedWebhookDTO>('POST', `${A}/webhooks`, { body: input }),
+  updateWebhook: (id: string, patch: WebhookUpdate) => request<WebhookDTO>('PUT', `${A}/webhooks/${enc(id)}`, { body: patch }),
+  deleteWebhook: (id: string) => request<{ ok: boolean }>('DELETE', `${A}/webhooks/${enc(id)}`),
+  rotateWebhookSecret: (id: string) => request<CreatedWebhookDTO>('POST', `${A}/webhooks/${enc(id)}/rotate-secret`),
+  testWebhook: (id: string) => request<WebhookDeliveryDTO>('POST', `${A}/webhooks/${enc(id)}/test`),
+  webhookDeliveries: (id: string) => request<{ items: WebhookDeliveryDTO[] }>('GET', `${A}/webhooks/${enc(id)}/deliveries`),
+  webhookDelivery: (deliveryId: string) => request<WebhookDeliveryDTO>('GET', `${A}/webhooks/deliveries/${enc(deliveryId)}`),
+  redeliverWebhook: (deliveryId: string) => request<WebhookDeliveryDTO>('POST', `${A}/webhooks/deliveries/${enc(deliveryId)}/redeliver`),
+  testEmail: (to?: string) => request<{ ok: true; recipients: string[] }>('POST', `${A}/email-alerts/test`, { body: to ? { to } : {} }),
 };
 
 /** Resolve a relative evidence/API URL against the current origin (for new-tab links). */

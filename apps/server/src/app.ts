@@ -11,6 +11,7 @@ import type { Ctx } from './context.js';
 import { createDatabase, migrate, type Database } from './db/index.js';
 import { createKeyring } from './lib/crypto.js';
 import { HttpError } from './lib/errors.js';
+import { appLoggerOptions } from './lib/log-redact.js';
 import { createStorage, type BlobStorage } from './lib/storage.js';
 import { createBus, type RealtimeBus } from './realtime/bus.js';
 import { liveRoute } from './realtime/live-route.js';
@@ -21,6 +22,9 @@ import { candidateRoutes } from './routes/candidate/index.js';
 import { publicRoutes } from './routes/public.js';
 import { bootstrapAdmin } from './services/bootstrap.js';
 import { JobRunner } from './jobs/runner.js';
+import { registerIntegrationJobs } from './jobs/integrations.js';
+import { createSmtpMailer, type Mailer } from './lib/mailer.js';
+import { integrationApiRoutes } from './routes/v1/index.js';
 import { sweeperJob } from './jobs/sweeper.js';
 import { DEFAULT_RETENTION_INTERVAL_MS, runRetentionExclusive } from './services/retention.js';
 import type { VisionService } from './vision/types.js';
@@ -44,6 +48,8 @@ export interface BuildAppOptions {
   bootstrap?: boolean;
   /** Serve the web app from config.webDistDir (default true). */
   serveWeb?: boolean;
+  /** Outgoing email for alerts (default: SMTP from config.smtp, or none). Tests pass a MemoryMailer. */
+  mailer?: Mailer | null;
 }
 
 declare module 'fastify' {
@@ -72,19 +78,8 @@ const CSP = [
 export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInstance> {
   const config = opts.config ?? loadConfig();
   const app = Fastify({
-    logger: opts.logger ?? {
-      level: config.logLevel,
-      redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-client-instance"]'],
-      serializers: {
-        // Never log candidate access tokens (e.g. /api/public/privacy-notice?token=...).
-        req: (req: { method: string; url: string; hostname?: string; ip?: string }) => ({
-          method: req.method,
-          url: req.url.replace(/([?&]token=)[^&]+/i, '$1[redacted]'),
-          host: req.hostname,
-          remoteAddress: req.ip,
-        }),
-      },
-    },
+    // Never log candidate access tokens (/take/<token>, ?token=, Authorization): lib/log-redact.ts.
+    logger: opts.logger ?? appLoggerOptions(config.logLevel),
     trustProxy: config.trustProxy,
     bodyLimit: 2 * 1024 * 1024,
     genReqId: () => Math.random().toString(36).slice(2, 12),
@@ -103,6 +98,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   const storage = opts.storage ?? (owned.storage = createStorage(config.storage));
   const bus = opts.bus ?? (owned.bus = await createBus(config.redisUrl, (err) => app.log.error({ err }, 'redis bus error')));
   const keyring = createKeyring(config.evidenceKey, config.evidenceKeysOld);
+  const ownedMailer = opts.mailer === undefined && config.smtp ? createSmtpMailer(config.smtp) : null;
 
   const ctx = {
     config,
@@ -114,6 +110,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     bus,
     now: opts.now ?? (() => Date.now()),
     log: app.log,
+    mailer: opts.mailer !== undefined ? opts.mailer : ownedMailer,
   } as Omit<Ctx, 'live' | 'jobs'> as Ctx;
   ctx.live = new LiveNotifier(ctx);
   ctx.jobs = new JobRunner(ctx);
@@ -131,8 +128,11 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       }
     },
   });
+  // Webhook delivery, email alerts, abandoned-session hygiene (jobs/integrations.ts).
+  registerIntegrationJobs(ctx);
   app.decorate('ctx', ctx);
   app.decorateRequest('staff', null);
+  app.decorateRequest('apiKey', null);
 
   await app.register(fastifyCookie, { secret: config.sessionSecret });
   await app.register(fastifyRateLimit, {
@@ -182,6 +182,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await app.register(candidateRoutes, { prefix: '/api/candidate' });
   await app.register(liveRoute);
   await app.register(adminRoutes, { prefix: '/api/admin' });
+  await app.register(integrationApiRoutes, { prefix: '/api/v1' });
 
   const webIndex = join(config.webDistDir, 'index.html');
   const serveWeb = opts.serveWeb !== false && existsSync(webIndex);
@@ -224,6 +225,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     await owned.bus?.close();
     await owned.vision?.close();
     await owned.storage?.close?.();
+    await ownedMailer?.close?.();
     await owned.database?.close();
   });
 

@@ -23,6 +23,7 @@ export const HOLD_REASONS = [
   'id_photo_mismatch', // live candidate did not match approved ID photo (policy: required)
   'pause_limit', // pause exceeded configured maximum duration
   'staff', // held manually by staff
+  'id_photo_unverifiable', // comparison with the approved ID photo was inconclusive / not possible (policy: required) — NOT a mismatch
 ] as const;
 export type HoldReason = (typeof HOLD_REASONS)[number];
 

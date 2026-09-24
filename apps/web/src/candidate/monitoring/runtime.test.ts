@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { eventUpsertSchema, type EpisodeUpdate } from '@sp/shared';
-import { episodeToUpsert, toFlushReason } from './runtime';
+import { DEFAULT_POLICY, type IdentitySampleResponse } from '@sp/shared';
+import { vi } from 'vitest';
+import { episodeToUpsert, MonitoringRuntime, SampleTriggerQueue, toFlushReason, type RuntimeDeps } from './runtime';
 import { TraceRecorder, traceEnabled } from './trace';
 
 describe('episodeToUpsert', () => {
@@ -71,5 +73,67 @@ describe('isSoftwareRenderer', () => {
     expect(isSoftwareRenderer(null)).toBe(true);
     expect(isSoftwareRenderer('ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe(false);
     expect(isSoftwareRenderer('Apple M1')).toBe(false);
+  });
+});
+
+describe('SampleTriggerQueue', () => {
+  it('keeps the most important waiting trigger', () => {
+    const q = new SampleTriggerQueue();
+    q.push('periodic', 0);
+    q.push('face_return', 1);
+    q.push('after_obstruction', 2);
+    expect(q.take(3)).toBe('face_return');
+    expect(q.take(3)).toBeNull();
+    q.push('camera_reconnect', 0);
+    q.push('periodic', 0);
+    expect(q.take(0)).toBe('camera_reconnect');
+  });
+
+  it('expires stale requests except server follow-ups', () => {
+    const q = new SampleTriggerQueue(1000);
+    q.push('face_return', 0);
+    expect(q.take(5000)).toBeNull();
+    q.push('follow_up', 0);
+    expect(q.take(5000)).toBe('follow_up');
+  });
+});
+
+describe('MonitoringRuntime.handleSampleResult', () => {
+  function makeRuntime() {
+    const deps = {
+      api: {},
+      outbox: {},
+      camera: {},
+      clock: { now: () => Date.now() },
+      policy: DEFAULT_POLICY,
+      instanceId: 'instance-0001',
+      baseline: null,
+      onSignal: vi.fn(),
+      onHold: vi.fn(),
+    } as unknown as RuntimeDeps & { onSignal: ReturnType<typeof vi.fn>; onHold: ReturnType<typeof vi.fn> };
+    return { rt: new MonitoringRuntime(deps), deps };
+  }
+  const result = (decision: 'match' | 'unable_to_verify' | 'mismatch', guidance: string[] = []): IdentitySampleResponse => ({
+    result: { id: 'r', trigger: 'periodic', decision, similarity: null, confidence: 0.5, quality: null, guidance, at: 1 },
+    followUpInMs: null,
+    status: 'active',
+    hold: null,
+  });
+
+  it('shows the server guidance when the image could not be verified, and clears it after a match', () => {
+    const { rt, deps } = makeRuntime();
+    rt.handleSampleResult(result('unable_to_verify', ['Your face is too dark. Turn on a light.']));
+    expect(deps.onSignal).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'candidate_prompt', key: 'identity_guidance', message: expect.stringContaining('Your face is too dark') }),
+    );
+    rt.handleSampleResult(result('match'));
+    expect(deps.onSignal).toHaveBeenLastCalledWith({ kind: 'candidate_prompt_clear', key: 'identity_guidance' });
+  });
+
+  it('switches to the hold screen when the server holds the exam', () => {
+    const { rt, deps } = makeRuntime();
+    rt.handleSampleResult({ ...result('mismatch'), status: 'on_hold' });
+    expect(deps.onHold).toHaveBeenCalled();
+    expect(deps.onSignal).not.toHaveBeenCalled();
   });
 });

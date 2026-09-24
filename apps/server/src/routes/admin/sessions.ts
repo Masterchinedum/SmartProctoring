@@ -42,7 +42,7 @@ import {
 import { and, desc, eq, gte, ilike, inArray, isNotNull, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { getStaff, requireStaff } from '../../auth/staff.js';
+import { getStaff, requireStaff, roleAtLeast } from '../../auth/staff.js';
 import { candidates, events, examSessions, exams, notes, pauseRequests } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { notFound, validationFailed } from '../../lib/errors.js';
@@ -191,7 +191,8 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     const { session, exam } = await loadScopedSession(ctx.db, staff.orgId, id);
     const org = await loadOrgRow(ctx, staff.orgId);
     const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices] = await Promise.all([
-      loadSessionSummaries(ctx, ctx.db, { orgId: staff.orgId, sessionIds: [id] }),
+      // The access link (a bearer credential) only for admins, only on this explicit detail response.
+      loadSessionSummaries(ctx, ctx.db, { orgId: staff.orgId, sessionIds: [id], includeAccessLink: roleAtLeast(staff.role, 'admin') }),
       loadPeriodDTOs(ctx.db, id),
       loadIdentityCheckDTOs(ctx.db, id),
       loadIdentityReferenceDTOs(ctx.db, id),
@@ -268,7 +269,10 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'note.created', targetType: 'session', targetId: id, meta: { noteId: n.id }, ip: req.ip, at: now });
       return n;
     });
-    return toNoteDTO(note, staff.name);
+    const dto = toNoteDTO(note, staff.name);
+    // Other staff watching the session see the note without reloading (the session summary refreshes too).
+    ctx.live.sessionNote(id, dto);
+    return dto;
   });
 
   /* ------------------------------------------------------------------ lifecycle actions */

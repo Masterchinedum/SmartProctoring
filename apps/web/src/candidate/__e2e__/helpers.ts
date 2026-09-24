@@ -97,6 +97,28 @@ export class AdminApi {
     return this.json<SessionDetailDTO>('get', `/api/admin/sessions/${sessionId}`);
   }
 
+  /** Pending pause request of a session (null if none). */
+  async pendingPauseRequestId(sessionId: string): Promise<string | null> {
+    const d = await this.sessionDetail(sessionId);
+    return d.summary.pendingPauseRequest?.id ?? d.pauseRequests.find((r) => r.status === 'pending')?.id ?? null;
+  }
+
+  decidePause(sessionId: string, requestId: string, approve: boolean, note?: string): Promise<unknown> {
+    return this.json('post', `/api/admin/sessions/${sessionId}/pause-requests/${requestId}/decision`, { approve, note });
+  }
+
+  hold(sessionId: string, note?: string): Promise<unknown> {
+    return this.json('post', `/api/admin/sessions/${sessionId}/hold`, { note });
+  }
+
+  release(sessionId: string, opts: { requireCheck?: boolean; reEnroll?: boolean; note?: string } = {}): Promise<unknown> {
+    return this.json('post', `/api/admin/sessions/${sessionId}/release`, { requireCheck: true, reEnroll: false, ...opts });
+  }
+
+  terminate(sessionId: string, reason: string): Promise<unknown> {
+    return this.json('post', `/api/admin/sessions/${sessionId}/terminate`, { reason });
+  }
+
   async events(sessionId: string): Promise<EventDTO[]> {
     return (await this.json<{ items: EventDTO[] }>('get', `/api/admin/sessions/${sessionId}/events`)).items;
   }

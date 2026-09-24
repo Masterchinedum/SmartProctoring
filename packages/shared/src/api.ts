@@ -662,7 +662,9 @@ export type LiveMessage =
   | { type: 'session'; session: SessionSummaryDTO }
   | { type: 'event'; event: EventDTO; candidateName: string; examTitle: string }
   | { type: 'identity_check'; sessionId: string; check: IdentityCheckDTO }
-  | { type: 'pause_request'; sessionId: string; request: PauseRequestDTO };
+  | { type: 'pause_request'; sessionId: string; request: PauseRequestDTO }
+  /** A staff note was added to a session (session-level notes; event notes arrive as 'event' updates). */
+  | { type: 'note'; sessionId: string; note: NoteDTO };
 
 export const ACCESS_LINK_PATH = '/take/'; // full link: `${PUBLIC_URL}/take/${accessToken}`
 

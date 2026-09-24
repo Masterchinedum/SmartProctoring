@@ -103,7 +103,7 @@ export function AuditLogPage() {
                   <tr key={e.id}>
                     <td className="nowrap small">{formatDateTime(e.at)}</td>
                     <td>
-                      {e.actorName ?? (e.actorType === 'system' ? 'System' : e.actorType === 'candidate' ? 'Candidate' : '—')}
+                      {e.actorName ?? (e.actorType === 'system' ? 'System' : e.actorType === 'candidate' ? 'Candidate' : e.actorType === 'api_key' ? 'API key' : '—')}
                       <div className="muted small">{e.actorType}</div>
                     </td>
                     <td>

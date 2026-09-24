@@ -32,6 +32,9 @@ advice — review it with counsel for your jurisdictions.
 | Answers, timing, pauses, periods | During exam | Postgres | — | Your exam-records policy |
 | Device info (camera label, SHA-256 of camera id, user agent, screen size) | Check-in | `device_records` | — | With the session record |
 | Staff actions (reviews, notes, holds, evidence views) | Staff | `audit_log`, `notes` | — | Audit retention per your policy |
+| Webhook notifications (candidate name + external id, exam title, event type/title/observation/times, links) — **no images, face data or scores** | Integrations | `webhook_deliveries` (sent to endpoints your admins configure) | — | 30 days (delivery log) |
+| Alert emails (candidate name, exam, observation sentence, link) — **no images** | Integrations | `email_alerts` queue, your SMTP provider | — | 30 days (queue) |
+| API-key activity (writes, report/event reads) | Your integrations | `audit_log` (actor `api_key`) | — | Audit retention per your policy |
 
 Not collected: continuous video/audio, screen contents, other applications, other monitors or
 devices, clipboard contents, keystrokes, location.
@@ -57,6 +60,9 @@ devices, clipboard contents, keystrokes, location.
 * **Legal hold**: an administrator can place a session under legal hold (e.g. an open appeal); its
   evidence is not purged until the hold is lifted. Holds are audit-logged.
 * **Event metadata** is deleted after `eventRetentionDays` (default 365).
+* **Sessions that never end** (not started, paused or on hold and then forgotten) are closed automatically
+  after `abandonAfterDays` without activity (default 30; status terminated, no score, answers kept), so the
+  retention periods above start running.
 * Deleting a candidate removes their ID photo and template immediately.
 
 ## 5. Candidate rights and alternatives
@@ -78,4 +84,7 @@ launch.
 ## 7. Sub-processors
 
 None by default: all analysis runs in the candidate's browser and on your own server. If you enable
-S3-compatible storage or managed Postgres/Redis, list those providers as sub-processors.
+S3-compatible storage or managed Postgres/Redis, list those providers as sub-processors. If you configure SMTP
+(email alerts), your email provider receives alert emails (candidate name, exam, observation, link — no
+images). Webhooks and the integration API send data only to systems your administrators configure; list
+them in your records of processing.

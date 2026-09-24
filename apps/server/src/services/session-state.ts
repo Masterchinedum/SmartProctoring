@@ -14,7 +14,7 @@ import {
   OBSERVED_PERIOD_KINDS,
   type CandidateCommand,
   type CheckPurpose,
-  type EndReason,
+  type SessionEndReason,
   type EventSource,
   type EventType,
   type HoldReason,
@@ -45,6 +45,7 @@ import {
 import { HttpError, notFound } from '../lib/errors.js';
 import { sessionClock } from './dto.js';
 import { gradeSession } from './grading.js';
+import { enqueueIntegrationNotifications } from './integration-events.js';
 import { mergePolicy, orgThresholds } from './org.js';
 
 export const TERMINAL: SessionStatus[] = ['submitted', 'terminated'];
@@ -172,6 +173,10 @@ export class SessionMutation {
 
   onCommit(fn: () => void | Promise<void>): void {
     this.afterCommit.push(fn);
+  }
+  /** Events created or changed by this mutation (integration outbox, realtime). */
+  get touchedEventIds(): string[] {
+    return [...this.touchedEvents];
   }
   touchEvent(id: string): void {
     this.touchedEvents.add(id);
@@ -410,6 +415,7 @@ export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: Sessio
     mutation = m;
     const out = await fn(m);
     await m.flush();
+    await enqueueIntegrationNotifications(m); // webhook / email outbox rows in the same transaction
     return out;
   });
   (mutation as SessionMutation | null)?.runAfterCommit();
@@ -459,6 +465,8 @@ export const HOLD_MESSAGES: Record<HoldReason, string> = {
   id_photo_mismatch: 'We could not match you with the identity photo on file. An administrator will review this before you can start.',
   pause_limit: 'Your pause was longer than the exam rules allow. An administrator needs to approve before you can continue. Your answers and remaining time are saved.',
   staff: 'An administrator has put your exam on hold. Please wait for further instructions.',
+  id_photo_unverifiable:
+    'We could not compare you clearly with the identity photo on file (for example because of lighting or image quality). This is not a finding that you are a different person. An administrator will review this before you can start.',
 };
 
 /** Put the session on hold (clock stopped, on_hold period opens, candidate gets a 'hold' command). */
@@ -484,6 +492,9 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
     holdMessage: message,
     holdCanReverify: opts.canReverify ?? false,
     holdPrevStatus: prev === 'on_hold' ? m.session.holdPrevStatus : prev === 'paused' ? 'active' : prev,
+    // A new hold invalidates any earlier staff authorisation to re-enrol the reference (staff decide again on release).
+    reEnrollAuthorized: false,
+    reEnrollAuthorizedBy: null,
   });
   m.resetIdentityCounters();
   await m.addEvent({ type: 'session_held', source: opts.source ?? 'server_system', details: { reason: opts.reason, previousStatus: prev, by: opts.by ?? null, ...(opts.details ?? {}) } });
@@ -493,13 +504,18 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
 /**
  * End the session (submitted / terminated). Clock stops, all open periods/events close, answers are graded.
  */
-export async function finalizeSession(m: SessionMutation, endReason: EndReason, opts: { by?: string | null; note?: string | null } = {}): Promise<void> {
+export async function finalizeSession(
+  m: SessionMutation,
+  endReason: SessionEndReason,
+  opts: { by?: string | null; note?: string | null; /** 'abandoned' only */ observation?: string; details?: Record<string, unknown>; candidateMessage?: string } = {},
+): Promise<void> {
   if (TERMINAL.includes(m.session.status)) return;
   // Time expiry is recorded at the moment the clock ran out (the sweeper may run a few seconds later).
   const rs = m.session.runningSince?.getTime();
   const at = endReason === 'time_expired' && rs != null ? Math.max(rs, Math.min(m.now, rs + m.session.durationMs - m.session.usedMs)) : m.now;
   m.clockStop(at);
-  const status: SessionStatus = endReason === 'staff_terminated' ? 'terminated' : 'submitted';
+  // 'abandoned' (housekeeping after inactivity) ends as terminated so no score is implied; answers are kept.
+  const status: SessionStatus = endReason === 'staff_terminated' || endReason === 'abandoned' ? 'terminated' : 'submitted';
   await m.closeOpenEvents(at, 'session_end');
   await m.closeOpenPeriod(at);
   await m.tx
@@ -516,14 +532,18 @@ export async function finalizeSession(m: SessionMutation, endReason: EndReason, 
     holdCanReverify: false,
   });
   if (endReason === 'time_expired') await m.addEvent({ type: 'session_expired', startedAt: at });
-  if (status === 'terminated') {
+  if (endReason === 'abandoned') {
+    // Neutral housekeeping marker (services/abandonment.ts); no score, answers kept.
+    await m.addEvent({ type: 'session_terminated', source: 'server_system', startedAt: at, observation: opts.observation, details: { reason: 'abandoned_after_inactivity', ...(opts.details ?? {}) } });
+    await m.enqueueCommand({ kind: 'terminated', message: opts.candidateMessage ?? 'This exam session was closed because it was not used for a long time.' });
+  } else if (endReason === 'staff_terminated') {
     await m.addEvent({ type: 'session_terminated', source: 'staff', startedAt: at, details: { reason: opts.note ?? null, by: opts.by ?? null } });
     await m.enqueueCommand({ kind: 'terminated', message: 'Your exam was ended by an administrator.' });
   } else {
     await m.addEvent({ type: 'session_submitted', startedAt: at, source: 'server_system', details: { endReason, by: opts.by ?? null, note: opts.note ?? null } });
     if (endReason !== 'candidate_submitted') await m.enqueueCommand({ kind: 'submitted', reason: endReason });
   }
-  if (wasStarted) {
+  if (wasStarted && endReason !== 'abandoned') {
     const score = await gradeSession(m.tx, m.session.id, m.session.examId, at);
     m.set({ score });
   }

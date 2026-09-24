@@ -47,6 +47,11 @@ export interface Config {
   /** Staff session idle timeout / absolute lifetime. */
   staffSessionIdleMs: number;
   staffSessionMaxMs: number;
+  /**
+   * Per-session caps on candidate-driven storage (services/session-limits.ts):
+   * SESSION_MAX_EVIDENCE_ITEMS (1500), SESSION_MAX_EVIDENCE_MB (300), SESSION_MAX_CHECKS_PER_HOUR (30).
+   */
+  sessionLimits: { maxEvidenceItems: number; maxEvidenceBytes: number; maxChecksPerHour: number };
   /** SMTP server for email alerts (SMTP_*). null = email alerts unavailable. */
   smtp: SmtpConfig | null;
   /** Outgoing webhooks (services/webhooks.ts). */
@@ -235,6 +240,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sweeperIntervalMs: int(env.SWEEPER_INTERVAL_MS, 5000),
     staffSessionIdleMs: int(env.STAFF_SESSION_IDLE_MIN, 8 * 60) * 60_000,
     staffSessionMaxMs: int(env.STAFF_SESSION_MAX_HOURS, 7 * 24) * 3_600_000,
+    sessionLimits: {
+      maxEvidenceItems: Math.max(1, int(env.SESSION_MAX_EVIDENCE_ITEMS, 1500)),
+      maxEvidenceBytes: Math.max(1, int(env.SESSION_MAX_EVIDENCE_MB, 300)) * 1024 * 1024,
+      maxChecksPerHour: Math.max(1, int(env.SESSION_MAX_CHECKS_PER_HOUR, 30)),
+    },
     smtp,
     webhooks,
     integrationApi: { rateLimitPerMinute: Math.max(1, int(env.API_RATE_LIMIT_PER_MINUTE, 600)) },
