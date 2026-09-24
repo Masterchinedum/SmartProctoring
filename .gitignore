@@ -15,3 +15,8 @@ eval-reports/local/
 *.tsbuildinfo
 .DS_Store
 dump.rdb
+
+# agent / local scratch (never commit derived face images)
+.scratch*/
+**/.scratch*/
+*.y4m
