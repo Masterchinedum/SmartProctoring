@@ -12,24 +12,30 @@
  *     removes most of that between-person spread. A probe similarity s is mapped into the global genuine frame by a
  *     z-score transfer from the personal genuine model:
  *         s' = g.mean + (s - p.mean) * (g.sd / p.sd)
- *     where p.mean = baseline.mean - drift(bucket) and p.sd = sqrt(baseline.sd^2 + driftSd(bucket)^2), both
- *     bounded (band around the global mean, limited sharpening, shrinkage towards the global model with few
- *     enrolment frames), and then scored with the calibrated `sampleLLR(s', bucket)`. So a drop from 0.78 to 0.40 is
- *     strong evidence of a different person even though 0.40 is above the global mismatch threshold, while a
- *     person whose own frames are only ~0.6 similar gets a more lenient model. Poor-quality frames are barely
- *     normalised (their drift is large and uncertain).
+ *     where p.mean = baseline.mean - drift(bucket) and p.sd = sqrt(baseline.sd^2 + driftSd(bucket)^2) with the drift
+ *     measured by the vision module (`GENUINE_DRIFT`: 'continuous' = same session, 'relaxed' = another day / room /
+ *     camera), both bounded (band around the global mean, limited sharpening, shrinkage towards the global model with
+ *     few enrolment frames), and then scored with the calibrated `sampleLLR(s', bucket)`. So a drop from the person's
+ *     own level is evidence of a different person even above the global mismatch threshold, while a person whose own
+ *     frames are only ~0.6 similar gets a more lenient model. Poor frames are barely normalised. The 'relaxed' drift
+ *     applies at resume / reconnect / reverify checks and to every mid-exam sample after such a check (the room,
+ *     light and camera may differ from enrolment): 'continuous' normalisation across days caused 9–27 false alarms
+ *     per 1,000 h in the vision module's simulation (docs/accuracy/identity-v2.md §9).
  *  2. Accumulation (SPRT / windowed CUSUM): clamped LLRs of samples (a burst counts as ONE sample: its frames are
  *     taken within ~0.6 s and are not independent) are summed over a window of the last `sprt.maxSamples` samples
- *     no older than 10 minutes. sum >= sprt.suspect => 'suspect' (ask for a faster sample), sum >= sprt.confirm =>
+ *     no older than 10 minutes, with positive evidence from 'poor' samples capped at `sprt.maxPoorEvidence`
+ *     (`windowEvidence`, below `sprt.confirm`): poor light alone can make a session 'suspect' — faster sampling,
+ *     lighting guidance, an uncertain observation for staff — but confirmation waits for a fair or good frame. sum >= sprt.suspect => 'suspect' (ask for a faster sample), sum >= sprt.confirm =>
  *     'confirmed_mismatch', sum <= sprt.clear => evidence cleared ('consistent', window emptied) so lighting dips
  *     do not accumulate forever. Unusable frames contribute nothing (never "different person"). A discontinuity
  *     (track break, face return, camera reconnect, exam start...) drops earlier genuine evidence from the window —
  *     it vouched for whoever was in view BEFORE the break — and weights positive evidence of that sample by 1.25
- *     (a swap can only happen at a break). With the LLR clamp (6) and weight, a single sample can never reach
- *     `sprt.confirm` (9): at least two samples are always needed.
+ *     (a swap can only happen at a break). With the LLR clamp (5) and weight, a single sample can never reach
+ *     `sprt.confirm` (7): at least two fair / good samples are always needed.
  */
 import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityEvidenceDTO, IdentityPolicy, IdentitySampleRequestDTO, IdentityThresholds, SessionStatus } from '@sp/shared';
-import { BUCKET_MODELS, CALIBRATION, posteriorSwap, qualityBucket, sampleLLR, type QualityBucket } from '../vision/index.js';
+import { GENUINE_DRIFT, windowEvidence } from '../vision/calibration.js';
+import { BUCKET_MODELS, CALIBRATION, decideIdentity, posteriorSwap, qualityBucket, sampleLLR, type QualityBucket } from '../vision/index.js';
 
 /* =================================================================== per-session normalisation */
 
@@ -50,14 +56,8 @@ export type ComparisonContext =
   | 'relaxed';
 
 export const SESSION_NORMALISATION = Object.freeze({
-  /** Expected drop of a genuine probe below the enrolment baseline, per bucket (mean, sd). */
-  drift: Object.freeze({
-    good: Object.freeze({ mean: 0.06, sd: 0.05 }),
-    fair: Object.freeze({ mean: 0.12, sd: 0.07 }),
-    poor: Object.freeze({ mean: 0.2, sd: 0.1 }),
-  }) as Readonly<Record<QualityBucket, { mean: number; sd: number }>>,
-  /** Extra drift allowed in the 'relaxed' context. */
-  relaxedExtra: Object.freeze({ mean: 0.05, sd: 0.03 }),
+  /** Measured drop of a genuine probe below the enrolment baseline, per context and bucket (vision/calibration.ts). */
+  drift: GENUINE_DRIFT,
   /** The personal genuine mean stays within [global - below, global + above]. */
   meanBand: Object.freeze({ below: 0.08, above: 0.04 }),
   /** The personal sd is at least global sd / maxSharpen (per bucket; poor frames and the 'relaxed' context are not sharpened). */
@@ -79,13 +79,11 @@ export function usableBaseline(b: SessionBaseline | null | undefined): b is Sess
 export function personalGenuine(bucket: QualityBucket, baseline: SessionBaseline, context: ComparisonContext = 'continuous'): { mean: number; sd: number } {
   const g = BUCKET_MODELS[bucket].genuine;
   const N = SESSION_NORMALISATION;
-  const d = N.drift[bucket];
-  const extraMean = context === 'relaxed' ? N.relaxedExtra.mean : 0;
-  const extraSd = context === 'relaxed' ? N.relaxedExtra.sd : 0;
-  const rawMean = clamp(baseline.mean - d.mean - extraMean, g.mean - N.meanBand.below - extraMean, g.mean + N.meanBand.above);
+  const d = N.drift[context][bucket];
+  const rawMean = clamp(baseline.mean - d.mean, g.mean - N.meanBand.below, g.mean + N.meanBand.above);
   // Across rooms / cameras / days ('relaxed') the personal model may shift its mean but is never sharper than the global one.
   const sharpen = context === 'relaxed' ? 1 : N.maxSharpen[bucket];
-  const rawSd = Math.max(Math.sqrt(baseline.sd * baseline.sd + d.sd * d.sd + extraSd * extraSd), g.sd / sharpen);
+  const rawSd = Math.max(Math.sqrt(baseline.sd * baseline.sd + d.sd * d.sd), g.sd / sharpen);
   const w = baseline.n / (baseline.n + N.shrinkFrames);
   return { mean: w * rawMean + (1 - w) * g.mean, sd: w * rawSd + (1 - w) * g.sd };
 }
@@ -192,8 +190,20 @@ export const DISCONTINUITY_TRIGGERS: ReadonlySet<IdentityCheckTrigger> = new Set
 /** Triggers processed with interactive priority (someone may have just swapped in). */
 export const URGENT_TRIGGERS: ReadonlySet<IdentityCheckTrigger> = new Set<IdentityCheckTrigger>([...DISCONTINUITY_TRIGGERS, 'server_request', 'follow_up']);
 
+/** Accumulated evidence of a window: the LLR sum with poor-only positive evidence capped (`windowEvidence`). */
 export function windowSum(window: readonly EvidenceEntry[]): number {
-  return round4(window.reduce((a, e) => a + e.llr, 0));
+  return round4(windowEvidence(window));
+}
+
+/**
+ * The window is 'suspect' only because of poor-quality samples: without their (capped) positive evidence it would not
+ * be. Confirmation then waits for a fair / good frame; staff see an uncertain observation, the candidate lighting
+ * guidance.
+ */
+export function poorLightSuspect(acc: Pick<EvidenceAccumulator, 'state' | 'window'>): boolean {
+  if (acc.state !== 'suspect') return false;
+  const poorPositive = acc.window.some((e) => e.bucket === 'poor' && e.llr > 0);
+  return poorPositive && windowSum(acc.window.filter((e) => !(e.bucket === 'poor' && e.llr > 0))) < CALIBRATION.sprt.suspect;
 }
 
 export function toEvidenceDTO(acc: Readonly<EvidenceAccumulator>, prior: number = CALIBRATION.prior): IdentityEvidenceDTO {
@@ -286,11 +296,10 @@ export function accumulate(prev: Readonly<EvidenceAccumulator>, obs: SampleObser
  * The per-sample decision label shown in identity-check lists (org thresholds, as before): the calibrated evidence
  * decides escalation, the label only describes the single comparison. Unusable images are never a mismatch.
  */
-export function sampleLabel(similarity: number | null, quality: FaceQuality | null, thresholds: Pick<IdentityThresholds, 'match' | 'mismatch'>): IdentityDecision {
-  if (!quality || !quality.usable || similarity == null || !Number.isFinite(similarity)) return 'unable_to_verify';
-  if (similarity >= thresholds.match) return 'match';
-  if (similarity < Math.min(thresholds.mismatch, thresholds.match)) return 'mismatch';
-  return 'inconclusive';
+export function sampleLabel(similarity: number | null, quality: FaceQuality | null, thresholds: IdentityThresholds): IdentityDecision {
+  // vision's quality-aware rule: a poor frame is never labelled "mismatch", a fair / good one only with strong
+  // calibrated evidence (MISMATCH_MIN_LLR).
+  return decideIdentity(similarity, quality, thresholds, 'reference').decision;
 }
 
 /* =================================================================== check assessment (resume / reconnect / reverify) */
@@ -322,12 +331,18 @@ export interface CheckAssessment {
   clearMatch: number;
   clearMismatch: number;
   posterior: number;
+  /** 'uncertain' because the evidence of a different person came only from poor-quality frames (add light). */
+  poorLight: boolean;
 }
 
 /** Running identity assessment of a check's frames against the protected reference. */
 export function assessCheck(frames: readonly FrameEvidence[], opts: { atLimit?: boolean } = {}): CheckAssessment {
   const usable = frames.filter((f) => f.usable);
-  const llr = round4(usable.reduce((a, f) => a + f.llr, 0) * CHECK_EVIDENCE.frameWeight);
+  // Positive evidence from poor frames is capped as in the SPRT window: a dim-room check ends 'uncertain' (lighting
+  // guidance), never 'likely_mismatch', unless fair / good frames add their own evidence.
+  const weighted = usable.map((f) => ({ llr: f.llr * CHECK_EVIDENCE.frameWeight, bucket: f.bucket }));
+  const llr = round4(windowEvidence(weighted));
+  const poorLimited = weighted.some((f) => f.bucket === 'poor' && f.llr > 0) && windowEvidence(weighted.filter((f) => !(f.bucket === 'poor' && f.llr > 0))) < CHECK_EVIDENCE.mismatchLLR;
   const clearMatch = usable.filter((f) => f.llr <= -CHECK_EVIDENCE.clearFrameLLR).length;
   const clearMismatch = usable.filter((f) => f.llr >= CHECK_EVIDENCE.clearFrameLLR).length;
   const min = opts.atLimit ? CHECK_EVIDENCE.minFramesAtLimit : CHECK_EVIDENCE.minFrames;
@@ -337,7 +352,7 @@ export function assessCheck(frames: readonly FrameEvidence[], opts: { atLimit?: 
   else if (llr <= CHECK_EVIDENCE.matchLLR) status = 'likely_match';
   else if (llr >= CHECK_EVIDENCE.mismatchLLR) status = 'likely_mismatch';
   else status = 'uncertain';
-  return { status, llr, usable: usable.length, clearMatch, clearMismatch, posterior: round4(posteriorSwap(llr)) };
+  return { status, llr, usable: usable.length, clearMatch, clearMismatch, posterior: round4(posteriorSwap(llr)), poorLight: status === 'uncertain' && poorLimited };
 }
 
 /* =================================================================== cadence */
