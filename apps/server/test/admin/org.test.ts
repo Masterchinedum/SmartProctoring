@@ -45,8 +45,10 @@ describe('settings', () => {
     expect(JSON.stringify(badPolicy.json().details)).toContain('pause.timerBehavior');
     expect((await admin.put('/settings', { name: '   ' })).statusCode).toBe(400);
     // nothing was changed by the rejected requests
-    const [org] = await env.ctx.db.select().from(organizations).where(eq(organizations.id, env.org.id));
-    expect(org.settings.evidenceRetentionDays).toBe(30);
+    const after = json<OrgSettingsDTO>(await admin.get('/settings'));
+    expect(after).toMatchObject({ name: 'Test University', evidenceRetentionDays: 30, eventRetentionDays: 365 });
+    expect(after.identityThresholds).toEqual(json<OrgSettingsDTO>(await owner.get('/settings')).identityThresholds);
+    expect(json(await admin.get('/audit-log', { action: 'settings.' })).total).toBe(0);
   });
 
   it('updates settings, keeps unknown policy keys out, and audits the change', async () => {

@@ -120,19 +120,18 @@ export function createLivenessTracker(opts: {
         const progress = ok ? 1 : clamp01(1 - (dev - CENTER_TOL_KNOWN) / (2 * CENTER_TOL_KNOWN));
         return (last = hold(ok, t, progress, s, ok ? '' : instruction(s)));
       }
-      // No centre yet: any steady pose inside the absolute sanity window.
+      // No centre yet: any steady pose inside the absolute sanity window (hold() enforces holdMs).
       const st = steadiness(t, yaw, pitch);
       const plausible = Math.abs(yaw) <= CENTRE_MAX_YAW && Math.abs(pitch) <= CENTRE_MAX_PITCH;
-      const ok = plausible && st.steady;
-      const progress = ok ? 1 : plausible ? clamp01(st.spanMs / Math.max(1, holdMs)) * 0.99 : 0;
-      return (last = hold(ok, t, progress, s, plausible ? `${instruction(s)} and hold still` : instruction(s)));
+      const ok = plausible && st.steadyNow;
+      return (last = hold(ok, t, ok ? 1 : 0, s, `${instruction(s)} and hold still`));
     }
 
     // Implicit centre before the first action step.
     if (!centre) {
       const st = steadiness(t, yaw, pitch);
       const plausible = Math.abs(yaw) <= CENTRE_MAX_YAW && Math.abs(pitch) <= CENTRE_MAX_PITCH;
-      if (plausible && st.steady && st.spanMs >= holdMs * 0.9 && buf.length >= 2) {
+      if (plausible && st.steady) {
         centre = st.mean;
         buf = [];
         holdStart = null;
@@ -157,20 +156,20 @@ export function createLivenessTracker(opts: {
     return (last = hold(ok, t, progress, s, hint));
   }
 
-  /** Track the recent pose window; steady when the spread over ≥ holdMs stays within CENTRE_STEADY_DEG. */
-  function steadiness(t: number, yaw: number, pitch: number): { steady: boolean; spanMs: number; mean: { yaw: number; pitch: number } } {
+  /**
+   * Recent pose window (last holdMs). steadyNow: the spread within the window is ≤ CENTRE_STEADY_DEG
+   * (a larger movement restarts the window). steady: steadyNow for (almost) the whole hold time.
+   */
+  function steadiness(t: number, yaw: number, pitch: number): { steadyNow: boolean; steady: boolean; spanMs: number; mean: { yaw: number; pitch: number } } {
     buf.push({ t, yaw, pitch });
     while (buf.length > 0 && buf[0].t < t - holdMs) buf.shift();
     const ys = buf.map((b) => b.yaw);
     const ps = buf.map((b) => b.pitch);
-    let steady = Math.max(...ys) - Math.min(...ys) <= CENTRE_STEADY_DEG && Math.max(...ps) - Math.min(...ps) <= CENTRE_STEADY_DEG;
-    if (!steady) {
-      buf = buf.slice(-1);
-      steady = true;
-    }
+    const steadyNow = Math.max(...ys) - Math.min(...ys) <= CENTRE_STEADY_DEG && Math.max(...ps) - Math.min(...ps) <= CENTRE_STEADY_DEG;
+    if (!steadyNow) buf = buf.slice(-1);
     const spanMs = buf.length ? t - buf[0].t : 0;
     const mean = { yaw: buf.reduce((a, b) => a + b.yaw, 0) / buf.length, pitch: buf.reduce((a, b) => a + b.pitch, 0) / buf.length };
-    return { steady: steady && spanMs >= holdMs * 0.9 && buf.length >= 2, spanMs, mean };
+    return { steadyNow, steady: steadyNow && spanMs >= holdMs * 0.9 && buf.length >= 2, spanMs, mean };
   }
 
   function hold(ok: boolean, t: number, progress: number, s: LivenessStep, hint: string): LivenessProgress {
