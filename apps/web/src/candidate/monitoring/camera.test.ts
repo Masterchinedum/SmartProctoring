@@ -63,10 +63,10 @@ describe('CameraManager', () => {
     vi.restoreAllMocks();
   });
 
-  it('opens the camera un-mirrored at ~640×480 without audio and reports a hashed device id', async () => {
+  it('asks for HD (1280×720 ideal, for native-resolution identity crops) without audio and reports a hashed device id', async () => {
     const cam = new CameraManager();
     expect(await cam.start()).toBe(true);
-    expect(getUserMedia).toHaveBeenCalledWith({ video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } }, audio: false });
+    expect(getUserMedia).toHaveBeenCalledWith({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 15, max: 30 } }, audio: false });
     expect(cam.state.state).toBe('live');
     expect(cam.state.info?.label).toBe('Integrated Camera');
     expect(cam.state.info?.deviceIdHash).toMatch(/^[0-9a-f]{64}$/);
@@ -113,12 +113,23 @@ describe('CameraManager', () => {
     cam.dispose();
   });
 
-  it('falls back to any camera when the chosen one is gone', async () => {
-    failNext = ['OverconstrainedError'];
+  it('falls back to standard definition, then to any camera when the chosen one is gone', async () => {
+    failNext = ['OverconstrainedError', 'OverconstrainedError'];
     const cam = new CameraManager();
     expect(await cam.start('cam-9')).toBe(true);
-    expect((getUserMedia.mock.calls[0][0].video as MediaTrackConstraints).deviceId).toEqual({ exact: 'cam-9' });
-    expect((getUserMedia.mock.calls[1][0].video as MediaTrackConstraints).deviceId).toBeUndefined();
+    const video = (i: number) => getUserMedia.mock.calls[i][0].video as MediaTrackConstraints;
+    expect(video(0)).toMatchObject({ deviceId: { exact: 'cam-9' }, width: { ideal: 1280 } });
+    expect(video(1)).toMatchObject({ deviceId: { exact: 'cam-9' }, width: { ideal: 640 } });
+    expect(video(2).deviceId).toBeUndefined();
+    expect(cam.state.state).toBe('live');
+    cam.dispose();
+  });
+
+  it('a camera that refuses HD (NotReadableError) is opened in standard definition', async () => {
+    failNext = ['NotReadableError'];
+    const cam = new CameraManager();
+    expect(await cam.start()).toBe(true);
+    expect((getUserMedia.mock.calls[1][0].video as MediaTrackConstraints).width).toEqual({ ideal: 640 });
     expect(cam.state.state).toBe('live');
     cam.dispose();
   });

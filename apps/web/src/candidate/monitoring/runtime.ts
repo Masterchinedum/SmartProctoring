@@ -5,6 +5,7 @@ import {
   createFrameMetricsTracker,
   facesFromMediapipe,
   objectsFromMediapipe,
+  type ContinuityFire,
 } from '@sp/detection';
 import type {
   Baseline,
@@ -13,9 +14,11 @@ import type {
   EngineSignal,
   EpisodeUpdate,
   EventUpsert,
+  FaceObservation,
   FrameObservation,
   HeartbeatRequest,
   IdentityCheckTrigger,
+  IdentitySampleRequestDTO,
   IdentitySampleResponse,
   MonitoringStatus,
   ProctoringPolicy,
@@ -24,9 +27,12 @@ import { classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api'
 import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
-import { captureJpeg, GraySampler, sameFrame } from './frames';
+import { AnalysisFrame, captureFaceCrop, captureJpeg, GraySampler, HeldFrame, sameFrame } from './frames';
+import { BurstSampler, burstEligible, SUSPECT_INTERVAL_MS, type BurstResult } from './sampler';
 import type { TraceRecorder } from './trace';
 import { loadVision, type Vision } from './vision';
+
+export { SAMPLE_PRIORITY, SampleTriggerQueue } from './sampler';
 
 /**
  * Monitoring runtime — runs only while the session is active on a verified instance.
@@ -62,6 +68,33 @@ export interface RuntimeDeps {
   /** The server put the session on hold (from an identity sample response). */
   onHold?: () => void;
   onFatal?: (kind: 'invalid_link' | 'superseded') => void;
+  /** Diagnostics for the candidate debug overlay (?debug=1): a sample burst finished, a trigger fired. */
+  onDebug?: (e: RuntimeDebugEvent) => void;
+}
+
+export type RuntimeDebugEvent =
+  | { kind: 'burst'; result: BurstResult }
+  | { kind: 'trigger'; at: number; trigger: IdentityCheckTrigger; source: 'engine' | 'host' | 'server'; reason?: string };
+
+/** Live diagnostics of the monitoring runtime (debug overlay). */
+export interface RuntimeDebug {
+  cameraWidth: number;
+  cameraHeight: number;
+  analysisWidth: number;
+  analysisHeight: number;
+  fps: number;
+  faces: number;
+  /** ms until the next routine identity sample (null if unknown). */
+  nextSampleInMs: number | null;
+  /** Trigger waiting for a usable face / budget, or being captured. */
+  pendingTrigger: IdentityCheckTrigger | null;
+  burstActive: boolean;
+  /** Appearance distance to the rolling baseline and the current threshold. */
+  appearance: { distance: number; threshold: number; baselineFrames: number };
+  /** Swap triggers the engine fired (with the reason: gap / count / jump / appearance). */
+  swapTriggers: ContinuityFire[];
+  lastBurst: BurstResult | null;
+  budgetLeft: number;
 }
 
 export function episodeToUpsert(ep: EpisodeUpdate, instanceId: string): EventUpsert {
@@ -79,58 +112,10 @@ export function episodeToUpsert(ep: EpisodeUpdate, instanceId: string): EventUps
   };
 }
 
-/** Importance of identity-sample triggers when several are waiting (only the most important is kept). */
-export const SAMPLE_PRIORITY: Record<IdentityCheckTrigger, number> = {
-  track_break: 9,
-  appearance_change: 8,
-  exam_start: 7,
-  server_request: 6,
-  follow_up: 6,
-  camera_reconnect: 5,
-  after_multiple_people: 4,
-  face_return: 3,
-  after_obstruction: 2,
-  periodic: 1,
-  check_in: 0,
-  resume: 0,
-  reconnect: 0,
-  reverify: 0,
-  id_photo: 0,
-};
-
-/**
- * Holds an identity-sample request until it can be captured (another sample in flight, or no video
- * frame yet). The engine has already consumed the trigger, so it must not be lost; stale requests
- * expire because the situation they describe has passed.
- */
-export class SampleTriggerQueue {
-  private pending: { trigger: IdentityCheckTrigger; at: number } | null = null;
-
-  constructor(private readonly maxAgeMs = 20_000) {}
-
-  push(trigger: IdentityCheckTrigger, now: number): void {
-    if (!this.pending || SAMPLE_PRIORITY[trigger] > SAMPLE_PRIORITY[this.pending.trigger]) this.pending = { trigger, at: now };
-  }
-
-  /** The waiting trigger (removed from the queue), or null if none / expired. */
-  take(now: number): IdentityCheckTrigger | null {
-    const p = this.pending;
-    this.pending = null;
-    if (!p) return null;
-    if (p.trigger !== 'follow_up' && now - p.at > this.maxAgeMs) return null;
-    return p.trigger;
-  }
-
-  get size(): number {
-    return this.pending ? 1 : 0;
-  }
-
-  clear(): void {
-    this.pending = null;
-  }
-}
-
 type Engine = ReturnType<typeof createMonitoringEngine>;
+
+/** Identity-sample triggers that come from the host or the server rather than from the engine. */
+const HOST_TRIGGERS: ReadonlySet<IdentityCheckTrigger> = new Set(['exam_start', 'follow_up', 'server_request']);
 
 /** Maps a host stop reason onto the engine's flush reasons. */
 export function toFlushReason(reason: string): 'pause' | 'submit' | 'hold' | 'stop' {
@@ -145,8 +130,12 @@ export class MonitoringRuntime {
   private engine: Engine;
   private tracker: Tracker;
   private vision: Vision | null = null;
-  private readonly sampler = new GraySampler();
+  private readonly gray = new GraySampler();
+  private readonly analysis = new AnalysisFrame();
+  private readonly held = new HeldFrame();
   private readonly metrics = createFrameMetricsTracker();
+  private readonly bursts: BurstSampler;
+  private lastFaces = 0;
   private running = false;
   private stopped = false;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -159,8 +148,6 @@ export class MonitoringRuntime {
   private unsubCamera: (() => void) | null = null;
   private degraded: { id: string; version: number; startedAt: number; reason: string } | null = null;
   private followUpTimer: ReturnType<typeof setTimeout> | null = null;
-  private sampleInFlight = false;
-  private readonly sampleQueue = new SampleTriggerQueue();
   private readonly removers: (() => void)[] = [];
   private readonly pendingWrites = new Set<Promise<void>>();
 
@@ -169,11 +156,62 @@ export class MonitoringRuntime {
     this.engine = createMonitoringEngine({
       policy: p.detection,
       identityIntervalSec: p.identity.periodicCheckIntervalSec,
+      identityStartupIntervalSec: p.identity.startupIntervalSec,
+      identityStartupWindowSec: p.identity.startupWindowSec,
       evidence: p.evidence,
       baseline: deps.baseline ?? undefined,
       idFactory: uuid,
     });
     this.tracker = createBrowserSignalTracker(p.browser);
+    this.bursts = new BurstSampler({
+      burstSize: p.identity.burstSize ?? 3,
+      uuid,
+      now: () => this.now(),
+      mono: () => performance.now(),
+      send: (f, q) => this.deps.api.identitySample(f.sampleId, f.jpeg, q),
+      onSendFailed: (f, q, e) => this.sampleSendFailed(f, q, e),
+      onResponse: (res, final) => this.handleSampleResult(res, final),
+      onBurstStart: (trigger) => {
+        // The engine restarts its routine timer for its own triggers; host / server ones restart it here.
+        if (HOST_TRIGGERS.has(trigger)) this.engine.noteIdentitySample(this.now());
+      },
+      onBurstDone: (r) => this.deps.onDebug?.({ kind: 'burst', result: r }),
+      onTrigger: (e) => this.deps.onDebug?.({ kind: 'trigger', ...e }),
+    });
+  }
+
+  /**
+   * A server request for an identity burst (exam start, faster sample while the evidence is suspect), from
+   * the session state or a heartbeat. Deduplicated with the runtime's own triggers.
+   */
+  serverSampleRequest(req: IdentitySampleRequestDTO | null | undefined): void {
+    if (!req) return;
+    this.bursts.serverRequest(req);
+    this.pumpSamples();
+  }
+
+  /** Diagnostics for the debug overlay. */
+  debug(): RuntimeDebug {
+    const v = this.deps.camera.video;
+    const sched = this.engine.identitySchedule();
+    const cont = this.engine.continuityState();
+    const now = this.now();
+    const canvas = this.analysis.canvas;
+    return {
+      cameraWidth: v?.videoWidth ?? 0,
+      cameraHeight: v?.videoHeight ?? 0,
+      analysisWidth: canvas?.width ?? 0,
+      analysisHeight: canvas?.height ?? 0,
+      fps: Math.round(this.fps() * 10) / 10,
+      faces: this.lastFaces,
+      nextSampleInMs: sched.nextDueAt != null ? Math.max(0, sched.nextDueAt - now) : null,
+      pendingTrigger: this.bursts.pendingTrigger() ?? sched.pending,
+      burstActive: this.bursts.busy,
+      appearance: { distance: cont.patchDistance, threshold: cont.patchThreshold, baselineFrames: cont.baselineFrames },
+      swapTriggers: cont.fired,
+      lastBurst: this.bursts.last,
+      budgetLeft: this.bursts.budget.available(performance.now()),
+    };
   }
 
   get isRunning(): boolean {
@@ -236,6 +274,9 @@ export class MonitoringRuntime {
     }
 
     this.attachBrowserSignals();
+    // Identity continuity matters most right after the exam starts / resumes / reconnects: sample at once.
+    // (The server may ask for the same via CandidateSessionState.session.identitySample — deduplicated.)
+    this.bursts.request('exam_start', 'host');
     this.unsubCamera = this.deps.camera.subscribe((s) => this.onCamera(s));
     if (!this.deps.camera.state.wanted) void this.deps.camera.start();
     this.onCamera(this.deps.camera.state);
@@ -305,29 +346,37 @@ export class MonitoringRuntime {
 
     // Browser signal tracker runs regardless of the camera.
     this.pushEpisodes(this.tracker.tick(t));
-    this.pumpSamples();
+    this.bursts.tick();
 
     const stale = nowMs - this.lastIngestAt >= MIN_INGEST_INTERVAL_MS;
     let obs: FrameObservation | null = null;
+    // While a burst is collecting, hold the full-resolution frame so the analysed frame and the uploaded
+    // face crop are the same camera frame.
+    const bursting = this.bursts.busy || this.bursts.pendingTrigger() !== null;
+    let source: HTMLVideoElement | HTMLCanvasElement | null = null;
     if (camState === 'live' && this.vision?.face) {
-      const gray = cam.isVideoReady() ? this.sampler.sample(video) : null;
-      if (gray) {
+      source = cam.isVideoReady() ? (bursting ? this.held.capture(video) : video) : null;
+      const gray = source ? this.gray.sample(source) : null;
+      if (gray && source) {
         // Never analyse the same camera frame twice (it would look frozen) — unless no new frame has
         // arrived for a while, which genuinely is a frozen feed.
         if (sameFrame(gray.data, this.lastGray) && !stale) return;
         this.lastGray = gray.data;
-        const size = { width: video.videoWidth, height: video.videoHeight };
-        const faceRes = this.vision.detectFaces(video);
-        if (faceRes) {
+        // MediaPipe runs on a downscaled copy (≤ 640 px, aspect kept: normalised boxes map to the full frame).
+        const small = this.analysis.draw(source);
+        const size = small ? { width: small.width, height: small.height } : { width: video.videoWidth, height: video.videoHeight };
+        const faceRes = small ? this.vision.detectFaces(small) : null;
+        if (faceRes && small) {
           const frame = this.metrics.next(gray.data, gray.width, gray.height);
-          const faces = facesFromMediapipe(faceRes, gray, size);
+          const faces = facesFromMediapipe(faceRes, gray, size, { descriptors: true });
           let objects: FrameObservation['objects'] = null;
           if (this.vision.objects && nowMs - this.lastObjectsAt >= OBJECT_INTERVAL_MS) {
             this.lastObjectsAt = nowMs;
-            const objRes = this.vision.detectObjects(video);
+            const objRes = this.vision.detectObjects(small);
             if (objRes) objects = objectsFromMediapipe(objRes, size.width, size.height);
           }
           this.frameTimes.push(nowMs);
+          this.lastFaces = faces.length;
           obs = { t, camera: 'live', frame, faces, objects, fps: Math.round(this.fps() * 10) / 10 };
         }
       }
@@ -339,7 +388,7 @@ export class MonitoringRuntime {
     }
     if (!obs) return;
     this.lastIngestAt = nowMs;
-    this.deps.trace?.observation(obs);
+    this.deps.trace?.observation(stripDescriptors(obs));
     let out: EngineOutput;
     try {
       out = this.engine.ingest(obs);
@@ -348,6 +397,15 @@ export class MonitoringRuntime {
       return;
     }
     void this.handleOutput(out);
+    // Identity bursts ride on analysed frames: each burst frame is a new camera frame with exactly one usable face.
+    if (obs.frame && source) this.offerBurstFrame(source, obs.faces, t);
+  }
+
+  private offerBurstFrame(source: HTMLVideoElement | HTMLCanvasElement, faces: FaceObservation[], t: number): void {
+    const one = burstEligible(faces);
+    if (!this.bursts.wantsFrame(!!one && this.deps.camera.isVideoReady())) return;
+    const crop = captureFaceCrop(source, one!.box).then((c) => c?.blob ?? null);
+    void this.bursts.addFrame(crop, t);
   }
 
   private async handleOutput(out: EngineOutput | null | undefined): Promise<void> {
@@ -358,7 +416,7 @@ export class MonitoringRuntime {
     }
     this.pushEpisodes(out.episodes ?? []);
     for (const s of out.signals ?? []) {
-      if (s.kind === 'identity_sample') this.requestSample(s.trigger);
+      if (s.kind === 'identity_sample') this.requestSample(s.trigger, 'engine');
       else this.deps.onSignal?.(s);
     }
   }
@@ -386,54 +444,48 @@ export class MonitoringRuntime {
 
   /* ------------------------------------------------------------------ identity samples */
 
-  /** Queue an identity sample; it is captured as soon as the camera and the previous sample allow. */
-  private requestSample(trigger: IdentityCheckTrigger): void {
-    this.sampleQueue.push(trigger, Date.now());
-    this.pumpSamples();
+  /** Queue an identity sample; the burst is captured on the next analysed frames with one usable face. */
+  private requestSample(trigger: IdentityCheckTrigger, source: 'engine' | 'host' | 'server' = 'engine'): void {
+    this.bursts.request(trigger, source);
   }
 
+  /** Nothing to pump: bursts start on analysed frames (kept for callers). */
   private pumpSamples(): void {
-    if (!this.running || this.sampleInFlight || this.sampleQueue.size === 0) return;
-    if (!this.deps.camera.isVideoReady()) return;
-    const trigger = this.sampleQueue.take(Date.now());
-    if (trigger) void this.takeIdentitySample(trigger);
+    /* bursts are driven by the analysis loop (offerBurstFrame) */
   }
 
-  private async takeIdentitySample(trigger: IdentityCheckTrigger): Promise<void> {
-    this.sampleInFlight = true;
-    try {
-      const capturedAt = this.now();
-      const blob = await captureJpeg(this.deps.camera.video, 0.85);
-      if (!blob) {
-        this.sampleQueue.push(trigger, Date.now()); // try again on the next tick
-        return;
-      }
-      const sampleId = uuid();
-      try {
-        const res = await this.deps.api.identitySample(sampleId, blob, { trigger, capturedAt });
-        this.handleSampleResult(res);
-      } catch (e) {
-        const kind = classifyApiError(e);
-        if (kind === 'invalid_link' || kind === 'superseded') {
-          this.deps.onFatal?.(kind);
-          return;
-        }
-        if (kind === 'client' || kind === 'invalid_state') return; // refused in this state / unusable — nothing to retry
-        // Offline or server trouble: keep it for later delivery with its original timestamp. A busy server
-        // (vision queue full) is told apart: the sample waits, and that is not a reporting outage.
-        await this.deps.outbox.putSample({ id: sampleId, trigger, capturedAt, jpeg: blob, busy: isServerBusy(e) });
-      }
-    } finally {
-      this.sampleInFlight = false;
+  /** A burst frame could not be sent directly: keep it for later delivery with its original timestamp. */
+  private async sampleSendFailed(
+    f: { sampleId: string; capturedAt: number; jpeg: Blob },
+    q: { trigger: IdentityCheckTrigger; burstId?: string; burstIndex?: number; burstSize?: number },
+    e: unknown,
+  ): Promise<'queued' | 'dropped' | 'fatal'> {
+    const kind = classifyApiError(e);
+    if (kind === 'invalid_link' || kind === 'superseded') {
+      this.deps.onFatal?.(kind);
+      return 'fatal';
     }
+    if (kind === 'client' || kind === 'invalid_state') return 'dropped'; // refused in this state / unusable — nothing to retry
+    // Offline or server trouble: keep it for later delivery. A busy server (vision queue full) is told apart:
+    // the sample waits, and that is not a reporting outage.
+    try {
+      await this.deps.outbox.putSample({ id: f.sampleId, trigger: q.trigger, capturedAt: f.capturedAt, jpeg: f.jpeg, busy: isServerBusy(e), burstId: q.burstId, burstIndex: q.burstIndex, burstSize: q.burstSize });
+    } catch (err) {
+      console.warn('[monitoring] failed to queue identity sample', err);
+    }
+    return 'queued';
   }
 
-  /** Server's answer to an identity sample (direct or delivered later from the outbox). */
-  handleSampleResult(res: IdentitySampleResponse): void {
+  /**
+   * Server's answer to an identity sample (direct or delivered later from the outbox). Only the final frame of
+   * a burst carries the burst decision and the cadence (`final`); any frame may report a hold.
+   */
+  handleSampleResult(res: IdentitySampleResponse, final = true): void {
     if (res.status === 'on_hold' || res.hold) {
       this.deps.onHold?.();
       return;
     }
+    if (!final) return;
     const r = res.result;
     if (r?.decision === 'unable_to_verify' && r.guidance?.length) {
       // Non-blocking guidance: the image was not usable for a dependable comparison.
@@ -446,11 +498,20 @@ export class MonitoringRuntime {
     } else if (r?.decision === 'match') {
       this.deps.onSignal?.({ kind: 'candidate_prompt_clear', key: 'identity_guidance' });
     }
-    if (res.followUpInMs != null && this.running) {
+    if (!this.running) return;
+    // Cadence: the server's next routine sample time; faster while its evidence is 'suspect'; else the policy's.
+    const suspect = res.evidence?.state === 'suspect' || res.evidence?.state === 'confirmed_mismatch';
+    const next = res.nextSampleInMs != null && Number.isFinite(res.nextSampleInMs) ? res.nextSampleInMs : suspect ? SUSPECT_INTERVAL_MS : null;
+    try {
+      this.engine.scheduleIdentitySample(next, this.now());
+    } catch (e) {
+      console.warn('[monitoring] scheduleIdentitySample failed', e);
+    }
+    if (res.followUpInMs != null) {
       if (this.followUpTimer) clearTimeout(this.followUpTimer);
       this.followUpTimer = setTimeout(() => {
         this.followUpTimer = null;
-        this.requestSample('follow_up');
+        this.requestSample('follow_up', 'server');
       }, Math.max(500, res.followUpInMs));
     }
   }
@@ -551,7 +612,7 @@ export class MonitoringRuntime {
     this.loopTimer = null;
     if (this.followUpTimer) clearTimeout(this.followUpTimer);
     this.followUpTimer = null;
-    this.sampleQueue.clear();
+    this.bursts.stop();
     for (const r of this.removers.splice(0)) r();
     this.unsubCamera?.();
     this.unsubCamera = null;
@@ -579,4 +640,17 @@ export class MonitoringRuntime {
     this.deps.onStatus?.(this.lastStatus);
     if (opts.stopCamera) this.deps.camera.stop();
   }
+}
+
+/** Traces record what the engine saw, minus the appearance descriptors (bulky, and not replayable data). */
+export function stripDescriptors(obs: FrameObservation): FrameObservation {
+  if (!obs.faces.some((f) => 'descriptor' in f)) return obs;
+  return {
+    ...obs,
+    faces: obs.faces.map((f) => {
+      if (!('descriptor' in f)) return f;
+      const { descriptor: _d, ...rest } = f as FaceObservation & { descriptor?: unknown };
+      return rest;
+    }),
+  };
 }

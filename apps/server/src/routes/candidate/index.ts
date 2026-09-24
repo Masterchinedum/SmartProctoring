@@ -168,7 +168,8 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     return uploadEventEvidence(ctx, c.session, c.policy, instanceId, evidenceId, q, jpegBody(req));
   });
 
-  app.post('/identity/sample', { config: limit(60) }, async (req) => {
+  // Bursts: burstSize (<= 5) requests per sample; up to one sample every ~2.5 s while the evidence is 'suspect'.
+  app.post('/identity/sample', { config: limit(240) }, async (req) => {
     const c = getCandidate(req);
     const instanceId = requireInstanceId(req);
     const q = identitySampleQuerySchema.parse(req.query);

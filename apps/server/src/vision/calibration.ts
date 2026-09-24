@@ -156,13 +156,46 @@ export function rawLLR(similarity: number, model: Readonly<BucketModel>): number
   return logMixture(s, model.impostor.mean, model.impostor.sd) - logMixture(s, model.genuine.mean, model.genuine.sd);
 }
 
+const LLR_GRID_STEP = 0.001;
+const llrTables = new Map<QualityBucket, Float64Array>();
+
 /**
- * log(p(s|different person) / p(s|same person)) for one comparison of a probe against the reference
- * template; > 0 = evidence of a different person. Clamped to ±CALIBRATION.llrClamp. Non-finite similarity => 0.
+ * Monotone (non-increasing in s) version of the mixture LLR: similarities are clamped to
+ * [impostor.mean, genuine.mean] — a similarity above the typical genuine score is never weaker evidence of
+ * the same person, one below the typical impostor score never weaker evidence of a different person (the
+ * raw ratio of two Gaussians with uniform floors is not monotone in its tails) — and a running minimum over
+ * a 0.001 grid removes any remaining wiggle between the two means.
+ */
+function llrTable(bucket: QualityBucket): Float64Array {
+  let t = llrTables.get(bucket);
+  if (t) return t;
+  const m = BUCKET_MODELS[bucket];
+  const n = Math.round(2 / LLR_GRID_STEP) + 1;
+  t = new Float64Array(n);
+  let run = Infinity;
+  for (let i = 0; i < n; i++) {
+    const s = -1 + i * LLR_GRID_STEP;
+    const x = Math.min(m.genuine.mean, Math.max(m.impostor.mean, s));
+    run = Math.min(run, rawLLR(x, m));
+    t[i] = run;
+  }
+  llrTables.set(bucket, t);
+  return t;
+}
+
+/**
+ * log(p(s|different person) / p(s|same person)) for one comparison of a probe (one frame or the template of
+ * one burst, `scoreAgainst`) against the reference template; > 0 = evidence of a different person.
+ * Monotone non-increasing in `similarity`, clamped to ±CALIBRATION.llrClamp. Non-finite similarity => 0.
  */
 export function sampleLLR(similarity: number, bucket: QualityBucket): number {
   if (!Number.isFinite(similarity)) return 0;
-  const llr = rawLLR(similarity, BUCKET_MODELS[bucket] ?? BUCKET_MODELS.poor);
+  const t = llrTable(BUCKET_MODELS[bucket] ? bucket : 'poor');
+  const x = Math.max(-1, Math.min(1, similarity));
+  const f = (x + 1) / LLR_GRID_STEP;
+  const i = Math.min(t.length - 2, Math.floor(f));
+  const w = f - i;
+  const llr = t[i] * (1 - w) + t[i + 1] * w;
   const c = CALIBRATION.llrClamp;
   return Math.max(-c, Math.min(c, llr));
 }

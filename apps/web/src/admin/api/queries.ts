@@ -40,6 +40,7 @@ export const qk = {
   apiKeys: ['integrations', 'api-keys'] as const,
   webhooks: ['integrations', 'webhooks'] as const,
   webhookDeliveries: (id: string) => ['integrations', 'webhooks', id, 'deliveries'] as const,
+  verifierInfo: ['integrations', 'verifiers'] as const,
 };
 
 /* ------------------------------------------------------------------ cache patching (realtime + mutations) */

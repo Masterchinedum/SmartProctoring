@@ -70,6 +70,49 @@ export function maxSimilarity(probe: ArrayLike<number>, refs: readonly ArrayLike
   return bestSimilarity(probe, refs).similarity;
 }
 
+/**
+ * Identity template of several embeddings of ONE person: the L2-normalised mean of the unit embeddings.
+ * Used for the enrolment gallery (several check-in frames) and for probe bursts (frames captured within
+ * ~0.6 s). Averaging cancels per-frame noise (sensor noise, landmark jitter, JPEG), which is the dominant
+ * error source on webcams (docs/accuracy/identity-v2.md §4).
+ */
+export function templateFrom(embeddings: readonly ArrayLike<number>[]): Float32Array {
+  if (embeddings.length === 0) throw new Error('templateFrom: no embeddings');
+  const dim = embeddings[0].length;
+  const out = new Float32Array(dim);
+  for (const e of embeddings) {
+    if (e.length !== dim) throw new Error('templateFrom: dimension mismatch');
+    let n = 0;
+    for (let i = 0; i < dim; i++) n += e[i] * e[i];
+    n = Math.sqrt(n) || 1;
+    for (let i = 0; i < dim; i++) out[i] += e[i] / n;
+  }
+  let n = 0;
+  for (let i = 0; i < dim; i++) n += out[i] * out[i];
+  n = Math.sqrt(n) || 1;
+  for (let i = 0; i < dim; i++) out[i] /= n;
+  return out;
+}
+
+/**
+ * THE similarity of a probe (one embedding, or the frames of one burst) to an enrolled gallery (the
+ * embeddings of the protected reference): cosine between the probe template (mean of the burst) and the
+ * gallery template (mean of the gallery). Calibrated in calibration.ts (`sampleLLR`, CALIBRATION.match /
+ * mismatch) for exactly this score, so use it everywhere a probe is compared with the reference.
+ */
+export function scoreAgainst(probe: ArrayLike<number> | readonly ArrayLike<number>[], gallery: readonly ArrayLike<number>[]): number {
+  if (gallery.length === 0) throw new Error('scoreAgainst: empty gallery');
+  const probes = isEmbeddingList(probe) ? probe : [probe];
+  if (probes.length === 0) throw new Error('scoreAgainst: no probe');
+  const p = probes.length === 1 ? probes[0] : templateFrom(probes);
+  const g = gallery.length === 1 ? gallery[0] : templateFrom(gallery);
+  return cosineSimilarity(p, g);
+}
+
+function isEmbeddingList(v: ArrayLike<number> | readonly ArrayLike<number>[]): v is readonly ArrayLike<number>[] {
+  return Array.isArray(v) && (v.length === 0 || typeof v[0] !== 'number');
+}
+
 /** Effective [match, mismatch] thresholds for a comparison target (sanitised so mismatch <= match). */
 export function thresholdsFor(thresholds: IdentityThresholds, against: ComparisonTarget): { match: number; mismatch: number } {
   const match = against === 'id_photo' ? thresholds.idPhotoMatch : thresholds.match;

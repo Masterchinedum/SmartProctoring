@@ -7,7 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
-import { candidates, checkFrames, evidence, identityReferences, type EvidenceKind, type EvidenceRow } from '../db/schema.js';
+import { candidates, checkFrames, evidence, identityReferences, identitySampleFrames, type EvidenceKind, type EvidenceRow } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { sha256Hex } from '../lib/crypto.js';
 import { evidenceStorageKey } from '../lib/storage.js';
@@ -154,6 +154,7 @@ export async function purgeSessionEvidence(ctx: EvidenceCtx, db: DbOrTx, session
   const now = new Date(ctx.now());
   await db.update(identityReferences).set({ embeddingsEnc: null, purgedAt: now }).where(and(eq(identityReferences.sessionId, sessionId), isNull(identityReferences.purgedAt)));
   await db.update(checkFrames).set({ embeddingEnc: null }).where(eq(checkFrames.sessionId, sessionId));
+  await db.update(identitySampleFrames).set({ embeddingEnc: null }).where(eq(identitySampleFrames.sessionId, sessionId));
   return { evidence: n };
 }
 

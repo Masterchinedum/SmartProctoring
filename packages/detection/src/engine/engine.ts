@@ -4,7 +4,8 @@ import { defaultIdFactory } from '../util/id';
 import { isFiniteNumber } from '../util/math';
 import { attentionAngles, awayThresholds, countPersons, DEFAULT_BASELINE, directionOf, isAway, K, plausibleFaces, type DetectorHost, type TickContext } from './context';
 import { EpisodeBook } from './episodes';
-import { IdentityScheduler } from './identity';
+import { IdentityScheduler, type IdentitySchedule } from './identity';
+import { ContinuityDetector, type ContinuityState } from './detectors/continuity';
 import { PromptManager } from './prompts';
 import type { FlushReason } from './span';
 import { CameraStateDetector, CoveredDetector, DegradedDetector, FrozenDetector, LightingDetector } from './detectors/camera';
@@ -19,6 +20,10 @@ export interface EngineOptions {
   policy: DetectionPolicy;
   /** policy.identity.periodicCheckIntervalSec */
   identityIntervalSec: number;
+  /** policy.identity.startupIntervalSec: faster routine samples during the start-up window (default: identityIntervalSec). */
+  identityStartupIntervalSec?: number;
+  /** policy.identity.startupWindowSec: start-up window from the first tick after creation / flush (default 0 = none). */
+  identityStartupWindowSec?: number;
   /** policy.evidence */
   evidence?: { maxScreenshotsPerEvent: number; periodicScreenshotSec: number };
   baseline?: Baseline | null;
@@ -41,6 +46,17 @@ export interface MonitoringEngine {
   /** Close all open episodes at time t (pause, submit, hold, stop). Returns the closing updates. */
   flush(t: number, reason: 'pause' | 'submit' | 'hold' | 'stop'): EngineOutput;
   status(): MonitoringStatus;
+  /**
+   * Server-driven cadence: the next routine identity sample is due `inMs` after `t` (null: back to the
+   * policy interval). A trigger that is already waiting still goes first.
+   */
+  scheduleIdentitySample(inMs: number | null, t: number): void;
+  /** The host took an identity sample of its own (exam start, server request, follow-up): restart the routine timer. */
+  noteIdentitySample(t: number): void;
+  /** Identity sampling state (for diagnostics): pending trigger, next routine due time. */
+  identitySchedule(): IdentitySchedule;
+  /** Swap-trigger diagnostics: latest appearance distance / threshold and the triggers fired. */
+  continuityState(): ContinuityState;
 }
 
 /** Window for the internal throughput estimate when the host does not report obs.fps. */
@@ -67,7 +83,11 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
     policy,
     book,
     prompts: new PromptManager(),
-    identity: new IdentityScheduler(Math.max(0, opts.identityIntervalSec) * 1000),
+    identity: new IdentityScheduler({
+      intervalMs: Math.max(0, opts.identityIntervalSec) * 1000,
+      startupIntervalMs: opts.identityStartupIntervalSec != null ? Math.max(0, opts.identityStartupIntervalSec) * 1000 : undefined,
+      startupWindowMs: Math.max(0, opts.identityStartupWindowSec ?? 0) * 1000,
+    }),
     episodes: [],
     signals: [],
   };
@@ -83,6 +103,7 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
   const obstruction = new ObstructionDetector(host);
   const gaze = new GazeDetector(host);
   const objects = new ObjectDetector(host);
+  const continuity = new ContinuityDetector(host);
 
   let baseline: Baseline | null = opts.baseline ?? null;
   let recalibrator: BaselineCalibrator | null = null;
@@ -235,14 +256,8 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
       degraded.step(ctx);
     }
 
-    const singleUsable =
-      ctx.visionOk &&
-      ctx.faceCount === 1 &&
-      ctx.primaryAssessable &&
-      !ctx.lightingBad &&
-      Math.abs(ctx.yawOff) <= K.identityMaxYawOffset &&
-      Math.abs(ctx.pitchOff) <= K.identityMaxPitchOffset;
-    host.identity.step(t, singleUsable, host.signals);
+    continuity.step(ctx);
+    host.identity.step(t, identitySampleable(ctx), host.signals);
 
     if (ctx.frame) prevHash = ctx.frame.dhash;
     else if (!ctx.live) prevHash = null;
@@ -263,6 +278,8 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
         }),
       );
       host.identity.arm('camera_reconnect');
+      // A different camera looks different: start a fresh track / appearance baseline (camera_reconnect covers it).
+      continuity.reset();
       prevHash = null;
       frozen.reset();
       if (recalibrate) recalibrator = createBaselineCalibrator();
@@ -287,6 +304,7 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
     feed.flush(at, reason);
     host.prompts.clearAll(host.signals);
     host.identity.reset();
+    continuity.reset();
     book.forgetClosed();
     prevHash = null;
     lastObjectsAt = -Infinity;
@@ -344,7 +362,29 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
     setCameraInfo,
     flush,
     status,
+    scheduleIdentitySample(inMs: number | null, t: number) {
+      host.identity.scheduleNext(inMs != null && isFiniteNumber(inMs) && isFiniteNumber(t) ? t + Math.max(0, inMs) : null);
+    },
+    noteIdentitySample(t: number) {
+      if (isFiniteNumber(t)) host.identity.noteSample(t);
+    },
+    identitySchedule: () => host.identity.schedule(),
+    continuityState: () => continuity.state(),
   };
+}
+
+/**
+ * A frame the host may capture for a server-side identity comparison: exactly one face, not cut off, not
+ * badly obstructed, roughly frontal relative to the candidate's baseline. Deliberately NOT gated on
+ * lighting, contrast, sharpness or an open lighting_unusable / camera_frozen episode: the server judges
+ * image usability ("unable to verify" with guidance), and a dim room must never silence identity sampling.
+ */
+export function identitySampleable(ctx: TickContext): boolean {
+  const f = ctx.primary;
+  if (!ctx.live || !ctx.frame || ctx.covered || ctx.faceCount !== 1 || !f) return false;
+  if (f.cutOff) return false;
+  if (isFiniteNumber(f.visibility) && f.visibility < K.identityMinVisibility) return false;
+  return Math.abs(ctx.yawOff) <= K.identityMaxYawOffset && Math.abs(ctx.pitchOff) <= K.identityMaxPitchOffset;
 }
 
 export type { EngineSignal, EpisodeUpdate };

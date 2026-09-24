@@ -3,6 +3,8 @@
  * After editing this file run `pnpm --filter @sp/server db:generate` to produce a SQL migration in ./drizzle.
  */
 import { sql } from 'drizzle-orm';
+import type { EvidenceAccumulator, SessionBaseline } from '../services/identity-evidence.js';
+import type { ExternalVerifierStoredSettings } from '../verifiers/settings.js';
 import {
   bigserial,
   boolean,
@@ -72,6 +74,8 @@ export interface OrgSettings {
   /** Email alert recipients (used only when SMTP is configured). */
   alertRecipients: string[];
   emailAlerts: EmailAlertToggles;
+  /** Optional external second-opinion face verifier (src/verifiers/settings.ts; key pair stored encrypted). */
+  externalVerifier: ExternalVerifierStoredSettings;
 }
 
 export const organizations = pgTable('organizations', {
@@ -243,6 +247,25 @@ export interface IdentityEngineState {
   followUpRequestedAt: number | null;
   /** Identity check ids that contributed to the currently pending/open mismatch. */
   pendingMismatchCheckIds: string[];
+  /** v2: identity-continuity evidence accumulator over mid-exam samples (services/identity-evidence.ts). */
+  evidence: EvidenceAccumulator;
+  /** When the current observed active period began (start / resume / reconnect / hold release): start-up cadence. */
+  activeSince: number | null;
+  /** The server wants a sample with this trigger (e.g. exam_start) since `since`; cleared when one arrives. */
+  sampleRequest: { trigger: IdentityCheckTrigger; since: number } | null;
+  /** Bursts whose frames are still arriving (identity_sample_frames). */
+  pendingBursts: PendingBurst[];
+}
+
+/** A burst of identity frames being collected (IdentitySampleQuery burstId / burstIndex / burstSize). */
+export interface PendingBurst {
+  id: string;
+  size: number;
+  trigger: IdentityCheckTrigger;
+  /** Server receipt time of the first frame (the burst is decided on the frames received after BURST_TIMEOUT_MS). */
+  firstReceivedAt: number;
+  /** Distinct burstIndex values received. */
+  indexes: number[];
 }
 
 export type SessionMonitoring = MonitoringStatus & { at: number; fps?: number; cameraState?: string; visibility?: string; fullscreen?: boolean };
@@ -407,6 +430,11 @@ export const identityReferences = pgTable(
     idPhoto: jsonb('id_photo').$type<{ decision: IdentityDecision; similarity: number | null }>(),
     /** Evidence ids (kind identity_reference): [full frame, face crop]. */
     imageEvidenceIds: jsonb('image_evidence_ids').$type<string[]>().notNull().default([]),
+    /**
+     * Genuine self-similarity measured at enrolment (leave-one-out scores of the gallery frames), used to normalise
+     * later scores per session. Null for references created before identity v2 (global calibration only).
+     */
+    baseline: jsonb('baseline').$type<SessionBaseline | null>(),
     /** Scene/device context at enrolment (brightness, camera) for neutral environment comparisons. */
     environment: jsonb('environment').$type<{ imageBrightness: number | null; faceBrightness: number | null; cameraLabel: string; cameraIdHash: string }>(),
     checkId: uuid('check_id'),
@@ -531,6 +559,45 @@ export const identityChecks = pgTable(
     index('identity_checks_event_idx').on(t.eventId),
   ],
 );
+
+/**
+ * Frames of identity-sample bursts (POST /api/candidate/identity/sample with burstId). A burst is decided as ONE
+ * sample (identity_checks row) once all its frames arrived or BURST_TIMEOUT_MS after its first frame; the frames'
+ * embeddings are only kept (encrypted, AAD `sample-frame:<id>`) until then.
+ */
+export const identitySampleFrames = pgTable(
+  'identity_sample_frames',
+  {
+    id: id(),
+    sessionId: uuid('session_id')
+      .notNull()
+      .references(() => examSessions.id, { onDelete: 'cascade' }),
+    /** Client sample id of this frame (idempotency). */
+    sampleId: text('sample_id').notNull(),
+    burstId: text('burst_id').notNull(),
+    burstIndex: integer('burst_index').notNull(),
+    burstSize: integer('burst_size').notNull(),
+    trigger: text('trigger').$type<IdentityCheckTrigger>().notNull(),
+    capturedAt: ts('captured_at').notNull(),
+    receivedAt: ts('received_at').notNull(),
+    analysis: jsonb('analysis').$type<FrameAnalysisSummary>().notNull(),
+    similarity: doublePrecision('similarity'),
+    /** Per-frame label (the burst decision is on the identity_checks row). */
+    decision: text('decision').$type<IdentityDecision>().notNull(),
+    llr: doublePrecision('llr'),
+    /** Encrypted embedding; null once the burst was decided (or purged). */
+    embeddingEnc: bytea('embedding_enc'),
+    probeEvidenceId: uuid('probe_evidence_id'),
+    frameEvidenceId: uuid('frame_evidence_id'),
+    /** The identity_checks row of the burst decision (null while the burst is being collected). */
+    identityCheckId: uuid('identity_check_id'),
+    clientInstanceId: text('client_instance_id'),
+    /** Stored response for idempotent replays of the same sampleId. */
+    response: jsonb('response').$type<Record<string, unknown>>(),
+  },
+  (t) => [uniqueIndex('identity_sample_frames_sample_uq').on(t.sessionId, t.sampleId), index('identity_sample_frames_burst_idx').on(t.sessionId, t.burstId)],
+);
+export type IdentitySampleFrame = typeof identitySampleFrames.$inferSelect;
 
 /* ------------------------------------------------------------------ events & evidence */
 

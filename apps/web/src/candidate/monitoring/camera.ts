@@ -34,7 +34,17 @@ export interface CameraSnapshot {
 
 export type CameraListener = (s: CameraSnapshot) => void;
 
-const CONSTRAINTS: MediaTrackConstraints = {
+/**
+ * HD for identity evidence (face crops are taken at the camera's native resolution); analysis runs on a
+ * downscaled copy. `ideal` lets the browser pick the closest mode the camera supports (many laptop cameras
+ * give 1280×720; others 640×480). If the camera refuses to start in HD, a standard-definition retry follows.
+ */
+export const HD_CONSTRAINTS: MediaTrackConstraints = {
+  width: { ideal: 1280 },
+  height: { ideal: 720 },
+  frameRate: { ideal: 15, max: 30 },
+};
+export const SD_CONSTRAINTS: MediaTrackConstraints = {
   width: { ideal: 640 },
   height: { ideal: 480 },
   frameRate: { ideal: 15 },
@@ -152,7 +162,7 @@ export class CameraManager {
     return this.acquire(deviceId ?? this.preferredId ?? null);
   }
 
-  private async acquire(deviceId: string | null): Promise<boolean> {
+  private async acquire(deviceId: string | null, hd = true): Promise<boolean> {
     const seq = ++this.startSeq;
     if (!navigator.mediaDevices?.getUserMedia) {
       this.set({ state: 'unavailable', problem: 'This browser cannot access a camera on this page.', starting: false });
@@ -160,13 +170,19 @@ export class CameraManager {
     }
     this.set({ starting: true });
     let stream: MediaStream;
+    const base = hd ? HD_CONSTRAINTS : SD_CONSTRAINTS;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: deviceId ? { ...CONSTRAINTS, deviceId: { exact: deviceId } } : CONSTRAINTS,
+        video: deviceId ? { ...base, deviceId: { exact: deviceId } } : base,
         audio: false,
       });
     } catch (err) {
       const name = (err as { name?: string })?.name;
+      if (hd && (name === 'OverconstrainedError' || name === 'NotReadableError' || name === 'AbortError')) {
+        // Some cameras / drivers refuse an HD mode: try standard definition before anything else.
+        if (seq !== this.startSeq) return false;
+        return this.acquire(deviceId, false);
+      }
       if (deviceId && (name === 'OverconstrainedError' || name === 'NotFoundError' || name === 'NotReadableError')) {
         // The chosen camera is gone or busy: fall back to any camera.
         if (seq !== this.startSeq) return false;

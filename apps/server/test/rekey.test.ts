@@ -11,18 +11,19 @@ import type { InjectOptions } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { Ctx } from '../src/context.js';
-import { auditLog, candidates, checkFrames, evidence, examSessions, identityReferences, webhooks } from '../src/db/schema.js';
+import { auditLog, candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, webhooks } from '../src/db/schema.js';
 import { createKeyring, keyIdFor, sha256Hex, type Keyring } from '../src/lib/crypto.js';
 import { LocalBus } from '../src/realtime/bus.js';
 import { accessLinkFor } from '../src/services/dto.js';
 import { purgeEvidenceRows, readEvidence } from '../src/services/evidence.js';
-import { frameAad, idPhotoAad, referenceAad } from '../src/services/identity-common.js';
+import { frameAad, idPhotoAad, referenceAad, sampleFrameAad } from '../src/services/identity-common.js';
 import { COLUMN_TARGETS, EVIDENCE_TARGET, rekeyAll, rekeyAllExclusive, REKEY_LOCK_KEY, type RekeyCtx } from '../src/services/rekey.js';
 import { RETENTION_LOCK_KEY } from '../src/services/retention.js';
 import { readWebhookSecret } from '../src/services/webhooks.js';
+import { decryptVerifierCredentials } from '../src/verifiers/settings.js';
 import { FakeVisionService } from '../src/vision/fake.js';
 import { clientEvent, json, MIN, screenshot, staffApi } from './admin/fixtures.js';
-import { runCheck, startedSession } from './flow.js';
+import { burst, runCheck, startedSession } from './flow.js';
 import { createTestEnv, type CandidateClient, type TestEnv } from './helpers.js';
 
 const K1 = Buffer.alloc(32, 7); // createTestEnv's EVIDENCE_KEY
@@ -47,6 +48,7 @@ async function assertAllDecrypt(keyring: Keyring) {
     ['id_photo_embeddings', (await env.ctx.db.select({ id: candidates.id, v: candidates.idPhotoEmbedding }).from(candidates).where(isNotNull(candidates.idPhotoEmbedding))).map((r) => ({ ...r, aad: idPhotoAad(r.id) }))],
     ['reference_embeddings', (await env.ctx.db.select({ id: identityReferences.id, v: identityReferences.embeddingsEnc }).from(identityReferences).where(isNotNull(identityReferences.embeddingsEnc))).map((r) => ({ ...r, aad: referenceAad(r.id) }))],
     ['check_frame_embeddings', (await env.ctx.db.select({ id: checkFrames.id, v: checkFrames.embeddingEnc }).from(checkFrames).where(isNotNull(checkFrames.embeddingEnc))).map((r) => ({ ...r, aad: frameAad(r.id) }))],
+    ['sample_frame_embeddings', (await env.ctx.db.select({ id: identitySampleFrames.id, v: identitySampleFrames.embeddingEnc }).from(identitySampleFrames).where(isNotNull(identitySampleFrames.embeddingEnc))).map((r) => ({ ...r, aad: sampleFrameAad(r.id) }))],
     ['access_tokens', (await env.ctx.db.select({ id: examSessions.id, v: examSessions.accessTokenEnc }).from(examSessions).where(isNotNull(examSessions.accessTokenEnc))).map((r) => ({ ...r, aad: `access-token:${r.id}` }))],
   ] as const) {
     for (const r of rows) keyring.decrypt(r.v!, r.aad);
@@ -55,6 +57,10 @@ async function assertAllDecrypt(keyring: Keyring) {
   const hooks = await env.ctx.db.select().from(webhooks);
   for (const h of hooks) expect(readWebhookSecret({ keyring }, h)).toMatch(/^whsec_/);
   n.webhook_secrets = hooks.length;
+  // External verifier key pairs (base64 ciphertext inside organizations.settings).
+  const orgs = (await env.ctx.db.select().from(organizations)).filter((o) => o.settings.externalVerifier?.credentialsEnc);
+  for (const o of orgs) expect(decryptVerifierCredentials(keyring, o.id, o.settings.externalVerifier!.credentialsEnc!).accessKeyId).toMatch(/^AKIA/);
+  n.external_verifier_credentials = orgs.length;
   const ev = await env.ctx.db.select().from(evidence).where(isNull(evidence.purgedAt));
   for (const row of ev) {
     const data = await readEvidence({ storage: env.storage, keyring }, row);
@@ -80,12 +86,15 @@ describe('rekey after rotating EVIDENCE_KEY', () => {
     session = await env.newSession({ candidateId: cand.id });
     c = await startedSession(env, env.candidateClient(session.token));
     env.clock.advance(MIN);
+    // An identity burst still being collected (its first frame's embedding is kept, encrypted, until the burst is decided).
+    await burst(env, c, [{ person: 'alice' }, { person: 'alice' }, { person: 'alice' }], { omit: [1, 2] });
     const evId = await clientEvent(c, { type: 'phone_detected', startedAt: env.clock.t - 5000, endedAt: env.clock.t - 1000 });
     await screenshot(c, evId, env.clock.t - 3000);
     purgedId = await screenshot(c, evId, env.clock.t - 2000);
     const [p] = await env.ctx.db.select().from(evidence).where(eq(evidence.id, purgedId));
     await purgeEvidenceRows(env.ctx, env.ctx.db, [p], 'test');
     webhookId = json(await admin.post('/webhooks', { url: 'http://127.0.0.1:9/hook', events: ['session.held'], description: 'x' })).webhook.id;
+    json(await admin.put('/settings', { externalVerifier: { provider: 'aws-rekognition', region: 'eu-west-1', accessKeyId: 'AKIAREKEYTEST0000001', secretAccessKey: 'rekey-test-secret-0123456789abcdef' } }));
 
     const counts = await assertAllDecrypt(ring(K1));
     for (const [k, v] of Object.entries(counts)) expect(v, k).toBeGreaterThan(0);

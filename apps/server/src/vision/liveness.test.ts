@@ -134,7 +134,51 @@ describe('verifyLiveness', () => {
     const tries = [1, 2, 3].map((k) => f(0, 'turn_right', 4000 + k, { yawDeg: -2 }));
     const fished = [...frames.slice(0, 3), ...tries, f(0, 'turn_right', 4900, { yawDeg: -28 }), frames[4]];
     expect(verifyLiveness(SPEC, fished).steps[0].passed).toBe(false);
-    expect(verifyLiveness(SPEC, fished, undefined, { maxFramesPerStep: 5 }).steps[0].passed).toBe(true);
+    // Even inside a larger window a single outlier frame is not enough (webcam pose noise)...
+    expect(verifyLiveness(SPEC, fished, undefined, { maxFramesPerStep: 5 }).steps[0].passed).toBe(false);
+    // ...unless the (legacy) one-frame rule is configured.
+    expect(verifyLiveness(SPEC, fished, undefined, { maxFramesPerStep: 5, minFramesAgreeing: 1 }).steps[0].passed).toBe(true);
+  });
+
+  it('needs two agreeing frames when a step has several (noise-tolerant, no single-outlier pass)', () => {
+    const frames = passingFrames();
+    const held = [f(0, 'turn_right', 4100, { yawDeg: -24 }), f(0, 'turn_right', 4300, { yawDeg: -15 }), f(0, 'turn_right', 4500, { yawDeg: -27 })];
+    const ok = verifyLiveness(SPEC, [...frames.slice(0, 3), ...held, frames[4]]);
+    expect(ok.passed).toBe(true);
+    // Second-best frame is the step's measurement.
+    const hs = held.map((h) => h.analysis.pose!.yawDeg - ok.steps[0].measured!);
+    expect(Math.min(...hs.map(Math.abs))).toBeLessThan(0.2);
+    const oneLucky = [f(0, 'turn_right', 4100, { yawDeg: -4 }), f(0, 'turn_right', 4300, { yawDeg: -26 }), f(0, 'turn_right', 4500, { yawDeg: 1 })];
+    expect(verifyLiveness(SPEC, [...frames.slice(0, 3), ...oneLucky, frames[4]]).steps[0].passed).toBe(false);
+  });
+
+  it('a flat photo with webcam pose noise (dim room, ~6 deg per frame) still fails', () => {
+    // Flat photo rotated +/-40 deg about the vertical axis; landmark noise adds up to +/-9 deg of apparent yaw.
+    const noisyFlat = (step: LivenessFrame['step'], action: LivenessFrame['action'], at: number, rot: number, jitterPx: number): LivenessFrame => {
+      const base = syntheticLandmarks(0, -8, 320, 240, 12.5);
+      const lm = base.map((p, i) => ({ x: 320 + (p.x - 320) * Math.cos((rot * Math.PI) / 180) + (i === 2 ? jitterPx : 0), y: p.y })) as typeof base;
+      const pose = poseFromFivePoints(lm);
+      const analysis = fakeAnalysis({ person: 'cand', yawDeg: pose.yawDeg, pitchDeg: pose.pitchDeg }, { embed: true });
+      if (analysis.primary) analysis.primary.landmarks = lm;
+      analysis.dhash = (at * 7919).toString(16).padStart(16, '0').slice(-16);
+      return { step, action, analysis, capturedAt: T0 + at };
+    };
+    const frames = [
+      noisyFlat('frontal', 'center', 1000, 0, 0),
+      noisyFlat('frontal', 'center', 1300, 0, 1),
+      // one lucky noisy frame per step in the "right" direction, the others ordinary
+      noisyFlat(0, 'turn_right', 4000, 40, -9),
+      noisyFlat(0, 'turn_right', 4200, 40, 1),
+      noisyFlat(0, 'turn_right', 4400, 40, 0),
+      noisyFlat(1, 'turn_left', 8000, -40, 9),
+      noisyFlat(1, 'turn_left', 8200, -40, -1),
+      noisyFlat(1, 'turn_left', 8400, -40, 0),
+    ];
+    const lucky = frames.filter((x) => x.step !== 'frontal').map((x) => x.analysis.pose!.yawDeg);
+    expect(Math.max(...lucky.map(Math.abs))).toBeGreaterThan(12); // the outlier alone would have passed a step
+    const r = verifyLiveness(SPEC, frames);
+    expect(r.passed).toBe(false);
+    expect(r.steps.every((st) => !st.passed)).toBe(true);
   });
 
   it('fails on a too-small turn and reports the measurement', () => {
@@ -179,6 +223,18 @@ describe('verifyLiveness', () => {
 });
 
 describe('checkStepFrame', () => {
+  it('reports progress towards the required change', () => {
+    const half = f(0, 'turn_right', 0, { yawDeg: -7 }).analysis;
+    const fb = checkStepFrame('turn_right', half, SPEC, { yawDeg: 0, pitchDeg: -8 });
+    expect(fb.satisfied).toBe(false);
+    expect(fb.requiredDeg).toBe(12);
+    expect(fb.progress!).toBeGreaterThan(0.3);
+    expect(fb.progress!).toBeLessThan(1);
+    const wrong = checkStepFrame('turn_left', half, SPEC, { yawDeg: 0, pitchDeg: -8 });
+    expect(wrong.progress).toBe(0);
+    expect(wrong.directionalDeg!).toBeLessThan(0);
+  });
+
   it('gives immediate per-frame feedback', () => {
     const turned = f(0, 'turn_right', 0, { yawDeg: -28 }).analysis;
     expect(checkStepFrame('turn_right', turned, SPEC, { yawDeg: 0, pitchDeg: -8 }).satisfied).toBe(true);

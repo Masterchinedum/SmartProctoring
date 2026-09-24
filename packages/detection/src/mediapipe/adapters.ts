@@ -1,4 +1,5 @@
-import { poseFromFivePoints, type FaceObservation, type NormBox, type ObjectObservation, type Pt } from '@sp/shared';
+import { poseFromFivePoints, type NormBox, type ObjectObservation, type Pt } from '@sp/shared';
+import { facePatch, meshGeometry, type DescribedFace } from '../continuity/descriptor';
 import { regionStats } from '../metrics/frame';
 import { clamp, clamp01 } from '../util/math';
 
@@ -106,15 +107,18 @@ export function gazeFromBlendshapes(categories: MpCategory[]): { gazeX: number; 
  *   presence threshold, so score = 0.55 + 0.4 × inFrameFraction × sizeFactor (tiny faces score lower).
  * - brightness: face-region mean luminance when `gray` is given.
  * - Pose is computed on pixel-scaled points (frame size from `frame`, else `gray`, else 4:3).
+ * - `opts.descriptors`: attach an appearance descriptor (16×16 face patch from `gray` + mesh ratios) used by
+ *   the engine's swap triggers (DescribedFace; never sent anywhere, not part of traces).
  */
 export function facesFromMediapipe(
   result: { faceLandmarks: MpLandmark[][]; faceBlendshapes?: { categories: MpCategory[] }[] },
   gray?: GrayFrame | null,
   frame?: { width: number; height: number } | null,
-): FaceObservation[] {
+  opts: { descriptors?: boolean } = {},
+): DescribedFace[] {
   const W = frame?.width || gray?.width || 640;
   const H = frame?.height || gray?.height || 480;
-  const out: FaceObservation[] = [];
+  const out: DescribedFace[] = [];
   const list = Array.isArray(result?.faceLandmarks) ? result.faceLandmarks : [];
   for (let i = 0; i < list.length; i++) {
     const lm = list[i];
@@ -158,7 +162,7 @@ export function facesFromMediapipe(
     }
     const sizeFactor = clamp01((bw - 0.02) / 0.08);
     const score = clamp01(0.55 + 0.4 * inFrame * sizeFactor);
-    const face: FaceObservation = {
+    const face: DescribedFace = {
       box,
       score: round3(score),
       yaw: round3(pose.yawDeg),
@@ -170,6 +174,12 @@ export function facesFromMediapipe(
       cutOff,
     };
     if (brightness !== undefined) face.brightness = brightness;
+    if (opts.descriptors) {
+      face.descriptor = {
+        patch: gray && gray.data && gray.width > 0 && gray.height > 0 ? facePatch(gray.data, gray.width, gray.height, box, { a: five[0], b: five[1] }) : null,
+        geom: meshGeometry(lm, W, H),
+      };
+    }
     out.push(face);
   }
   return out;

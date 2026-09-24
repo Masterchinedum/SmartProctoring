@@ -26,6 +26,25 @@ export const QUALITY_GATE: Readonly<QualityGate> = Object.freeze({
 });
 
 /**
+ * The original (identity v1) live-frame gate, kept for before/after evaluation (eval:identity --webcam --legacy).
+ * Its photometric limits (contrast >= 18, brightness >= 40, sharpness >= 80) rejected ~100 % of dim-room and
+ * backlit webcam frames although SFace still separates genuine and impostor faces there.
+ */
+export const QUALITY_GATE_V1: Readonly<QualityGate> = Object.freeze({
+  minDetectionScore: 0.75,
+  minInterEyePx: 28,
+  minBrightness: 40,
+  maxBrightness: 220,
+  minContrast: 18,
+  minSharpness: 80,
+  maxAbsYawDeg: 25,
+  minPitchDeg: -35,
+  maxPitchDeg: 25,
+  secondaryFaceSizeRatio: 0.4,
+  cutOffTolerance: 0.08,
+});
+
+/**
  * Relaxed gate for uploaded ID photos (often small, scanned, older, tightly cropped, and ID cards may
  * carry a smaller "ghost" portrait next to the main one).
  */
@@ -76,6 +95,12 @@ export interface FaceRegionStats {
   sharpness: number;
   /** Variance of the Laplacian without normalisation (for diagnostics / calibration). */
   rawLaplacianVar: number;
+  /** Estimated noise std-dev (Immerkaer's operator on the face region), 8-bit units. */
+  noise?: number;
+  /** Noise-robust sharpness: like `sharpness`, but on a 3x3-binomial-smoothed crop with the noise term removed. */
+  detail?: number;
+  /** Fraction of face-region pixels <= 3 or >= 252. */
+  clipped?: number;
 }
 
 /** Brightness / contrast / sharpness of the aligned face crop (only pixels that map inside the image). */
@@ -123,7 +148,66 @@ export function faceRegionStats(face: AlignedFace): FaceRegionStats {
   const lmean = ln > 0 ? lsum / ln : 0;
   const rawLaplacianVar = ln > 0 ? Math.max(0, lsumSq / ln - lmean * lmean) : 0;
   const sharpness = variance >= 1 ? (rawLaplacianVar * SHARPNESS_REF_STD * SHARPNESS_REF_STD) / variance : 0;
-  return { brightness, contrast, sharpness, rawLaplacianVar };
+  const extra = noiseAndDetail(face, { sx0, sx1, sy0, sy1 }, variance);
+  return { brightness, contrast, sharpness, rawLaplacianVar, ...extra };
+}
+
+/**
+ * Noise and noise-robust sharpness of the face region.
+ *
+ * Noise: Immerkaer (1996) — the 3x3 operator [1 -2 1; -2 4 -2; 1 -2 1] cancels locally planar image structure,
+ * so sigma = sqrt(pi/2) * mean(|I * N|) / 6 estimates additive noise. Detail: the Laplacian variance of a
+ * binomial-smoothed crop (which suppresses pixel noise ~ 7x in variance but keeps the mid frequencies that
+ * disappear with defocus / motion blur), minus the expected noise contribution, normalised like `sharpness`.
+ */
+function noiseAndDetail(face: AlignedFace, r: { sx0: number; sx1: number; sy0: number; sy1: number }, variance: number): { noise: number; detail: number; clipped: number } {
+  const { gray, valid, size } = face;
+  const x0 = Math.max(2, r.sx0);
+  const x1 = Math.min(size - 2, r.sx1);
+  const y0 = Math.max(2, r.sy0);
+  const y1 = Math.min(size - 2, r.sy1);
+  // Binomial-smoothed copy of the region (+1 px border).
+  const sm = new Float32Array(size * size);
+  for (let y = y0 - 1; y < y1 + 1; y++) {
+    for (let x = x0 - 1; x < x1 + 1; x++) {
+      const i = y * size + x;
+      sm[i] =
+        (4 * gray[i] + 2 * (gray[i - 1] + gray[i + 1] + gray[i - size] + gray[i + size]) + gray[i - size - 1] + gray[i - size + 1] + gray[i + size - 1] + gray[i + size + 1]) / 16;
+    }
+  }
+  let nAbs = 0;
+  let nN = 0;
+  let clip = 0;
+  let cN = 0;
+  let ls = 0;
+  let lss = 0;
+  let lN = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = y * size + x;
+      if (!valid[i]) continue;
+      const g = gray[i];
+      cN++;
+      if (g <= 3 || g >= 252) clip++;
+      if (!valid[i - size - 1] || !valid[i - size + 1] || !valid[i + size - 1] || !valid[i + size + 1]) continue;
+      const conv =
+        gray[i - size - 1] - 2 * gray[i - size] + gray[i - size + 1] - 2 * gray[i - 1] + 4 * g - 2 * gray[i + 1] + gray[i + size - 1] - 2 * gray[i + size] + gray[i + size + 1];
+      nAbs += Math.abs(conv);
+      nN++;
+      const lap = sm[i - 1] + sm[i + 1] + sm[i - size] + sm[i + size] - 4 * sm[i];
+      ls += lap;
+      lss += lap * lap;
+      lN++;
+    }
+  }
+  const noise = nN > 0 ? (Math.sqrt(Math.PI / 2) * (nAbs / nN)) / 6 : 0;
+  const lmean = lN > 0 ? ls / lN : 0;
+  const lapVar = lN > 0 ? Math.max(0, lss / lN - lmean * lmean) : 0;
+  // White noise of variance s^2 through binomial smoothing then the 4-neighbour Laplacian: gain = sum of squared kernel taps = 0.40625.
+  const noiseLap = 0.40625 * noise * noise;
+  const signalVar = Math.max(1, variance - noise * noise);
+  const detail = variance >= 1 ? (Math.max(0, lapVar - noiseLap) * SHARPNESS_REF_STD * SHARPNESS_REF_STD) / signalVar : 0;
+  return { noise, detail, clipped: cN > 0 ? clip / cN : 0 };
 }
 
 export interface QualityInput {
@@ -228,6 +312,9 @@ export function assessQuality(input: QualityInput, gate: QualityGate = QUALITY_G
     yawDeg: round2(yawDeg),
     pitchDeg: round2(pitchDeg),
     cutOff,
+    ...(stats?.noise != null ? { noise: round2(stats.noise) } : {}),
+    ...(stats?.detail != null ? { detail: round2(stats.detail) } : {}),
+    ...(stats?.clipped != null ? { clipped: round4(stats.clipped) } : {}),
     issues: orderIssues(issues),
     usable: issues.size === 0,
   };

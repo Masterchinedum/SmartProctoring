@@ -79,15 +79,31 @@ disconnect if `disconnectTimerBehavior='continue'`).
    inter-eye px ≥ 28, face brightness 40..220, contrast, Laplacian sharpness, yaw/pitch proxy from
    landmarks (|yaw| ≤ 25°), cut-off. Failing ⇒ `unable_to_verify` + guidance strings.
 3. Similarity-transform align to 112×112 (ArcFace 5-point template) → SFace → L2-normalised 128-d.
-4. Compare to reference = **max cosine similarity** over the reference embeddings.
-   Thresholds (org-configurable, `DEFAULT_IDENTITY_THRESHOLDS`): `≥0.45 match`, `<0.28 mismatch`, else `inconclusive` (ID photo: `≥0.42` / `<0.24`). Calibration: docs/accuracy/identity.md.
-5. **Decision aggregation** (active exam): one mismatch ⇒ ask the client for a follow-up sample
-   (`followUpInMs`); `mismatchConfirmations` (2) consecutive quality mismatches ⇒ open
-   `identity_mismatch` event (integrity, high) with probe + reference evidence and context
-   (preceded by pause / face absence / camera reconnect), then hold or flag per policy. The event
-   stays open while mismatches continue; two consecutive matches close it. Repeated
-   `unable_to_verify`/`inconclusive` (3 consecutive) ⇒ `identity_unverifiable` (uncertain) and
-   candidate guidance — **never** labelled as a different person.
+4. **Reference and score (identity v2).** Enrolment (initial check, staff-authorised re-enrolment) keeps a
+   gallery of up to 8 diverse, mutually consistent embeddings from the check's frontal frames plus its near-frontal
+   liveness frames (|Δyaw| ≤ 20° from the candidate's own frontal pose), and a per-session **baseline** (mean / sd
+   of the leave-one-out scores of those frames). A probe (one frame, or the mean of a burst) is scored with
+   `scoreAgainst` = cosine to the gallery template (vision/identity.ts). Per-sample labels still use the org
+   thresholds (`≥0.45 match`, `<0.28 mismatch`, else `inconclusive`; ID photo `≥0.42` / `<0.24`), but escalation
+   uses calibrated evidence: `sampleLLR(score, qualityBucket)` (vision/calibration.ts), after a per-session
+   normalisation of the score against the baseline (services/identity-evidence.ts) — a drop from the person's own
+   level counts even above the global mismatch threshold; poor frames and checks after a pause are normalised
+   leniently. Unusable frames carry no evidence.
+5. **Decisions.** *Checks* (resume / reconnect / reverify) are adaptive: every frame returns
+   `CheckFrameResponse.progress` (frames wanted, running assessment, liveness step status, canComplete); the
+   decision sums the (correlation-discounted) LLRs of all identity frames: likely same ⇒ pass, likely different ⇒
+   `identity_mismatch` + hold / flag (also with some fair / poor frames), otherwise retry with guidance;
+   `unable_to_verify` only when no usable frame came after the adaptive collection. *During the exam*, samples are
+   bursts (1–5 frames within ~0.6 s, decided as ONE sample; incomplete bursts after ~3 s on the frames received)
+   feeding a per-session SPRT accumulator (`CALIBRATION.sprt`): `suspect` ⇒ faster sampling (2.5 s,
+   trigger `server_request`); `confirmed_mismatch` ⇒ `identity_mismatch` (integrity, high; confidence = posterior;
+   details: per-sample scores / LLRs / triggers, baseline, calibration version) and hold or flag per policy; strong
+   genuine evidence clears the window. A track break / face return / camera reconnect / exam start drops earlier
+   genuine evidence from the window. 3 unusable samples in a row ⇒ `identity_unverifiable` (uncertain) and
+   guidance — **never** labelled as a different person. Cadence is server-driven (`nextSampleInMs`: start-up
+   interval for `startupWindowSec` after a (re)start, else `periodicCheckIntervalSec`, faster while monitoring /
+   suspect); `CandidateSessionState.session.identitySample` / `HeartbeatResponse.identitySample` ask for an
+   `exam_start` burst right after /start and after every passed resume / reconnect / reverify check.
 6. **The reference is immutable.** It is never updated from later samples. Only staff can authorise a
    re-enrolment (`release` with `reEnroll=true`), which creates a new reference version, keeps the old
    one, and is audit-logged.
@@ -99,6 +115,11 @@ measures yaw/pitch from YuNet landmarks per frame (nose offset relative to eye m
 inter-eye distance — a flat photo rotated in front of the camera does **not** produce this parallax),
 requires each step's direction/magnitude relative to the frontal frames, same identity across all
 frames (similarity ≥ match), non-identical frames, and completion inside the expiry window.
+
+Optional external second opinion (off by default; `docs/EXTERNAL_VERIFIER.md`): at check-in, resume and suspected
+swaps an organisation may also ask a provider (AWS Rekognition CompareFaces, or another `ExternalVerifier`) and
+combine its answer with the internal decision (`verifiers/fusion.ts`: it can settle an inconclusive result or flag a
+disagreement for review, never raise a mismatch alone; failures fall back to the internal decision).
 
 ## 5. Monitoring engine (browser, `@sp/detection`)
 

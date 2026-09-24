@@ -5,6 +5,7 @@ import type { DbOrTx } from '../db/index.js';
 import { answers, candidates, examSessions, exams, organizations, pauseRequests, questions, sessionPeriods, type ExamSession } from '../db/schema.js';
 import { conflict, notFound } from '../lib/errors.js';
 import { ms, remainingMs, toHoldDTO, toPauseRequestDTO } from './dto.js';
+import { identitySampleRequest } from './identity-evidence.js';
 import { noticeFor } from './privacy.js';
 import { effectivePolicy, requiredCheckFor } from './session-state.js';
 
@@ -83,6 +84,7 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
       verifiedInstanceId: instanceId && s.verifiedInstanceId === instanceId ? s.verifiedInstanceId : null,
       hold: toHoldDTO(s),
       pauseRequest,
+      identitySample: instanceInControl(s, instanceId) ? identitySampleRequest(s.status, s.identityState, policy.identity.burstSize, now) : null,
     },
     exam: {
       id: exam.id,

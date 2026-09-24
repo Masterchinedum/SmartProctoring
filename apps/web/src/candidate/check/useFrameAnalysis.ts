@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { createFrameMetricsTracker, facesFromMediapipe, regionStats } from '@sp/detection';
 import type { FaceObservation, FrameObservation } from '@sp/shared';
 import { useController } from '../context';
-import { GraySampler, sameFrame, type GrayFrame } from '../monitoring/frames';
+import { AnalysisFrame, GraySampler, sameFrame, type GrayFrame } from '../monitoring/frames';
 import { loadVision, type Vision } from '../monitoring/vision';
 
 /**
  * Pre-exam camera analysis loop (readiness checklist, calibration, liveness guidance).
- * Uses the same models and conversion as the monitoring runtime, on the un-mirrored video.
+ * Uses the same models and conversion as the monitoring runtime, on the un-mirrored video: MediaPipe runs on
+ * a downscaled copy (≤ 640 px, aspect kept), so normalised face boxes also apply to the full-resolution
+ * frame that identity evidence is cropped from.
  */
 
 export interface FrameAnalysis {
@@ -59,6 +61,7 @@ export function useFrameAnalysis(enabled: boolean, onFrame: (a: FrameAnalysis) =
     if (!enabled || !vs.vision?.face) return;
     const vision = vs.vision;
     const sampler = new GraySampler();
+    const analysis = new AnalysisFrame();
     const metrics = createFrameMetricsTracker();
     let timer: ReturnType<typeof setTimeout> | null = null;
     let alive = true;
@@ -86,11 +89,12 @@ export function useFrameAnalysis(enabled: boolean, onFrame: (a: FrameAnalysis) =
           // Skip exact duplicates (camera slower than our sampling) so each frame is analysed once.
           if (gray && sameFrame(gray.data, lastGray)) gray = null;
           if (gray) lastGray = gray.data;
-          const res = gray ? vision.detectFaces(video) : null;
-          if (gray && res) {
+          const small = gray ? analysis.draw(video) : null;
+          const res = small ? vision.detectFaces(small) : null;
+          if (gray && res && small) {
             const frame = metrics.next(gray.data, gray.width, gray.height);
+            const faces = facesFromMediapipe(res, gray, { width: small.width, height: small.height });
             const size = { width: video.videoWidth, height: video.videoHeight };
-            const faces = facesFromMediapipe(res, gray, size);
             const primary = plausibleFaces(faces).sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h)[0] ?? null;
             const t = ctrl.clock.now();
             cb.current({

@@ -16,6 +16,8 @@ import { DEFAULT_DETECT_THRESHOLD, YUNET_INPUT_SIZE, decodeToDetectedFaces, inte
 import { DEFAULT_MAX_DECODE_SIDE, decodeImage, decodeRegion, encodeJpegRegion, resizeRgb, wholeImageStats, type RgbImage } from './image';
 import { SFACE_MODEL_FILE, YUNET_MODEL_FILE } from './models';
 import { removeInitializersFromInputs } from './onnx-model';
+import { DEFAULT_EMBEDDING_RECIPE } from './embeddings';
+import { combineViews, l2normalize, recipeViews, type EmbeddingRecipe } from './embed-prep';
 import { assessQuality, faceRegionStats, resolveGate } from './quality';
 import type { AnalyzeOptions, DetectedFace, HeadPose, ImageAnalysis, QualityGate } from './types';
 
@@ -30,6 +32,8 @@ export interface VisionEngineOptions {
   maxDecodeSide?: number;
   /** Engine-wide quality-gate override (per-call `AnalyzeOptions.gate` is applied on top). */
   gate?: Partial<QualityGate>;
+  /** How `ImageAnalysis.embedding` is computed (default DEFAULT_EMBEDDING_RECIPE). */
+  embedding?: EmbeddingRecipe;
 }
 
 /** Faces this small (inter-ocular px in the sampled image) are re-sampled from the full-resolution original. */
@@ -59,6 +63,7 @@ export class VisionEngine {
   private readonly gate: QualityGate;
   private readonly detectThreshold: number;
   private readonly maxDecodeSide: number;
+  private readonly recipe: EmbeddingRecipe;
   /** Reusable detector input buffers (4.9 MB each), one per concurrent analysis (in-process mode). */
   private readonly tensorPool: Float32Array[] = [];
 
@@ -70,6 +75,7 @@ export class VisionEngine {
     this.gate = resolveGate(opts.gate);
     this.detectThreshold = opts.detectThreshold ?? DEFAULT_DETECT_THRESHOLD;
     this.maxDecodeSide = opts.maxDecodeSide ?? DEFAULT_MAX_DECODE_SIDE;
+    this.recipe = opts.embedding ?? DEFAULT_EMBEDDING_RECIPE;
   }
 
   static async create(opts: VisionEngineOptions): Promise<VisionEngine> {
@@ -122,7 +128,12 @@ export class VisionEngine {
       { width: img.origWidth, height: img.origHeight, faces, pose, stats, imageBrightness: whole.brightness, imageContrast: whole.contrast },
       gate,
     );
-    const embedding = opts.embed && aligned ? await this.embed(aligned) : null;
+    const embedding = opts.embed && aligned ? await this.embedRecipe(aligned, this.recipe) : null;
+    let embeddingVariants: Record<string, Float32Array> | undefined;
+    if (opts.embeddingVariants?.length && aligned) {
+      embeddingVariants = {};
+      for (const r of opts.embeddingVariants) embeddingVariants[r.id] = await this.embedRecipe(aligned, r);
+    }
     const faceCropJpeg = opts.faceCrop && primary ? await this.faceCrop(img, primary.box) : null;
     return {
       width: img.origWidth,
@@ -135,6 +146,7 @@ export class VisionEngine {
       dhash: whole.dhash,
       faceCropJpeg,
       imageBrightness: Math.round(whole.brightness * 100) / 100,
+      ...(embeddingVariants ? { embeddingVariants } : {}),
     };
   }
 
@@ -189,18 +201,20 @@ export class VisionEngine {
     );
   }
 
-  private async embed(face: AlignedFace): Promise<Float32Array> {
+  /** Embedding of an aligned face under a recipe: normalize(sum of the unit embeddings of its views). */
+  private async embedRecipe(face: AlignedFace, recipe: EmbeddingRecipe): Promise<Float32Array> {
+    const views = recipeViews(face, recipe);
+    const units: Float32Array[] = [];
+    for (const v of views) units.push(await this.embedInput(v, face.size));
+    return units.length === 1 ? units[0] : combineViews(units);
+  }
+
+  private async embedInput(input: Float32Array, size: number): Promise<Float32Array> {
     const out = await this.recognizer.run({
-      [this.recognizer.inputNames[0]]: new ort.Tensor('float32', face.rgb, [1, 3, face.size, face.size]),
+      [this.recognizer.inputNames[0]]: new ort.Tensor('float32', input, [1, 3, size, size]),
     });
     const t = out[this.recognizer.outputNames[0]];
-    const raw = t.data as Float32Array;
-    const e = new Float32Array(raw.length);
-    let norm = 0;
-    for (let i = 0; i < raw.length; i++) norm += raw[i] * raw[i];
-    norm = Math.sqrt(norm) || 1;
-    for (let i = 0; i < raw.length; i++) e[i] = raw[i] / norm;
-    return e;
+    return l2normalize(Float32Array.from(t.data as Float32Array));
   }
 
   private async faceCrop(img: RgbImage & { scale: number }, box: { x: number; y: number; w: number; h: number }): Promise<Buffer | null> {

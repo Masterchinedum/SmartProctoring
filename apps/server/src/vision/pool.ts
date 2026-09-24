@@ -161,7 +161,11 @@ export class VisionWorkerPool {
   }
 
   analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis> {
-    const req: TaskRequest = { type: 'analyze', image, opts: { embed: opts.embed, faceCrop: opts.faceCrop, gate: opts.gate } };
+    const req: TaskRequest = {
+      type: 'analyze',
+      image,
+      opts: { embed: opts.embed, faceCrop: opts.faceCrop, gate: opts.gate, ...(opts.embeddingVariants ? { embeddingVariants: opts.embeddingVariants } : {}) },
+    };
     return this.submit(req, opts.priority ?? 'interactive').then((a) => reviveAnalysis(a as ImageAnalysis));
   }
 

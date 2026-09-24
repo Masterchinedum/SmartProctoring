@@ -36,6 +36,13 @@
       "when": 1790238304636,
       "tag": "0004_hot_heartbeat_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790266297623,
+      "tag": "0005_identity_v2",
+      "breakpoints": true
     }
   ]
 }

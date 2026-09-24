@@ -13,6 +13,11 @@ export { K as ENGINE_CONSTANTS, DEFAULT_BASELINE, attentionAngles, directionOf, 
 export { PROMPTS } from './engine/prompts';
 export type { PromptKey } from './engine/prompts';
 export { REPLAY as REPLAY_PARAMS } from './engine/detectors/feed';
+export { CONTINUITY as CONTINUITY_PARAMS } from './engine/detectors/continuity';
+export type { ContinuityFire, ContinuityState } from './engine/detectors/continuity';
+export { identitySampleable } from './engine/engine';
+export { IdentityScheduler, triggerPriority, STABLE_MS as IDENTITY_STABLE_MS, FAST_STABLE_MS as IDENTITY_FAST_STABLE_MS } from './engine/identity';
+export type { IdentitySchedule, IdentityTrigger } from './engine/identity';
 export { UNAUTHORIZED_LABELS } from './engine/detectors/objects';
 
 // Baseline & environment
@@ -32,6 +37,10 @@ export { dhash64, hammingHex, majorityHash } from './metrics/hash';
 // MediaPipe adapters
 export { facesFromMediapipe, fivePointsFromMesh, gazeFromBlendshapes, objectsFromMediapipe, faceRegionQuality } from './mediapipe/adapters';
 export type { MpLandmark, MpCategory, GrayFrame } from './mediapipe/adapters';
+
+// Appearance descriptor (swap triggers)
+export { facePatch, meshGeometry, patchDistance, geomDistance, descriptorOf, innerFaceRegion, PATCH_SIZE, GEOMETRY_POINTS } from './continuity/descriptor';
+export type { FaceDescriptor, DescribedFace } from './continuity/descriptor';
 
 // Liveness guidance
 export { createLivenessTracker } from './liveness/tracker';

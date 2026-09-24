@@ -48,6 +48,7 @@ import { gradeSession } from './grading.js';
 import { enqueueIntegrationNotifications } from './integration-events.js';
 import { mergePolicy, orgThresholds } from './org.js';
 import { capturesWithin, GAP_NOT_RETURNED, loadLateCaptures } from './reporting-gaps.js';
+import { EMPTY_ACCUMULATOR } from './identity-evidence.js';
 
 export const TERMINAL: SessionStatus[] = ['submitted', 'terminated'];
 export const UNOBSERVED_KINDS: PeriodKind[] = ['paused', 'disconnected', 'on_hold'];
@@ -66,10 +67,15 @@ export const EMPTY_IDENTITY_STATE: IdentityEngineState = {
   lastMatchAt: null,
   followUpRequestedAt: null,
   pendingMismatchCheckIds: [],
+  evidence: { ...EMPTY_ACCUMULATOR, window: [] },
+  activeSince: null,
+  sampleRequest: null,
+  pendingBursts: [],
 };
 
 export function identityState(s: Pick<ExamSession, 'identityState'>): IdentityEngineState {
-  return { ...EMPTY_IDENTITY_STATE, ...(s.identityState ?? {}) };
+  const st = { ...EMPTY_IDENTITY_STATE, ...(s.identityState ?? {}) };
+  return { ...st, evidence: { ...EMPTY_ACCUMULATOR, ...(st.evidence ?? {}), window: [...(st.evidence?.window ?? [])] }, pendingBursts: [...(st.pendingBursts ?? [])] };
 }
 
 /** Effective policy: snapshot taken at exam start, else org default merged with the exam policy. */
@@ -408,10 +414,30 @@ export class SessionMutation {
     this.set({ identityState: state });
   }
 
-  /** Reset per-period identity aggregation counters (new observed period). */
+  /**
+   * Reset per-period identity aggregation (a new period begins: exam start, pause, hold, resume, release). When the
+   * session is (again) active, the start-up sampling cadence begins and an exam_start sample is requested
+   * (CandidateSessionState / HeartbeatResponse.identitySample): a swap is most likely right after a (re)start.
+   * Bursts still being collected belong to the previous period; they are dropped (identity-samples.ts decides
+   * frames that still arrive as late frames, without effect).
+   */
   resetIdentityCounters(): void {
     const st = identityState(this.session);
-    this.setIdentityState({ ...st, consecutiveMatch: 0, consecutiveMismatch: 0, consecutiveUnable: 0, followUpRequestedAt: null, pendingMismatchCheckIds: [], identicalDhashStreak: 0, lastSampleDhash: null });
+    const active = this.session.status === 'active';
+    this.setIdentityState({
+      ...st,
+      consecutiveMatch: 0,
+      consecutiveMismatch: 0,
+      consecutiveUnable: 0,
+      followUpRequestedAt: null,
+      pendingMismatchCheckIds: [],
+      identicalDhashStreak: 0,
+      lastSampleDhash: null,
+      evidence: { ...EMPTY_ACCUMULATOR, window: [] },
+      pendingBursts: [],
+      activeSince: active ? this.now : null,
+      sampleRequest: active ? { trigger: 'exam_start', since: this.now } : null,
+    });
   }
 
   /* ---------------------------------------------------------------- commands */

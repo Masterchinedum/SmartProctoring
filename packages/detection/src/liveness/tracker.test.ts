@@ -125,4 +125,108 @@ describe('LivenessTracker', () => {
     expect(tr.current().done).toBe(false);
     expect(tr.current().stepIndex).toBe(0);
   });
+
+  it('captures at the PEAK of the turn, not at the first threshold crossing', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left'), targetYawDeg: 20, targetPitchDeg: 12 });
+    tr.setCentre({ yaw: 0, pitch: -4 });
+    // Turning steadily at 30°/s: crosses 20° at ~670 ms but keeps turning until 36°.
+    let ready: number | null = null;
+    let peakYaw = 0;
+    for (let t = 0; t <= 3000; t += 100) {
+      const yaw = Math.min(36, t * 0.03);
+      const p = tr.update(face({ yaw, pitch: -4 }), 1, t);
+      if (p.readyToCapture && ready === null) {
+        ready = t;
+        peakYaw = yaw;
+      }
+      if (t === 700) expect(p.stage).not.toBe('move'); // past the target …
+      if (t === 700) expect(p.readyToCapture).toBe(false); // … but still turning: no capture yet
+    }
+    expect(ready).not.toBeNull();
+    expect(ready!).toBeGreaterThan(1200); // after the head stopped (at 1200 ms, 36°)
+    expect(peakYaw).toBe(36);
+  });
+
+  it('coming back a little from an overshoot is fine: the peak is that of the last second', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_right'), targetYawDeg: 20, targetPitchDeg: 12 });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    hold(tr, 0, 300, { yaw: -40 });
+    const p = hold(tr, 400, 1600, { yaw: -30 });
+    expect(p.readyToCapture).toBe(true);
+  });
+
+  it('reports hold progress and a "hold still" message while holding', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left'), targetYawDeg: 20, targetPitchDeg: 12, holdMs: 400 });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    const p = hold(tr, 0, 300, { yaw: 25 });
+    expect(p.stage).toBe('hold');
+    expect(p.holdProgress).toBeGreaterThan(0.4);
+    expect(p.holdProgress).toBeLessThan(1);
+    expect(p.message).toMatch(/Hold/);
+  });
+
+  it('awaitVerdict: waits for the server, then advances when the step is satisfied', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left', 'turn_right'), targetYawDeg: 20, targetPitchDeg: 12, awaitVerdict: true });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    expect(hold(tr, 0, 600, { yaw: 26 }).readyToCapture).toBe(true);
+    tr.markCaptured(600);
+    expect(hold(tr, 700, 300, { yaw: 26 }).readyToCapture).toBe(true);
+    tr.markCaptured(1000);
+    let p = tr.update(face({ yaw: 0 }), 1, 1100);
+    expect(p.stage).toBe('verify');
+    expect(p.action).toBe('turn_left');
+    expect(p.readyToCapture).toBe(false);
+    tr.verdict(0, true);
+    p = tr.current();
+    expect(p.action).toBe('turn_right');
+    expect(p.stepIndex).toBe(1);
+  });
+
+  it('awaitVerdict: a step the server did not accept is re-prompted in place with a larger target, one frame at a time', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left', 'turn_right'), targetYawDeg: 20, targetPitchDeg: 12, awaitVerdict: true, maxFramesPerStep: 3 });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    hold(tr, 0, 600, { yaw: 22 });
+    tr.markCaptured(600);
+    hold(tr, 700, 300, { yaw: 22 });
+    tr.markCaptured(1000);
+    tr.verdict(0, false);
+    let p = tr.current();
+    expect(p.stage).toBe('retry');
+    expect(p.action).toBe('turn_left');
+    expect(p.message).toMatch(/a little further/);
+    // The same turn as before is no longer enough …
+    p = hold(tr, 1100, 800, { yaw: 22 });
+    expect(p.readyToCapture).toBe(false);
+    expect(p.message).toMatch(/a little further/);
+    // … turning further (≥ 22 + 6°) and holding captures one more frame.
+    p = hold(tr, 2000, 800, { yaw: 30 });
+    expect(p.readyToCapture).toBe(true);
+    tr.markCaptured(2800);
+    expect(tr.current().stage).toBe('verify');
+    // Still not accepted, but the step's frame budget (3) is used up: move on, the server decides at completion.
+    tr.verdict(0, false);
+    expect(tr.current().action).toBe('turn_right');
+  });
+
+  it('awaitVerdict: a verdict for another step or while not waiting is ignored', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left', 'turn_right'), targetYawDeg: 20, targetPitchDeg: 12, awaitVerdict: true });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    tr.verdict(0, true);
+    expect(tr.current().action).toBe('turn_left');
+    hold(tr, 0, 600, { yaw: 26 });
+    tr.markCaptured(600);
+    hold(tr, 700, 300, { yaw: 26 });
+    tr.markCaptured(1000);
+    tr.verdict(1, true);
+    expect(tr.current().stage).toBe('verify');
+    expect(tr.current().action).toBe('turn_left');
+  });
+
+  it('setCentre uses the frontal frames’ pose instead of an implicit centre (no extra "look straight" wait)', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left'), targetYawDeg: 20, targetPitchDeg: 12 });
+    tr.setCentre({ yaw: 10, pitch: -20 });
+    const p = tr.update(face({ yaw: 20, pitch: -20 }), 1, 0);
+    expect(p.action).toBe('turn_left');
+    expect(p.progress).toBeCloseTo(0.5, 2);
+  });
 });

@@ -7,3 +7,4 @@ export * from './api';
 export * from './privacy';
 export * from './pose';
 export * from './integrations';
+export * from './verifiers';

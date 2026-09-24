@@ -5,6 +5,7 @@ import type { CheckPurpose, ConnectionStatus, EndReason, HoldReason, PeriodKind,
 import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityResultDTO, LivenessChallengeDTO, LivenessResultDTO } from './identity';
 import type { MonitoringStatus } from './observation';
 import { IDENTITY_CHECK_TRIGGERS } from './identity';
+import { externalVerifierUpdateSchema, type ExternalVerifierSettingsDTO } from './verifiers';
 
 /**
  * HTTP API contract. Paths are relative to the server origin.
@@ -144,6 +145,11 @@ export interface CandidateSessionState {
     verifiedInstanceId: string | null;
     hold: HoldDTO | null;
     pauseRequest: PauseRequestDTO | null;
+    /**
+     * The server wants an identity sample now (e.g. {trigger:'exam_start', inMs:0} right after /start or after a
+     * passed resume / reconnect / reverify check). Same semantics as HeartbeatResponse.identitySample.
+     */
+    identitySample?: IdentitySampleRequestDTO | null;
   };
   exam: {
     id: string;
@@ -294,6 +300,23 @@ export interface HeartbeatResponse {
   timerRunning: boolean;
   requiredCheck: CheckPurpose | null;
   commands: CandidateCommand[];
+  /**
+   * Server-requested identity sample outside the routine cadence. Present (repeated on every heartbeat) until the
+   * server has received a sample for it: {trigger:'exam_start', inMs:0} after the exam starts / resumes / reconnects,
+   * {trigger:'server_request', inMs:0} while the identity evidence is 'suspect' and the requested faster sample is late.
+   * The client takes a burst of `burstSize` frames after `inMs` with that trigger. Routine sampling follows
+   * IdentitySampleResponse.nextSampleInMs.
+   */
+  identitySample?: IdentitySampleRequestDTO | null;
+}
+
+/** A server request for an identity sample (burst) — see HeartbeatResponse.identitySample. */
+export interface IdentitySampleRequestDTO {
+  trigger: IdentityCheckTrigger;
+  /** Take the burst after this many ms (0 = now). */
+  inMs: number;
+  /** Frames in the burst (policy.identity.burstSize). */
+  burstSize: number;
 }
 
 /** Candidate-reported event (upsert by id, applied only if version > stored version). */
@@ -649,6 +672,8 @@ export interface OrgSettingsDTO {
   alertRecipients: string[];
   /** Which alerts are emailed to alertRecipients (throttled to one email per session per 5 minutes). */
   emailAlerts: EmailAlertToggles;
+  /** Optional external second-opinion face verifier (./verifiers.ts, docs/EXTERNAL_VERIFIER.md). Off by default. */
+  externalVerifier: ExternalVerifierSettingsDTO;
 }
 
 export interface EmailAlertToggles {
@@ -766,6 +791,7 @@ export type { IdentityCheckTrigger };
  *   GET  /metrics/detection-quality?from=&to=      -> DetectionQualityDTO                           [reviewer]
  *   POST /metrics/offline-evaluation  (JSON report from an eval CLI, or {kind, report}) -> { id, kind, createdAt } [admin]
  *        (DetectionQualityDTO.offlineEvaluation is then { reports: [{ id, kind, createdAt, global, report }] })
+ *   POST /tools/identity-test?testId=&mode=enroll|probe|reset  (image/jpeg) -> IdentityTestResponse (camera self-test; nothing stored) [reviewer]
  *   WS   /live                                    -> LiveMessage frames                            [reviewer]
  *
  *   Integrations (types in ./integrations.ts; public integration API /api/v1/* documented in docs/INTEGRATION_API.md):
@@ -785,6 +811,10 @@ export type { IdentityCheckTrigger };
  *   POST /webhooks/deliveries/:id/redeliver        -> WebhookDeliveryDTO  (same delivery id, attempted now) [admin]
  *   POST /email-alerts/test {to?}                  -> { ok: true, recipients: string[] }  (409 smtp_not_configured) [admin]
  *   (email alert recipients/toggles and abandonAfterDays are part of GET/PUT /settings)
+ *
+ *   External second-opinion face verifier (types in ./verifiers.ts; settings = OrgSettingsDTO.externalVerifier):
+ *   GET  /verifiers                                -> ExternalVerifierInfoDTO                       [admin]
+ *   POST /verifiers/test  (image/jpeg)             -> ExternalVerifierTestResultDTO (image vs itself, saved settings) [admin]
  */
 
 export interface Paged<T> {
@@ -837,6 +867,7 @@ export const settingsUpdateSchema = z.object({
   abandonAfterDays: z.number().int().min(1).max(3650).optional(),
   alertRecipients: z.array(z.string().trim().email().max(254)).max(20).optional(),
   emailAlerts: z.object({ holds: z.boolean(), pauseRequests: z.boolean(), highSeverity: z.boolean() }).partial().optional(),
+  externalVerifier: externalVerifierUpdateSchema.optional(),
 });
 export const legalHoldSchema = z.object({ enabled: z.boolean() });
 export const staffSubmitSchema = z.object({ note: z.string().max(1000).optional() });

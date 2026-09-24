@@ -2,6 +2,7 @@
  * Candidate lifecycle actions: consent, start, answers, heartbeat (+command delivery), pause, submit.
  */
 import {
+  DEFAULT_POLICY,
   EVENT_TYPES,
   PRIVACY_NOTICE_VERSION,
   type EventType,
@@ -10,6 +11,7 @@ import {
   type HeartbeatRequest,
   type HeartbeatResponse,
   type PauseResponse,
+  type ProctoringPolicy,
   type SaveAnswerRequest,
   type SaveAnswerResponse,
 } from '@sp/shared';
@@ -21,6 +23,7 @@ import { badRequest, conflict, invalidState, notFound, validationFailed } from '
 import { assertInControl, buildCandidateState, instanceInControl, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { recordMultipleInstances } from './checks.js';
 import { applyInstanceUsage, evaluateInstanceUsage } from './instance-usage.js';
+import { identitySampleRequest } from './identity-evidence.js';
 import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
 import { assertStatus, finalizeSession, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession } from './session-state.js';
 import { clockExpired } from '@sp/shared';
@@ -159,6 +162,8 @@ export async function cancelPauseRequest(ctx: Ctx, sessionId: string, instanceId
 export interface LoadedSession {
   session: ExamSession;
   sessionVersion: string;
+  /** Effective policy as loaded with the session (candidate auth); used for identitySample.burstSize. */
+  policy?: ProctoringPolicy;
 }
 
 type HeartbeatClient = { ip: string; userAgent: string };
@@ -220,7 +225,15 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
   if (!rows.length || rows[0].pendingCommands) return null; // changed meanwhile / commands to deliver: full path
   const after = { ...s, ...patch } as ExamSession;
   ctx.live.sessionChanged(s.id, { orgId: s.orgId, visible: staffVisibleKey(after) !== staffVisibleKey(s) });
-  return { serverTime: now, status: s.status, remainingMs: remainingMs(s, now), timerRunning: s.runningSince != null, requiredCheck: requiredCheckFor(s, instanceId), commands: [] };
+  return {
+    serverTime: now,
+    status: s.status,
+    remainingMs: remainingMs(s, now),
+    timerRunning: s.runningSince != null,
+    requiredCheck: requiredCheckFor(s, instanceId),
+    commands: [],
+    identitySample: inControl ? identitySampleRequest(s.status, s.identityState, (loaded.policy ?? DEFAULT_POLICY).identity.burstSize, now) : null,
+  };
 }
 
 export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string, body: HeartbeatRequest, client?: HeartbeatClient, loaded?: LoadedSession): Promise<HeartbeatResponse> {
@@ -285,6 +298,7 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
     // Clock expiry is enforced here as well as by the sweeper.
     if ((s.status === 'active' || s.status === 'paused') && clockExpired(sessionClock(s), now)) await finalizeSession(m, 'time_expired');
     await deliver(false);
+    const inControl = instanceInControl(m.session, instanceId) && !TERMINAL.includes(m.session.status);
     return {
       serverTime: now,
       status: m.session.status,
@@ -292,6 +306,7 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
       timerRunning: m.session.runningSince != null,
       requiredCheck: requiredCheckFor(m.session, instanceId),
       commands,
+      identitySample: inControl ? identitySampleRequest(m.session.status, m.session.identityState, (await m.policy()).identity.burstSize, now) : null,
     };
   });
 }

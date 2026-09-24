@@ -253,3 +253,82 @@ export function hammingHex(a: string, b: string): number {
   }
   return dist;
 }
+
+/* ------------------------------------------------------------------------------ low-light enhancement */
+
+/** Frames darker / flatter than this get a second detection pass on an enhanced copy when the first finds no face. */
+export const ENHANCE_MAX_BRIGHTNESS = 100;
+export const ENHANCE_MAX_CONTRAST = 45;
+
+/**
+ * Local-contrast enhancement for face DETECTION in dark, flat or backlit webcam frames (the detector misses
+ * faces whose luma spans only ~20 levels). CLAHE on luma (tiles x tiles grid, histogram clip `clip` x the
+ * uniform bin height, bilinear interpolation between tile mappings) applied as a per-pixel gain to R, G, B.
+ * Pure function; the enhanced copy is only used to find the face — statistics, alignment and embedding use
+ * the original pixels.
+ */
+export function enhanceForDetection(img: RgbImage, tiles = 8, clip = 3): RgbImage {
+  const { data, width: w, height: h } = img;
+  const n = w * h;
+  const lum = new Uint8Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 3) lum[i] = (77 * data[p] + 150 * data[p + 1] + 29 * data[p + 2]) >> 8;
+  const tw = w / tiles;
+  const th = h / tiles;
+  const maps = new Float32Array(tiles * tiles * 256);
+  const hist = new Float32Array(256);
+  for (let ty = 0; ty < tiles; ty++) {
+    for (let tx = 0; tx < tiles; tx++) {
+      hist.fill(0);
+      const x0 = Math.floor(tx * tw);
+      const x1 = Math.floor((tx + 1) * tw);
+      const y0 = Math.floor(ty * th);
+      const y1 = Math.floor((ty + 1) * th);
+      let cnt = 0;
+      for (let y = y0; y < y1; y += 2) {
+        for (let x = x0; x < x1; x += 2) {
+          hist[lum[y * w + x]]++;
+          cnt++;
+        }
+      }
+      const limit = Math.max(1, (clip * cnt) / 256);
+      let excess = 0;
+      for (let b = 0; b < 256; b++) {
+        if (hist[b] > limit) {
+          excess += hist[b] - limit;
+          hist[b] = limit;
+        }
+      }
+      const add = excess / 256;
+      const base = (ty * tiles + tx) * 256;
+      let acc = 0;
+      for (let b = 0; b < 256; b++) {
+        acc += hist[b] + add;
+        maps[base + b] = (acc / Math.max(1, cnt)) * 255;
+      }
+    }
+  }
+  const out = new Uint8Array(data.length);
+  for (let y = 0; y < h; y++) {
+    const gy = Math.min(tiles - 1, Math.max(0, (y + 0.5) / th - 0.5));
+    const ty0 = Math.floor(gy);
+    const ty1 = Math.min(tiles - 1, ty0 + 1);
+    const fy = gy - ty0;
+    for (let x = 0; x < w; x++) {
+      const gx = Math.min(tiles - 1, Math.max(0, (x + 0.5) / tw - 0.5));
+      const tx0 = Math.floor(gx);
+      const tx1 = Math.min(tiles - 1, tx0 + 1);
+      const fx = gx - tx0;
+      const i = y * w + x;
+      const l = lum[i];
+      const v =
+        (1 - fy) * ((1 - fx) * maps[(ty0 * tiles + tx0) * 256 + l] + fx * maps[(ty0 * tiles + tx1) * 256 + l]) +
+        fy * ((1 - fx) * maps[(ty1 * tiles + tx0) * 256 + l] + fx * maps[(ty1 * tiles + tx1) * 256 + l]);
+      const gain = l > 0 ? Math.min(8, v / l) : 1;
+      const p = i * 3;
+      out[p] = Math.min(255, data[p] * gain);
+      out[p + 1] = Math.min(255, data[p + 1] * gain);
+      out[p + 2] = Math.min(255, data[p + 2] * gain);
+    }
+  }
+  return { data: out, width: w, height: h };
+}

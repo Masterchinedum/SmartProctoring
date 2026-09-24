@@ -67,6 +67,8 @@ export interface Config {
   webhooks: WebhookConfig;
   /** Integration API /api/v1 (API-key authenticated). */
   integrationApi: { rateLimitPerMinute: number };
+  /** Optional external second-opinion face verifiers (src/verifiers, docs/EXTERNAL_VERIFIER.md). */
+  externalVerifiers: ExternalVerifiersConfig;
   /** Warnings produced while loading (printed at startup). */
   warnings: string[];
 }
@@ -99,6 +101,23 @@ export interface WebhookConfig {
   intervalMs: number;
 }
 
+/**
+ * Server-level bounds for the external face verifier. Each organisation still has to switch it on (Settings →
+ * Integrations; off by default) — these only limit what administrators may choose.
+ */
+export interface ExternalVerifiersConfig {
+  /** EXTERNAL_VERIFIERS: providers organisations may enable (comma list, default `aws-rekognition`; `none` = feature off). */
+  allowedProviders: string[];
+  /**
+   * EXTERNAL_VERIFIER_ENV_CREDENTIALS: organisations may use the server's own AWS credentials (default credential
+   * chain: IAM role, AWS_* environment, shared config) instead of storing a key. Default false (the operator pays and
+   * the images go to the operator's AWS account — enable it only for single-tenant deployments).
+   */
+  allowEnvCredentials: boolean;
+  /** EXTERNAL_VERIFIER_TIMEOUT_MS: per comparison, retries included (default 4000, 500–30000). */
+  timeoutMs: number;
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** apps/server directory, whether running from src/ (tsx) or dist/ (bundled). */
@@ -121,6 +140,17 @@ function int(v: string | undefined, dflt: number): number {
   const n = Number.parseInt(v, 10);
   if (!Number.isFinite(n)) throw new Error(`Invalid integer in environment: ${v}`);
   return n;
+}
+
+/** EXTERNAL_VERIFIERS: unset = `aws-rekognition`; `none` / `off` / empty = no provider. */
+function parseProviderList(v: string | undefined): string[] {
+  if (v == null) return ['aws-rekognition'];
+  const list = v
+    .split(',')
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean);
+  if (list.some((p) => p === 'none' || p === 'off' || p === 'false')) return [];
+  return [...new Set(list)];
 }
 
 function decodeKey(name: string, b64: string): Buffer {
@@ -276,6 +306,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     smtp,
     webhooks,
     integrationApi: { rateLimitPerMinute: Math.max(1, int(env.API_RATE_LIMIT_PER_MINUTE, 600)) },
+    externalVerifiers: {
+      allowedProviders: parseProviderList(env.EXTERNAL_VERIFIERS),
+      allowEnvCredentials: bool(env.EXTERNAL_VERIFIER_ENV_CREDENTIALS, false),
+      timeoutMs: Math.min(30_000, Math.max(500, int(env.EXTERNAL_VERIFIER_TIMEOUT_MS, 4_000))),
+    },
     warnings,
   };
 }

@@ -13,9 +13,14 @@
  * Embeddings from different models are not comparable; deserialisation refuses an unknown model id
  * unless `allowAnyModel` is set.
  */
+import { RECIPE_V1, type EmbeddingRecipe } from './embed-prep';
+
 export const EMBEDDING_MAGIC = 'SPEM';
 export const EMBEDDING_FORMAT_VERSION = 1;
 export const EMBEDDING_MODEL_SFACE_2021DEC = 1;
+
+/** How the engine computes `ImageAnalysis.embedding` (embed-prep.ts). */
+export const DEFAULT_EMBEDDING_RECIPE: Readonly<EmbeddingRecipe> = RECIPE_V1;
 export const EMBEDDING_DIM = 128;
 const HEADER = 12;
 const MAX_COUNT = 1024;

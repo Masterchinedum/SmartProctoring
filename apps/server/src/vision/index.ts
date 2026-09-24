@@ -9,6 +9,8 @@ export {
   maxSimilarity,
   bestSimilarity,
   thresholdsFor,
+  templateFrom,
+  scoreAgainst,
   decideIdentity,
   buildReference,
   aggregateFrames,

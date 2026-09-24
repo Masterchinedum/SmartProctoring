@@ -125,7 +125,7 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
         subtitle="Organisation-wide defaults. Individual exams can override the proctoring policy and evidence retention."
         actions={
           <Link className="btn" to="/admin/integrations">
-            Integrations: API keys, webhooks, email alerts ›
+            Integrations: API keys, webhooks, email alerts, face verifier ›
           </Link>
         }
       />

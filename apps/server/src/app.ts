@@ -30,6 +30,7 @@ import { createSmtpMailer, type Mailer } from './lib/mailer.js';
 import { integrationApiRoutes } from './routes/v1/index.js';
 import { sweeperJob } from './jobs/sweeper.js';
 import { DEFAULT_RETENTION_INTERVAL_MS, runRetentionExclusive } from './services/retention.js';
+import { createVerifierRegistry, type VerifierRegistry } from './verifiers/registry.js';
 import type { VisionService } from './vision/types.js';
 
 export interface BuildAppOptions {
@@ -60,6 +61,8 @@ export interface BuildAppOptions {
   rateLimitRedis?: Redis | null;
   /** Key prefix for the rate-limit counters in Redis (default `sp:rl:`; tests use a unique one). */
   rateLimitNamespace?: string;
+  /** External second-opinion verifier providers (default: AWS Rekognition with the real SDK; tests pass mocks). */
+  verifiers?: VerifierRegistry;
 }
 
 declare module 'fastify' {
@@ -127,6 +130,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     now: opts.now ?? (() => Date.now()),
     log: app.log,
     mailer: opts.mailer !== undefined ? opts.mailer : ownedMailer,
+    verifiers: opts.verifiers ?? createVerifierRegistry(),
   } as Omit<Ctx, 'live' | 'jobs'> as Ctx;
   ctx.live = new LiveNotifier(ctx);
   ctx.jobs = new JobRunner(ctx);
@@ -256,6 +260,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     await owned.vision?.close();
     await owned.storage?.close?.();
     await ownedMailer?.close?.();
+    if (!opts.verifiers) ctx.verifiers.close();
     await owned.database?.close();
   });
 

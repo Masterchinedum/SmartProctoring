@@ -10,6 +10,9 @@ import type {
   DetectionQualityDTO,
   EventDTO,
   ExamDTO,
+  ExternalVerifierInfoDTO,
+  ExternalVerifierTestResultDTO,
+  ExternalVerifierUpdate,
   ExamInput,
   IdentityComparisonDTO,
   IdPhotoUploadResponse,
@@ -214,8 +217,12 @@ export const api = {
 
   // ---- org
   settings: () => request<OrgSettingsDTO>('GET', `${A}/settings`),
-  updateSettings: (patch: Partial<Omit<OrgSettingsDTO, 'identityThresholds'>> & { identityThresholds?: Partial<OrgSettingsDTO['identityThresholds']> }) =>
-    request<OrgSettingsDTO>('PUT', `${A}/settings`, { body: patch }),
+  updateSettings: (
+    patch: Partial<Omit<OrgSettingsDTO, 'identityThresholds' | 'externalVerifier'>> & {
+      identityThresholds?: Partial<OrgSettingsDTO['identityThresholds']>;
+      externalVerifier?: ExternalVerifierUpdate;
+    },
+  ) => request<OrgSettingsDTO>('PUT', `${A}/settings`, { body: patch }),
   users: () => request<{ items: StaffUserDTO[] }>('GET', `${A}/users`),
   createUser: (input: { email: string; name: string; role: StaffRole; password: string }) => request<StaffUserDTO>('POST', `${A}/users`, { body: input }),
   updateUser: (id: string, patch: { name?: string; role?: StaffRole; disabled?: boolean; password?: string }) =>
@@ -238,6 +245,9 @@ export const api = {
   webhookDelivery: (deliveryId: string) => request<WebhookDeliveryDTO>('GET', `${A}/webhooks/deliveries/${enc(deliveryId)}`),
   redeliverWebhook: (deliveryId: string) => request<WebhookDeliveryDTO>('POST', `${A}/webhooks/deliveries/${enc(deliveryId)}/redeliver`),
   testEmail: (to?: string) => request<{ ok: true; recipients: string[] }>('POST', `${A}/email-alerts/test`, { body: to ? { to } : {} }),
+  // ---- external second-opinion face verifier (settings: updateSettings({ externalVerifier }))
+  verifierInfo: () => request<ExternalVerifierInfoDTO>('GET', `${A}/verifiers`),
+  testVerifier: (jpeg: Blob) => request<ExternalVerifierTestResultDTO>('POST', `${A}/verifiers/test`, { blob: jpeg }),
 };
 
 /** Resolve a relative evidence/API URL against the current origin (for new-tab links). */

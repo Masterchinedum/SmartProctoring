@@ -119,6 +119,20 @@ describe.each([
     expect(box.stats()).toMatchObject({ size: 0, oldestAt: null });
   });
 
+  it('delivers the frames of a queued identity burst in order with their burst metadata (a lone sample without)', async () => {
+    const burstId = '7a7a7a7a-1111-4222-8333-444444444444';
+    await box.putSample({ id: 'b2', trigger: 'track_break', capturedAt: 100, jpeg: jpeg(), burstId, burstIndex: 2, burstSize: 3 });
+    await box.putSample({ id: 'b0', trigger: 'track_break', capturedAt: 100, jpeg: jpeg(), burstId, burstIndex: 0, burstSize: 3 });
+    await box.putSample({ id: 'b1', trigger: 'track_break', capturedAt: 100, jpeg: jpeg(), burstId, burstIndex: 1, burstSize: 3 });
+    await box.putSample({ id: 'p', trigger: 'periodic', capturedAt: 50, jpeg: jpeg() });
+    const { sender, calls } = makeSender();
+    await box.flushOnce(sender);
+    const sent = calls.filter((c) => c.kind === 'sample');
+    expect(sent.map((c) => c.args[0])).toEqual(['p', 'b0', 'b1', 'b2']);
+    expect(sent[0].args[2]).toEqual({ trigger: 'periodic', capturedAt: 50 });
+    expect(sent[2].args[2]).toEqual({ trigger: 'track_break', capturedAt: 100, burstId, burstIndex: 1, burstSize: 3 });
+  });
+
   it('keeps items on network failure and reports failingSince', async () => {
     await box.putEvent(ev('33333333-3333-4333-8333-333333333333', 1));
     const { sender } = makeSender({

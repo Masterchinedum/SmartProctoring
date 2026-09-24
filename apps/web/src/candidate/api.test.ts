@@ -53,6 +53,15 @@ describe('candidate api client', () => {
     expect(calls[1].url).toBe('/api/candidate/identity/sample?sampleId=s-1&trigger=face_return&capturedAt=7');
   });
 
+  it('sends burst metadata with every frame of an identity burst', async () => {
+    const { fn, calls } = mockFetch(() => json(200, {}));
+    const api = createCandidateApi({ token: 't', instanceId: 'inst-abcdef', fetchImpl: fn });
+    const burstId = '6f1c2b8e-2d7a-4f55-9b1e-0c2d3e4f5a6b';
+    await api.identitySample('s-2', new Uint8Array([1]), { trigger: 'track_break', capturedAt: 9, burstId, burstIndex: 1, burstSize: 3 });
+    const q = new URLSearchParams(calls[0].url.split('?')[1]);
+    expect(Object.fromEntries(q)).toEqual({ sampleId: 's-2', trigger: 'track_break', capturedAt: '9', burstId, burstIndex: '1', burstSize: '3' });
+  });
+
   it('sends JSON bodies and an empty object for bodiless POSTs', async () => {
     const { fn, calls } = mockFetch(() => json(200, {}));
     const api = createCandidateApi({ token: 't', instanceId: 'inst-abcdef', fetchImpl: fn });

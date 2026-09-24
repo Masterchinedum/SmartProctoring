@@ -4,7 +4,8 @@
  *    (startedAt = last heartbeat) and, if policy.connection.disconnectTimerBehavior = 'stop', the clock stops
  *    at the last heartbeat;
  *  - clock expiry        => auto-submit (session_expired + session_submitted, endReason time_expired);
- *  - stale checks        => expired.
+ *  - stale checks        => expired;
+ *  - identity bursts whose remaining frames never arrived => decided on the frames received (identity-samples.ts).
  * Runs via JobRunner (one instance at a time, pg advisory lock); each session change runs under its row lock.
  */
 import { clockExpired } from '@sp/shared';
@@ -13,12 +14,13 @@ import type { Ctx } from '../context.js';
 import type { JobDefinition } from './runner.js';
 import { checks, examSessions } from '../db/schema.js';
 import { sessionClock } from '../services/dto.js';
+import { decideStaleBurstsForAll } from '../services/identity-samples.js';
 import { finalizeSession, withSession } from '../services/session-state.js';
 
 const MIN_HEARTBEAT_TIMEOUT_MS = 10_000;
 const BATCH = 200;
 
-export async function sweepOnce(ctx: Ctx): Promise<{ timedOut: number; expired: number; checksExpired: number }> {
+export async function sweepOnce(ctx: Ctx): Promise<{ timedOut: number; expired: number; checksExpired: number; burstsDecided: number }> {
   const now = ctx.now();
   let timedOut = 0;
   let expired = 0;
@@ -88,7 +90,10 @@ export async function sweepOnce(ctx: Ctx): Promise<{ timedOut: number; expired: 
     .where(and(eq(checks.status, 'open'), lt(checks.expiresAt, new Date(now - 10_000))))
     .returning({ id: checks.id });
 
-  return { timedOut, expired, checksExpired: ex.length };
+  // 4. Identity bursts whose remaining frames never arrived are decided on the frames received.
+  const burstsDecided = await decideStaleBurstsForAll(ctx);
+
+  return { timedOut, expired, checksExpired: ex.length, burstsDecided };
 }
 
 /** The sweeper as a JobRunner job (registered by app.ts). */

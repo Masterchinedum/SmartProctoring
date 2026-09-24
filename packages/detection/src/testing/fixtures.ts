@@ -55,6 +55,8 @@ export class Driver {
     this.engine = createMonitoringEngine({
       policy: opts.policy ?? policy(),
       identityIntervalSec: opts.identityIntervalSec ?? 30,
+      identityStartupIntervalSec: opts.identityStartupIntervalSec,
+      identityStartupWindowSec: opts.identityStartupWindowSec,
       evidence: opts.evidence ?? { maxScreenshotsPerEvent: 4, periodicScreenshotSec: 30 },
       baseline: opts.baseline === undefined ? BASELINE : opts.baseline,
       idFactory: opts.idFactory ?? sequentialIdFactory(),

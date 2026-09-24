@@ -3,6 +3,7 @@
  * the server. Implementation lives in this folder (index.ts exports createVisionService etc.).
  */
 import type { FaceQuality, IdentityDecision, IdentityThresholds, LivenessAction, LivenessResultDTO } from '@sp/shared';
+import type { EmbeddingRecipe } from './embed-prep';
 
 export interface Point { x: number; y: number }
 
@@ -38,6 +39,8 @@ export interface ImageAnalysis {
   faceCropJpeg: Buffer | null;
   /** Whole-image mean luminance 0..255. */
   imageBrightness: number;
+  /** Only when `AnalyzeOptions.embeddingVariants` was given: recipe id -> L2-normalised embedding. */
+  embeddingVariants?: Record<string, Float32Array>;
 }
 
 export interface AnalyzeOptions {
@@ -51,6 +54,11 @@ export interface AnalyzeOptions {
    * may ignore it.
    */
   priority?: 'interactive' | 'background';
+  /**
+   * Evaluation / diagnostics only: also compute the primary face's embedding under these recipes
+   * (returned in `ImageAnalysis.embeddingVariants`, keyed by recipe id). Costs one SFace run per view.
+   */
+  embeddingVariants?: EmbeddingRecipe[];
 }
 
 export interface VisionService {

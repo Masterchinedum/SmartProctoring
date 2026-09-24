@@ -36,6 +36,8 @@ advice — review it with counsel for your jurisdictions.
 | Webhook notifications (candidate name + external id, exam title, event type/title/observation/times, links) — **no images, face data or scores** | Integrations | `webhook_deliveries` (sent to endpoints your admins configure) | — | 30 days (delivery log) |
 | Alert emails (candidate name, exam, observation sentence, link) — **no images** | Integrations | `email_alerts` queue, your SMTP provider | — | 30 days (queue) |
 | API-key activity (writes, report/event reads) | Your integrations | `audit_log` (actor `api_key`) | — | Audit retention per your policy |
+| **Optional, off by default:** probe image + one reference/ID-photo image sent for an external second opinion at the decision points an administrator selected (`docs/EXTERNAL_VERIFIER.md`) | Identity checks | Sent to the configured provider (e.g. Amazon Rekognition, in the chosen AWS region) over TLS; SmartProctoring stores only the resulting score/outcome with the check | In transit (TLS) | Provider's terms (opt out of AI-service content use) |
+| External verifier credentials (AWS access key pair, optional) | Administrator | `organizations.settings` | Yes (AES-256-GCM) | Until removed or the provider is switched off |
 
 Not collected: continuous video/audio, screen contents, other applications, other monitors or
 devices, clipboard contents, keystrokes, location.
@@ -85,7 +87,17 @@ launch.
 ## 7. Sub-processors
 
 None by default: all analysis runs in the candidate's browser and on your own server. If you enable
-S3-compatible storage or managed Postgres/Redis, list those providers as sub-processors. If you configure SMTP
+S3-compatible storage or managed Postgres/Redis, list those providers as sub-processors.
+
+**External face verifier (optional, off by default).** If an administrator enables a second-opinion provider
+(Settings → Integrations; `docs/EXTERNAL_VERIFIER.md`), that provider — for Amazon Rekognition, Amazon Web
+Services — receives **face images** (the live camera image and the reference or ID photo it is compared with) for
+the selected checks (check-in, resume, suspected change of person) and is a **sub-processor of biometric data**:
+list it, sign its data processing terms, choose the AWS region for data residency, and opt out of the provider's
+use of AI-service content (AWS Organizations AI services opt-out policy) before enabling it. While it is active the
+candidate privacy notice names the provider, and images are sent only for candidates who accepted that notice
+(consent at or after the moment it was enabled). The provider's answer never records a "possible different person"
+on its own. `EXTERNAL_VERIFIERS=none` disables the feature server-wide. If you configure SMTP
 (email alerts), your email provider receives alert emails (candidate name, exam, observation, link — no
 images). Webhooks and the integration API send data only to systems your administrators configure; list
 them in your records of processing.

@@ -4,6 +4,7 @@ import type {
   CandidateSessionState,
   CheckPurpose,
   HeartbeatResponse,
+  IdentitySampleRequestDTO,
   MonitoringStatus,
   PauseResponse,
   SessionStatus,
@@ -20,8 +21,9 @@ import { AnswerStore } from './answers';
 import { ClockSync, Countdown } from './clock';
 import { Outbox, type OutboxStats } from './outbox';
 import { CameraManager, type CameraSnapshot } from './monitoring/camera';
-import { MonitoringRuntime } from './monitoring/runtime';
+import { MonitoringRuntime, type RuntimeDebug } from './monitoring/runtime';
 import { TraceRecorder, traceEnabled } from './monitoring/trace';
+import { DebugStore, debugEnabled } from './debug';
 
 /**
  * CandidateController — long-lived, non-React state for one exam session in this page:
@@ -130,10 +132,14 @@ export class CandidateController {
   readonly countdown = new Countdown();
   readonly camera: CameraManager;
   readonly trace: TraceRecorder | null;
+  /** Diagnostics for the `?debug=1` overlay (collects nothing without the flag). */
+  readonly debug = new DebugStore(debugEnabled());
   outbox: Outbox | null = null;
   answers: AnswerStore | null = null;
   private runtime: MonitoringRuntime | null = null;
   private runtimeStarting = false;
+  /** A server identity-sample request that arrived before monitoring runs (e.g. exam_start with /start). */
+  private pendingServerSample: IdentitySampleRequestDTO | null = null;
   private readonly listeners = new Set<Listener>();
   private snap: ControllerSnapshot;
   private toastSeq = 0;
@@ -324,6 +330,7 @@ export class CandidateController {
     let awaitingContinue = this.snap.awaitingContinue;
     if (awaitingContinue && state.session.status !== 'active' && state.session.status !== awaitingContinue.from) awaitingContinue = null;
     this.patch({ state, pausedAtLocal, pauseReasonLocal, timeUp, awaitingContinue });
+    if (state.session.status === 'active') this.serverSampleRequest(state.session.identitySample);
 
     await this.ensureOutbox(sid);
     if (state.questions && (state.session.status === 'active' || state.session.status === 'paused' || state.session.status === 'on_hold')) {
@@ -361,7 +368,7 @@ export class CandidateController {
     if (!this.outboxOpening) {
       this.outboxOpening = Outbox.open({
         namespace: sessionId,
-        onSampleResult: (_s, res) => this.onSampleResult(res),
+        onSampleResult: (rec, res) => this.onSampleResult(res, rec),
         onFatal: (kind) => this.setFatal(kind),
         onDropped: (kind, id, reason) => console.warn(`[outbox] dropped ${kind} ${id}: ${reason}`),
         onAnswerRefusedAfterEnd: () => this.noteUnsavedAnswers('after_end'),
@@ -467,6 +474,23 @@ export class CandidateController {
 
   /* ================================================================ monitoring */
 
+  /**
+   * The server asks for an identity burst (exam start / resume / reconnect, or a faster sample while its
+   * evidence is suspect): hand it to the running monitoring, or keep it until monitoring starts (the
+   * "Check complete" screen waits for the candidate's click). The runtime also takes its own exam-start
+   * burst, so an older server without this field is covered; duplicates are dropped there.
+   */
+  private serverSampleRequest(req: IdentitySampleRequestDTO | null | undefined): void {
+    if (!req) return;
+    if (this.runtime?.isRunning) this.runtime.serverSampleRequest(req);
+    else this.pendingServerSample = req;
+  }
+
+  /** Live monitoring diagnostics (debug overlay). */
+  runtimeDebug(): RuntimeDebug | null {
+    return this.runtime?.isRunning ? this.runtime.debug() : null;
+  }
+
   private async startMonitoring(): Promise<void> {
     if (this.runtime || this.runtimeStarting || !this.outbox) return;
     const s = this.snap.state;
@@ -499,11 +523,18 @@ export class CandidateController {
         },
         onHold: () => void this.onHoldDetected(),
         onFatal: (kind) => this.setFatal(kind),
+        onDebug: (e) => {
+          if (e.kind === 'burst') this.debug.burst(e.result);
+          else this.debug.trigger({ at: e.at, trigger: e.trigger, source: e.source, reason: e.reason });
+        },
       });
       this.previousBaseline = null; // compared once per period
       this.runtime = rt;
       this.patch({ monitoringActive: true });
       await rt.start();
+      const pending = this.pendingServerSample;
+      this.pendingServerSample = null;
+      if (pending && this.runtime === rt) rt.serverSampleRequest(pending);
     } catch (e) {
       console.error('[controller] monitoring failed to start', e);
     } finally {
@@ -527,14 +558,21 @@ export class CandidateController {
   async stopMonitoring(reason: string, opts: { flush: boolean; stopCamera: boolean }): Promise<void> {
     const rt = this.runtime;
     this.runtime = null;
+    this.pendingServerSample = null;
     if (rt) await rt.stop(reason, { stopCamera: opts.stopCamera });
     else if (opts.stopCamera) this.camera.stop();
     this.patch({ monitoringActive: false, prompts: [] });
     if (opts.flush && this.outbox) await this.outbox.flushNow(FLUSH_BEFORE_TRANSITION_MS);
   }
 
-  private onSampleResult(res: import('@sp/shared').IdentitySampleResponse): void {
-    if (res.status === 'on_hold' || res.hold) void this.onHoldDetected();
+  /** An identity sample delivered later from the outbox: holds apply at once; the running monitoring takes the cadence. */
+  private onSampleResult(res: import('@sp/shared').IdentitySampleResponse, rec?: { burstId?: string; burstIndex?: number; burstSize?: number }): void {
+    if (res.status === 'on_hold' || res.hold) {
+      void this.onHoldDetected();
+      return;
+    }
+    const final = !rec?.burstId || res.burst?.complete === true || (rec.burstIndex ?? 0) >= (rec.burstSize ?? 1) - 1;
+    if (final) this.runtime?.handleSampleResult(res, true);
   }
 
   private async onHoldDetected(): Promise<void> {
@@ -637,7 +675,10 @@ export class CandidateController {
       if (await this.handleCommand(cmd, hb)) needReload = true;
     }
     // Active on the server: answers refused while it was paused / on hold can be saved now.
-    if (hb.status === 'active' && !hb.requiredCheck) void this.outbox?.resumeAnswers();
+    if (hb.status === 'active' && !hb.requiredCheck) {
+      void this.outbox?.resumeAnswers();
+      this.serverSampleRequest(hb.identitySample);
+    }
     const s = this.snap.state;
     if (s && (hb.status !== s.session.status || hb.requiredCheck !== s.session.requiredCheck)) {
       needReload = true;

@@ -116,6 +116,10 @@ export interface EvidenceUploadQuery {
 export interface IdentitySampleQuery {
   trigger: IdentityCheckTrigger;
   capturedAt: number;
+  /** Burst of frames decided together (identitySampleQuerySchema): shared burstId, 0-based index, size. */
+  burstId?: string;
+  burstIndex?: number;
+  burstSize?: number;
 }
 
 export type JpegBody = Blob | ArrayBuffer | Uint8Array;
@@ -282,7 +286,14 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
       (
         await request<IdentitySampleResponse>(
           'POST',
-          `/api/candidate/identity/sample${qs({ sampleId, trigger: q.trigger, capturedAt: Math.round(q.capturedAt) })}`,
+          `/api/candidate/identity/sample${qs({
+            sampleId,
+            trigger: q.trigger,
+            capturedAt: Math.round(q.capturedAt),
+            burstId: q.burstId,
+            burstIndex: q.burstId ? q.burstIndex : undefined,
+            burstSize: q.burstId ? q.burstSize : undefined,
+          })}`,
           jpeg,
           'jpeg',
         )

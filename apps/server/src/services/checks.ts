@@ -15,6 +15,7 @@ import {
   LIVENESS_INSTRUCTIONS,
   QUALITY_GUIDANCE,
   type CheckFrameResponse,
+  type CheckProgressDTO,
   type CheckPurpose,
   type CompleteCheckResponse,
   type IdentityCheckTrigger,
@@ -52,20 +53,24 @@ import { audit } from '../lib/audit.js';
 import { safeEqual } from '../lib/crypto.js';
 import { badRequest, conflict, gone, HttpError, invalidState, notFound } from '../lib/errors.js';
 import {
-  aggregateFrames,
-  buildReference,
   checkStepFrame,
   decideIdentity,
   deserializeEmbeddings,
-  maxSimilarity,
-  REFERENCE_MIN_FRAMES,
+  CALIBRATION,
+  guidanceForIssues,
+  INCONCLUSIVE_GUIDANCE,
+  LIVENESS_DEFAULTS,
+  NO_EMBEDDING_GUIDANCE,
+  qualityScore,
   serializeEmbeddings,
   verifyLiveness,
   type FrameAggregateResult,
   type ImageAnalysis,
+  type LivenessChallengeSpec,
   type LivenessFrame,
-  type ReferenceBuildResult,
 } from '../vision/index.js';
+import { assessCheck, CHECK_EVIDENCE, sampleLabel, type CheckAssessment } from './identity-evidence.js';
+import { buildGallery, ENROL_TARGET_FRAMES, identityFrameIndexes, probeEvidence, scoreReference, type GalleryResult, type ProbeEvidence } from './identity-gallery.js';
 import { buildCandidateState, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { readEvidence, storeEvidence } from './evidence.js';
 import { copyEvidence, frameAad, frameToAnalysis, idPhotoAad, loadActiveReference, precedingContext, referenceAad, summarizeAnalysis, toIdentityResultDTO, type ActiveReference } from './identity-common.js';
@@ -78,20 +83,27 @@ export const CHECK_TTL_MS = 3 * 60_000;
 export const TARGET_YAW_DEG = 20;
 export const TARGET_PITCH_DEG = 12;
 export const MAX_FRAMES_PER_CHECK = 40;
-/** Upload caps per liveness step / for frontal frames (only the first frames of a step count anyway). */
-export const MAX_FRAMES_PER_STEP = 4;
+/**
+ * A liveness step the server reports as not satisfied (CheckProgressDTO.steps) may be re-prompted: its frames are
+ * judged in windows of LIVENESS_DEFAULTS.maxFramesPerStep, at most MAX_STEP_ATTEMPTS windows per step (bounded
+ * chances for a noisy frame; the anti-photo parallax check is unchanged).
+ */
+export const MAX_STEP_ATTEMPTS = 2;
+export const MAX_FRAMES_PER_STEP = LIVENESS_DEFAULTS.maxFramesPerStep * MAX_STEP_ATTEMPTS;
+/** Adaptive collection: the server keeps asking for frontal frames (CheckProgressDTO.frontalNeeded) up to this many. */
 export const MAX_FRONTAL_FRAMES = 10;
 const BRIGHTNESS_CHANGE = 45;
 
 const TRIGGER_FOR: Record<CheckPurpose, IdentityCheckTrigger> = { initial: 'check_in', resume: 'resume', reconnect: 'reconnect', reverify: 'reverify' };
 
 /**
- * Frontal frames the client must upload. A check that builds a reference (initial, or a staff-authorised
- * re-enrolment) needs REFERENCE_MIN_FRAMES clear frontal frames even when the liveness challenge (whose
- * 'center' step adds frontal frames) is turned off; a comparison needs 2.
+ * Frontal frames the client uploads first (the minimum; CheckFrameResponse.progress.frontalNeeded asks for more
+ * while the evidence is insufficient, up to MAX_FRONTAL_FRAMES). A check that builds a reference (initial, or a
+ * staff-authorised re-enrolment) wants ENROL_TARGET_FRAMES for a diverse gallery even when the liveness challenge
+ * is off; a comparison wants CALIBRATION.minFramesForDecision.
  */
 export function frontalFramesRequired(purpose: CheckPurpose, buildsReference = purpose === 'initial'): number {
-  return buildsReference ? Math.max(3, REFERENCE_MIN_FRAMES) : 2;
+  return buildsReference ? ENROL_TARGET_FRAMES : CHECK_EVIDENCE.minFrames;
 }
 
 /**
@@ -228,6 +240,7 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
         : null,
       attemptsRemaining: max - failed,
       frontalFramesRequired: frontalFramesRequired(required, required === 'initial' || reEnrollmentApplies(s, required)),
+      maxFrontalFrames: MAX_FRONTAL_FRAMES,
     };
   });
 }
@@ -351,9 +364,10 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
   });
 
   const quality = analysis.quality;
+  const progress = await checkProgress(ctx, check);
   if (step === 'frontal') {
     const accepted = quality.usable && analysis.embedding != null;
-    return { accepted, quality, guidance: accepted ? [] : guidanceFor(quality.issues), measured: analysis.pose ? { yawDeg: r1(analysis.pose.yawDeg), pitchDeg: r1(analysis.pose.pitchDeg) } : undefined };
+    return { accepted, quality, guidance: accepted ? [] : guidanceFor(quality.issues), measured: analysis.pose ? { yawDeg: r1(analysis.pose.yawDeg), pitchDeg: r1(analysis.pose.pitchDeg) } : undefined, progress };
   }
   // Liveness step frame: feedback relative to the candidate's own frontal pose.
   // The candidate's own frontal pose (YuNet pitch has an offset for frontal faces, so never use absolute pose).
@@ -368,7 +382,91 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
   const issues = quality.issues.filter((i) => i !== 'face_turned');
   const guidance = [...guidanceFor(issues)];
   if (!fb.satisfied && fb.reason) guidance.push(fb.reason);
-  return { accepted, quality, guidance, stepSatisfied: fb.satisfied, measured: fb.measured ?? undefined };
+  // The step's status as the server will verify it (its best window so far), not just this frame.
+  const stepSatisfied = progress.steps.find((x) => x.index === Number(step))?.satisfied ?? fb.satisfied;
+  return { accepted, quality, guidance: stepSatisfied ? guidanceFor(issues) : guidance, stepSatisfied, measured: fb.measured ?? undefined, progress };
+}
+
+/* =================================================================== adaptive progress */
+
+function livenessSpecOf(check: Pick<Check, 'liveness' | 'issuedAt' | 'expiresAt'>): LivenessChallengeSpec | null {
+  const spec = check.liveness;
+  return spec ? { steps: spec.steps, issuedAt: check.issuedAt.getTime(), expiresAt: check.expiresAt.getTime(), targetYawDeg: spec.targetYawDeg, targetPitchDeg: spec.targetPitchDeg } : null;
+}
+
+/**
+ * Liveness frames to verify: frontal frames plus, per step, the first window of LIVENESS_DEFAULTS.maxFramesPerStep
+ * frames (receipt order) that satisfies the step, else its latest window (at most MAX_STEP_ATTEMPTS windows).
+ * A re-prompted step thus gets a second, bounded chance without letting a client fish with unlimited frames.
+ */
+export function selectLivenessFrames(frames: readonly LivenessFrame[], spec: LivenessChallengeSpec, thresholds: IdentityThresholds): LivenessFrame[] {
+  const W = Math.max(1, LIVENESS_DEFAULTS.maxFramesPerStep);
+  const base = frames.filter((f) => f.step === 'frontal');
+  const keep = new Set<LivenessFrame>(base);
+  for (const step of spec.steps) {
+    const sf = frames.filter((f) => f.step === step.index);
+    const windows: LivenessFrame[][] = [];
+    for (let i = 0; i < sf.length && windows.length < MAX_STEP_ATTEMPTS; i += W) windows.push(sf.slice(i, i + W));
+    if (!windows.length) continue;
+    let chosen = windows[windows.length - 1];
+    if (windows.length > 1) {
+      for (const w of windows) {
+        const r = verifyLiveness(spec, [...base, ...w], thresholds);
+        if (r.steps.find((x) => x.index === step.index)?.passed) {
+          chosen = w;
+          break;
+        }
+      }
+    }
+    for (const f of chosen) keep.add(f);
+  }
+  return frames.filter((f) => keep.has(f));
+}
+
+function verifyCheckLiveness(check: Pick<Check, 'liveness' | 'issuedAt' | 'expiresAt'>, frames: readonly LivenessFrame[], thresholds: IdentityThresholds): LivenessResultDTO | null {
+  const spec = livenessSpecOf(check);
+  return spec ? verifyLiveness(spec, selectLivenessFrames(frames, spec, thresholds), thresholds) : null;
+}
+
+/**
+ * The server's running assessment after a frame (CheckFrameResponse.progress): usable frontal frames, how many more
+ * it wants (enrolment: a diverse gallery; comparison: enough accumulated evidence either way), the running identity
+ * assessment against the protected reference, the liveness steps' status, and whether /complete can be called.
+ */
+export async function checkProgress(ctx: Ctx, check: Check): Promise<CheckProgressDTO> {
+  const [s] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, check.sessionId));
+  const [org] = await ctx.db.select().from(organizations).where(eq(organizations.id, s.orgId));
+  const thresholds = orgThresholds(org);
+  const prepared = await prepareFrames(ctx, check.id);
+  const frontalSubmitted = prepared.frames.filter((f) => f.step === 'frontal').length;
+  const atLimit = frontalSubmitted >= MAX_FRONTAL_FRAMES || prepared.frames.length >= MAX_FRAMES_PER_CHECK;
+  const room = Math.max(0, MAX_FRONTAL_FRAMES - frontalSubmitted);
+  const buildsReference = check.purpose === 'initial' || reEnrollmentApplies(s, check.purpose);
+
+  let frontalAccepted = prepared.frontal.filter((f) => f.isFrontal && f.analysis.quality.usable && f.analysis.embedding != null).length;
+  let frontalNeeded = 0;
+  let identity: CheckProgressDTO['identity'] = null;
+  if (buildsReference) {
+    const g = buildGallery(prepared.frontal.map((f) => ({ analysis: f.analysis, frontal: f.isFrontal })), thresholds);
+    frontalAccepted = g.usableFrontal;
+    if (g.ok) frontalNeeded = Math.max(0, ENROL_TARGET_FRAMES - g.usableFrontal);
+    else frontalNeeded = g.failure === 'too_few' ? Math.max(1, ENROL_TARGET_FRAMES - g.usableFrontal) : 2;
+  } else {
+    const active = await loadActiveReference(ctx, ctx.db, check.sessionId);
+    if (active) {
+      const a = assessCheck(probeEvidence(prepared.frontal.map((f) => f.analysis), active.embeddings, active.ref.baseline ?? null, 'relaxed'), { atLimit });
+      identity = a.status;
+      frontalNeeded = a.status === 'pending' ? Math.max(1, CHECK_EVIDENCE.minFrames - a.usable) : a.status === 'uncertain' ? 2 : 0;
+    }
+  }
+  frontalNeeded = atLimit ? 0 : Math.min(frontalNeeded, room);
+
+  const expired = ctx.now() > check.expiresAt.getTime();
+  const liveness = verifyCheckLiveness(check, livenessFrames(prepared), thresholds);
+  const steps = (liveness?.steps ?? []).map((x) => ({ index: x.index, satisfied: x.passed }));
+  const stepFrames = (i: number) => prepared.frames.filter((f) => f.step === String(i)).length;
+  const livenessOpen = !expired && prepared.frames.length < MAX_FRAMES_PER_CHECK && steps.some((x) => !x.satisfied && stepFrames(x.index) < MAX_FRAMES_PER_STEP);
+  return { frontalAccepted, frontalNeeded, identity, steps, canComplete: expired || (frontalNeeded === 0 && !livenessOpen) };
 }
 
 function guidanceFor(issues: readonly (keyof typeof QUALITY_GUIDANCE)[]): string[] {
@@ -384,15 +482,33 @@ function median(v: number[]): number {
 
 /* =================================================================== complete */
 
+interface PreparedFrame {
+  id: string;
+  step: string;
+  action: LivenessAction | 'center';
+  capturedAt: number;
+  evidenceId: string | null;
+  cropId: string | null;
+  analysis: ImageAnalysis;
+  clientYaw: number | null;
+  clientPitch: number | null;
+  /** A frontal frame (step 'frontal' or the 'center' step) rather than a near-frontal liveness frame. */
+  isFrontal: boolean;
+}
+
 interface PreparedFrames {
-  frames: { id: string; step: string; action: LivenessAction | 'center'; capturedAt: number; evidenceId: string | null; cropId: string | null; analysis: ImageAnalysis; clientYaw: number | null; clientPitch: number | null }[];
-  frontal: PreparedFrames['frames'];
+  frames: PreparedFrame[];
+  /**
+   * Identity evidence, receipt order: frontal frames plus liveness frames within NEAR_FRONTAL_* of the candidate's
+   * frontal pose (identity-gallery.ts identityFrameIndexes).
+   */
+  frontal: PreparedFrame[];
 }
 
 async function prepareFrames(ctx: Ctx, checkId: string): Promise<PreparedFrames> {
   // Server receipt order; the liveness time window and step order use server receipt time, not client clocks.
   const rows = await ctx.db.select().from(checkFrames).where(eq(checkFrames.checkId, checkId)).orderBy(asc(checkFrames.seq));
-  const frames = rows.map((f) => ({
+  const frames: PreparedFrame[] = rows.map((f) => ({
     id: f.id,
     step: f.step,
     action: f.action,
@@ -402,8 +518,76 @@ async function prepareFrames(ctx: Ctx, checkId: string): Promise<PreparedFrames>
     analysis: frameToAnalysis(ctx, f),
     clientYaw: f.clientYaw,
     clientPitch: f.clientPitch,
+    isFrontal: f.step === 'frontal' || f.action === 'center',
   }));
-  return { frames, frontal: frames.filter((f) => f.step === 'frontal' || f.action === 'center') };
+  return { frames, frontal: identityFrameIndexes(frames).map((x) => frames[x.index]) };
+}
+
+/** Assessment of a resume / reconnect / reverify check's frames against the protected reference. */
+interface ContinuationIdentity extends FrameAggregateResult {
+  assessment: CheckAssessment;
+  perFrame: ProbeEvidence[];
+}
+
+/**
+ * Decide a comparison check on the accumulated evidence of all its identity frames (identity-evidence.ts
+ * assessCheck): likely the same person => match; likely a different person (and the mean-embedding score below the
+ * match threshold) => mismatch — also when some frames were fair / poor; otherwise inconclusive; no usable frame at
+ * all => unable_to_verify (guidance).
+ */
+function assessContinuation(analyses: readonly ImageAnalysis[], active: ActiveReference, thresholds: IdentityThresholds): ContinuationIdentity {
+  const perFrame = probeEvidence(analyses, active.embeddings, active.ref.baseline ?? null, 'relaxed');
+  const assessment = assessCheck(perFrame, { atLimit: true });
+  const usable = perFrame.filter((f) => f.usable && analyses[f.index].embedding);
+  const sims = usable.map((f) => f.similarity!).sort((a, b) => a - b);
+  const aggSim = usable.length ? scoreReference(usable.map((f) => analyses[f.index].embedding!), active.embeddings) : null;
+  let decision: IdentityDecision;
+  if (assessment.status === 'likely_match' && aggSim != null && aggSim >= thresholds.mismatch) decision = 'match';
+  else if (assessment.status === 'likely_mismatch' && aggSim != null && aggSim < thresholds.match) decision = 'mismatch';
+  else if (usable.length === 0) decision = 'unable_to_verify';
+  else decision = 'inconclusive';
+  const labels = perFrame.map((f) => sampleLabel(f.similarity, analyses[f.index].quality, thresholds));
+  const count = (d: IdentityDecision) => labels.filter((l) => l === d).length;
+  const allIssues = analyses.flatMap((a) => a.quality.issues);
+  let guidance: string[] = [];
+  let confidence: number;
+  if (decision === 'match') confidence = Math.round((1 - assessment.posterior) * 10000) / 10000;
+  else if (decision === 'mismatch') confidence = assessment.posterior;
+  else if (decision === 'unable_to_verify') {
+    confidence = 1;
+    guidance = allIssues.length ? guidanceForIssues(allIssues) : [NO_EMBEDDING_GUIDANCE];
+  } else {
+    confidence = 0.5;
+    const unusableIssues = perFrame.filter((f) => !f.usable).flatMap((f) => analyses[f.index].quality.issues);
+    guidance = unusableIssues.length ? guidanceForIssues(unusableIssues) : [INCONCLUSIVE_GUIDANCE];
+  }
+  const pick = (idx: number[], by: (i: number) => number) => idx.reduce<number | null>((b, i) => (b == null || by(i) > by(b) ? i : b), null);
+  const usableIdx = usable.map((f) => f.index);
+  const bestProbeIndex =
+    (decision === 'mismatch' ? pick(usableIdx, (i) => perFrame[i].llr) : pick(usableIdx, (i) => qualityScore(analyses[i].quality))) ??
+    pick(
+      analyses.map((_, i) => i).filter((i) => analyses[i].primary != null),
+      (i) => qualityScore(analyses[i].quality),
+    );
+  const r4 = (v: number) => Math.round(v * 10000) / 10000;
+  return {
+    decision,
+    similarity: aggSim,
+    confidence,
+    guidance,
+    frames: perFrame.map((f, i) => ({ decision: labels[i], similarity: f.similarity, confidence: 1, guidance: [], index: f.index, usable: f.usable })),
+    matchCount: count('match'),
+    mismatchCount: count('mismatch'),
+    inconclusiveCount: count('inconclusive'),
+    unableCount: count('unable_to_verify'),
+    usableCount: usable.length,
+    minSimilarity: sims.length ? r4(sims[0]) : null,
+    maxSimilarity: sims.length ? r4(sims[sims.length - 1]) : null,
+    medianSimilarity: sims.length ? r4(median(sims)) : null,
+    bestProbeIndex,
+    assessment,
+    perFrame,
+  };
 }
 
 function livenessFrames(p: PreparedFrames): LivenessFrame[] {
@@ -473,24 +657,21 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
   const policy = effectivePolicy(s0, exam, org ?? null);
   const thresholds = orgThresholds(org);
 
-  const spec = check.liveness;
-  const liveness: LivenessResultDTO | null = spec
-    ? verifyLiveness({ steps: spec.steps, issuedAt: check.issuedAt.getTime(), expiresAt: check.expiresAt.getTime(), targetYawDeg: spec.targetYawDeg, targetPitchDeg: spec.targetPitchDeg }, livenessFrames(prepared), thresholds)
-    : null;
+  const liveness: LivenessResultDTO | null = verifyCheckLiveness(check, livenessFrames(prepared), thresholds);
   const livenessOk = !liveness || liveness.passed;
 
   const frontalAnalyses = prepared.frontal.map((f) => f.analysis);
-  let reference: ReferenceBuildResult | null = null;
-  let aggregate: FrameAggregateResult | null = null;
+  let reference: GalleryResult | null = null;
+  let aggregate: ContinuationIdentity | null = null;
   let active: ActiveReference | null = null;
   const purpose = check.purpose;
   // Re-checked under the lock in applyContinuation (the authorisation may change meanwhile).
   const reEnroll = reEnrollmentApplies(s0, purpose);
-  if (purpose === 'initial' || reEnroll) reference = buildReference(frontalAnalyses, thresholds);
+  if (purpose === 'initial' || reEnroll) reference = buildGallery(prepared.frontal.map((f) => ({ analysis: f.analysis, frontal: f.isFrontal })), thresholds);
   if (purpose !== 'initial') {
     active = await loadActiveReference(ctx, ctx.db, sessionId);
     if (!active && !reEnroll) throw invalidState('No identity reference exists for this exam');
-    if (active) aggregate = aggregateFrames(frontalAnalyses, active.embeddings, thresholds, 'reference');
+    if (active) aggregate = assessContinuation(frontalAnalyses, active, thresholds);
   }
 
   // Images for evidence: reference (best frontal) and probe (best probe frame).
@@ -505,8 +686,7 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
   if (purpose === 'initial' && reference?.ok && policy.identity.idPhotoComparison !== 'off' && cand.idPhotoEmbedding) {
     try {
       const photoEmb = deserializeEmbeddings(ctx.keyring.decrypt(cand.idPhotoEmbedding, idPhotoAad(cand.id)));
-      const sims = reference.embeddings.map((e) => maxSimilarity(e, photoEmb));
-      const sim = Math.max(...sims);
+      const sim = Math.max(...photoEmb.map((p) => scoreReference(p, reference!.gallery)));
       const d = decideIdentity(sim, reference.quality, thresholds, 'id_photo');
       idPhoto = { decision: d.decision, similarity: d.similarity, confidence: d.confidence };
     } catch (err) {
@@ -547,8 +727,8 @@ interface ApplyCtx {
   thresholds: IdentityThresholds;
   liveness: LivenessResultDTO | null;
   livenessOk: boolean;
-  reference: ReferenceBuildResult | null;
-  aggregate: FrameAggregateResult | null;
+  reference: GalleryResult | null;
+  aggregate: ContinuationIdentity | null;
   active: ActiveReference | null;
   refImages: ImagePair | null;
   probeImages: ImagePair | null;
@@ -650,8 +830,9 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     sessionId: m.session.id,
     candidateId: m.session.candidateId,
     version: maxVersion + 1,
-    embeddingsEnc: a.ctx.keyring.encrypt(serializeEmbeddings(reference.embeddings), referenceAad(refId)),
-    embeddingCount: reference.embeddings.length,
+    embeddingsEnc: a.ctx.keyring.encrypt(serializeEmbeddings(reference.gallery), referenceAad(refId)),
+    embeddingCount: reference.gallery.length,
+    baseline: reference.baseline,
     quality: reference.quality,
     liveness,
     idPhoto: a.idPhoto ? { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity } : null,
@@ -682,7 +863,7 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     observation: liveness ? undefined : 'The camera readiness check was completed; the live-person check is disabled by the exam rules.',
     details: { checkId: a.check.id, livenessSteps: liveness?.steps.length ?? 0, liveness: liveness ? 'passed' : 'off' },
   });
-  await m.addEvent({ type: 'reference_created', source: 'server_identity', details: { referenceId: refId, version: maxVersion + 1, embeddingCount: reference.embeddings.length } });
+  await m.addEvent({ type: 'reference_created', source: 'server_identity', details: { referenceId: refId, version: maxVersion + 1, embeddingCount: reference.gallery.length, framesAccepted: reference.accepted.length, baseline: reference.baseline } });
   m.set({ verifiedInstanceId: a.instanceId, checkAttemptsResetAt: new Date(m.now) });
   m.setIdentityState({ ...identityState(m.session), lastMatchAt: m.now });
 
@@ -799,6 +980,9 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     matchCount: aggregate?.matchCount,
     mismatchCount: aggregate?.mismatchCount,
     unableCount: aggregate?.unableCount,
+    evidence: aggregate
+      ? { status: aggregate.assessment.status, llr: aggregate.assessment.llr, posterior: aggregate.assessment.posterior, usableFrames: aggregate.assessment.usable, calibrationVersion: CALIBRATION.version }
+      : undefined,
   };
   const quality = aggregate?.bestProbeIndex != null ? a.prepared.frontal[aggregate.bestProbeIndex]?.analysis.quality : (a.prepared.frontal[0]?.analysis.quality ?? null);
   // Only the reverify check of a hold released with reEnroll=true may replace the reference (see reEnrollmentApplies).
@@ -881,8 +1065,9 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
       sessionId: s.id,
       candidateId: s.candidateId,
       version: maxVersion + 1,
-      embeddingsEnc: a.ctx.keyring.encrypt(serializeEmbeddings(ref.embeddings), referenceAad(refId)),
-      embeddingCount: ref.embeddings.length,
+      embeddingsEnc: a.ctx.keyring.encrypt(serializeEmbeddings(ref.gallery), referenceAad(refId)),
+      embeddingCount: ref.gallery.length,
+      baseline: ref.baseline,
       quality: ref.quality,
       liveness,
       imageEvidenceIds: images.map((e) => e.id),
@@ -1008,6 +1193,11 @@ async function recordReferenceMismatch(
       maxSimilarity: agg.maxSimilarity,
       frames: { match: agg.matchCount, mismatch: agg.mismatchCount, inconclusive: agg.inconclusiveCount, unable: agg.unableCount },
       thresholds: { match: a.thresholds.match, mismatch: a.thresholds.mismatch },
+      llrSum: agg.assessment.llr,
+      posterior: agg.assessment.posterior,
+      perFrame: agg.perFrame.map((f) => ({ similarity: f.similarity, bucket: f.bucket, llr: f.usable ? f.llr : null })),
+      baseline: a.active?.ref.baseline ?? null,
+      calibrationVersion: CALIBRATION.version,
       identityCheckIds: [idRow.id],
       referenceId: a.active?.ref.id ?? null,
       ...(o.extraDetails ?? {}),

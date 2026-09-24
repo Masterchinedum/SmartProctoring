@@ -51,7 +51,7 @@ describe('P0-1: a re-enrolment authorisation cannot outlive the hold it was give
     expect((await c.req('POST', '/api/candidate/pause', {})).json().outcome).toBe('paused');
     env.clock.advance(10 * MIN);
     const { start, complete } = await runCheck(env, c, 'resume', { spec: { person: 'impostor-p01' } });
-    expect(start.frontalFramesRequired).toBe(2);
+    expect(start.frontalFramesRequired).toBe(3); // a comparison (resume), not an enrolment
     expect(complete!.outcome).toBe('held');
     expect(complete!.identity!.decision).toBe('mismatch');
     expect(complete!.state.session.hold!.reason).toBe('identity_mismatch');
@@ -101,7 +101,7 @@ describe('P0-1: a re-enrolment authorisation cannot outlive the hold it was give
     await releaseHold(env.ctx, s.id, actor(), { reEnroll: true, note: 'Verified by video call' });
     env.clock.advance(MIN);
     const { start, complete } = await runCheck(env, c, 'reverify', { spec: { person: 'reenrol-new' } });
-    expect(start.frontalFramesRequired).toBe(3);
+    expect(start.frontalFramesRequired).toBe(5); // an authorised re-enrolment builds a gallery
     expect(complete!.outcome).toBe('passed');
     const refs = await refsOf(s.id);
     expect(refs).toHaveLength(2);
@@ -129,25 +129,25 @@ describe('P0-1: a re-enrolment authorisation cannot outlive the hold it was give
 });
 
 describe('P1-2: authorised re-enrolment works with the liveness check turned off', () => {
-  it('asks for 3 frontal frames and builds the new reference', async () => {
+  it('asks for enrolment frontal frames (5) and builds the new reference', async () => {
     const { s, c } = await freshSession({ identity: { liveness: 'off' } });
     await startedSession(env, c);
     await c.req('POST', '/api/candidate/pause', {});
     const r1 = await runCheck(env, c, 'resume', { spec: { person: 'alice-glasses-off' } });
     expect(r1.start.liveness).toBeNull();
-    expect(r1.start.frontalFramesRequired).toBe(2);
+    expect(r1.start.frontalFramesRequired).toBe(3);
     expect(r1.complete!.outcome).toBe('held');
     await releaseHold(env.ctx, s.id, actor(), { reEnroll: true });
     const r2 = await runCheck(env, c, 'reverify', { spec: { person: 'alice-glasses-off' } });
     expect(r2.start.liveness).toBeNull();
-    expect(r2.start.frontalFramesRequired).toBe(3);
+    expect(r2.start.frontalFramesRequired).toBe(5);
     expect(r2.complete!.outcome, JSON.stringify(r2.complete)).toBe('passed');
     expect(await refsOf(s.id)).toHaveLength(2);
     // A reverify WITHOUT re-enrolment only compares (2 frames).
     await holdSession(env.ctx, s.id, actor());
     await releaseHold(env.ctx, s.id, actor(), { requireCheck: true });
     const r3 = await runCheck(env, c, 'reverify', { spec: { person: 'alice-glasses-off' } });
-    expect(r3.start.frontalFramesRequired).toBe(2);
+    expect(r3.start.frontalFramesRequired).toBe(3);
     expect(r3.complete!.outcome).toBe('passed');
   });
 });

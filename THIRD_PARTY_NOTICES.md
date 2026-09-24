@@ -58,6 +58,7 @@ Full text: https://www.apache.org/licenses/LICENSE-2.0 — the models and librar
 | drizzle-orm | Apache-2.0 | |
 | pg | MIT | |
 | ioredis | MIT | optional (multi-instance realtime) |
+| @aws-sdk/client-s3, @aws-sdk/client-rekognition (AWS SDK for JavaScript v3) | Apache-2.0 | optional (S3 evidence storage; external second-opinion face verifier, loaded only when an organisation enables it) |
 | nodemailer | MIT-0 | optional (email alerts over SMTP) |
 | zod | MIT | |
 | pino | MIT | |

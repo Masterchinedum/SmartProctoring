@@ -10,7 +10,7 @@ Report vulnerabilities privately to the maintainers; do not open public issues f
 
 **Assets.** Face images and face templates (biometric data), identity references, event evidence, exam
 content and answer keys, candidate personal data, staff accounts, organisation API keys and webhook
-secrets, the evidence encryption key, the integrity of the proctoring record (who took the exam, what was
+secrets, external face-verifier credentials (AWS access keys, optional), the evidence encryption key, the integrity of the proctoring record (who took the exam, what was
 observed).
 
 **Actors and trust.**
@@ -22,6 +22,7 @@ observed).
 | Reviewer / admin / owner | Staff session cookie (`sp_session`) | Their own organisation only, by role (reviewer < admin < owner). |
 | Integration (LMS/HR) | Organisation API key (`sp_live_…`) | Its organisation's exams, candidates, sessions, reports and events — never images or face data. |
 | Webhook receiver | Verifies our HMAC signature | Receives notifications only; never images, templates or similarity scores. |
+| External face verifier (optional, e.g. AWS Rekognition) | Our request, signed with the organisation's IAM key or the server's role | Off by default. When an admin enables it: receives face images for the selected identity checks; its answer is advisory — combined by a fixed table, it never records a "possible different person" on its own (`docs/EXTERNAL_VERIFIER.md`). |
 | Other tenants | Their own credentials | Nothing in another organisation (all ids of other orgs are 404). |
 | Network attacker / third-party website | — | Nothing (TLS, CSRF and clickjacking defences). |
 
@@ -91,22 +92,31 @@ server-side identity match, read other sessions, or change category/severity (th
 ### Cryptography
 * AES-256-GCM for every blob and template, random 96-bit IV per object, AAD binding each ciphertext to its
   row (`evidence:<id>`, `reference:<id>`, `idphoto:<candidateId>`, `access-token:<sessionId>`,
-  `webhook-secret:<id>`, `frame:<id>`), key id embedded for rotation (`EVIDENCE_KEYS_OLD`). After a rotation
+  `webhook-secret:<id>`, `frame:<id>`, `external-verifier:<orgId>`), key id embedded for rotation (`EVIDENCE_KEYS_OLD`). After a rotation
   the `rekey` CLI re-encrypts every encrypted column and evidence blob under the current key (batched,
   resumable, compare-and-set per row, `--dry-run`, audit `keys.rekeyed`), so old keys can be retired
   (`docs/OPERATIONS.md` §3).
 * Constant-time comparison for liveness nonces; tokens/keys are looked up by hash.
 * Webhooks: `HMAC-SHA256(secret, t.body)` with timestamp; secrets shown once, stored encrypted.
+* External verifier AWS keys: write-only (responses show `accessKeyIdSet` + the last 4 characters of the key id),
+  encrypted in the organisation settings (AAD binds them to the organisation), never logged or audited, deleted when
+  the provider is switched off or server credentials are chosen; covered by `rekey`.
 
 ### Outbound requests (SSRF)
 * Webhook URLs must be `https://` in production and resolve to public unicast addresses (IPv4/IPv6 private,
   loopback, link-local/metadata, CGNAT, NAT64/6to4-embedded and documentation ranges refused), checked when
   saved and again at connect time through a pinned DNS lookup (no DNS rebinding); redirects are never
   followed; 10 s timeout; at most 64 KB of the response is read and 200 characters kept.
+* External face verifier (optional): requests go only through the AWS SDK to the Rekognition endpoint of the
+  configured region — no administrator-supplied URLs; deadline `EXTERNAL_VERIFIER_TIMEOUT_MS` (4 s), one retry when
+  throttled, a per-organisation circuit breaker (5 failures ⇒ 60 s pause), failures fall back to the internal
+  decision. Operators can switch the feature off (`EXTERNAL_VERIFIERS=none`) and must opt in to letting
+  organisations use the server's own AWS credentials (`EXTERNAL_VERIFIER_ENV_CREDENTIALS`).
 
 ### Abuse and availability
 * Rate limits: candidate endpoints per access token (30–600/min per endpoint), privacy notice 60/min/IP,
-  login and password change 10/min/IP, integration API 600/min/key, webhook test/redeliver and test email.
+  login and password change 10/min/IP, integration API 600/min/key, webhook test/redeliver, test email and
+  external-verifier test (10/min).
   With `REDIS_URL` the counters are kept in Redis and shared by all instances (a Redis outage lets requests
   through and is logged); without it they are in memory per instance.
 * Vision work is bounded (concurrency + queue of 256); overload returns `503 vision_busy` with `Retry-After`
@@ -115,7 +125,8 @@ server-side identity match, read other sessions, or change category/severity (th
 ### Privacy and audit
 * Every image fetch (screenshots, check frames, identity references, probes, ID photos — all served only by
   `GET /api/admin/evidence/:id`) writes `evidence.view` to the audit log; so do reviews, notes, holds,
-  releases, re-enrolments, settings, users, API keys, webhooks and retention purges.
+  releases, re-enrolments, settings (incl. external-verifier changes: provider/region/uses, key set/removed — never
+  the key), external-verifier tests, users, API keys, webhooks and retention purges.
 * Webhooks, alert emails and the integration API never contain images, templates or similarity scores.
   Webhooks and alert emails never carry candidate-written text as is: events reported by the browser use the
   catalog title/observation, the pause reason and other user-controlled text are stripped of links
@@ -181,6 +192,10 @@ fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, 
 - [ ] Rotating `SESSION_SECRET` signs every staff member out. Rotate webhook secrets and API keys on staff
       turnover; revoke unused keys.
 - [ ] Remove `BOOTSTRAP_ADMIN_PASSWORD` from the environment after the first start; the owner changes it.
+- [ ] External face verifier (organisations can opt in by default): set `EXTERNAL_VERIFIERS=none` if face images
+      must never leave your infrastructure; otherwise give the IAM user/role only `rekognition:CompareFaces`, opt
+      out of AI-service content use, and allow `EXTERNAL_VERIFIER_ENV_CREDENTIALS` only on single-tenant servers
+      (`docs/EXTERNAL_VERIFIER.md`).
 
 **Database, storage, backups**
 - [ ] Postgres role for the app: not a superuser, owner of the application schema only (migrations run at

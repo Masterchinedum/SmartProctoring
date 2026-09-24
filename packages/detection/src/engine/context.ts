@@ -51,6 +51,12 @@ export const K = {
   /** Identity samples need a roughly frontal face (server quality gate rejects |yaw| > 25°). */
   identityMaxYawOffset: 22,
   identityMaxPitchOffset: 22,
+  /**
+   * Identity samples skip only a badly obstructed face. Visibility also drops in a dim / low-contrast image
+   * (adapters: faceRegionQuality), and image usability is the server's call ("unable to verify" + guidance),
+   * so this floor is deliberately low: a dim but visible single face is still sampled.
+   */
+  identityMinVisibility: 0.3,
   /** Min interval between 'update' emissions for material detail changes. */
   minUpdateMs: 10000,
   peakSpacingMs: 3000,

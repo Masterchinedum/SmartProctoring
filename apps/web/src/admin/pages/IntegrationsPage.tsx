@@ -32,21 +32,23 @@ import { SEVERITY_LABELS } from '../lib/labels';
 import { CopyButton, EmptyState, ErrorState, Loading, PageHeader } from '../components/Common';
 import { ConfirmDialog, Modal } from '../components/Modal';
 import { RelativeTime } from '../components/Time';
+import { ExternalVerifierSection } from './ExternalVerifierSection';
 
-/** Settings → Integrations: API keys, webhooks and email alerts (administrators). */
+/** Settings → Integrations: API keys, webhooks, email alerts and the optional external face verifier (administrators). */
 export function IntegrationsPage() {
   const status = useQuery({ queryKey: qk.integrationStatus, queryFn: api.integrationStatus, retry: shouldRetry });
   return (
     <div className="stack integrations-page">
       <PageHeader
         title="Integrations"
-        subtitle="Connect SmartProctoring to your LMS or HR system (API keys, webhooks) and send alert emails to your staff."
+        subtitle="Connect SmartProctoring to your LMS or HR system (API keys, webhooks), send alert emails to your staff, and optionally add an external second opinion for identity checks."
         back={<Link to="/admin/settings">‹ Settings</Link>}
       />
       {status.isError ? <ErrorState error={status.error} onRetry={() => void status.refetch()} /> : null}
       <ApiKeysSection status={status.data} />
       <WebhooksSection status={status.data} />
       <EmailAlertsSection status={status.data} />
+      <ExternalVerifierSection />
     </div>
   );
 }

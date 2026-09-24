@@ -2,6 +2,7 @@ import { DEFAULT_IDENTITY_THRESHOLDS, identityThresholdsSchema, resolvePolicy, t
 import { eq } from 'drizzle-orm';
 import type { DbOrTx } from '../db/index.js';
 import { organizations, type Organization, type OrgSettings } from '../db/schema.js';
+import { DEFAULT_EXTERNAL_VERIFIER_SETTINGS, normalizeExternalVerifierSettings } from '../verifiers/settings.js';
 
 export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   evidenceRetentionDays: 30,
@@ -18,6 +19,7 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   abandonAfterDays: 30,
   alertRecipients: [],
   emailAlerts: { holds: true, pauseRequests: true, highSeverity: true },
+  externalVerifier: DEFAULT_EXTERNAL_VERIFIER_SETTINGS,
 };
 
 /** Organisation settings with every field filled from defaults. */
@@ -32,6 +34,7 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
     abandonAfterDays: s.abandonAfterDays ?? DEFAULT_ORG_SETTINGS.abandonAfterDays,
     alertRecipients: Array.isArray(s.alertRecipients) ? s.alertRecipients : [],
     emailAlerts: { ...DEFAULT_ORG_SETTINGS.emailAlerts, ...(s.emailAlerts ?? {}) },
+    externalVerifier: normalizeExternalVerifierSettings(s.externalVerifier),
   };
 }
 

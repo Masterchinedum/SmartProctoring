@@ -65,7 +65,7 @@ NODE_ENV=production DATABASE_URL=... EVIDENCE_KEY=... SESSION_SECRET=... node ap
      pnpm --filter @sp/server rekey                # re-encrypts in batches (--batch-size, default 200)
      ```
      It covers every encrypted value: evidence blobs (images), ID-photo, reference and check-frame face
-     templates, stored access tokens and webhook secrets. Progress goes to stderr; the summary names each
+     templates, stored access tokens, webhook secrets and external-verifier access keys. Progress goes to stderr; the summary names each
      `EVIDENCE_KEYS_OLD` key id as "still needed" or "no longer needed"; the run is audit-logged
      (`keys.rekeyed`). Exit code 0 = nothing left under an old key, 3 = items remain (or failed — see the
      output), 75 = another run holds the lock.
@@ -165,6 +165,9 @@ and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) s
 | `WEBHOOK_ALLOW_PRIVATE_NETWORKS` | `false` in production, `true` otherwise | Allow webhook URLs on localhost / private networks and plain `http://`… only for development. In production webhooks must be `https://` and resolve to public addresses (checked when saved and again at connect time). |
 | `WEBHOOK_DISABLE_AFTER_FAILURES` | 20 | Consecutive failed attempts (spanning ≥ 1 h) before a webhook is disabled. |
 | `API_RATE_LIMIT_PER_MINUTE` | 600 | Integration API requests per minute per API key (429 above). Counted across all instances when `REDIS_URL` is set; otherwise per instance. |
+| `EXTERNAL_VERIFIERS` | `aws-rekognition` | External second-opinion face verifiers organisations may switch on (each organisation still opts in; off by default). `none` = face images never leave this server. `docs/EXTERNAL_VERIFIER.md`. |
+| `EXTERNAL_VERIFIER_ENV_CREDENTIALS` | `false` | Let organisations use this server's AWS credentials (IAM role / `AWS_*` environment) instead of storing their own access key. Single-tenant deployments only. |
+| `EXTERNAL_VERIFIER_TIMEOUT_MS` | 4000 | Deadline per external comparison (retry included); afterwards the internal decision stands alone. |
 
 Background jobs (advisory-lock guarded, one instance at a time): `webhooks` every 5 s (plus immediately
 after a change), `email-alerts` every 10 s, `abandoned-sessions` hourly. Webhook attempts have a 10 s
@@ -172,5 +175,6 @@ timeout and are retried after 30 s, 1 min, 2 min, 5 min, 15 min, 30 min, 1 h, 2 
 Delivery records and queued alert emails contain candidate names and are deleted after 30 days.
 Customer-facing documentation of the API and webhooks: `docs/INTEGRATION_API.md`.
 
-Outbound network: allow egress to your SMTP server and to the webhook receivers. Webhook requests come
+Outbound network: allow egress to your SMTP server and to the webhook receivers (and, if an organisation enables
+the external face verifier, to `rekognition.<region>.amazonaws.com`). Webhook requests come
 from the server's own IP with `User-Agent: SmartProctoring-Webhooks/1.0`.

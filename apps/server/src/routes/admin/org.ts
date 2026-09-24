@@ -3,6 +3,7 @@
  *
  *   GET  /settings                                  -> OrgSettingsDTO               [admin]
  *   PUT  /settings  Partial<OrgSettingsDTO>         -> OrgSettingsDTO               [admin]
+ *        (externalVerifier takes ExternalVerifierUpdate: write-only key pair, see src/verifiers/settings.ts)
  *   GET  /users                                     -> { items: StaffUserDTO[] }    [admin]
  *   POST /users {email,name,role,password}          -> StaffUserDTO                 [admin; only an owner may create owners/admins]
  *   PUT  /users/:id {name?,role?,disabled?,password?} -> StaffUserDTO               [admin]
@@ -35,6 +36,7 @@ import { badRequest, conflict, forbidden, notFound, validationFailed } from '../
 import { toStaffUserDTO } from '../../services/dto.js';
 import { mergePolicy, orgSettings } from '../../services/org.js';
 import { clearLoginFailures } from '../../services/login-throttle.js';
+import { applyExternalVerifierUpdate, externalVerifierAuditMeta, toExternalVerifierDTO } from '../../verifiers/settings.js';
 import { blankToUndefined, escapeLike, idParam, loadOrgRow, pagingSchema, sanitizePolicyInput } from './common.js';
 
 const auditQuerySchema = pagingSchema.extend({
@@ -55,6 +57,7 @@ export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
     abandonAfterDays: s.abandonAfterDays,
     alertRecipients: [...s.alertRecipients],
     emailAlerts: { ...s.emailAlerts },
+    externalVerifier: toExternalVerifierDTO(s.externalVerifier),
   };
 }
 
@@ -110,8 +113,11 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         mergePolicy(undefined, policy); // throws ZodError (400) with field paths when invalid
         stored.defaultPolicy = policy;
       }
+      // External second-opinion verifier: the key pair is encrypted here and never returned (verifiers/settings.ts).
+      const verifier = body.externalVerifier !== undefined ? applyExternalVerifierUpdate({ keyring: ctx.keyring, config: ctx.config.externalVerifiers, orgId: staff.orgId, now }, cur.externalVerifier, body.externalVerifier) : null;
+      if (verifier) stored.externalVerifier = verifier.next;
       const next = orgSettings({ settings: stored });
-      const issues: { path: string; message: string }[] = [];
+      const issues: { path: string; message: string }[] = [...(verifier?.issues ?? [])];
       if (next.eventRetentionDays < next.evidenceRetentionDays) {
         issues.push({ path: 'eventRetentionDays', message: 'Event records must be kept at least as long as the evidence images' });
       }
@@ -146,6 +152,7 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
           ...(changed.includes('abandonAfterDays') ? { abandonAfterDays: { from: cur.abandonAfterDays, to: next.abandonAfterDays } } : {}),
           ...(changed.includes('alertRecipients') ? { alertRecipients: { count: next.alertRecipients.length } } : {}),
           ...(changed.includes('emailAlerts') ? { emailAlerts: next.emailAlerts } : {}),
+          ...(changed.includes('externalVerifier') && verifier ? { externalVerifier: externalVerifierAuditMeta(cur.externalVerifier, next.externalVerifier, verifier.credentials) } : {}),
         },
         ip: req.ip,
         at: now,

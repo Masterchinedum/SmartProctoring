@@ -57,6 +57,11 @@ src/
   vision/**, eval/**   vision agent. vision/service.ts = facade (VisionService) over pool.ts: worker threads (worker.ts,
                        bundled as dist/vision-worker.js) each running engine.ts (own onnxruntime sessions)
   lib/load-monitor.ts  logs "server overloaded (...)" when the event loop / DB pool / vision queue saturate
+  verifiers/**         optional external second-opinion face verifier (docs/EXTERNAL_VERIFIER.md): types.ts (ExternalVerifier),
+                       aws-rekognition.ts (CompareFaces), registry.ts (ctx.verifiers: providers, client cache, breaker),
+                       settings.ts (org settings.externalVerifier, encrypted key pair), fusion.ts (fuseWithExternal),
+                       index.ts maybeExternalSecondOpinion(ctx, org, kind, images, { consentAcceptedAt }) — the seam
+  routes/admin/verifiers.ts  GET /api/admin/verifiers, POST /api/admin/verifiers/test (image vs itself)
 ```
 
 ## Writing staff routes (admin agent)
@@ -100,7 +105,9 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
   idPhotoEvidenceId, idPhotoQuality, idPhotoApprovedAt/By. The candidate check decrypts with the same AAD.
 * Access link display: `accessLinkFor(ctx, sessionRow)`.
 * Encrypted AADs in use: `evidence:<evidenceId>`, `access-token:<sessionId>`, `idphoto:<candidateId>`,
-  `reference:<referenceId>`, `frame:<frameId>`, `webhook-secret:<webhookId>`. A NEW encrypted column must be
+  `reference:<referenceId>`, `frame:<frameId>`, `sample-frame:<frameId>`, `webhook-secret:<webhookId>`, `external-verifier:<orgId>` (base64
+  inside organizations.settings.externalVerifier.credentialsEnc; rekey target `external_verifier_credentials`).
+  A NEW encrypted column must be
   added to services/rekey.ts `COLUMN_TARGETS` (test/rekey.test.ts fails for an uncovered bytea column).
 
 ## Background jobs
@@ -128,8 +135,11 @@ after-commit "kicks" are no-ops).
   tweaked per test (allowPrivateNetworks is true outside production, so a local http receiver works).
 
 ## Candidate-side services (for reference)
-checks.ts (start/frames/complete: liveness, reference, ID photo, resume/reconnect/reverify, re-enrolment),
-identity-samples.ts (mid-exam aggregation, camera_feed_suspect), ingest.ts (events batch, evidence PUT),
+checks.ts (start/frames/complete: adaptive progress, liveness, gallery reference, ID photo, resume/reconnect/reverify,
+re-enrolment), identity-samples.ts (bursts, evidence accumulator -> identity_mismatch / identity_unverifiable,
+camera_feed_suspect), identity-evidence.ts (PURE: per-session normalisation, LLR accumulator, check assessment,
+cadence, identitySampleRequest), identity-gallery.ts (PURE: enrolment gallery + baseline, burst aggregation),
+identity-selftest.ts (staff camera self-test, in-memory; routes/admin/tools.ts), ingest.ts (events batch, evidence PUT),
 candidate-actions.ts (consent, start, answers, heartbeat + command queue, pause, submit),
 candidate-state.ts (CandidateSessionState, instanceInControl).
 
@@ -150,6 +160,12 @@ candidate-state.ts (CandidateSessionState, instanceInControl).
 * Reconnect (new browser instance): the old instance's still-open client events are closed at the gap start
   (`details.closedBy='instance_replaced'`); late updates reported by a non-active instance are clamped at the
   'disconnected' period (`details.endClampedBy='instance_replaced'`) and never stay open.
+* Identity v2 (docs/ARCHITECTURE.md §4): burst frames live in `identity_sample_frames` (embedding encrypted with AAD
+  `sample-frame:<id>` only until the burst is decided, then nulled); one `identity_checks` row per decided burst.
+  Evidence / cadence state is `exam_sessions.identity_state` (`evidence`, `activeSince`, `sampleRequest`,
+  `pendingBursts`); `resetIdentityCounters()` (every start / pause / hold / resume / release) resets it and, when the
+  session is active, requests an `exam_start` sample. The sweeper decides bursts whose frames stopped arriving.
+  `identity_references.baseline` holds the enrolment baseline (null for pre-v2 references: global calibration only).
 * Re-enrolment (`reEnrollAuthorized`) is honoured ONLY by the reverify check of the hold it was given for
   (checks.ts `reEnrollmentApplies`); any new hold, a release without check or passing the check clears it. A
   re-enrolled person who does not match the old reference still gets an `identity_mismatch` (details.reEnrolled).

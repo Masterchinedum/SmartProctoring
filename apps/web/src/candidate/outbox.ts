@@ -60,6 +60,10 @@ export interface SampleRecord {
   capturedAt: number;
   bytes: number;
   enqueuedAt: number;
+  /** Frame of an identity burst (sent as separate requests sharing burstId). */
+  burstId?: string;
+  burstIndex?: number;
+  burstSize?: number;
 }
 
 export interface AnswerRecord {
@@ -427,12 +431,22 @@ export class Outbox {
    * Queue an identity sample whose direct request failed. `busy`: the server answered 503/429 (vision queue
    * full) — the sample waits before it is re-sent, and that wait is not a delivery delay.
    */
-  async putSample(rec: { id: string; trigger: IdentityCheckTrigger; capturedAt: number; jpeg: Blob | ArrayBuffer | Uint8Array; busy?: boolean }): Promise<void> {
+  async putSample(rec: {
+    id: string;
+    trigger: IdentityCheckTrigger;
+    capturedAt: number;
+    jpeg: Blob | ArrayBuffer | Uint8Array;
+    busy?: boolean;
+    burstId?: string;
+    burstIndex?: number;
+    burstSize?: number;
+  }): Promise<void> {
     const data = await toArrayBuffer(rec.jpeg);
     if (await this.backend.get('samples', rec.id)) return;
     const t = this.now();
     await this.backend.put('blobs', { id: rec.id, data });
-    await this.backend.put('samples', { id: rec.id, trigger: rec.trigger, capturedAt: rec.capturedAt, bytes: data.byteLength, enqueuedAt: t });
+    const burst = rec.burstId ? { burstId: rec.burstId, burstIndex: rec.burstIndex ?? 0, burstSize: rec.burstSize ?? 1 } : {};
+    await this.backend.put('samples', { id: rec.id, trigger: rec.trigger, capturedAt: rec.capturedAt, bytes: data.byteLength, enqueuedAt: t, ...burst });
     if (rec.busy) this.markSampleBusy(rec.id);
     this.pendingIndex.set(`sample:${rec.id}`, t);
     await this.enforceSampleLimit();
@@ -547,7 +561,7 @@ export class Outbox {
   }
 
   private async enforceSampleLimit(): Promise<void> {
-    const max = this.opts.maxSamples ?? 40;
+    const max = this.opts.maxSamples ?? 60; // 20 bursts of 3 frames
     const keys = [...this.pendingIndex.entries()].filter(([k]) => k.startsWith('sample:')).sort((a, b) => a[1] - b[1]);
     for (let i = 0; i < keys.length - max; i++) {
       const id = keys[i][0].slice('sample:'.length);
@@ -709,7 +723,8 @@ export class Outbox {
    */
   private async flushSamples(sender: OutboxSender): Promise<number> {
     let n = 0;
-    const samples = (await this.backend.getAll('samples')).sort((a, b) => a.capturedAt - b.capturedAt);
+    // Oldest first; the frames of a burst in their index order (the server aggregates on the burst's last frame).
+    const samples = (await this.backend.getAll('samples')).sort((a, b) => a.capturedAt - b.capturedAt || (a.burstIndex ?? 0) - (b.burstIndex ?? 0));
     for (const s of samples) {
       if ((this.sampleWait.get(s.id)?.until ?? 0) > this.now()) continue;
       const blob = await this.backend.get('blobs', s.id);
@@ -721,7 +736,11 @@ export class Outbox {
       this.sampleInFlight = s.id;
       this.emit();
       try {
-        res = await sender.identitySample(s.id, blob.data, { trigger: s.trigger, capturedAt: s.capturedAt });
+        res = await sender.identitySample(s.id, blob.data, {
+          trigger: s.trigger,
+          capturedAt: s.capturedAt,
+          ...(s.burstId ? { burstId: s.burstId, burstIndex: s.burstIndex ?? 0, burstSize: s.burstSize ?? 1 } : {}),
+        });
       } catch (e) {
         // A sample the server will not take in the current state (e.g. captured after a pause began)
         // is only meaningful in near real time: drop it rather than retry forever.

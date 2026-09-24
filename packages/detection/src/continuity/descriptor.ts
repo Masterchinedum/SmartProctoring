@@ -37,13 +37,27 @@ export function innerFaceRegion(box: NormBox): NormBox {
   return { x: box.x + box.w * 0.12, y: box.y + box.h * 0.08, w: box.w * 0.76, h: box.h * 0.86 };
 }
 
+/** Eye centres (normalised frame coordinates, either order) for a roll/scale-aligned patch. */
+export interface EyePair {
+  a: { x: number; y: number };
+  b: { x: number; y: number };
+}
+
 /**
- * 16×16 zero-mean / unit-variance patch of `box` (normalised coordinates) on a grayscale frame, by area
- * averaging (each output cell averages the source pixels whose centres fall inside it; bilinear sample of
- * the cell centre when a cell is smaller than a pixel). Null when the region is too small or flat.
+ * Canonical face window for the aligned patch, in inter-ocular distances (IOD) around the eye midpoint with
+ * the eye line horizontal: x ∈ [−1, 1] (cheek to cheek), y ∈ [−0.7, 1.5] (brows to below the mouth).
  */
-export function facePatch(gray: Uint8Array, width: number, height: number, box: NormBox, size = PATCH_SIZE): Float32Array | null {
+export const ALIGNED_WINDOW = { x0: -1, x1: 1, y0: -0.7, y1: 1.5 } as const;
+
+/**
+ * 16×16 zero-mean / unit-variance appearance patch on a grayscale frame. With `eyes` (preferred) the patch
+ * is sampled in a face-aligned frame (eye line horizontal, scaled by the inter-ocular distance), so head
+ * roll, distance to the camera and position do not change it; otherwise the inner region of the face box
+ * is area-sampled. Null when the face is too small on the frame or the patch is flat.
+ */
+export function facePatch(gray: Uint8Array, width: number, height: number, box: NormBox, eyes?: EyePair | null, size = PATCH_SIZE): Float32Array | null {
   if (!gray || width <= 0 || height <= 0) return null;
+  if (eyes) return alignedPatch(gray, width, height, eyes, size);
   const r = innerFaceRegion(box);
   const x0 = Math.max(0, r.x * width);
   const y0 = Math.max(0, r.y * height);
@@ -71,6 +85,42 @@ export function facePatch(gray: Uint8Array, width: number, height: number, box: 
         }
       }
       out[cy * size + cx] = n > 0 ? sum / n : bilinear(gray, width, height, (sx0 + sx1) / 2 - 0.5, (sy0 + sy1) / 2 - 0.5);
+    }
+  }
+  return normalise(out);
+}
+
+function alignedPatch(gray: Uint8Array, width: number, height: number, eyes: EyePair, size: number): Float32Array | null {
+  // Pixel coordinates, left eye (image-left) first.
+  let l = { x: eyes.a.x * width, y: eyes.a.y * height };
+  let r = { x: eyes.b.x * width, y: eyes.b.y * height };
+  if (r.x < l.x) [l, r] = [r, l];
+  const ex = r.x - l.x;
+  const ey = r.y - l.y;
+  const iod = Math.hypot(ex, ey);
+  if (![l.x, l.y, r.x, r.y].every(Number.isFinite) || iod * (ALIGNED_WINDOW.x1 - ALIGNED_WINDOW.x0) < PATCH_MIN_PX) return null;
+  const ux = ex / iod; // unit vector along the eye line
+  const uy = ey / iod;
+  const vx = -uy; // perpendicular, pointing down the face
+  const vy = ux;
+  const mx = (l.x + r.x) / 2;
+  const my = (l.y + r.y) / 2;
+  const W = ALIGNED_WINDOW;
+  const out = new Float32Array(size * size);
+  const sub = 2; // 2×2 bilinear sub-samples per cell (anti-aliasing)
+  for (let cy = 0; cy < size; cy++) {
+    for (let cx = 0; cx < size; cx++) {
+      let sum = 0;
+      for (let sy = 0; sy < sub; sy++) {
+        const fy = W.y0 + ((cy + (sy + 0.5) / sub) / size) * (W.y1 - W.y0);
+        for (let sx = 0; sx < sub; sx++) {
+          const fx = W.x0 + ((cx + (sx + 0.5) / sub) / size) * (W.x1 - W.x0);
+          const px = mx + (fx * ux + fy * vx) * iod;
+          const py = my + (fx * uy + fy * vy) * iod;
+          sum += bilinear(gray, width, height, px - 0.5, py - 0.5);
+        }
+      }
+      out[cy * size + cx] = sum / (sub * sub);
     }
   }
   return normalise(out);

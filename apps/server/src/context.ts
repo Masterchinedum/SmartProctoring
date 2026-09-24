@@ -7,6 +7,7 @@ import type { Mailer } from './lib/mailer.js';
 import type { BlobStorage } from './lib/storage.js';
 import type { RealtimeBus } from './realtime/bus.js';
 import type { LiveNotifier } from './realtime/notifier.js';
+import type { VerifierRegistry } from './verifiers/registry.js';
 import type { VisionService } from './vision/types.js';
 
 /**
@@ -30,4 +31,6 @@ export interface Ctx {
   jobs: JobRunner;
   /** Outgoing email (SMTP from config.smtp, or a fake in tests). null = email alerts unavailable. */
   mailer: Mailer | null;
+  /** Optional external second-opinion face verifiers (src/verifiers; per-org settings, off by default). */
+  verifiers: VerifierRegistry;
 }

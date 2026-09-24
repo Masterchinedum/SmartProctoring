@@ -81,6 +81,12 @@ export interface FaceQuality {
   pitchDeg: number;
   /** True if the face box touches/extends beyond the image edge. */
   cutOff: boolean;
+  /** Estimated sensor-noise std-dev on the aligned face crop (8-bit units). Optional (added with identity v2). */
+  noise?: number;
+  /** Noise-robust sharpness (contrast-normalised Laplacian variance after a light denoise). Optional (v2). */
+  detail?: number;
+  /** Fraction of face pixels crushed to black (<= 3) or clipped to white (>= 252). Optional (v2). */
+  clipped?: number;
   issues: QualityIssue[];
   usable: boolean;
 }

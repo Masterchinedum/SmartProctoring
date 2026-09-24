@@ -7,7 +7,7 @@ import type { IdentityCheckTrigger, IdentityResultDTO, PeriodKind } from '@sp/sh
 import { and, desc, eq, gte, inArray, lte } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
-import { events, identityReferences, type CheckFrame, type EvidenceRow, type IdentityCheck, type IdentityReference } from '../db/schema.js';
+import { events, identityReferences, type CheckFrame, type EvidenceRow, type FrameAnalysisSummary, type IdentityCheck, type IdentityReference } from '../db/schema.js';
 import { deserializeEmbeddings } from '../vision/index.js';
 import type { DetectedFace, ImageAnalysis } from '../vision/types.js';
 import { readEvidence, storeEvidence } from './evidence.js';
@@ -15,6 +15,7 @@ import { readEvidence, storeEvidence } from './evidence.js';
 export const referenceAad = (id: string) => `reference:${id}`;
 export const frameAad = (id: string) => `frame:${id}`;
 export const idPhotoAad = (candidateId: string) => `idphoto:${candidateId}`;
+export const sampleFrameAad = (id: string) => `sample-frame:${id}`;
 
 export interface ActiveReference {
   ref: IdentityReference;
@@ -34,9 +35,6 @@ export async function loadActiveReference(ctx: Pick<Ctx, 'keyring'>, db: DbOrTx,
 
 /** Rebuild an ImageAnalysis from a stored check frame (embedding decrypted). */
 export function frameToAnalysis(ctx: Pick<Ctx, 'keyring'>, f: CheckFrame): ImageAnalysis {
-  const a = f.analysis;
-  const primary: DetectedFace | null =
-    a.box && a.landmarks && a.landmarks.length === 5 ? { box: a.box, score: a.score ?? a.quality.detectionScore, landmarks: a.landmarks as DetectedFace['landmarks'] } : null;
   let embedding: Float32Array | null = null;
   if (f.embeddingEnc) {
     try {
@@ -45,6 +43,13 @@ export function frameToAnalysis(ctx: Pick<Ctx, 'keyring'>, f: CheckFrame): Image
       embedding = null;
     }
   }
+  return analysisFromSummary(f.analysis, embedding);
+}
+
+/** Rebuild an ImageAnalysis from a stored analysis summary (summarizeAnalysis) and its (decrypted) embedding. */
+export function analysisFromSummary(a: FrameAnalysisSummary, embedding: Float32Array | null): ImageAnalysis {
+  const primary: DetectedFace | null =
+    a.box && a.landmarks && a.landmarks.length === 5 ? { box: a.box, score: a.score ?? a.quality.detectionScore, landmarks: a.landmarks as DetectedFace['landmarks'] } : null;
   return {
     width: a.width,
     height: a.height,
@@ -123,6 +128,10 @@ const TRIGGER_CONTEXT: Partial<Record<IdentityCheckTrigger, string>> = {
   after_multiple_people: 'multiple_people',
   after_obstruction: 'obstruction',
   follow_up: 'previous_non_match',
+  server_request: 'previous_non_match',
+  track_break: 'face_track_break',
+  appearance_change: 'appearance_change',
+  exam_start: 'exam_start',
   resume: 'pause',
   reconnect: 'disconnection',
   reverify: 'hold',

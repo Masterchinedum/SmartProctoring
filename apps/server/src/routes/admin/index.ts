@@ -7,6 +7,8 @@ import { integrationRoutes } from './integrations.js';
 import { metricsRoutes } from './metrics.js';
 import { orgRoutes } from './org.js';
 import { sessionRoutes } from './sessions.js';
+import { toolRoutes } from './tools.js';
+import { verifierRoutes } from './verifiers.js';
 
 /**
  * Staff API plugin, registered by app.ts with prefix /api/admin:
@@ -25,6 +27,8 @@ import { sessionRoutes } from './sessions.js';
  *   org.ts         organisation settings, staff users, audit log
  *   metrics.ts     detection quality, offline evaluation uploads
  *   integrations.ts  API keys, webhooks (+ deliveries), email-alert test, integration status
+ *   tools.ts       staff camera self-test of the identity pipeline (transient, nothing stored)
+ *   verifiers.ts   external second-opinion face verifier: providers offered, test connection
  */
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(sessionRoutes);
@@ -35,6 +39,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(orgRoutes);
   await app.register(metricsRoutes);
   await app.register(integrationRoutes);
+  await app.register(toolRoutes);
+  await app.register(verifierRoutes);
 };
 
 export default adminRoutes;

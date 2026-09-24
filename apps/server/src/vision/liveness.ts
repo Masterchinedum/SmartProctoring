@@ -12,8 +12,8 @@
 import { DEFAULT_IDENTITY_THRESHOLDS, LIVENESS_ACTIONS, type IdentityThresholds, type LivenessAction, type LivenessResultDTO } from '@sp/shared';
 import type { ImageAnalysis, LivenessChallengeSpec, LivenessFrame, QualityGate } from './types';
 import { hammingHex } from './image';
-import { cosineSimilarity, maxSimilarity } from './identity';
-import { QUALITY_GATE, poseWithinGate } from './quality';
+import { cosineSimilarity, templateFrom } from './identity';
+import { FRONTAL_PITCH_DEG, QUALITY_GATE, poseWithinGate } from './quality';
 
 export interface LivenessOptions {
   /** A step passes when the pose change reaches this fraction of the target (default 0.6). */
@@ -36,11 +36,33 @@ export interface LivenessOptions {
   maxFramesPerStep: number;
   /** Frontal frames must be within the general quality gate's pose limits. */
   frontalPoseGate: Pick<QualityGate, 'maxAbsYawDeg' | 'minPitchDeg' | 'maxPitchDeg'>;
+  /**
+   * Noise tolerance without fishing: a step passes when at least min(minFramesAgreeing, frames in the window)
+   * frames reach the required change, and the step's measurement is that k-th largest change. Webcam pose
+   * noise (within a burst: sd ~2.5 deg in good light, ~6 deg in a dim room) then cannot make a flat photo pass
+   * on one lucky frame, while a real turn held for a moment is seen in every frame (default 2).
+   */
+  minFramesAgreeing: number;
+  /**
+   * Frontal frames must be mutually consistent: each frontal frame against the template (mean) of the other
+   * frontal frames must reach this similarity (default FRONTAL_MIN_SIMILARITY). When not set explicitly, a
+   * `thresholds.match` below it is used instead (organisations with a stricter match threshold keep it).
+   */
+  frontalMinSimilarity?: number;
 }
+
+/**
+ * Consistency floors measured on the webcam simulator (docs/accuracy/identity-v2.md §6): frames of ONE person
+ * captured seconds apart score >= 0.45 against each other in 99 % of dim-room bursts once unusable frames are
+ * excluded, and >= 0.9 in good light; different people score <= 0.3.
+ */
+export const FRONTAL_MIN_SIMILARITY = 0.4;
+export const TURNED_MIN_SIMILARITY = 0.3;
 
 export const LIVENESS_DEFAULTS: Readonly<LivenessOptions> = Object.freeze({
   minFractionOfTarget: 0.6,
-  turnedMinSimilarity: 0.3,
+  turnedMinSimilarity: TURNED_MIN_SIMILARITY,
+  minFramesAgreeing: 2,
   minFrameHamming: 2,
   clockToleranceMs: 1000,
   clientContradictionFraction: 0.5,
@@ -107,9 +129,31 @@ function requiredChange(action: LivenessAction, spec: Pick<LivenessChallengeSpec
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 
+/** Per-frame step feedback (CheckFrameResponse.stepSatisfied / measured, CheckProgressDTO.steps). */
+export interface StepFrameFeedback {
+  /** This single frame reaches the step's required change (relative to `centre`). */
+  satisfied: boolean;
+  /** Pose relative to the centre (degrees, POSE_CONVENTION); null without a face. */
+  measured: { yawDeg: number; pitchDeg: number } | null;
+  /** Change in the required direction (degrees; negative = wrong way); null without a face / for 'center'. */
+  directionalDeg?: number | null;
+  /** Change the step needs (degrees); 0 for 'center'. */
+  requiredDeg?: number;
+  /** clamp(directional / required, 0, 1) — a progress bar value for the candidate UI. */
+  progress?: number;
+  reason?: string;
+}
+
 /**
- * Immediate feedback for one uploaded step frame (CheckFrameResponse.stepSatisfied / measured).
- * `centre` is the candidate's frontal pose if already known (else the absolute pose is used).
+ * Immediate feedback for one uploaded step frame. `centre` is the candidate's frontal pose (median of the
+ * check's frontal frames) if already known; otherwise yaw 0 / pitch FRONTAL_PITCH_DEG (how a frontal face
+ * reads with YuNet landmarks) is assumed.
+ *
+ * Semantics for per-step progress: `satisfied` says whether THIS frame would count for the step. The
+ * authoritative decision (`verifyLiveness`) needs min(LIVENESS_DEFAULTS.minFramesAgreeing, frames in the
+ * window) frames of the step's window to be satisfied, so a client should keep sending frames of a step
+ * (up to the window size) until the server-side progress for the step is satisfied, and hold the pose
+ * while it does.
  */
 export function checkStepFrame(
   action: LivenessAction | 'center',
@@ -117,19 +161,23 @@ export function checkStepFrame(
   spec: Pick<LivenessChallengeSpec, 'targetYawDeg' | 'targetPitchDeg'>,
   centre: Pose2 | null = null,
   options: Partial<LivenessOptions> = {},
-): { satisfied: boolean; measured: { yawDeg: number; pitchDeg: number } | null; reason?: string } {
+): StepFrameFeedback {
   const o = { ...LIVENESS_DEFAULTS, ...options };
-  if (!analysis.pose || !analysis.primary) return { satisfied: false, measured: null, reason: 'No face detected' };
-  if (!singleFace(analysis)) return { satisfied: false, measured: null, reason: LIVENESS_REASONS.faceCount };
-  const c = centre ?? { yawDeg: 0, pitchDeg: 0 };
+  if (!analysis.pose || !analysis.primary) return { satisfied: false, measured: null, directionalDeg: null, progress: 0, reason: 'No face detected' };
+  if (!singleFace(analysis)) return { satisfied: false, measured: null, directionalDeg: null, progress: 0, reason: LIVENESS_REASONS.faceCount };
+  const c = centre ?? { yawDeg: 0, pitchDeg: FRONTAL_PITCH_DEG };
   const measured = { yawDeg: r1(analysis.pose.yawDeg - c.yawDeg), pitchDeg: r1(analysis.pose.pitchDeg - c.pitchDeg) };
   if (action === 'center') {
     const ok = Math.abs(measured.yawDeg) <= o.centerToleranceDeg && Math.abs(measured.pitchDeg) <= o.centerToleranceDeg;
-    return ok ? { satisfied: true, measured } : { satisfied: false, measured, reason: 'Look straight at the screen' };
+    return ok
+      ? { satisfied: true, measured, directionalDeg: null, requiredDeg: 0, progress: 1 }
+      : { satisfied: false, measured, directionalDeg: null, requiredDeg: 0, progress: 0, reason: 'Look straight at the screen' };
   }
   const { directional } = stepDelta(action, analysis.pose, c);
   const need = requiredChange(action, spec, o);
-  return directional >= need ? { satisfied: true, measured } : { satisfied: false, measured, reason: directional < 0 ? 'Head moved the wrong way' : 'Turn a little further' };
+  const progress = Math.round(Math.max(0, Math.min(1, directional / Math.max(1e-6, need))) * 100) / 100;
+  const base = { measured, directionalDeg: r1(directional), requiredDeg: r1(need), progress };
+  return directional >= need ? { satisfied: true, ...base } : { satisfied: false, ...base, reason: directional < 0 ? 'Head moved the wrong way' : 'Turn a little further' };
 }
 
 /** Verify a completed liveness challenge. Pure function; all inputs come from server-side analyses. */
@@ -187,11 +235,15 @@ export function verifyLiveness(
 
   const frontalEmb = frontal.map((f) => f.analysis.embedding).filter((e): e is Float32Array => e != null);
   if (frontal.length > 0 && frontalEmb.length < frontal.length) reasons.add(LIVENESS_REASONS.noEmbedding);
-  for (let i = 0; i < frontalEmb.length; i++) {
-    for (let j = i + 1; j < frontalEmb.length; j++) {
-      if (cosineSimilarity(frontalEmb[i], frontalEmb[j]) < thresholds.match) reasons.add(LIVENESS_REASONS.frontalInconsistent);
+  // Each frontal frame against the template of the others (one noisy frame cannot drag every pair down).
+  const frontalFloor = o.frontalMinSimilarity ?? Math.min(FRONTAL_MIN_SIMILARITY, thresholds.match);
+  if (frontalEmb.length >= 2) {
+    for (let i = 0; i < frontalEmb.length; i++) {
+      const others = templateFrom(frontalEmb.filter((_, j) => j !== i));
+      if (cosineSimilarity(frontalEmb[i], others) < frontalFloor) reasons.add(LIVENESS_REASONS.frontalInconsistent);
     }
   }
+  const frontalTemplate = frontalEmb.length ? templateFrom(frontalEmb) : null;
   // Client-reported frontal pose (for the optional cross-check).
   const clientCentreYaw = medianOrZero(frontal.map((f) => f.clientYaw));
   const clientCentrePitch = medianOrZero(frontal.map((f) => f.clientPitch));
@@ -207,8 +259,8 @@ export function verifyLiveness(
 
   // Every non-frontal frame must be the same person as the frontal frames.
   const identityOk = (f: LivenessFrame): boolean => {
-    if (!f.analysis.embedding || frontalEmb.length === 0) return false;
-    return maxSimilarity(f.analysis.embedding, frontalEmb) >= o.turnedMinSimilarity;
+    if (!f.analysis.embedding || !frontalTemplate) return false;
+    return cosineSimilarity(f.analysis.embedding, frontalTemplate) >= o.turnedMinSimilarity;
   };
 
   const qualifying = new Map<number, LivenessFrame>();
@@ -248,12 +300,14 @@ export function verifyLiveness(
     }
     const action = step.action;
     const need = requiredChange(action, spec, o);
-    let best: { f: LivenessFrame; measured: number; directional: number } | null = null;
-    for (const f of usable) {
-      if (!identityOk(f)) continue;
-      const d = stepDelta(action, f.analysis.pose!, centre);
-      if (!best || d.directional > best.directional) best = { f, ...d };
-    }
+    // k-th best frame of the window (k = min(minFramesAgreeing, identity-consistent frames)): a step passes on
+    // agreeing frames, not on one noisy outlier.
+    const measuredFrames = usable
+      .filter((f) => identityOk(f))
+      .map((f) => ({ f, ...stepDelta(action, f.analysis.pose!, centre) }))
+      .sort((a, b) => b.directional - a.directional);
+    const k = Math.max(1, Math.min(Math.max(1, Math.floor(o.minFramesAgreeing)), measuredFrames.length));
+    const best: { f: LivenessFrame; measured: number; directional: number } | null = measuredFrames.length ? measuredFrames[k - 1] : null;
     if (!best) {
       setStep(step.index, false, null, 'The face in this step does not match the frontal frames');
       continue;

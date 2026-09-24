@@ -1,5 +1,5 @@
 /** Candidate-flow helpers for integration tests (drive the real HTTP API with fake camera frames). */
-import { PRIVACY_NOTICE_VERSION, type CheckPurpose, type CompleteCheckResponse, type StartCheckResponse } from '@sp/shared';
+import { PRIVACY_NOTICE_VERSION, type CheckFrameResponse, type CheckProgressDTO, type CheckPurpose, type CompleteCheckResponse, type StartCheckResponse } from '@sp/shared';
 import { expect } from 'vitest';
 import type { FakeImageSpec } from '../src/vision/fake.js';
 import type { CandidateClient, TestEnv } from './helpers.js';
@@ -22,6 +22,8 @@ export interface CheckOptions {
   wrongTurns?: boolean;
   /** Skip the complete call. */
   noComplete?: boolean;
+  /** Do not send the extra frontal frames the server asks for (progress.frontalNeeded). */
+  ignoreProgress?: boolean;
 }
 
 const POSE: Record<string, { yawDeg: number; pitchDeg: number }> = {
@@ -37,7 +39,16 @@ export async function startCheck(c: CandidateClient, purpose: CheckPurpose, devi
   return r;
 }
 
-export async function runCheck(env: TestEnv, c: CandidateClient, purpose: CheckPurpose, o: CheckOptions = {}): Promise<{ start: StartCheckResponse; complete: CompleteCheckResponse | null }> {
+/**
+ * Drive a check like the web client: the required frontal frames, one frame per liveness step, then extra frontal
+ * frames while the server's progress asks for them (frontalNeeded, up to maxFrontalFrames), then /complete.
+ */
+export async function runCheck(
+  env: TestEnv,
+  c: CandidateClient,
+  purpose: CheckPurpose,
+  o: CheckOptions = {},
+): Promise<{ start: StartCheckResponse; complete: CompleteCheckResponse | null; progress: CheckProgressDTO | null; frontalSent: number }> {
   const r = await startCheck(c, purpose, o.device ?? DEVICE);
   expect(r.statusCode, r.body).toBe(200);
   const start = r.json() as StartCheckResponse;
@@ -45,22 +56,30 @@ export async function runCheck(env: TestEnv, c: CandidateClient, purpose: CheckP
   const nonce = start.liveness?.nonce ?? '';
   let t = env.clock.t;
   const url = `/api/candidate/checks/${start.checkId}/frames`;
-  for (let i = 0; i < start.frontalFramesRequired; i++) {
-    const fs = { ...spec, yawDeg: 0, pitchDeg: 0, ...(o.frontal?.[i] ?? {}) };
+  let progress: CheckProgressDTO | null = null;
+  let frontalSent = 0;
+  const sendFrontal = async () => {
+    const fs = { ...spec, yawDeg: 0, pitchDeg: 0, ...(o.frontal?.[frontalSent] ?? {}) };
     const fr = await c.jpeg(url, fs, { step: 'frontal', capturedAt: (t += 200), nonce });
     expect(fr.statusCode, fr.body).toBe(200);
-  }
+    frontalSent++;
+    progress = (fr.json() as CheckFrameResponse).progress ?? progress;
+  };
+  for (let i = 0; i < start.frontalFramesRequired; i++) await sendFrontal();
   for (const step of start.liveness?.steps ?? []) {
     let pose = POSE[step.action];
     if (o.wrongTurns && step.action !== 'center') pose = { yawDeg: 0, pitchDeg: 0 };
     const fr = await c.jpeg(url, { ...spec, ...pose }, { step: step.index, capturedAt: (t += 300), nonce, clientYaw: pose.yawDeg, clientPitch: pose.pitchDeg });
     expect(fr.statusCode, fr.body).toBe(200);
+    progress = (fr.json() as CheckFrameResponse).progress ?? progress;
   }
+  const max = start.maxFrontalFrames ?? start.frontalFramesRequired;
+  while (!o.ignoreProgress && progress && (progress as CheckProgressDTO).frontalNeeded > 0 && frontalSent < max) await sendFrontal();
   env.clock.advance(Math.max(0, t - env.clock.t) + 100);
-  if (o.noComplete) return { start, complete: null };
+  if (o.noComplete) return { start, complete: null, progress, frontalSent };
   const cr = await c.req('POST', `/api/candidate/checks/${start.checkId}/complete`);
   expect(cr.statusCode, cr.body).toBe(200);
-  return { start, complete: cr.json() as CompleteCheckResponse };
+  return { start, complete: cr.json() as CompleteCheckResponse, progress, frontalSent };
 }
 
 /** Invite -> consent -> initial check -> start. Returns the candidate client in control. */
@@ -89,4 +108,33 @@ export function hb(c: CandidateClient, extra: Record<string, unknown> = {}) {
 export async function sample(env: TestEnv, c: CandidateClient, spec: FakeImageSpec, trigger = 'periodic', sampleId: string = crypto.randomUUID()) {
   const r = await c.jpeg('/api/candidate/identity/sample', spec, { sampleId, trigger, capturedAt: env.clock.t });
   return r;
+}
+
+/**
+ * Send a burst (one request per frame sharing burstId). `order` sends the frames in another order (indexes);
+ * `omit` leaves frames out (an incomplete burst). Returns every response in send order.
+ */
+export async function burst(
+  env: TestEnv,
+  c: CandidateClient,
+  specs: FakeImageSpec[],
+  o: { trigger?: string; burstId?: string; order?: number[]; omit?: number[]; size?: number } = {},
+) {
+  const burstId = o.burstId ?? crypto.randomUUID();
+  const size = o.size ?? specs.length;
+  const order = (o.order ?? specs.map((_, i) => i)).filter((i) => !(o.omit ?? []).includes(i));
+  const out = [];
+  for (const i of order) {
+    const r = await c.jpeg('/api/candidate/identity/sample', specs[i], {
+      sampleId: crypto.randomUUID(),
+      trigger: o.trigger ?? 'periodic',
+      capturedAt: env.clock.t + i * 200,
+      burstId,
+      burstIndex: i,
+      burstSize: size,
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    out.push(r.json());
+  }
+  return { burstId, responses: out, last: out[out.length - 1] };
 }

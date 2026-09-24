@@ -91,7 +91,9 @@ export class IdentityScheduler {
   dueAt(t: number): number | null {
     if (this.hostDueAt !== null) return this.hostDueAt;
     if (this.lastSampleAt === null) return null;
-    const iv = this.interval(t);
+    // The interval in effect when the previous sample was taken (a sample taken inside the start-up window
+    // schedules the next one at the start-up pace).
+    const iv = this.interval(Math.min(t, this.lastSampleAt));
     return iv > 0 ? this.lastSampleAt + iv : null;
   }
 

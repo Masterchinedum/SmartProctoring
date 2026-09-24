@@ -10,6 +10,7 @@
  *     exam_sessions.access_token_enc        access-token:<sessionId>
  *     webhooks.secret_enc                   webhook-secret:<webhookId>
  *   evidence blobs (storage; evidence.key_id)  evidence:<evidenceId>   (purged rows have no blob)
+ *   organizations.settings.externalVerifier.credentialsEnc (base64 in JSON)  external-verifier:<orgId>
  *
  * Batches in primary-key order, each row on its own: a row is only rewritten if it still holds the ciphertext that
  * was read (compare-and-set), so concurrent writers, purges and re-uploads are never overwritten. Idempotent and
@@ -23,9 +24,10 @@ import { and, asc, eq, gt, isNotNull, isNull, ne, sql, type SQL } from 'drizzle-
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import type { Ctx } from '../context.js';
 import type { Database, Db } from '../db/index.js';
-import { candidates, checkFrames, evidence, examSessions, identityReferences, webhooks } from '../db/schema.js';
+import { candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, webhooks } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
-import { frameAad, idPhotoAad, referenceAad } from './identity-common.js';
+import { verifierCredentialsAad } from '../verifiers/settings.js';
+import { frameAad, idPhotoAad, referenceAad, sampleFrameAad } from './identity-common.js';
 
 /**
  * Its own lock: re-encryption and the retention job (RETENTION_LOCK_KEY 727274010) are safe to run concurrently
@@ -51,11 +53,29 @@ export const COLUMN_TARGETS: ColumnTarget[] = [
   { name: 'id_photo_embeddings', table: candidates, id: candidates.id, col: candidates.idPhotoEmbedding, aad: idPhotoAad },
   { name: 'reference_embeddings', table: identityReferences, id: identityReferences.id, col: identityReferences.embeddingsEnc, aad: referenceAad },
   { name: 'check_frame_embeddings', table: checkFrames, id: checkFrames.id, col: checkFrames.embeddingEnc, aad: frameAad },
+  { name: 'sample_frame_embeddings', table: identitySampleFrames, id: identitySampleFrames.id, col: identitySampleFrames.embeddingEnc, aad: sampleFrameAad },
   { name: 'access_tokens', table: examSessions, id: examSessions.id, col: examSessions.accessTokenEnc, aad: (id) => `access-token:${id}` },
   { name: 'webhook_secrets', table: webhooks, id: webhooks.id, col: webhooks.secretEnc, aad: (id) => `webhook-secret:${id}` },
 ];
 export const EVIDENCE_TARGET = 'evidence_blobs';
-export const REKEY_TARGETS = [...COLUMN_TARGETS.map((t) => t.name), EVIDENCE_TARGET];
+/** External verifier key pairs: base64 ciphertext inside organizations.settings (verifiers/settings.ts). */
+export const VERIFIER_CREDENTIALS_TARGET = 'external_verifier_credentials';
+export const REKEY_TARGETS = [...COLUMN_TARGETS.map((t) => t.name), EVIDENCE_TARGET, VERIFIER_CREDENTIALS_TARGET];
+
+const verifierCredentialsSql = sql<string | null>`${organizations.settings}->'externalVerifier'->>'credentialsEnc'`;
+
+/** Organisations with a stored verifier key pair (few rows: one per organisation at most). */
+async function verifierCredentialRows(db: Db): Promise<{ id: string; enc: string }[]> {
+  const rows = await db.select({ id: organizations.id, enc: verifierCredentialsSql }).from(organizations).where(sql`${verifierCredentialsSql} IS NOT NULL`).orderBy(asc(organizations.id));
+  return rows.filter((r): r is { id: string; enc: string } => typeof r.enc === 'string' && r.enc.length > 0);
+}
+
+/** Key id in a base64 keyring blob ('?' if it is not one of ours). */
+function keyIdOfBase64(b64: string): string {
+  const buf = Buffer.from(b64, 'base64');
+  if (buf.length <= 5 || buf.subarray(0, 4).toString('latin1') !== 'SPE1') return '?';
+  return buf.subarray(5, 5 + buf[4]).toString('utf8');
+}
 
 /** Key id embedded in an encrypted bytea value ("SPE1" | len | keyId | …), '?' if it is not one of our blobs. */
 function keyIdSql(col: PgColumn): SQL<string> {
@@ -118,6 +138,11 @@ export async function countByKeyId(db: Db, only?: string[]): Promise<Record<stri
       .where(isNull(evidence.purgedAt))
       .groupBy(evidence.keyId);
     out[EVIDENCE_TARGET] = Object.fromEntries(rows.map((r) => [r.keyId, r.n]));
+  }
+  if (!only || only.includes(VERIFIER_CREDENTIALS_TARGET)) {
+    const byKey: Record<string, number> = {};
+    for (const r of await verifierCredentialRows(db)) byKey[keyIdOfBase64(r.enc)] = (byKey[keyIdOfBase64(r.enc)] ?? 0) + 1;
+    out[VERIFIER_CREDENTIALS_TARGET] = byKey;
   }
   return out;
 }
@@ -223,6 +248,30 @@ async function rekeyEvidence(ctx: RekeyCtx, sum: RekeyTargetSummary, failures: R
   }
 }
 
+async function rekeyVerifierCredentials(ctx: RekeyCtx, sum: RekeyTargetSummary, failures: RekeySummary['failures'], onProgress?: RekeyOptions['onProgress']): Promise<void> {
+  const current = ctx.keyring.currentKeyId;
+  let done = 0;
+  for (const r of await verifierCredentialRows(ctx.db)) {
+    if (keyIdOfBase64(r.enc) === current) continue;
+    try {
+      const aad = verifierCredentialsAad(r.id);
+      const next = ctx.keyring.encrypt(ctx.keyring.decrypt(Buffer.from(r.enc, 'base64'), aad), aad).toString('base64');
+      // Compare-and-set on the ciphertext that was read (an administrator may have replaced the key meanwhile).
+      const updated = await ctx.db
+        .update(organizations)
+        .set({ settings: sql`jsonb_set(${organizations.settings}, '{externalVerifier,credentialsEnc}', to_jsonb(${next}::text))` })
+        .where(and(eq(organizations.id, r.id), sql`${verifierCredentialsSql} = ${r.enc}`))
+        .returning({ id: organizations.id });
+      if (updated.length) sum.rekeyed++;
+      else sum.skipped++;
+    } catch (err) {
+      sum.failed++;
+      failures.push({ target: VERIFIER_CREDENTIALS_TARGET, id: r.id, error: (err as Error).message });
+    }
+    onProgress?.({ target: VERIFIER_CREDENTIALS_TARGET, done: ++done, total: sum.outdated });
+  }
+}
+
 /** Re-encrypt (or, with dryRun, count) everything not under the current key. */
 export async function rekeyAll(ctx: RekeyCtx, opts: RekeyOptions = {}): Promise<RekeySummary> {
   const started = Date.now();
@@ -239,6 +288,7 @@ export async function rekeyAll(ctx: RekeyCtx, opts: RekeyOptions = {}): Promise<
     targets.push(sum);
     if (opts.dryRun || outdated === 0) continue;
     if (name === EVIDENCE_TARGET) await rekeyEvidence(ctx, sum, failures, batch, opts.onProgress);
+    else if (name === VERIFIER_CREDENTIALS_TARGET) await rekeyVerifierCredentials(ctx, sum, failures, opts.onProgress);
     else await rekeyColumn(ctx, COLUMN_TARGETS.find((t) => t.name === name)!, sum, failures, batch, opts.onProgress);
   }
   const after = opts.dryRun ? before : await countByKeyId(ctx.db, only);
