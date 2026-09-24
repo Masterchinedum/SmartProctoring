@@ -18,7 +18,8 @@ export {
   REFERENCE_MIN_FRAMES,
   REFERENCE_MAX_EMBEDDINGS,
   REFERENCE_MAX_ABS_YAW_DEG,
-  REFERENCE_MAX_ABS_PITCH_DEG,
+  REFERENCE_MIN_PITCH_DEG,
+  REFERENCE_MAX_PITCH_DEG,
   REFERENCE_INCONSISTENT_REASON,
   type ComparisonTarget,
 } from './identity';
@@ -29,6 +30,8 @@ export {
   resolveGate,
   assessQuality,
   regateQuality,
+  poseWithinGate,
+  FRONTAL_PITCH_DEG,
   guidanceForIssues,
   qualityScore,
 } from './quality';

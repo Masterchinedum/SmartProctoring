@@ -26,9 +26,10 @@ export const NO_EMBEDDING_GUIDANCE = 'We couldn’t analyse your face. Sit in fr
 
 export const REFERENCE_MIN_FRAMES = 3;
 export const REFERENCE_MAX_EMBEDDINGS = 5;
-/** Reference frames must be closer to frontal than the general gate. */
+/** Reference frames must be closer to frontal than the general gate (pitch window centred like the gate's). */
 export const REFERENCE_MAX_ABS_YAW_DEG = 20;
-export const REFERENCE_MAX_ABS_PITCH_DEG = 20;
+export const REFERENCE_MIN_PITCH_DEG = -30;
+export const REFERENCE_MAX_PITCH_DEG = 20;
 export const REFERENCE_INCONSISTENT_REASON = 'Frames appear to show different people or are inconsistent';
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -111,7 +112,7 @@ function isReferenceCandidate(a: ImageAnalysis): boolean {
   if (!a.quality.usable || !a.embedding) return false;
   const yaw = a.pose?.yawDeg ?? a.quality.yawDeg;
   const pitch = a.pose?.pitchDeg ?? a.quality.pitchDeg;
-  return Math.abs(yaw) <= REFERENCE_MAX_ABS_YAW_DEG && Math.abs(pitch) <= REFERENCE_MAX_ABS_PITCH_DEG;
+  return Math.abs(yaw) <= REFERENCE_MAX_ABS_YAW_DEG && pitch >= REFERENCE_MIN_PITCH_DEG && pitch <= REFERENCE_MAX_PITCH_DEG;
 }
 
 /**

@@ -251,7 +251,7 @@ export async function eventRowsToDTOs(db: DbOrTx, rows: EventRow[]): Promise<Eve
   const names = new Map(reviewers.map((r) => [r.id, r.name]));
   const counts = new Map(noteCounts.map((r) => [r.eventId as string, r.n]));
   return rows.map((r) =>
-    toEventDTO(r, { evidence: evByEvent.get(r.id) ?? [], reviewerName: r.reviewedBy ? (names.get(r.reviewedBy) ?? null) : null, notesCount: counts.get(r.id) ?? 0 }),
+    toEventDTO(r, { evidence: (evByEvent.get(r.id) ?? []).filter((e) => e.sessionId === r.sessionId), reviewerName: r.reviewedBy ? (names.get(r.reviewedBy) ?? null) : null, notesCount: counts.get(r.id) ?? 0 }),
   );
 }
 

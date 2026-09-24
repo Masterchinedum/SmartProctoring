@@ -10,10 +10,10 @@
  * that stays the same person throughout.
  */
 import { DEFAULT_IDENTITY_THRESHOLDS, LIVENESS_ACTIONS, type IdentityThresholds, type LivenessAction, type LivenessResultDTO } from '@sp/shared';
-import type { ImageAnalysis, LivenessChallengeSpec, LivenessFrame } from './types';
+import type { ImageAnalysis, LivenessChallengeSpec, LivenessFrame, QualityGate } from './types';
 import { hammingHex } from './image';
 import { cosineSimilarity, maxSimilarity } from './identity';
-import { QUALITY_GATE } from './quality';
+import { QUALITY_GATE, poseWithinGate } from './quality';
 
 export interface LivenessOptions {
   /** A step passes when the pose change reaches this fraction of the target (default 0.6). */
@@ -28,8 +28,8 @@ export interface LivenessOptions {
   clientContradictionFraction: number;
   /** A 'center' step frame must be within this many degrees of the frontal pose (default 12). */
   centerToleranceDeg: number;
-  /** Frontal frames must be within the general gate's pose limits (default 25). */
-  maxFrontalAbsDeg: number;
+  /** Frontal frames must be within the general quality gate's pose limits. */
+  frontalPoseGate: Pick<QualityGate, 'maxAbsYawDeg' | 'minPitchDeg' | 'maxPitchDeg'>;
 }
 
 export const LIVENESS_DEFAULTS: Readonly<LivenessOptions> = Object.freeze({
@@ -39,7 +39,7 @@ export const LIVENESS_DEFAULTS: Readonly<LivenessOptions> = Object.freeze({
   clockToleranceMs: 1000,
   clientContradictionFraction: 0.5,
   centerToleranceDeg: 12,
-  maxFrontalAbsDeg: QUALITY_GATE.maxAbsYawDeg,
+  frontalPoseGate: { maxAbsYawDeg: QUALITY_GATE.maxAbsYawDeg, minPitchDeg: QUALITY_GATE.minPitchDeg, maxPitchDeg: QUALITY_GATE.maxPitchDeg },
 });
 
 export const LIVENESS_REASONS = {
@@ -168,7 +168,7 @@ export function verifyLiveness(
 
   // Frontal frames define the candidate's own centre pose and identity.
   const frontal = frames.filter((f) => (f.step === 'frontal' || f.action === 'center') && singleFace(f.analysis));
-  const frontalPoses = frontal.map((f) => f.analysis.pose!).filter((p) => Math.abs(p.yawDeg) <= o.maxFrontalAbsDeg && Math.abs(p.pitchDeg) <= o.maxFrontalAbsDeg);
+  const frontalPoses = frontal.map((f) => f.analysis.pose!).filter((p) => poseWithinGate(p.yawDeg, p.pitchDeg, o.frontalPoseGate));
   if (frontal.length === 0) {
     reasons.add(LIVENESS_REASONS.noFrontal);
   } else if (frontalPoses.length === 0) {

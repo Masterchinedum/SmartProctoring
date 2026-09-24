@@ -78,6 +78,14 @@ export function episodeToUpsert(ep: EpisodeUpdate, instanceId: string): EventUps
 }
 
 type Engine = ReturnType<typeof createMonitoringEngine>;
+
+/** Maps a host stop reason onto the engine's flush reasons. */
+export function toFlushReason(reason: string): 'pause' | 'submit' | 'hold' | 'stop' {
+  if (reason === 'pause' || reason === 'paused') return 'pause';
+  if (reason === 'submit' || reason === 'submitted' || reason === 'terminated') return 'submit';
+  if (reason === 'hold' || reason === 'on_hold') return 'hold';
+  return 'stop';
+}
 type Tracker = ReturnType<typeof createBrowserSignalTracker>;
 
 export class MonitoringRuntime {
@@ -98,7 +106,6 @@ export class MonitoringRuntime {
   private followUpTimer: ReturnType<typeof setTimeout> | null = null;
   private sampleInFlight = false;
   private readonly removers: (() => void)[] = [];
-  private lastVideoTime = -1;
   private readonly pendingWrites = new Set<Promise<void>>();
 
   constructor(private readonly deps: RuntimeDeps) {
@@ -156,7 +163,7 @@ export class MonitoringRuntime {
             startedAt: Math.round(t),
             endedAt: Math.round(t),
             confidence: 1,
-            observation: cmp.notes.length ? `Compared with the previous exam period: ${cmp.notes.join('; ')}.`.slice(0, OBSERVATION_MAX) : undefined,
+            observation: cmp.notes.length ? cmp.notes.join(' ').slice(0, OBSERVATION_MAX) : undefined,
             details: { notes: cmp.notes, ...(cmp.details ?? {}) },
             version: 1,
             clientInstanceId: this.deps.instanceId,
@@ -254,7 +261,6 @@ export class MonitoringRuntime {
       }
       this.tickNo++;
       this.frameTimes.push(performance.now());
-      this.lastVideoTime = video.currentTime;
       obs = { t, camera: 'live', frame, faces, objects, fps: Math.round(this.fps() * 10) / 10 };
     } else {
       obs = { t, camera: camState, frame: null, faces: [], objects: null, fps: 0 };
@@ -419,7 +425,7 @@ export class MonitoringRuntime {
     const reportDisplays = () => {
       if (typeof scr.isExtended === 'boolean') this.pushEpisodes(tr.displays(scr.isExtended, this.now()));
     };
-    if ('onchange' in scr) on(scr, 'change', reportDisplays);
+    if ('onchange' in scr) on(scr as unknown as EventTarget, 'change', reportDisplays);
 
     // Initial state.
     const t = this.now();
@@ -450,7 +456,7 @@ export class MonitoringRuntime {
     if (wasRunning) {
       const t = this.now();
       try {
-        const out = this.engine.flush(t, reason);
+        const out = this.engine.flush(t, toFlushReason(reason));
         this.pushEpisodes(out.episodes ?? []);
         for (const s of out.signals ?? []) if (s.kind !== 'identity_sample') this.deps.onSignal?.(s);
       } catch (e) {

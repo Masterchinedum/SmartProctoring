@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 
 /** Self-host MediaPipe WASM (no third-party CDN at runtime). */
 function copyMediapipeWasm() {
-  const src = join(dirname(require.resolve('@mediapipe/tasks-vision/package.json')), 'wasm');
+  const src = join(dirname(require.resolve('@mediapipe/tasks-vision')), 'wasm');
   const dest = join(__dirname, 'public', 'mediapipe');
   if (!existsSync(dest)) mkdirSync(dest, { recursive: true });
   for (const f of readdirSync(src)) {

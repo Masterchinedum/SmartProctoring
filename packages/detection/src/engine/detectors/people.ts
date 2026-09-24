@@ -131,7 +131,7 @@ export class MultiplePeopleDetector {
     this.host.identity.arm('after_multiple_people');
   }
 
-  private data(t: number, endedAt: number | null) {
+  private data(t: number, endedAt: number | null): { confidence: number; details: Record<string, unknown>; observation: string } {
     const durationSec = round(((endedAt ?? t) - this.epStart) / 1000, 1);
     const sources: string[] = [];
     if (this.maxFaces >= 2) sources.push('faces');

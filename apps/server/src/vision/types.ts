@@ -107,9 +107,15 @@ export interface QualityGate {
   minContrast: number;
   /** Contrast-normalised variance of Laplacian on the aligned crop below this => `blurry`. */
   minSharpness: number;
-  /** |yaw| / |pitch| above these (degrees) => `face_turned`. */
+  /** |yaw| above this (degrees) => `face_turned`. */
   maxAbsYawDeg: number;
-  maxAbsPitchDeg: number;
+  /**
+   * Pitch outside [minPitchDeg, maxPitchDeg] => `face_turned`. Asymmetric on purpose: with YuNet
+   * landmarks the shared five-point formula reads frontal faces ~10 deg "down", and laptop webcams sit
+   * above the eyes, so candidates normally appear to look slightly down.
+   */
+  minPitchDeg: number;
+  maxPitchDeg: number;
   /** A second face at least this fraction of the primary face's width => `multiple_faces`. */
   secondaryFaceSizeRatio: number;
   /** Fraction of the face box allowed outside the image before it counts as cut off. */

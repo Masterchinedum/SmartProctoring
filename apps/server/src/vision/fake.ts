@@ -14,6 +14,7 @@ import sharp from 'sharp';
 import type { FaceQuality, QualityIssue } from '@sp/shared';
 import { VisionInputError } from './image';
 import { processIdPhoto } from './id-photo';
+import { poseWithinGate } from './quality';
 import type { AnalyzeOptions, DetectedFace, HeadPose, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, Point } from './types';
 
 export interface FakeImageSpec {
@@ -24,7 +25,7 @@ export interface FakeImageSpec {
   yawDeg?: number;
   pitchDeg?: number;
   rollDeg?: number;
-  /** Quality-gate outcome. Default: usable when exactly one face, |yaw|,|pitch| <= 25 and no issues. */
+  /** Quality-gate outcome. Default: usable when exactly one face, pose within QUALITY_GATE and no issues. */
   usable?: boolean;
   /** Quality issues to report. Default: derived (no_face / multiple_faces / face_turned; 'blurry' if usable === false). */
   issues?: QualityIssue[];
@@ -161,7 +162,7 @@ export function fakeAnalysis(spec: FakeImageSpec, opts: AnalyzeOptions = {}): Im
     issues = [];
     if (n === 0) issues.push('no_face');
     if (n > 1) issues.push('multiple_faces');
-    if (n > 0 && (Math.abs(yawDeg) > 25 || Math.abs(pitchDeg) > 25)) issues.push('face_turned');
+    if (n > 0 && !poseWithinGate(yawDeg, pitchDeg)) issues.push('face_turned');
     if (spec.usable === false && issues.length === 0) issues.push('blurry');
   }
   const usable = issues.length === 0 && (spec.usable ?? true) && n > 0;

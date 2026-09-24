@@ -467,17 +467,19 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
   const prev = m.session.status;
   const message = opts.message ?? HOLD_MESSAGES[opts.reason];
   m.clockStop(at);
-  if (prev !== 'on_hold') {
-    await m.closeOpenEvents(at, 'hold', ['reporting_interrupted']);
-    await m.switchPeriod('on_hold', at, { reason: opts.reason, meta: { previousStatus: prev } });
+  if (prev !== 'on_hold') await m.closeOpenEvents(at, 'hold', ['reporting_interrupted']);
+  const open = await m.openPeriodRow();
+  const continuing = open?.kind === 'on_hold';
+  if (continuing) {
+    await m.tx.update(sessionPeriods).set({ reason: opts.reason }).where(eq(sessionPeriods.id, open.id));
+    open.reason = opts.reason;
   } else {
-    const p = await m.openPeriodRow();
-    if (p) await m.tx.update(sessionPeriods).set({ reason: opts.reason }).where(eq(sessionPeriods.id, p.id));
+    await m.switchPeriod('on_hold', at, { reason: opts.reason, meta: { previousStatus: prev } });
   }
   m.set({
     status: 'on_hold',
     holdReason: opts.reason,
-    holdSince: prev === 'on_hold' && m.session.holdSince ? m.session.holdSince : new Date(at),
+    holdSince: continuing && m.session.holdSince ? m.session.holdSince : new Date(at),
     holdMessage: message,
     holdCanReverify: opts.canReverify ?? false,
     holdPrevStatus: prev === 'on_hold' ? m.session.holdPrevStatus : prev === 'paused' ? 'active' : prev,

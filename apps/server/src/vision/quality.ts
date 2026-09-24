@@ -17,9 +17,10 @@ export const QUALITY_GATE: Readonly<QualityGate> = Object.freeze({
   minBrightness: 40,
   maxBrightness: 220,
   minContrast: 18,
-  minSharpness: 120,
+  minSharpness: 80,
   maxAbsYawDeg: 25,
-  maxAbsPitchDeg: 25,
+  minPitchDeg: -35,
+  maxPitchDeg: 25,
   secondaryFaceSizeRatio: 0.4,
   cutOffTolerance: 0.08,
 });
@@ -34,9 +35,10 @@ export const ID_PHOTO_QUALITY_GATE: Readonly<QualityGate> = Object.freeze({
   minBrightness: 35,
   maxBrightness: 230,
   minContrast: 14,
-  minSharpness: 70,
+  minSharpness: 50,
   maxAbsYawDeg: 30,
-  maxAbsPitchDeg: 30,
+  minPitchDeg: -40,
+  maxPitchDeg: 30,
   secondaryFaceSizeRatio: 0.7,
   cutOffTolerance: 0.2,
 });
@@ -50,6 +52,9 @@ export function resolveGate(override?: Partial<QualityGate>, base: Readonly<Qual
   }
   return g;
 }
+
+/** Typical pitch reading of a frontal face with YuNet landmarks (median over near-frontal portraits). */
+export const FRONTAL_PITCH_DEG = -10;
 
 /** Region of the 112x112 aligned crop used for brightness / contrast (cheeks, eyes, nose, mouth). */
 const STATS_X0 = 22;
@@ -133,6 +138,11 @@ export interface QualityInput {
   imageContrast: number;
 }
 
+/** Whether a head pose (POSE_CONVENTION degrees) is frontal enough for the gate. */
+export function poseWithinGate(yawDeg: number, pitchDeg: number, gate: Pick<QualityGate, 'maxAbsYawDeg' | 'minPitchDeg' | 'maxPitchDeg'> = QUALITY_GATE): boolean {
+  return Math.abs(yawDeg) <= gate.maxAbsYawDeg && pitchDeg >= gate.minPitchDeg && pitchDeg <= gate.maxPitchDeg;
+}
+
 /** Faces other than the primary that are large enough to count as another person in view. */
 export function significantSecondaryFaces(faces: DetectedFace[], ratio: number): DetectedFace[] {
   if (faces.length < 2) return [];
@@ -202,7 +212,7 @@ export function assessQuality(input: QualityInput, gate: QualityGate = QUALITY_G
   if (brightness > gate.maxBrightness) issues.add('too_bright');
   if (contrast < gate.minContrast) issues.add('low_contrast');
   if (interEyePx < gate.minInterEyePx) issues.add('face_too_small');
-  if (Math.abs(yawDeg) > gate.maxAbsYawDeg || Math.abs(pitchDeg) > gate.maxAbsPitchDeg) issues.add('face_turned');
+  if (!poseWithinGate(yawDeg, pitchDeg, gate)) issues.add('face_turned');
   // Sharpness is meaningless on a crop that is mostly dark/flat; those images are already rejected.
   if (sharpness < gate.minSharpness && !issues.has('too_dark') && !issues.has('low_contrast')) issues.add('blurry');
   if (primary.score < gate.minDetectionScore) issues.add('low_detection_confidence');
@@ -238,7 +248,7 @@ export function regateQuality(q: FaceQuality, faces: DetectedFace[], width: numb
   if (q.brightness > gate.maxBrightness) issues.add('too_bright');
   if (q.contrast < gate.minContrast) issues.add('low_contrast');
   if (q.interEyePx < gate.minInterEyePx) issues.add('face_too_small');
-  if (Math.abs(q.yawDeg) > gate.maxAbsYawDeg || Math.abs(q.pitchDeg) > gate.maxAbsPitchDeg) issues.add('face_turned');
+  if (!poseWithinGate(q.yawDeg, q.pitchDeg, gate)) issues.add('face_turned');
   if (q.sharpness < gate.minSharpness && !issues.has('too_dark') && !issues.has('low_contrast')) issues.add('blurry');
   if (q.detectionScore < gate.minDetectionScore) issues.add('low_detection_confidence');
   return { ...q, faceCount: 1 + secondary.length, cutOff, issues: orderIssues(issues), usable: issues.size === 0 };
@@ -263,7 +273,7 @@ export function guidanceForIssues(issues: readonly QualityIssue[]): string[] {
  * reference frame / evidence probe. Not a gate.
  */
 export function qualityScore(q: FaceQuality): number {
-  const pose = 1 - Math.min(1, (Math.abs(q.yawDeg) + Math.abs(q.pitchDeg)) / 50);
+  const pose = 1 - Math.min(1, (Math.abs(q.yawDeg) + Math.abs(q.pitchDeg - FRONTAL_PITCH_DEG)) / 50);
   const sharp = Math.min(1, q.sharpness / 600);
   const size = Math.min(1, q.interEyePx / 80);
   const light = 1 - Math.min(1, Math.abs(q.brightness - 130) / 110);
