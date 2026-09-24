@@ -111,8 +111,24 @@ pnpm test              # unit + integration tests (server tests need Postgres)
 pnpm typecheck
 pnpm --filter @sp/detection eval                          # behavioural detector accuracy
 pnpm --filter @sp/server eval:identity --dataset <dir>    # identity accuracy on your data
-pnpm test:e2e                                              # end-to-end with fake camera
+pnpm test:e2e                                              # end-to-end with fake camera (see e2e/README.md;
+                                                           # needs face photos in E2E_FACES_DIR)
 ```
+
+## Documentation
+
+| Document | For |
+|---|---|
+| [docs/HANDOVER.md](docs/HANDOVER.md) | What exists, how it was verified, known limitations, defaults chosen |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The product specification |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, lifecycle, identity pipeline, events and evidence |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deployment, configuration, keys, backups, sizing, runbooks |
+| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, controls, production checklist |
+| [docs/PRIVACY.md](docs/PRIVACY.md) | Data inventory, retention, access, candidate rights |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Load-test method, measured capacity, tuning |
+| [docs/accuracy/](docs/accuracy/README.md) | Accuracy methodology, baselines, pre-launch protocol |
+| [docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md) | Conformance status and accommodations |
+| [docs/INTEGRATION_API.md](docs/INTEGRATION_API.md) | API keys, `/api/v1`, webhooks |
 
 ## Licensing
 
