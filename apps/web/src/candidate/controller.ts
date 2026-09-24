@@ -117,6 +117,7 @@ export class CandidateController {
   private hbTimer: ReturnType<typeof setTimeout> | null = null;
   private hbSeq = 0;
   private hbInFlight = false;
+  private hbSoon = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private uiTimer: ReturnType<typeof setInterval> | null = null;
   private outboxOpening: Promise<Outbox> | null = null;
@@ -385,7 +386,12 @@ export class CandidateController {
             this.patch({ prompts: this.snap.prompts.filter((p) => p.key !== sig.key) });
           }
         },
-        onStatus: (st) => this.patch({ monitoring: st }),
+        onStatus: (st) => {
+          const prev = this.snap.monitoring;
+          this.patch({ monitoring: st });
+          // Let staff see a change of monitoring state (ok / attention / degraded) promptly.
+          if (prev?.state !== st.state) this.heartbeatSoon();
+        },
         onHold: () => void this.onHoldDetected(),
         onFatal: (kind) => this.setFatal(kind),
       });
@@ -425,7 +431,13 @@ export class CandidateController {
   setCurrentQuestionIndex(i: number): void {
     if (i === this.currentQuestionIndex) return;
     this.currentQuestionIndex = i;
-    if (this.hbTimer) this.scheduleHeartbeat(1000);
+    this.heartbeatSoon();
+  }
+
+  /** Send the next heartbeat shortly (debounced), e.g. after a status or place change. */
+  private heartbeatSoon(delayMs = 800): void {
+    if (this.hbInFlight) this.hbSoon = true;
+    else if (this.hbTimer) this.scheduleHeartbeat(delayMs);
   }
 
   getCurrentQuestionIndex(): number {
@@ -489,7 +501,9 @@ export class CandidateController {
     } finally {
       this.hbInFlight = false;
     }
-    this.scheduleHeartbeat();
+    const soon = this.hbSoon;
+    this.hbSoon = false;
+    this.scheduleHeartbeat(soon ? 800 : HEARTBEAT_INTERVAL_MS);
   }
 
   private async onHeartbeat(hb: HeartbeatResponse, timing: RequestTiming): Promise<void> {

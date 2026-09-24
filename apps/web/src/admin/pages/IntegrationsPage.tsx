@@ -448,7 +448,7 @@ function WebhookModal({ webhook, httpsRequired, onClose, onCreated }: { webhook:
       >
         <label>
           Endpoint URL
-          <input type="url" value={d.url} onChange={(e) => set({ url: e.target.value })} placeholder="https://lms.example.com/hooks/proctoring" aria-invalid={touched && !!errors.url} />
+          <input type="text" inputMode="url" autoComplete="off" spellCheck={false} value={d.url} onChange={(e) => set({ url: e.target.value })} placeholder="https://lms.example.com/hooks/proctoring" aria-invalid={touched && !!errors.url} />
           {touched && errors.url ? <span className="text-danger small">{errors.url}</span> : <span className="muted small">Must be reachable from the internet{httpsRequired ? ' over https://' : ''}. Redirects are not followed.</span>}
         </label>
         <label>
