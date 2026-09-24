@@ -105,6 +105,17 @@ export function IdentityTab({ d, onOpenEvent }: { d: SessionDetailDTO; onOpenEve
                     <td>
                       <DecisionBadge decision={c.decision} livenessFailed={c.livenessPassed === false} />
                       <div className="muted small">confidence {formatPercent(c.confidence)}</div>
+                      {c.secondOpinion ? (
+                        <div className="small second-opinion" title={`Outcome: ${c.secondOpinion.outcome}`}>
+                          {c.secondOpinion.needsHumanReview ? <span className="badge badge-warning">Opinions disagree — review</span> : null}
+                          <div className="muted">
+                            Second opinion{c.secondOpinion.provider ? ` (${c.secondOpinion.provider})` : ''}
+                            {c.secondOpinion.externalSimilarity != null ? `: similarity ${formatPercent(c.secondOpinion.externalSimilarity)}` : ''}
+                            {c.secondOpinion.internalDecision !== c.decision ? ` · own engine said: ${DECISION_LABELS[c.secondOpinion.internalDecision] ?? c.secondOpinion.internalDecision}` : ''}
+                          </div>
+                          {c.secondOpinion.explanation ? <div>{c.secondOpinion.explanation}</div> : null}
+                        </div>
+                      ) : null}
                     </td>
                     <td>{formatSimilarity(c.similarity)}</td>
                     <td>

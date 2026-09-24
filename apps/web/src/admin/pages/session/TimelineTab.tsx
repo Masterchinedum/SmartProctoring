@@ -168,7 +168,9 @@ function TimelineCheckRow({ check: c }: { check: IdentityCheckDTO }) {
             <span className="muted">{TRIGGER_LABELS[c.trigger] ?? c.trigger}</span>
             <DecisionBadge decision={c.decision} livenessFailed={c.livenessPassed === false} />
             {c.similarity != null ? <span className="small muted">similarity {formatSimilarity(c.similarity)}</span> : null}
+            {c.secondOpinion?.needsHumanReview ? <span className="badge badge-warning">Second opinion disagrees</span> : null}
           </span>
+          {c.secondOpinion?.explanation ? <span className="small muted">{c.secondOpinion.explanation}</span> : null}
           {issues.length ? <span className="small muted">Image quality: {issues.map(qualityIssueLabel).join(', ')}</span> : null}
           {c.context.precededBy.length ? <span className="small muted">After: {c.context.precededBy.map(contextLabel).join(' · ')}</span> : null}
         </span>
