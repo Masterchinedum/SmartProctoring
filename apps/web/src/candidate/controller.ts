@@ -511,6 +511,18 @@ export class CandidateController {
     }
   }
 
+  /**
+   * Screens that do not use the camera (on hold, paused, ended) call this when shown: release a camera that no
+   * monitoring run owns — the check's camera when the check ended in a hold (e.g. an ID-photo hold at check-in, a
+   * different person at a resume check), a cancelled resume / re-verification check, or the ready screen's
+   * preview when staff put the exam on hold or ended it. Running monitoring releases its own camera
+   * (stopMonitoring), after closing its open episodes.
+   */
+  releaseIdleCamera(): void {
+    if (this.runtime || this.runtimeStarting) return;
+    if (this.camera.state.wanted || this.camera.state.stream) this.camera.stop();
+  }
+
   /** Stop monitoring: close open episodes, queue them and try to deliver them (bounded wait). */
   async stopMonitoring(reason: string, opts: { flush: boolean; stopCamera: boolean }): Promise<void> {
     const rt = this.runtime;

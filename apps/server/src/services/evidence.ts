@@ -157,12 +157,15 @@ export async function purgeSessionEvidence(ctx: EvidenceCtx, db: DbOrTx, session
   return { evidence: n };
 }
 
-/** Remove a candidate's approved ID photo (blob + embedding). */
+/**
+ * Remove a candidate's approved ID photo (blob + embedding). Copies attached to a session's event (the photo an
+ * identity event was compared with) are that session's evidence: retention and legal hold govern them.
+ */
 export async function purgeCandidateIdPhoto(ctx: EvidenceCtx, db: DbOrTx, candidateId: string, reason: string): Promise<void> {
   const rows = await db
     .select()
     .from(evidence)
-    .where(and(eq(evidence.candidateId, candidateId), eq(evidence.kind, 'id_photo'), isNull(evidence.purgedAt)));
+    .where(and(eq(evidence.candidateId, candidateId), eq(evidence.kind, 'id_photo'), isNull(evidence.sessionId), isNull(evidence.purgedAt)));
   await purgeEvidenceRows(ctx, db, rows, reason);
   await db
     .update(candidates)

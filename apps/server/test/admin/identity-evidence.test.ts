@@ -194,4 +194,36 @@ describe('ID photo mismatch at check-in', () => {
     expect(r.identity.summary).toBe('The person at check-in may not match the approved ID photo (similarity 0.00); this was flagged for review.');
     expect(r.identity.idPhoto).toMatchObject({ decision: 'mismatch' });
   });
+
+  it("keeps the compared photo as the session's evidence: listed with the event, kept when the photo on file changes, purged with the session (e2e 16/17)", async () => {
+    const created = json(await admin.post('/candidates', { name: 'Jo Photo', externalId: 'JO-1' }));
+    expect(json(await admin.jpeg(`/candidates/${created.id}/id-photo`, { person: 'photo-owner-2' })).accepted).toBe(true);
+    const { exam } = await env.newExam({ title: 'Photo Exam 2', policy: { identity: { idPhotoComparison: 'advisory' } } });
+    const assigned = json(await admin.post(`/exams/${exam.id}/assignments`, { candidateIds: [created.id] }));
+    const sessionId: string = assigned.items[0].sessionId;
+    const c = env.candidateClient(assigned.items[0].accessLink.split('/take/')[1]);
+    await consent(c);
+    expect((await runCheck(env, c, 'initial', { spec: { person: 'someone-else-2' } })).complete!.idPhoto).toMatchObject({ decision: 'mismatch' });
+    const ev = await eventOf(sessionId, 'identity_mismatch');
+
+    // Listed with its event (staff event drawer), as this session's evidence.
+    const listed = json<{ items: { id: string; evidence: { id: string; kind: string }[] }[] }>(await reviewer.get(`/sessions/${sessionId}/events`)).items.find((e) => e.id === ev.id)!;
+    expect(listed.evidence.map((x) => x.kind)).toContain('id_photo');
+    const [copy] = await env.ctx.db.select().from(evidence).where(and(eq(evidence.eventId, ev.id), eq(evidence.kind, 'id_photo')));
+    expect(copy.sessionId).toBe(sessionId);
+    expect(listed.evidence.find((x) => x.kind === 'id_photo')!.id).toBe(copy.id);
+
+    // Replacing, then removing the photo on file keeps the exact photo that was compared.
+    expect(json(await admin.jpeg(`/candidates/${created.id}/id-photo`, { person: 'photo-owner-2' })).accepted).toBe(true);
+    expect((await reviewer.get(`/evidence/${copy.id}`)).statusCode).toBe(200);
+    const cmp = json<IdentityComparisonDTO>(await reviewer.get(`/identity/compare/${ev.id}`));
+    expect(cmp.reference.images.map((i) => i.id)).toEqual([copy.id]);
+    expect(cmp.reference.purpose).toBe('approved ID photo');
+    expect((await admin.del(`/candidates/${created.id}/id-photo`)).statusCode).toBe(200);
+    expect((await reviewer.get(`/evidence/${copy.id}`)).statusCode).toBe(200);
+
+    // The session's evidence purge (retention) deletes it with the session's other images.
+    await purgeSessionEvidence(env.ctx, env.ctx.db, sessionId, 'retention');
+    expect((await reviewer.get(`/evidence/${copy.id}`)).statusCode).toBe(410);
+  });
 });

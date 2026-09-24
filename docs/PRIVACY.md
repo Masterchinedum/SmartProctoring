@@ -28,6 +28,7 @@ advice — review it with counsel for your jurisdictions.
 | Liveness / check frames | Check-in, resume, reconnect | Evidence store | Yes | Evidence retention period |
 | Identity-sample probe images (only when not a clean match, unless configured) | During exam | Evidence store | Yes | Evidence retention period |
 | Event screenshots (moment of observation) | During exam | Evidence store | Yes | Evidence retention period |
+| Copy of the approved ID photo attached to an ID-photo identity event (the exact photo compared, for review) | Check-in | Evidence store | Yes | Evidence retention period of that session (also after the photo on file is replaced or removed; kept under legal hold) |
 | Event metadata (type, times, confidence, measurements) | During exam | Postgres `events`, `identity_checks` | — | Event retention period (default 365 days) |
 | Answers, timing, pauses, periods | During exam | Postgres | — | Your exam-records policy |
 | Device info (camera label, SHA-256 of camera id, user agent, screen size) | Check-in | `device_records` | — | With the session record |

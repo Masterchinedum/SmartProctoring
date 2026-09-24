@@ -27,7 +27,13 @@ import { candidates, checkFrames, evidence, examSessions, identityReferences, we
 import { audit } from '../lib/audit.js';
 import { frameAad, idPhotoAad, referenceAad } from './identity-common.js';
 
-export const REKEY_LOCK_KEY = 727_274_010;
+/**
+ * Its own lock: re-encryption and the retention job (RETENTION_LOCK_KEY 727274010) are safe to run concurrently
+ * (compare-and-set here, delete-after-tombstone in purgeEvidenceRows). Sharing the retention key made `rekey` fail
+ * with "another re-encryption is running" whenever a server was running retention — e.g. right after the restart
+ * the rotation procedure requires (retention runs at start) — and blocked retention during a long re-encryption.
+ */
+export const REKEY_LOCK_KEY = 727_274_011;
 export const REKEY_DEFAULT_BATCH = 200;
 
 export type RekeyCtx = Pick<Ctx, 'db' | 'storage' | 'keyring' | 'now' | 'log'> & { database: Database };

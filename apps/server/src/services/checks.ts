@@ -728,8 +728,9 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
       await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, photoRow.id));
       for (const img of images) await copyEvidence(a.ctx, m.tx, img, { kind: 'identity_probe', eventId: ev.id, identityCheckId: photoRow.id });
       if (cand.idPhotoEvidenceId) {
+        // The exact photo compared, as this session's evidence (the candidate-level photo has no session).
         const [photo] = await m.tx.select().from(evidence).where(eq(evidence.id, cand.idPhotoEvidenceId));
-        if (photo) await copyEvidence(a.ctx, m.tx, photo, { kind: 'id_photo', eventId: ev.id });
+        if (photo) await copyEvidence(a.ctx, m.tx, photo, { kind: 'id_photo', eventId: ev.id, sessionId: m.session.id });
       }
     }
     if (policy.identity.idPhotoComparison === 'required' && a.idPhoto.decision !== 'match') {

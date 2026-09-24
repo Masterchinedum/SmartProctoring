@@ -15,10 +15,10 @@ pnpm --filter @sp/e2e fixtures                  # (re)build the fake-camera vide
 pnpm --filter @sp/e2e typecheck
 ```
 
-Runtime (26 tests, 4-core machine shared with other workloads): ~9 minutes with the default 2 workers,
-~7.5 minutes with `E2E_WORKERS=3` (~18 minutes of test time; the longest tests wait for real detections:
-a person swap, an absence, a 2-minute exam running out). Global setup adds ~15 s (plus ~1 minute the
-first time, to generate the fixtures).
+Runtime (32 tests, 4-core machine shared with other workloads): ~11.5 minutes with the default 2 workers
+(~22 minutes of test time; the longest tests wait for real detections: a person swap, an absence, a 2-minute
+exam running out; scenarios 16–18 add ~3 minutes of test time, including their own server starts). Global setup
+adds ~15 s (plus ~1 minute the first time, to generate the fixtures).
 
 ## Prerequisites
 
@@ -39,8 +39,22 @@ first time, to generate the fixtures).
 4. Starts the server from source (`apps/server`: `tsx src/main.ts`) on port 8098 with
    `WEB_DIST_DIR=apps/web/dist`, `PUBLIC_URL=http://localhost:8098`, `BOOTSTRAP_ADMIN_*` (owner
    `owner@example.com`), fixed test `EVIDENCE_KEY` / `SESSION_SECRET`, `STORAGE_DIR` in a temp dir,
-   `SWEEPER_INTERVAL_MS=2000`, and waits for `/api/health`. Log: `e2e/.artifacts/server.log`.
+   `SWEEPER_INTERVAL_MS=2000`, and waits for `/api/health`. Log: `e2e/.artifacts/server.log`. The storage
+   directory is passed to the workers as `E2E_STORAGE_DIR` (the retention spec runs the server's CLI against it).
 5. Teardown stops the server (process group) and deletes the evidence directory.
+
+**Dedicated server instances.** Specs that need a different server environment start their own instance
+(`lib/server.ts`, same code path as global setup) with its own port, database and storage directory, so the main
+server and the other specs are unaffected; they stop it in `afterAll`:
+
+| Spec | Port | Database | Why |
+|---|---|---|---|
+| `18-integrations` | `E2E_PORT`+1 (8099) | `proctor_e2e_integr` | SMTP pointed at an in-process SMTP sink; an https webhook receiver (self-signed certificate in `e2e/.artifacts/tls`, trusted by the server through `NODE_EXTRA_CA_CERTS`; `WEBHOOK_ALLOW_PRIVATE_NETWORKS=true` because it listens on 127.0.0.1) |
+| `17-retention-rekey` (key rotation) | `E2E_PORT`+2 (8100) | `proctor_e2e_rekey` | restarted three times with different `EVIDENCE_KEY` / `EVIDENCE_KEYS_OLD` |
+
+Both use `PUBLIC_URL=http://127.0.0.1:<port>` (a different host than the main server's `localhost`, so staff
+cookies never mix), `NODE_ENV=production` and `VISION_THREADS=2`. Their databases are re-created by the spec
+(names must contain `e2e`); logs: `e2e/.artifacts/server-integrations.log`, `server-rekey-{1,2,3}.log`.
 
 ## Environment variables
 
@@ -67,6 +81,8 @@ and writes derived stills and videos to `e2e/.fixtures/` (gitignored):
 | `obama.jpg` | candidate **A** (head-and-shoulders crop), the empty room (a crop of the background), A in a dim room (×0.44) and a dark room (×0.25) |
 | `deepface/img30.jpg` | person **B** — a clearly different, frontal face |
 | `two_people.jpg` | two people in view |
+| `obama2.jpg` | approved ID photos of A (another photo of the same person): `id-a.jpg` (head-and-shoulders crop) and `id-a-poor.jpg` (the same crop as a 90 px wide JPEG at quality 5, scaled back up — accepted at upload, compares as *inconclusive*, similarity ≈ 0.32) |
+| `deepface/img13.jpg` | approved ID photo of someone else (`id-other.jpg`; similarity to A ≈ 0.10) |
 
 `biden.jpg` is deliberately not used as person B: his head is turned 22–29° depending on the crop, right
 at the server's 25° pose gate, so the honest outcome for it is "unable to verify" (which the product
@@ -121,6 +137,9 @@ How the fake camera behaves (and how the tests rely on it):
 | 13 | `13-degraded-and-context` | (folded in from the candidate app's drafts) vision models unavailable → the exam still runs, `monitoring_degraded`; resume from another seat on the same browser → match + neutral `environment_changed` only; manual staff hold → release without a new check → continues |
 | 14 | `14-accessibility` | WCAG 2.1 AA checks with the in-repo checker `lib/a11y.ts` (Chromium's accessibility tree over CDP: accessible names, landmarks, `<h1>`, lang/title, id references, text contrast). **a:** keyboard-only candidate walkthrough — consent → camera check → start → every question type → question navigation → submit / privacy / pause dialogs (focus moves to each new heading, dialogs trap focus and return it, Escape, inert background, error tied to its field, countdown announced at the 10-minute mark only, 320 px reflow); staff: new flag announced (rate-limited), status tabs, session tabs, events row → drawer, reference image → viewer (arrows, Escape). **b:** phone-sized screen without a camera → friendly notice, consent still possible, reflow, reduced motion; staff sign-in page. **c:** every staff page passes the checker (titles, skip link). See `docs/ACCESSIBILITY.md` |
 | 15 | `15-resume-continue` | **a:** `requireFullscreen`: pause → browser closed → reopened → resume check passes → 25 s on "Check complete" (longer than the heartbeat timeout and a paused-state poll): the session stays online (heartbeats, label "waiting for the candidate to continue"), no `reporting_interrupted`, and no `fullscreen_exited` before or after the click that enters fullscreen and starts monitoring. **b:** pause with approval: an answer typed after staff approved (heartbeats held back, the server refuses it with 409) is kept, re-sent after the resume in the same page and graded |
+| 16 | `16-id-photo` | approved ID photo uploaded in the staff UI (an image without a face is refused with guidance and nothing stored) and compared at check-in. **Advisory:** same person → neutral `id_photo_compared` (match); a different person → `identity_mismatch` against the ID photo (high, with the compared photo and the check-in image as evidence) and the exam continues; comparison view shows the ID photo vs the check-in image with the ID-photo thresholds (0.24/0.42). **Required:** same person proceeds; a different person is held before the exam starts (`id_photo_mismatch`, candidate message, camera released); a poor photo of the same person compares inconclusive → held as `id_photo_unverifiable` ("not a finding that you are a different person"), never an `identity_mismatch` |
+| 17 | `17-retention-rekey` | **a:** two submitted sessions (exam retention 1 day) moved 2 days into the past; one placed under legal hold in the UI → `pnpm --filter @sp/server retention:run --dry-run` deletes nothing → `retention:run` purges the other (every evidence URL incl. the compared ID-photo copy → 410 `evidence_purged`; Identity tab, event drawer and comparison view show "Deleted under the retention policy on …"; events kept; the candidate's ID photo on file kept; `retention.purge` audit entry) and keeps the held one; hold lifted → next run purges it. **b:** dedicated instance: data under key K1 (evidence, reference and check-frame templates, ID-photo templates, access links, webhook secret) → restart with `EVIDENCE_KEY=K2`, `EVIDENCE_KEYS_OLD=K1` → `rekey --dry-run` (exit 3, every target listed) → `rekey` (exit 0, "no longer needed") → restart with K2 only: evidence bytes unchanged, access links unchanged, webhook test signed with the original secret, resume check against the reference passes, a new check-in matches the ID photo |
+| 18 | `18-integrations` | dedicated instance with SMTP + https webhook receiver. **a:** Integrations page: API key (shown once), webhook (secret shown once), "Send test" → ping verified with the function copied verbatim from `docs/INTEGRATION_API.md` (wrong secret, altered body, stale timestamp rejected), alert recipients saved, test email received. **b:** `/api/v1` with that key: 401 without it, candidate upsert by `externalId`, idempotent assignment, the candidate takes the exam (ID-photo mismatch, tab switch, staff hold/release, submit); webhooks `event.created`, `identity.mismatch`, `session.held`, `session.released`, `session.submitted` (score) signed, without images, details or similarity; a delivery answered HTTP 500 is retried after ~30 s with the same delivery id (attempt 2) and shows "Delivered 2/10" in the UI; first alert email at once, a later alert of the same session (the staff hold) waits for the 5-minute window and arrives in one combined email, another session's hold is emailed at once; emails without images or scores; session, report and events via `/api/v1` without evidence URLs or similarity scores |
 
 ## Known limits
 
@@ -133,8 +152,11 @@ How the fake camera behaves (and how the tests rely on it):
 * **Active liveness passing path uses a synthetic video** (`scripts/synth-headturn.ts`), tuned to the
   server's parallax and anti-replay rules; it is a test of the pipeline, not of liveness accuracy (see
   `docs/accuracy/`).
-* The ID-photo comparison, webhooks/API keys/email alerts and retention are covered by server tests, not
-  by this suite.
+* **Time is moved, not waited for**, in two places: the retention spec moves the sessions' end time 2 days back
+  (evidence retention is at least 1 day), and the integrations spec moves the previous alert email's send time
+  5 minutes back to see the combined email without waiting for the throttle window.
+* Email alerts go to an in-process SMTP sink (plain SMTP, no TLS/AUTH) and webhooks to a local https receiver;
+  deliverability through real providers (SPF/DKIM, TLS) is not covered.
 * The login endpoint allows 10 attempts/min per IP, so the staff API client logs in once per worker and
   staff pages reuse its cookie; only the UI-login tests type a password.
 * Test artifacts: `e2e/test-results/` (trace + screenshot on failure), server log in `e2e/.artifacts/`.

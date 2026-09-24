@@ -396,3 +396,30 @@ describe('CandidateController — reporting interrupted (P2-4)', () => {
     expect(c.getSnapshot().reportingInterrupted).toBe(true);
   });
 });
+
+describe('CandidateController — camera released on screens without monitoring (e2e 16: ID-photo hold at check-in)', () => {
+  it('releases a camera that a check left on when the exam is on hold without monitoring', async () => {
+    server.status = 'invited';
+    server.verifiedInstanceId = null;
+    const c = newController();
+    await c.load();
+    await c.camera.start(); // the check's camera (no camera in jsdom: wanted, but unavailable)
+    expect(c.camera.state.wanted).toBe(true);
+    // The check ends in a hold (e.g. required ID-photo comparison): the hold screen asks for the camera to go.
+    server.status = 'on_hold';
+    await c.applyState(server.state());
+    expect(h.runtimes).toHaveLength(0);
+    c.releaseIdleCamera();
+    expect(c.camera.state.wanted).toBe(false);
+  });
+
+  it('leaves the camera of running monitoring alone (stopMonitoring releases it after closing episodes)', async () => {
+    const c = newController();
+    await c.load();
+    await tick(10);
+    expect(h.runtimes).toHaveLength(1);
+    await c.camera.start();
+    c.releaseIdleCamera();
+    expect(c.camera.state.wanted).toBe(true);
+  });
+});

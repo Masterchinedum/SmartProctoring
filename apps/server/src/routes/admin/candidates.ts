@@ -243,7 +243,7 @@ export const candidatesRoutes: FastifyPluginAsync = async (app) => {
       const previous = await tx
         .select()
         .from(evidence)
-        .where(and(eq(evidence.candidateId, id), eq(evidence.kind, 'id_photo'), isNull(evidence.purgedAt), ne(evidence.id, row.id)));
+        .where(and(eq(evidence.candidateId, id), eq(evidence.kind, 'id_photo'), isNull(evidence.sessionId), isNull(evidence.purgedAt), ne(evidence.id, row.id)));
       await tx
         .update(candidates)
         .set({

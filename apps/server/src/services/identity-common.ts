@@ -75,19 +75,23 @@ export function summarizeAnalysis(a: ImageAnalysis) {
   };
 }
 
-/** Decrypt and re-store an evidence image under a new id (e.g. reference images linked to a mismatch event). */
+/**
+ * Decrypt and re-store an evidence image under a new id (e.g. reference images linked to a mismatch event).
+ * `sessionId` attaches a copy of a candidate-level image (the approved ID photo) to a session: the copy is then
+ * that session's evidence — listed with its event, purged by the session's retention, kept under its legal hold.
+ */
 export async function copyEvidence(
   ctx: Ctx,
   db: DbOrTx,
   src: EvidenceRow,
-  patch: { kind?: EvidenceRow['kind']; eventId?: string | null; identityCheckId?: string | null; reason?: string | null },
+  patch: { kind?: EvidenceRow['kind']; eventId?: string | null; identityCheckId?: string | null; reason?: string | null; sessionId?: string },
 ): Promise<EvidenceRow | null> {
   const data = await readEvidence(ctx, src);
   if (!data) return null;
   const { row } = await storeEvidence(ctx, db, {
     id: randomUUID(),
     orgId: src.orgId,
-    sessionId: src.sessionId,
+    sessionId: patch.sessionId ?? src.sessionId,
     candidateId: src.candidateId,
     eventId: patch.eventId ?? null,
     identityCheckId: patch.identityCheckId ?? null,

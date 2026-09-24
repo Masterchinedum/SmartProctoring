@@ -18,6 +18,7 @@ import { accessLinkFor } from '../src/services/dto.js';
 import { purgeEvidenceRows, readEvidence } from '../src/services/evidence.js';
 import { frameAad, idPhotoAad, referenceAad } from '../src/services/identity-common.js';
 import { COLUMN_TARGETS, EVIDENCE_TARGET, rekeyAll, rekeyAllExclusive, REKEY_LOCK_KEY, type RekeyCtx } from '../src/services/rekey.js';
+import { RETENTION_LOCK_KEY } from '../src/services/retention.js';
 import { readWebhookSecret } from '../src/services/webhooks.js';
 import { FakeVisionService } from '../src/vision/fake.js';
 import { clientEvent, json, MIN, screenshot, staffApi } from './admin/fixtures.js';
@@ -137,6 +138,19 @@ describe('rekey after rotating EVIDENCE_KEY', () => {
     const again = await rekeyAll(rekeyCtx(keyring));
     expect(again.targets.every((t) => t.outdated === 0 && t.rekeyed === 0)).toBe(true);
     expect((await rekeyAll(rekeyCtx(keyring), { dryRun: true })).remaining).toEqual({});
+  });
+
+  it('is not blocked by a running retention job (distinct advisory lock; e2e 17: rekey right after a restart)', async () => {
+    expect(REKEY_LOCK_KEY).not.toBe(RETENTION_LOCK_KEY);
+    const client = await env.ctx.database.pool.connect();
+    try {
+      await client.query('SELECT pg_advisory_lock($1)', [RETENTION_LOCK_KEY]);
+      const summary = await rekeyAllExclusive(rekeyCtx(ring(K2, [K1])), { dryRun: true });
+      expect(summary).not.toBeNull();
+    } finally {
+      await client.query('SELECT pg_advisory_unlock($1)', [RETENTION_LOCK_KEY]);
+      client.release();
+    }
   });
 
   it('refuses to run twice at the same time', async () => {

@@ -196,10 +196,11 @@ export function runServerCli(script: 'retention:run' | 'rekey', args: string[], 
   });
 }
 
-/** The JSON document a CLI printed with --json (pnpm prints its own banner lines first). */
+/** The JSON document a CLI printed with --json (pnpm prints its own lines before, and after a non-zero exit). */
 export function cliJson<T>(r: CliResult): T {
-  const i = r.stdout.indexOf('\n{');
-  const text = r.stdout.startsWith('{') ? r.stdout : i >= 0 ? r.stdout.slice(i + 1) : '';
-  if (!text) throw new Error(`no JSON in CLI output (exit ${r.code}):\n${r.stdout}\n${r.stderr}`);
-  return JSON.parse(text) as T;
+  const lines = r.stdout.split('\n');
+  const start = lines.findIndex((l) => l === '{');
+  const end = start >= 0 ? lines.findIndex((l, i) => i > start && l === '}') : -1;
+  if (start < 0 || end < 0) throw new Error(`no JSON in CLI output (exit ${r.code}):\n${r.stdout}\n${r.stderr}`);
+  return JSON.parse(lines.slice(start, end + 1).join('\n')) as T;
 }

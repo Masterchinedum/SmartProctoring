@@ -608,16 +608,27 @@ function DeliveryRow({ d, label, tone, open, onToggle, onRedeliver, busy }: { d:
 
 function EmailAlertsSection({ status }: { status: IntegrationStatusDTO | undefined }) {
   const q = useQuery({ queryKey: qk.settings, queryFn: api.settings, retry: shouldRetry });
+  // Saving changes the settings, which re-keys (remounts) the form below: the "Saved." confirmation lives here.
+  const [saved, setSaved] = useState(false);
   if (q.isPending) return <Loading />;
   if (q.isError) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
-  return <EmailAlertsForm key={JSON.stringify([q.data.alertRecipients, q.data.emailAlerts])} settings={q.data} status={status} />;
+  return <EmailAlertsForm key={JSON.stringify([q.data.alertRecipients, q.data.emailAlerts])} settings={q.data} status={status} saved={saved} setSaved={setSaved} />;
 }
 
-function EmailAlertsForm({ settings, status }: { settings: OrgSettingsDTO; status: IntegrationStatusDTO | undefined }) {
+function EmailAlertsForm({
+  settings,
+  status,
+  saved,
+  setSaved,
+}: {
+  settings: OrgSettingsDTO;
+  status: IntegrationStatusDTO | undefined;
+  saved: boolean;
+  setSaved: (saved: boolean) => void;
+}) {
   const qc = useQueryClient();
   const [text, setText] = useState(settings.alertRecipients.join('\n'));
   const [toggles, setToggles] = useState(settings.emailAlerts);
-  const [saved, setSaved] = useState(false);
   const available = status?.email.available ?? false;
   const parsed = parseRecipients(text);
   const tooMany = parsed.emails.length > MAX_ALERT_RECIPIENTS;

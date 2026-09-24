@@ -51,10 +51,10 @@ const ID_PHOTOS = {
   /** Someone who appears in no camera fixture (SFace similarity to A ~0.10, far below the 0.24 ID-photo mismatch threshold). */
   'id-other.jpg': { src: 'deepface/img13.jpg', crop: null, maxSide: 1280 },
   /**
-   * A's photo as a 100 px wide JPEG at quality 5, scaled back to 460 px: accepted at upload, but the
+   * A's photo as a 90 px wide JPEG at quality 5, scaled back to 460 px: accepted at upload, but the
    * comparison with the live candidate lands in the inconclusive band (~0.3, between 0.24 and 0.42).
    */
-  'id-a-poor.jpg': { src: 'obama2.jpg', crop: { left: 120, top: 100, width: 460, height: 600 }, thumb: { width: 100, quality: 5 } },
+  'id-a-poor.jpg': { src: 'obama2.jpg', crop: { left: 120, top: 100, width: 460, height: 600 }, thumb: { width: 90, quality: 5 } },
 } as const;
 export type IdPhotoName = keyof typeof ID_PHOTOS;
 

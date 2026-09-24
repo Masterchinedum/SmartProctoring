@@ -99,7 +99,10 @@ export function ReadyScreen() {
 /* ------------------------------------------------------------------ paused */
 
 export function PausedScreen({ onResume }: { onResume: () => void }) {
+  const ctrl = useController();
   const snap = useSnapshot();
+  // No camera while paused (e.g. after a cancelled resume check).
+  useEffect(() => ctrl.releaseIdleCamera(), [ctrl]);
   const state = snap.state!;
   const p = state.exam.policy.pause;
   const req = state.session.pauseRequest;
@@ -156,6 +159,8 @@ export function PausedScreen({ onResume }: { onResume: () => void }) {
 export function HoldScreen({ onReverify }: { onReverify: () => void }) {
   const ctrl = useController();
   const snap = useSnapshot();
+  // No camera while on hold — also when the hold came from a check (monitoring never ran) or the ready screen.
+  useEffect(() => ctrl.releaseIdleCamera(), [ctrl]);
   const state = snap.state!;
   const hold = state.session.hold;
   const [refreshing, setRefreshing] = useState(false);
@@ -227,13 +232,16 @@ function endText(reason: string | null, terminated: boolean): string {
 }
 
 export function EndedScreen() {
+  const ctrl = useController();
   const snap = useSnapshot();
   const state = snap.state!;
   const terminated = state.session.status === 'terminated';
   const pending = snap.outbox?.size ?? 0;
   useEffect(() => {
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
-  }, []);
+    // "Your camera is off": also when the exam ended while no monitoring ran (e.g. terminated from the ready screen).
+    ctrl.releaseIdleCamera();
+  }, [ctrl]);
   return (
     <Page>
       <BrandHeader title={state.exam.title} />

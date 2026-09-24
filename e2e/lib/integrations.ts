@@ -95,8 +95,9 @@ export class WebhookReceiver {
     return self;
   }
 
+  /** The certificate names 127.0.0.1 (IP SAN), the address this receiver listens on. */
   url(path = '/hooks/smartproctoring'): string {
-    return `https://localhost:${this.port}${path}`;
+    return `https://127.0.0.1:${this.port}${path}`;
   }
 
   ofType(type: string): ReceivedWebhook[] {
