@@ -6,7 +6,33 @@ YuNet/SFace inference on real face photos); the method is in §2 so every number
 
 ## 1. Summary
 
-__SUMMARY__
+One 4-vCPU instance (Postgres and the load generator on the same VM), load test with a 60 s check-in ramp
+and 120 s of exam traffic, no staff dashboard open (quiet runs, §2), whole-run p50 / p95 in ms:
+
+| endpoint | N=200 before | N=200 after | N=500 before | N=500 after |
+|---|---|---|---|---|
+| heartbeat | 7 / 44 | **3 / 5** | 1,426 / 2,836 | **3 / 8** |
+| answer save | 7 / 44 | **5 / 8** | 2,074 / 4,175 | **5 / 12** |
+| event batch | 10 / 70 | **6 / 10** | 1,476 / 2,941 | **6 / 14** |
+| identity sample | 72 / 167 | **63 / 78** | 3,569 / 7,010 | **66 / 96** |
+| check frame | 52 / 120 | **61 / 73** | 5,932 / 13,744 | **68 / 98** |
+| check complete | 27 / 73 | **21 / 30** | 9,811 / 18,016 | **25 / 50** |
+| errors | 0 | 0 | 0 | 0 |
+
+(An earlier measurement of the old code on a busier VM: N=200 heartbeat 10 / 97, identity sample 85 / 323,
+check frame 115 / 331; N=500 heartbeat 3.7 s / 6.6 s, identity sample p50 9.7 s, check frame p50 7.3 s.)
+With a staff dashboard connected N=500 is unchanged (heartbeat 3 / 9, identity sample 66 / 104).
+
+* **Root causes**: face inference (onnxruntime-node, synchronous) ran on the event loop — 47 % of the main
+  thread at N=500 — so every request queued behind it and the 20 Postgres connections sat idle in
+  transactions; plus a realtime session summary (5 queries) after every heartbeat, answer, event and sample even
+  with no dashboard open; heartbeats that rewrote every index of `exam_sessions`.
+* **Knee** (after): the request path (heartbeats, answers, events) stays under 70 ms p95 up to N=1,200; the
+  limit is face analysis: **≈ 52 identity samples/s per instance** (3 vision workers on 4 vCPU). N=1,000 with
+  check-ins spread over 2 min meets every target in steady state; N=800 checking in within 1 min (13 check-ins/s)
+  queues check frames (p95 6 s); N=1,200 saturates vision (identity samples wait seconds, some 503s).
+* **Sizing**: plan ≈ 250 concurrent candidates per vCPU at the default 30 s identity interval and ≈ 2 check-ins/s
+  per vCPU of start-up burst; details in §6.
 
 ## 2. Method
 
@@ -145,8 +171,89 @@ coalescing/keepalive/batching/no-subscriber), `test/realtime-bus.test.ts` (incl.
 
 ## 5. Results
 
-__RESULTS__
+All runs: 4 vCPU VM, Postgres + load generator on the same VM, bundled server (`node dist/main.js`), default
+settings (3 vision workers × 1 thread, `PG_POOL_MAX=20`), quiet VM unless noted. p50 / p95 in ms.
+
+### 5.1 Before / after
+See §1 (N=200 and N=500, no dashboard). Before = commit `e9d595c` (the state this work started from), after =
+this change set; same VM, same parameters, runs minutes apart.
+
+### 5.2 Knee (after, one staff dashboard connected)
+
+| N | ramp | check-ins/s | heartbeat | answer | events | identity sample (whole run) | identity sample (steady) | check frame | errors |
+|---|---|---|---|---|---|---|---|---|---|
+| 500 | 60 s | 8.3 | 3 / 9 | 5 / 13 | 6 / 15 | 66 / 104 | 65 / 84 | 71 / 112 | 0 |
+| 800 | 60 s | 13.3 | 5 / 20 | 7 / 32 | 9 / 38 | 84 / 5,204 | 74 / 2,509 | 964 / 5,998 | 0 |
+| 1,000 | 120 s | 8.3 | 6 / 19 | 9 / 31 | 11 / 37 | 91 / 5,357 | 78 / 146 | 95 / 300 | 0 |
+| 1,200 | 150 s | 8.0 | 9 / 30 | 14 / 54 | 17 / 65 | 204 / 11,799 | 136 / 6,266 | 98 / 2,404 | 120 × 503¹ |
+
+¹ identity samples still refused after 3 retries (882 were retried successfully) — the vision queue was full.
+
+Reading the table: the request path scales past 1,200 candidates (196 heartbeats/s at p95 22 ms in the
+steady phase of N=1,200); face analysis sets the knee. During a check-in burst check frames go first
+(`interactive` priority) and mid-exam identity samples wait (`background`), which is why the whole-run sample
+p95 grows first while check-ins stay fast; with check-ins at 13/s (N=800 in one minute) check frames queue too.
+
+### 5.3 Maximum identity-sample throughput (one instance)
+150 candidates sending samples back to back (`SAMPLE_SEC=1`), steady phase:
+
+| vision workers | samples/s | sample p50 | heartbeat p95 meanwhile |
+|---|---|---|---|
+| 3 (default on 4 vCPU) | **52.6** | 2.4 s (queue) | 12 ms |
+| 4 (`VISION_WORKERS=4`) | 58.6 | 2.1 s | 22 ms |
+
+In-process inference before the change reached 14–24 analyses/s in a micro-benchmark on the same VM while
+holding the event loop (p99 event-loop delay 60–120 ms). Per analysis a worker spends ≈ 50 ms CPU (§3.5); a
+single unloaded analysis takes ≈ 60–65 ms end to end (≈ 50 ms before, when one request could use 4 intra-op
+threads — the only number that got slightly worse).
+
+### 5.4 Resource use (after)
+At N=1,000 (817 in the exam, one dashboard): server process ≈ 1.95 vCPU (vision ≈ 1.35, event loop ≈ 0.6,
+event-loop utilisation 0.85 during the ramp), Postgres ≈ 0.25 vCPU, load generator ≈ 0.2 vCPU; RSS ≈ 700 MB
+(≈ 370 MB before; each vision worker ≈ 100 MB). Postgres: 89 % of `exam_sessions` updates HOT, 0 pool waiters.
+Realtime with one dashboard at N=500: ≈ 37 session summaries/s + 30 events/s + 14 identity checks/s, loaded in
+batches (≈ 7 summaries per minute per candidate: events, identity decisions, 30 s keepalive).
 
 ## 6. Sizing guidance
 
-__SIZING__
+Per concurrent candidate at the default policy (identity sample every 30 s, heartbeat every 5 s), measured:
+≈ 1.7 ms/s of face analysis + ≈ 0.7 ms/s event loop + ≈ 0.3 ms/s Postgres ≈ **2.7 ms CPU per candidate-second**,
+i.e. ≈ 370 candidates per fully busy vCPU. Keep ≥ 30 % headroom for check-in bursts and GC.
+
+| deployment | concurrent candidates | check-in burst |
+|---|---|---|
+| 2 vCPU instance | ≈ 400 | ≈ 4 check-ins/s |
+| 4 vCPU instance | ≈ 800–1,000 | ≈ 8 check-ins/s |
+| 8 vCPU host | ≈ 1,800–2,000 as **two** 4-vCPU instances | ≈ 16 check-ins/s |
+
+One instance's event loop is a single core: at ≈ 0.7 ms/s per candidate it saturates around 1,400 candidates
+whatever the core count, so scale beyond ≈ 1,000–1,200 candidates per instance by adding instances, not cores.
+
+* **Check-ins are the burst**: a check-in costs 3 face analyses (≈ 150 ms CPU) plus ≈ 30 queries. If all
+  candidates start at the same minute, size for `candidates ÷ 60` check-ins/s — or stagger start times
+  (e.g. open the exam 5–10 min before the start). A shorter identity interval scales the analysis cost linearly
+  (15 s ⇒ ≈ 3.4 ms/s per candidate).
+* **When to add instances**: when the `server overloaded (…)` warning (lib/load-monitor.ts, OPERATIONS §5)
+  keeps appearing, when identity samples or check frames answer 503 `vision_busy`, or when you plan for more
+  than the table above. Scale horizontally: N instances behind a load balancer.
+* **Redis** (`REDIS_URL`) is required as soon as there is more than one instance: staff realtime fans out
+  through it and rate limits are shared. It also tells each instance whether any staff dashboard is open
+  anywhere (`PUBSUB NUMSUB`), so instances without watchers do no realtime work. Load is light (one small
+  message per realtime update).
+* **Postgres**: ≈ 1.5 queries per candidate-second (≈ 1,400 queries/s at 1,000 candidates) and ≈ 0.25 vCPU
+  per 1,000 candidates with warm caches; 2 vCPU / 4 GB is plenty for several thousand candidates. Connections =
+  instances × `PG_POOL_MAX` (+ scripts); keep below `max_connections` (default 100). A co-located Postgres over
+  its Unix socket (`?host=/var/run/postgresql`) costs the server ≈ 35 % less CPU per query than TCP. With
+  PgBouncer in transaction mode enable `max_prepared_statements` (the candidate-auth query is prepared).
+* **`VISION_THREADS`** (default CPU count − 1, max 8): CPU threads for face analysis, one single-threaded
+  worker each (best throughput per core). Set it to the CPU count on dedicated vision-heavy instances whose
+  Postgres is elsewhere (+13 % throughput measured on 4 vCPU), lower it when the host also runs other services.
+  `VISION_THREADS_PER_WORKER` > 1 lowers single-image latency at the cost of throughput. `VISION_NICE`
+  (Linux, default 0) lowers the vision threads' priority so request handling wins under CPU saturation — useful
+  on a dedicated host, harmful on a shared one (other processes then win over vision too).
+  `VISION_WORKERS=0` runs inference on the event loop (tools only).
+* **`PG_POOL_MAX`** (default 20): 20 was never exhausted once inference left the event loop (0 waiters up to
+  N=1,200). Raise it only if the overload warning names the database pool while Postgres itself has spare CPU;
+  more connections do not make a CPU-bound event loop faster. `PG_STATEMENT_TIMEOUT_MS` (default 60 s) stops a
+  runaway statement from holding a connection and row locks.
+* **Memory**: ≈ 400 MB + ≈ 100 MB per vision worker; ≈ 0.7 GB at 1,000 candidates on 4 vCPU.

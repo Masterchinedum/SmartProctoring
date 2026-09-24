@@ -30,9 +30,20 @@ NODE_ENV=production DATABASE_URL=... EVIDENCE_KEY=... SESSION_SECRET=... node ap
 * **Browser side**: behavioural analysis runs on the candidate's device (MediaPipe WASM, ~5 fps face
   mesh + ~1 fps object detection). Recommended candidate hardware: any laptop from the last ~6 years,
   Chrome/Edge/Firefox/Safari current versions, 720p webcam.
-* **Server side**: identity verification costs one face detection + one embedding per sample
-  (~25–60 ms CPU). With the default 30 s interval, one vCPU sustains roughly 500–1,000 concurrent
-  candidates; check-ins are burstier (≈10 frames each). Tune `VISION_CONCURRENCY` to the core count.
+* **Server side** (measured, docs/PERFORMANCE.md): a candidate costs ≈ 2.7 ms CPU per second at the default
+  30 s identity interval — ≈ 1.7 ms of face analysis (one detection + one embedding ≈ 50 ms per sample, in
+  worker threads), ≈ 0.7 ms of request handling, ≈ 0.3 ms of Postgres. Plan **≈ 250 concurrent candidates per
+  vCPU**: a 4-vCPU instance carries ≈ 800–1,000 candidates (N=500: heartbeat p95 8 ms, identity sample p95
+  96 ms, check frame p95 98 ms; N=1,000 with check-ins over 2 min: all request p95 < 40 ms). One instance
+  analyses at most ≈ 52 identity samples/s on 4 vCPU and its event loop tops out around 1,200–1,400
+  candidates — beyond that add instances rather than cores.
+* **Check-in bursts**: a check-in is 3 face analyses (≈ 150 ms CPU); a 4-vCPU instance absorbs ≈ 8 check-ins/s
+  on top of running exams. If everyone starts in the same minute, size for `candidates ÷ 60` check-ins/s or open
+  the exam a few minutes early. Check frames are analysed before mid-exam identity samples when busy.
+* **Tuning**: `VISION_THREADS` (default CPU count − 1) = CPU threads for face analysis; `PG_POOL_MAX` (default
+  20 per instance; instances × `PG_POOL_MAX` < Postgres `max_connections`); `PG_STATEMENT_TIMEOUT_MS`
+  (default 60 s). Memory ≈ 400 MB + 100 MB per vision thread. Postgres: ≈ 0.25 vCPU and ≈ 1,500 queries/s per
+  1,000 candidates.
 * **Multiple instances**: run N app containers behind a load balancer, set `REDIS_URL` so realtime
   staff updates fan out across instances and rate-limit counters (login, candidate endpoints, integration API)
   are shared by all instances, and use `STORAGE_DRIVER=s3` (or a shared volume) so every
