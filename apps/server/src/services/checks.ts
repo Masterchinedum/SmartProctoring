@@ -973,6 +973,7 @@ async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string
       startedAt: firstAt[0]?.issuedAt.getTime() ?? check.issuedAt.getTime(),
       endedAt: m.now,
       confidence: why.identity?.confidence ?? null,
+      observation: unverifiableObservation(why.reason, why.qualityOnly === true, Math.ceil(used)),
       details: { purpose: check.purpose, attempts: used, lastReason: why.reason, qualityOnly: why.qualityOnly === true, guidance: why.guidance, livenessPassed: a.livenessOk, ...secondOpinionDetails(a.second) },
       context: { checkId: check.id },
     });
@@ -984,6 +985,21 @@ async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string
     return { outcome: 'held', message: m.session.holdMessage ?? '', guidance: why.guidance, identity: why.identity, idPhoto: null, attemptsRemaining: 0 };
   }
   return { outcome: 'retry', message: why.message, guidance: why.guidance, identity: why.identity, idPhoto: null, attemptsRemaining: remaining(max, used), qualityOnly: why.qualityOnly === true };
+}
+
+/**
+ * Reviewer-facing sentence for a check that ran out of attempts. It separates "the images were too poor to compare"
+ * (not evidence of anything) from "clear images that never matched convincingly" (e.g. a look-alike, or a large
+ * change in appearance), which the catalog's generic wording would otherwise present as an image-quality problem.
+ */
+export function unverifiableObservation(reason: string, qualityOnly: boolean, attempts: number): string | undefined {
+  const n = `${attempts} attempt${attempts === 1 ? '' : 's'}`;
+  if (reason === 'liveness_failed') return `The live-person check (head movements) was not completed after ${n}. This is not evidence of a different person; review the check images.`;
+  if (reason === 'inconclusive' && !qualityOnly)
+    return `The face was clearly visible in the verification images, but after ${n} it never matched the protected identity reference convincingly. Compare the images: this can be a different person who resembles the candidate, or a large change in appearance.`;
+  if (qualityOnly || reason === 'unable_to_verify' || reason === 'reference_not_established')
+    return `After ${n} the verification images were still not clear enough to compare (for example lighting, distance or blur). This is not evidence of a different person.`;
+  return undefined;
 }
 
 const LIVENESS_RETRY_MESSAGE = 'We could not confirm the live head movements. Follow each instruction on screen, moving your head slowly, and try again.';

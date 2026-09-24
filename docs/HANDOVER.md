@@ -58,7 +58,7 @@ samples below a fixed threshold. It sampled only every 30 s, and never specifica
 | Decision | Calibrated likelihood ratios per quality bucket and per reference quality (a dim-enrolled reference is judged against the candidate's own level in that room); per-session normalisation; sequential test with *suspect* (faster sampling, visible to staff) and *confirmed* (hold) levels; poor light capped below confirm | `vision/calibration.ts`, `services/identity-evidence.ts` |
 | Checks (check-in, resume, reconnect) | Adaptive: the server says how many frames it still needs; extends up to 24 frames while usable frames agree; pools usable frames across retries of the same check; quality-only failures cost half an attempt; lighting guidance | `services/checks.ts`, `apps/web/src/candidate/check/` |
 | Liveness | The phone-photo defence is unchanged (landmark parallax on the server). Peak capture with in-place re-prompts. Noise-adaptive pose smoothing in dim light, where browser pose jitters ±8°. Mirror-averaged landmarks so left and right turns measure the same | `vision/liveness.ts`, `engine.ts`, `check/poseFilter.ts` |
-| Staff | Poor-light suspects and second-opinion disagreements shown on the identity tab and timeline; camera & identity self-test page | `apps/web/src/admin` |
+| Staff | Poor-light suspects and second-opinion disagreements are shown on the identity tab and timeline. A check that runs out of attempts now says why: images too poor to compare (not evidence of anything), or clear images that never matched convincingly (compare them; this is how a look-alike at resume shows up). Camera & identity self-test page | `apps/web/src/admin`, `services/checks.ts` |
 | Optional second opinion | AWS Rekognition CompareFaces at check-in / resume / suspected swap. Never flips a clear internal decision; disagreements go to a human. Consent-gated, fail-open, off by default | `apps/server/src/verifiers`, `docs/EXTERNAL_VERIFIER.md` |
 
 **Measured (simulator, `docs/accuracy/identity-v2.md`).** 140 public photos of 43 people, including 3 families,
@@ -76,7 +76,30 @@ rendered as laptop-webcam frames:
 
 **Measured end to end (real Chromium, real server, webcam-realistic video; `docs/accuracy/end-to-end.md`).**
 
-__E2E_SUMMARY__
+Final run: commit 98b49a4, calibration webcam-v2.1, 3 runs per case (96 runs), on a quiet 4-CPU machine.
+**Every target was met.** The full e2e suite then passed 65/65.
+
+| What the owner saw / what matters | Result now |
+|---|---|
+| Returning student resumes on the **first attempt** | 3/3 in every condition: same room, typical light (median 6.9 s); dim (24 s); window behind (24 s); side lamp (7 s); 640×480 dim (24 s); another day (6.4 s); another day + other room + USB camera (6.5 s); active liveness (24 s) |
+| … with active liveness in dim light / another room | 2/3 first attempt, 1/3 second attempt (max 110 s) |
+| … another day **and** poor light | Weak: 1/9 pass. The rest get lighting guidance and retry; never called a different person |
+| **Swap 5 s after exam start** (stand up / sit down, cross-dissolve with the face never leaving view, slide; 720p and 480p) | **Held 12/12**, median 5.0 s after the new person is in view (max 11.1 s) |
+| Family member (father replaces son) | Held 6/6 mid-exam (≈ 5 s); 3/3 at resume |
+| Look-alike swap in a dim room at 640×480 | Visible to staff 3/3, 1.4–1.5 s after the swap (non-matching checks, *suspect*, uncertain event); never auto-held, by design |
+| Look-alike at resume | Never passes (12/12); held for review after the attempts |
+| Genuine 5-minute sessions with light changes, sway, glances (6) | 213/213 samples matched; **0 false alarms**, 0 *could not verify* |
+| Liveness | Turning head 9/9 (7 first attempt); still photo never passes (6/6) |
+| Staff camera-test page | A different person confirmed 2.5–3 s after sitting down |
+
+Bugs the realistic run found, all fixed:
+- the head-turn check stalled in dim light because browser pose jitters ±8°; fixed with pose smoothing;
+- backlit resumes burned all attempts; fixed with the gate change, frame pooling and half-weight retries;
+- a dim-room look-alike was labelled a match; fixed with the v2.1 reference-conditioned evidence;
+- the face detector's yaw read one side larger than the other; fixed with the symmetric pose.
+
+These are simulated webcam videos of 5 public identities with synthetic head turns, not production rates. See
+`accuracy/end-to-end.md` §4–5 for the remaining gaps.
 
 **Recogniser research** (`docs/accuracy/recognizer.md`, `tools/recognizer/`). SFace was fine-tuned for dim and
 backlit webcams with label-free self-distillation on public-domain portraits, keeping the same architecture and

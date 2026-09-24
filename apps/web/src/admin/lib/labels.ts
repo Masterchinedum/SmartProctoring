@@ -225,3 +225,17 @@ export function describeDetailValue(key: string, value: unknown): string | null 
   }
   return null;
 }
+
+/**
+ * Reviewer guidance for an event: the catalog note, except where the event's details say the generic note would
+ * mislead. A check that ran out of attempts with CLEAR images that never matched convincingly (a look-alike, or a
+ * large change in appearance) is not an image-quality problem, so "this is NOT evidence of a different person" is
+ * replaced by a prompt to compare the images.
+ */
+export function reviewerGuidance(event: { type: string; details?: Record<string, unknown> | null }): string | null {
+  const d = event.details ?? {};
+  if (event.type === 'identity_unverifiable' && d.lastReason === 'inconclusive' && d.qualityOnly === false) {
+    return 'The images were clear enough to compare but never matched the reference convincingly. Compare the reference and the check images side by side: consider a different person who resembles the candidate, and a large change in appearance (glasses, hair, weight, age of the reference). Release, re-verify or escalate as appropriate.';
+  }
+  return (EVENT_CATALOG as Record<string, { reviewerNote?: string }>)[event.type]?.reviewerNote ?? null;
+}

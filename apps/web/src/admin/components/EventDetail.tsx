@@ -7,7 +7,7 @@ import { useDialogFocus } from '../../lib/a11y';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { applyEvent, qk } from '../api/queries';
 import { formatDateTime, formatPercent } from '../lib/format';
-import { contextLabel, PERIOD_LABELS, SOURCE_LABELS, TRIGGER_LABELS } from '../lib/labels';
+import { contextLabel, PERIOD_LABELS, reviewerGuidance, SOURCE_LABELS, TRIGGER_LABELS } from '../lib/labels';
 import { mismatchEvidence } from '../lib/cameraTest';
 import { CategoryBadge, ReviewBadge, SeverityBadge } from './Badges';
 import { ErrorState, KeyValueTable, Loading } from './Common';
@@ -57,6 +57,7 @@ export function EventDrawer({ eventId, sessionId, initial, onClose }: { eventId:
 export function EventDetailBody({ event, sessionId }: { event: EventDTO; sessionId: string }) {
   const catalog = EVENT_CATALOG[event.type];
   const canCompare = COMPARABLE_TYPES.includes(event.type);
+  const guidance = reviewerGuidance(event);
   return (
     <div className="stack event-detail">
       <div>
@@ -101,10 +102,10 @@ export function EventDetailBody({ event, sessionId }: { event: EventDTO; session
         </Link>
       ) : null}
 
-      {catalog?.reviewerNote ? (
+      {guidance ? (
         <div className="guidance">
           <div className="guidance-title">Reviewer guidance</div>
-          {catalog.reviewerNote}
+          {guidance}
         </div>
       ) : null}
 
