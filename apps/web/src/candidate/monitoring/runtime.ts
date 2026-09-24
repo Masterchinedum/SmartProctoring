@@ -277,9 +277,8 @@ export class MonitoringRuntime {
       }
       // No decodable frame yet (or the detector hiccuped): keep time moving at >= 1 Hz without a frame.
       if (!obs && stale) obs = { t, camera: 'live', frame: null, faces: [], objects: null, fps: Math.round(this.fps() * 10) / 10 };
-    } else if (camState !== 'live' && stale) {
-      obs = { t, camera: camState, frame: null, faces: [], objects: null, fps: 0 };
-    } else if (camState !== 'live' && nowMs - this.lastIngestAt >= LOOP_INTERVAL_MS) {
+    } else if (camState !== 'live') {
+      // Camera off / muted / no permission: report the state every tick so disconnects are timed.
       obs = { t, camera: camState, frame: null, faces: [], objects: null, fps: 0 };
     }
     if (!obs) return;

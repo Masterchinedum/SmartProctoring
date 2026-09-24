@@ -1,3 +1,5 @@
+import { rgbaToGray } from '@sp/detection';
+
 /**
  * Canvas helpers: small grayscale frames for metrics and JPEG snapshots of the UN-MIRRORED camera
  * image (previews are mirrored with CSS only; nothing we analyse or upload is mirrored).
@@ -20,11 +22,6 @@ function make2d(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasR
   return ctx ? { canvas, ctx } : null;
 }
 
-/** Converts RGBA pixels to BT.601 luma. */
-function toGray(rgba: Uint8ClampedArray, out: Uint8Array): void {
-  for (let i = 0, j = 0; i < out.length; i++, j += 4) out[i] = (77 * rgba[j] + 150 * rgba[j + 1] + 29 * rgba[j + 2]) >> 8;
-}
-
 /** Reusable sampler producing a 160×120 grayscale frame from the video. */
 export class GraySampler {
   private readonly c = make2d(ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
@@ -34,9 +31,7 @@ export class GraySampler {
     try {
       this.c.ctx.drawImage(video, 0, 0, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
       const img = this.c.ctx.getImageData(0, 0, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
-      const data = new Uint8Array(ANALYSIS_WIDTH * ANALYSIS_HEIGHT);
-      toGray(img.data, data);
-      return { data, width: ANALYSIS_WIDTH, height: ANALYSIS_HEIGHT };
+      return { data: rgbaToGray(img.data, ANALYSIS_WIDTH, ANALYSIS_HEIGHT), width: ANALYSIS_WIDTH, height: ANALYSIS_HEIGHT };
     } catch {
       return null;
     }
