@@ -13,8 +13,13 @@ export const identityPolicySchema = z.object({
   livenessSteps: z.number().int().min(2).max(4).default(2),
   /** Compare live candidate to the candidate's approved ID photo (if one exists). */
   idPhotoComparison: z.enum(['off', 'advisory', 'required']).default('advisory'),
-  /** Seconds between routine identity samples while the exam is active. */
-  periodicCheckIntervalSec: z.number().int().min(10).max(600).default(30),
+  /** Seconds between routine identity samples while the exam is active (after the start-up window). */
+  periodicCheckIntervalSec: z.number().int().min(5).max(600).default(15),
+  /** Faster sampling right after the exam starts / resumes (swaps are most likely then). */
+  startupIntervalSec: z.number().int().min(3).max(120).default(6),
+  startupWindowSec: z.number().int().min(0).max(1800).default(180),
+  /** Frames per identity sample (captured within ~0.6 s and decided together). */
+  burstSize: z.number().int().min(1).max(5).default(3),
   /** What happens when there is strong evidence of a different person. */
   onMismatch: z.enum(['hold_for_review', 'flag_only']).default('hold_for_review'),
   /** Failed "unable to verify" attempts during a check before routing to human review. */

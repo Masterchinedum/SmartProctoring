@@ -81,6 +81,10 @@ export function episodeToUpsert(ep: EpisodeUpdate, instanceId: string): EventUps
 
 /** Importance of identity-sample triggers when several are waiting (only the most important is kept). */
 export const SAMPLE_PRIORITY: Record<IdentityCheckTrigger, number> = {
+  track_break: 9,
+  appearance_change: 8,
+  exam_start: 7,
+  server_request: 6,
   follow_up: 6,
   camera_reconnect: 5,
   after_multiple_people: 4,

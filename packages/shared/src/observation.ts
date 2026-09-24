@@ -113,7 +113,7 @@ export interface EpisodeUpdate {
 
 /** Side-effect requests from the engine to the host (not events). */
 export type EngineSignal =
-  | { kind: 'identity_sample'; trigger: 'face_return' | 'camera_reconnect' | 'after_multiple_people' | 'after_obstruction' | 'periodic' }
+  | { kind: 'identity_sample'; trigger: 'face_return' | 'camera_reconnect' | 'after_multiple_people' | 'after_obstruction' | 'periodic' | 'track_break' | 'appearance_change' }
   | { kind: 'candidate_prompt'; message: string; severity: 'info' | 'warning'; key: string }
   | { kind: 'candidate_prompt_clear'; key: string };
 

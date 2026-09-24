@@ -23,6 +23,10 @@ export const IDENTITY_CHECK_TRIGGERS = [
   'after_obstruction', // face visible again after obstruction / covered lens
   'follow_up', // confirmation sample requested by the server after a non-match
   'id_photo', // comparison against the approved ID photo
+  'exam_start', // immediately when the exam starts (and after every resume / reconnect)
+  'track_break', // the face track was interrupted, even briefly (possible quick swap)
+  'appearance_change', // the face region's appearance / geometry changed abruptly without a track break
+  'server_request', // the server asked for a faster sample (evidence inconclusive)
 ] as const;
 export type IdentityCheckTrigger = (typeof IDENTITY_CHECK_TRIGGERS)[number];
 

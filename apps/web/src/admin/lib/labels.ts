@@ -61,6 +61,10 @@ export const TRIGGER_LABELS: Record<IdentityCheckTrigger, string> = {
   after_obstruction: 'After obstruction',
   follow_up: 'Follow-up sample',
   id_photo: 'ID photo comparison',
+  exam_start: 'Exam start',
+  track_break: 'Face track interrupted',
+  appearance_change: 'Appearance changed',
+  server_request: 'Extra sample (server request)',
 };
 
 export const PERIOD_LABELS: Record<PeriodKind, string> = {

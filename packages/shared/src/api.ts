@@ -189,8 +189,10 @@ export interface StartCheckResponse {
   /** null when liveness policy is 'off'. */
   liveness: LivenessChallengeDTO | null;
   attemptsRemaining: number;
-  /** Frames needed for the identity portion (frontal). */
+  /** Frames needed for the identity portion (frontal) — the minimum; see CheckFrameResponse.progress. */
   frontalFramesRequired: number;
+  /** Upper bound of frontal frames the server accepts for this check (adaptive collection). */
+  maxFrontalFrames?: number;
 }
 
 /**
@@ -204,6 +206,25 @@ export interface CheckFrameResponse {
   /** For liveness step frames: whether this frame satisfies the step. */
   stepSatisfied?: boolean;
   measured?: { yawDeg: number; pitchDeg: number };
+  /**
+   * Adaptive frame collection: the server's running assessment after this frame. The client keeps sending
+   * frontal frames while `frontalNeeded > 0` (up to StartCheckResponse.maxFrontalFrames), re-prompts any
+   * liveness step whose `satisfied` is false, and calls /complete when `canComplete` is true.
+   */
+  progress?: CheckProgressDTO;
+}
+
+export interface CheckProgressDTO {
+  /** Usable frontal frames received so far. */
+  frontalAccepted: number;
+  /** More usable frontal frames wanted before the server can decide (0 = enough). */
+  frontalNeeded: number;
+  /** Resume / reconnect / reverify: running identity assessment against the protected reference. */
+  identity: 'pending' | 'likely_match' | 'likely_mismatch' | 'uncertain' | null;
+  /** Liveness step status (index as in the challenge). */
+  steps: { index: number; satisfied: boolean }[];
+  /** The client may call /complete now (enough evidence either way, or limits reached). */
+  canComplete: boolean;
 }
 
 /** POST /api/candidate/checks/:checkId/complete */
@@ -314,13 +335,32 @@ export const identitySampleQuerySchema = z.object({
   sampleId: z.string().uuid(),
   trigger: z.enum(IDENTITY_CHECK_TRIGGERS),
   capturedAt: z.coerce.number(),
+  /** Burst of 1–5 frames captured within ~0.6 s, sent as separate requests sharing burstId (sampleId per frame). */
+  burstId: z.string().uuid().optional(),
+  burstIndex: z.coerce.number().int().min(0).max(4).optional(),
+  burstSize: z.coerce.number().int().min(1).max(5).optional(),
 });
 export interface IdentitySampleResponse {
+  /** Decision for this request: per-frame for intermediate burst frames, aggregated on the burst's last frame. */
   result: IdentityResultDTO;
   /** Server wants another sample soon (to confirm a non-match). */
   followUpInMs: number | null;
   status: SessionStatus;
   hold: HoldDTO | null;
+  /** Burst bookkeeping (present when the request carried burstId). */
+  burst?: { id: string; received: number; size: number; complete: boolean };
+  /** Server-driven cadence: when set, send the next routine sample after this many ms (faster while uncertain). */
+  nextSampleInMs?: number | null;
+  /** Accumulated identity-continuity evidence for the session (for the candidate debug overlay / staff). */
+  evidence?: IdentityEvidenceDTO;
+}
+
+export interface IdentityEvidenceDTO {
+  /** Posterior probability that the person in view is NOT the enrolled candidate, 0..1. */
+  swapProbability: number;
+  state: 'consistent' | 'monitoring' | 'suspect' | 'confirmed_mismatch';
+  /** Samples contributing to the current evidence window. */
+  samples: number;
 }
 
 /** POST /api/candidate/pause */
@@ -800,4 +840,26 @@ export const settingsUpdateSchema = z.object({
 });
 export const legalHoldSchema = z.object({ enabled: z.boolean() });
 export const staffSubmitSchema = z.object({ note: z.string().max(1000).optional() });
+/**
+ * Staff camera self-test (no data stored; transient in-memory gallery per staff user, 15 min TTL):
+ *   POST /api/admin/tools/identity-test?testId=<uuid>&mode=enroll|probe|reset   body image/jpeg (none for reset)
+ * Lets an operator validate the identity pipeline with their own webcam: enroll a person, then probe with
+ * the same or another person and see quality, similarity and the decision the exam would make.
+ */
+export interface IdentityTestResponse {
+  testId: string;
+  mode: 'enroll' | 'probe' | 'reset';
+  quality: FaceQuality | null;
+  guidance: string[];
+  enrolledFrames: number;
+  /** Probe only: similarity to the enrolled template (max over gallery / template, as the engine uses). */
+  similarity: number | null;
+  decision: IdentityDecision | null;
+  /** Probe only: per-sample log-likelihood ratio (positive = evidence of a different person). */
+  llr: number | null;
+  /** Probe only: accumulated evidence across the probes of this test (resets on enroll). */
+  evidence: IdentityEvidenceDTO | null;
+  timingsMs: { analyze: number };
+}
+
 export const extendTimeSchema = z.object({ minutes: z.number().int().min(1).max(24 * 60), note: z.string().max(1000).optional() });

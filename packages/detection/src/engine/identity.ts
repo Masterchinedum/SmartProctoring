@@ -3,6 +3,8 @@ import type { EngineSignal } from '@sp/shared';
 export type IdentityTrigger = Extract<EngineSignal, { kind: 'identity_sample' }>['trigger'];
 
 const PRIORITY: Record<IdentityTrigger, number> = {
+  track_break: 7,
+  appearance_change: 6,
   camera_reconnect: 5,
   after_multiple_people: 4,
   face_return: 3,
