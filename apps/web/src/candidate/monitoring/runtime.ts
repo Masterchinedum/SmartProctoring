@@ -387,6 +387,10 @@ export class MonitoringRuntime {
     } else if (camState !== 'live') {
       // Camera off / muted / no permission: report the state every tick so disconnects are timed.
       obs = { t, camera: camState, frame: null, faces: [], objects: null, fps: 0 };
+    } else if (cam.isVideoReady()) {
+      // Camera analysis unavailable in this browser (degraded monitoring): identity samples still go to the
+      // server — full frames (no face box), at the routine interval and whenever the server asks.
+      this.sampleWithoutVision(video, nowMs);
     }
     if (!obs) return;
     this.lastIngestAt = nowMs;
@@ -401,6 +405,19 @@ export class MonitoringRuntime {
     void this.handleOutput(out);
     // Identity bursts ride on analysed frames: each burst frame is a new camera frame with exactly one usable face.
     if (obs.frame && source) this.offerBurstFrame(source, obs.faces, t);
+  }
+
+  /** Routine timer for sampling without in-browser analysis (null until the first such tick). */
+  private lastNoVisionRoutineAt: number | null = null;
+
+  private sampleWithoutVision(video: HTMLVideoElement, nowMs: number): void {
+    const iv = Math.max(5, this.deps.policy.identity.periodicCheckIntervalSec) * 1000;
+    if (this.lastNoVisionRoutineAt === null) this.lastNoVisionRoutineAt = nowMs; // the exam-start burst comes first
+    else if (nowMs - this.lastNoVisionRoutineAt >= iv) {
+      this.lastNoVisionRoutineAt = nowMs;
+      this.requestSample('periodic', 'host');
+    }
+    if (this.bursts.wantsFrame(true)) void this.bursts.addFrame(captureFaceCrop(video, null).then((c) => c?.blob ?? null), this.now());
   }
 
   private offerBurstFrame(source: HTMLVideoElement | HTMLCanvasElement, faces: FaceObservation[], t: number): void {

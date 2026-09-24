@@ -104,3 +104,36 @@ export function selfTestErrorMessage(err: unknown): string | null {
   if (e.status === 415) return 'The server did not accept the camera image (JPEG expected).';
   return e.message ?? null;
 }
+
+/* ------------------------------------------------------------------ identity_mismatch evidence (event drawer) */
+
+export interface MismatchSampleRow {
+  at: number | null;
+  trigger: string | null;
+  similarity: number | null;
+  bucket: string | null;
+  llr: number | null;
+}
+
+export interface MismatchEvidence {
+  posterior: number | null;
+  llrSum: number | null;
+  samples: MismatchSampleRow[];
+}
+
+const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+
+/**
+ * The accumulated identity evidence stored with an identity_mismatch event by the v2 engine
+ * (details.perSample / llrSum / posterior); null for events without it (older events, ID-photo comparisons).
+ */
+export function mismatchEvidence(details: Record<string, unknown> | null | undefined): MismatchEvidence | null {
+  const per = details?.perSample;
+  if (!Array.isArray(per) || per.length === 0) return null;
+  const samples = per
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+    .map((x) => ({ at: num(x.at), trigger: str(x.trigger), similarity: num(x.similarity), bucket: str(x.bucket), llr: num(x.llr) }))
+    .sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  return { posterior: num(details?.posterior), llrSum: num(details?.llrSum), samples };
+}

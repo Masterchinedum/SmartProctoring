@@ -59,6 +59,11 @@ export interface AnalyzeOptions {
    * (returned in `ImageAnalysis.embeddingVariants`, keyed by recipe id). Costs one SFace run per view.
    */
   embeddingVariants?: EmbeddingRecipe[];
+  /**
+   * Override the engine's low-light second detection pass for this call (default: the engine setting, on).
+   * Uploaded ID photos turn it off: a face only an enhancement can find is not a usable reference photo.
+   */
+  enhanceLowLight?: boolean;
 }
 
 export interface VisionService {

@@ -22,7 +22,23 @@ import { createVisionService } from '../vision/service';
 import type { VisionService } from '../vision/types';
 import { defaultFacesetsDir, loadFaceset } from './datasets';
 import { buildWebcamData, type WebcamDataOptions } from './webcam-eval';
-import { buildWebcamReport, currentPipeline, formatWebcamReport, legacyPipeline } from './webcam-report';
+import { buildWebcamReport, currentPipeline, formatWebcamReport, legacyPipeline, type EngineHooks } from './webcam-report';
+
+/**
+ * The identity engine's production decision logic (per-session normalisation, check assessment), loaded
+ * dynamically so the evaluation measures what ships without a compile-time dependency on the service layer.
+ */
+export async function loadEngineHooks(): Promise<EngineHooks | undefined> {
+  try {
+    const m = (await import('../services/identity-evidence')) as Record<string, unknown>;
+    const comparisonLLR = m.comparisonLLR as EngineHooks['comparisonLLR'] | undefined;
+    const assessCheck = m.assessCheck as EngineHooks['assessCheck'] | undefined;
+    if (typeof comparisonLLR === 'function' && typeof assessCheck === 'function') return { comparisonLLR, assessCheck };
+  } catch {
+    // service layer not available: plain calibrated LLR only
+  }
+  return undefined;
+}
 
 type Engine = 'v1' | 'v2';
 
@@ -112,7 +128,9 @@ export async function runWebcamCli(argv: string[]): Promise<number> {
   const load = (e: Engine) => buildWebcamData(noVision, { ...dataOptions(e, quick, facesetDir), cachedOnly: true });
   const v2 = await load('v2');
   const parts = [...(engines.includes('v1') ? [{ pipeline: legacyPipeline('default'), data: await load('v1') }] : []), { pipeline: currentPipeline('default'), data: v2 }];
-  const report = buildWebcamReport(v2, parts, { runs: values.runs ? Number(values.runs) : 100 });
+  const hooks = await loadEngineHooks();
+  if (!hooks) log('identity-engine hooks not found: reporting the plain calibrated evidence only');
+  const report = buildWebcamReport(v2, parts, { runs: values.runs ? Number(values.runs) : 100, hooks });
   console.log(formatWebcamReport(report));
   log(`done in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
   if (values.out) {

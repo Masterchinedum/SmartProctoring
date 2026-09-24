@@ -23,6 +23,10 @@ import {
   type SequentialRule,
   type SequentialSimResult,
   type Session,
+  checkAttempts,
+  type BurstTrial,
+  type CheckAttempt,
+  type FrameTrial,
 } from './webcam-metrics';
 import { WEBCAM_CONDITIONS, type WebcamCondition } from './webcam-sim';
 
@@ -45,6 +49,24 @@ export function currentPipeline(embedding = 'default'): PipelineSpec {
   };
 }
 
+/**
+ * Production decision logic of the identity engine (services/identity-evidence.ts), injected so the report measures
+ * what ships: per-session normalised per-sample LLR and the check assessment. Optional — without it the report uses
+ * the plain calibrated `sampleLLR` and a template-score rule for checks.
+ */
+export interface EngineHooks {
+  comparisonLLR(similarity: number, bucket: QualityBucket, baseline: { mean: number; sd: number; n: number } | null, context: 'continuous' | 'relaxed'): { llr: number };
+  assessCheck(frames: { usable: boolean; similarity: number | null; bucket: QualityBucket | null; llr: number }[], opts?: { atLimit?: boolean }): { status: string };
+}
+
+export interface CheckOutcomeRates {
+  n: number;
+  pass: number | null;
+  uncertain: number | null;
+  pending: number | null;
+  mismatch: number | null;
+}
+
 export interface PipelineReport {
   pipeline: string;
   enrolment: Record<string, { ok: number; total: number }>;
@@ -64,7 +86,17 @@ export interface PipelineReport {
     /** Swap while the evidence window holds strong genuine evidence (just above `clear`). */
     impostorAfterGenuine?: SequentialSimResult;
     perCondition: Record<string, { falseConfirmPer1000h: number | undefined; medianSamples: number | null | undefined; detectedWithin3: number | undefined; family3: number | undefined }>;
+    /** Same simulation with the identity engine's per-session normalisation ('continuous' context). */
+    normalised?: {
+      genuineSamePhoto: SequentialSimResult;
+      genuineCrossPhoto: SequentialSimResult;
+      impostor: SequentialSimResult;
+      impostorFamily: SequentialSimResult;
+      perCondition: Record<string, { falseConfirmPer1000h: number | undefined; medianSamples: number | null | undefined; detectedWithin3: number | undefined; family3: number | undefined }>;
+    };
   };
+  /** Checks decided by the identity engine's assessCheck ('relaxed' context): 3 frames, and 6 frames (adaptive). */
+  engineChecks?: Record<string, Record<'genuineSame' | 'genuineCross' | 'impostor' | 'family', { frames3: CheckOutcomeRates; frames6: CheckOutcomeRates }>>;
 }
 
 export interface WebcamReport {
@@ -76,7 +108,30 @@ export interface WebcamReport {
   assumptions: string[];
 }
 
-function sequentialFor(p: PipelineSpec, data: WebcamData, runs: number): PipelineReport['sequential'] & { sdWithin: Record<QualityBucket, number>; fits?: BucketFit[] } {
+type SimSet = Omit<PipelineReport['sequential'], 'rule' | 'normalised'>;
+
+function simulateAll(sessions: Session[], rule: SequentialRule, sd: Record<QualityBucket, number>, runs: number): SimSet {
+  const by = (k: (s: Session) => boolean) => sessions.filter(k);
+  const g = (ss: Session[]) => simulateSequential(ss, rule, sd, { mode: 'genuine', runs });
+  const i = (ss: Session[], startSum?: number) => simulateSequential(ss, rule, sd, { mode: 'impostor', runs: Math.max(5, Math.round(runs / 10)), startSum });
+  const perCondition: PipelineReport['sequential']['perCondition'] = {};
+  for (const c of WEBCAM_CONDITIONS) {
+    const gs = g(by((s) => s.kind === 'genuine_same' && s.condition === c));
+    const im = i(by((s) => s.kind.startsWith('impostor') && s.condition === c));
+    const fam = i(by((s) => s.kind === 'impostor_family' && s.condition === c));
+    perCondition[c] = { falseConfirmPer1000h: gs.falseConfirmPer1000h, medianSamples: im.medianSamples, detectedWithin3: im.detectedWithin?.[3], family3: fam.detectedWithin?.[3] };
+  }
+  return {
+    genuineSamePhoto: g(by((s) => s.kind === 'genuine_same')),
+    genuineCrossPhoto: g(by((s) => s.kind === 'genuine_cross')),
+    impostor: i(by((s) => s.kind.startsWith('impostor'))),
+    impostorFamily: i(by((s) => s.kind === 'impostor_family')),
+    impostorAfterGenuine: rule.type === 'sprt' ? i(by((s) => s.kind.startsWith('impostor')), CALIBRATION.sprt.clear + 0.01) : undefined,
+    perCondition,
+  };
+}
+
+function sequentialFor(p: PipelineSpec, data: WebcamData, runs: number, hooks?: EngineHooks): PipelineReport['sequential'] & { sdWithin: Record<QualityBucket, number>; fits?: BucketFit[] } {
   const all = scoreTrials(data, p, ['good', 'typical', 'dim', 'backlit']);
   // A session compares probes with a reference enrolled in the same or a better condition.
   const sessions = sessionsFrom(all.bursts.filter((b) => b.enrol === 'good' || b.enrol === 'typical' || b.enrol === b.condition));
@@ -86,31 +141,54 @@ function sequentialFor(p: PipelineSpec, data: WebcamData, runs: number): Pipelin
   const rule: SequentialRule =
     p.scoring === 'legacy'
       ? { type: 'consecutive', mismatch: p.mismatch, confirmations: DEFAULT_IDENTITY_THRESHOLDS.mismatchConfirmations }
-      : { type: 'sprt', llr: sampleLLR, params: { ...CALIBRATION.sprt, llrClamp: CALIBRATION.llrClamp } };
-  const by = (k: (s: Session) => boolean) => sessions.filter(k);
-  const g = (ss: Session[]) => simulateSequential(ss, rule, sd, { mode: 'genuine', runs });
-  const i = (ss: Session[], startSum?: number) => simulateSequential(ss, rule, sd, { mode: 'impostor', runs: Math.max(20, Math.round(runs / 5)), startSum });
-  const perCondition: PipelineReport['sequential']['perCondition'] = {};
-  for (const c of WEBCAM_CONDITIONS) {
-    const gs = g(by((s) => s.kind === 'genuine_same' && s.condition === c));
-    const im = i(by((s) => s.kind.startsWith('impostor') && s.condition === c));
-    const fam = i(by((s) => s.kind === 'impostor_family' && s.condition === c));
-    perCondition[c] = { falseConfirmPer1000h: gs.falseConfirmPer1000h, medianSamples: im.medianSamples, detectedWithin3: im.detectedWithin?.[3], family3: fam.detectedWithin?.[3] };
+      : { type: 'sprt', llr: (sim, b) => sampleLLR(sim, b), params: { ...CALIBRATION.sprt, llrClamp: CALIBRATION.llrClamp } };
+  const plain = simulateAll(sessions, rule, sd, runs);
+  let normalised: PipelineReport['sequential']['normalised'];
+  if (hooks && rule.type === 'sprt') {
+    const nrule: SequentialRule = { ...rule, llr: (sim, b, session) => hooks.comparisonLLR(sim, b, session.refBaseline, 'continuous').llr };
+    const { impostorAfterGenuine: _ignored, ...rest } = simulateAll(sessions, nrule, sd, runs);
+    void _ignored;
+    normalised = rest;
   }
   return {
     rule: rule.type === 'sprt' ? `windowed SPRT ${JSON.stringify(rule.params)}` : `${rule.confirmations} consecutive samples < ${rule.mismatch}`,
-    genuineSamePhoto: g(by((s) => s.kind === 'genuine_same')),
-    genuineCrossPhoto: g(by((s) => s.kind === 'genuine_cross')),
-    impostor: i(by((s) => s.kind.startsWith('impostor'))),
-    impostorFamily: i(by((s) => s.kind === 'impostor_family')),
-    impostorAfterGenuine: rule.type === 'sprt' ? i(by((s) => s.kind.startsWith('impostor')), CALIBRATION.sprt.clear + 0.01) : undefined,
-    perCondition,
+    ...plain,
+    normalised,
     sdWithin: sd,
     fits: p.scoring === 'template' ? fitBuckets(all.bursts.filter((b) => b.enrol === 'good' || b.enrol === 'typical')) : undefined,
   };
 }
 
-export function pipelineReport(data: WebcamData, p: PipelineSpec, opts: { runs?: number } = {}): PipelineReport {
+function rates(statuses: string[]): CheckOutcomeRates {
+  const n = statuses.length;
+  const pc = (st: string) => (n ? Math.round((1000 * statuses.filter((x) => x === st).length) / n) / 10 : null);
+  return { n, pass: pc('likely_match'), uncertain: pc('uncertain'), pending: pc('pending'), mismatch: pc('likely_mismatch') };
+}
+
+/** Resume / reconnect checks decided by the identity engine's assessCheck, per probe condition. */
+function engineChecks(frames: FrameTrial[], bursts: BurstTrial[], hooks: EngineHooks): NonNullable<PipelineReport['engineChecks']> {
+  const decide = (a: CheckAttempt) =>
+    hooks.assessCheck(
+      a.frames.map((f) => ({
+        usable: f.usable,
+        similarity: f.similarity,
+        bucket: f.bucket,
+        llr: f.usable && f.similarity != null && f.bucket ? hooks.comparisonLLR(f.similarity, f.bucket, a.refBaseline, 'relaxed').llr : 0,
+      })),
+      { atLimit: true },
+    ).status;
+  const a3 = checkAttempts(frames, bursts, 1);
+  const a6 = checkAttempts(frames, bursts, 2);
+  const out: NonNullable<PipelineReport['engineChecks']> = {};
+  for (const c of ['all', ...WEBCAM_CONDITIONS]) {
+    const f = (list: CheckAttempt[], kinds: string[]) => rates(list.filter((a) => (c === 'all' || a.condition === c) && kinds.includes(a.kind)).map(decide));
+    const row = (kinds: string[]) => ({ frames3: f(a3, kinds), frames6: f(a6, kinds) });
+    out[c] = { genuineSame: row(['genuine_same']), genuineCross: row(['genuine_cross']), impostor: row(['impostor', 'impostor_family']), family: row(['impostor_family']) };
+  }
+  return out;
+}
+
+export function pipelineReport(data: WebcamData, p: PipelineSpec, opts: { runs?: number; hooks?: EngineHooks } = {}): PipelineReport {
   const enrolment: PipelineReport['enrolment'] = {};
   for (const c of ['good', 'typical', 'dim', 'backlit'] as WebcamCondition[]) {
     const refs = scoreTrials(data, p, [c]).refs;
@@ -120,7 +198,7 @@ export function pipelineReport(data: WebcamData, p: PipelineSpec, opts: { runs?:
   const same = ['dim', 'backlit'].flatMap((c) =>
     scoreTrials(data, p, [c as WebcamCondition]).bursts.filter((b) => b.condition === c),
   );
-  const seq = sequentialFor(p, data, opts.runs ?? 100);
+  const seq = sequentialFor(p, data, opts.runs ?? 100, p.scoring === 'template' ? opts.hooks : undefined);
   const { sdWithin, fits, ...sequential } = seq;
   return {
     pipeline: p.name,
@@ -131,10 +209,11 @@ export function pipelineReport(data: WebcamData, p: PipelineSpec, opts: { runs?:
     buckets: fits,
     sdWithin,
     sequential,
+    ...(opts.hooks && p.scoring === 'template' ? { engineChecks: engineChecks(normal.frames, normal.bursts, opts.hooks) } : {}),
   };
 }
 
-export function buildWebcamReport(data: WebcamData, pipelines: (PipelineSpec | { pipeline: PipelineSpec; data: WebcamData })[], opts: { runs?: number } = {}): WebcamReport {
+export function buildWebcamReport(data: WebcamData, pipelines: (PipelineSpec | { pipeline: PipelineSpec; data: WebcamData })[], opts: { runs?: number; hooks?: EngineHooks } = {}): WebcamReport {
   const ids = new Map<string, number>();
   for (const s of data.sources) ids.set(s.identity, (ids.get(s.identity) ?? 0) + 1);
   const ms = data.records.map((r) => r.analyzeMs).filter((v) => Number.isFinite(v));
@@ -179,6 +258,18 @@ export function formatWebcamReport(r: WebcamReport): string {
     out.push(`  family impostors: median ${s.impostorFamily.medianSamples} samples, within 3 ${s.impostorFamily.detectedWithin?.[3]}%, never ${s.impostorFamily.notDetected}%`);
     if (s.impostorAfterGenuine) out.push(`  swap after strong genuine evidence: median ${s.impostorAfterGenuine.medianSamples} samples, within 3 ${s.impostorAfterGenuine.detectedWithin?.[3]}%`);
     out.push(`  per condition: ${Object.entries(s.perCondition).map(([c, v]) => `${c}: FA ${v.falseConfirmPer1000h}/1000h, median ${v.medianSamples}, <=3 ${v.detectedWithin3}%, family <=3 ${v.family3}%`).join(' | ')}`);
+    if (s.normalised) {
+      const n = s.normalised;
+      out.push(`  with the engine's per-session normalisation (continuous): FA same-photo ${n.genuineSamePhoto.falseConfirmPer1000h}/1000h (bad ${n.genuineSamePhoto.badSessions}/${n.genuineSamePhoto.sessions}), cross-photo ${n.genuineCrossPhoto.falseConfirmPer1000h}; swap median ${n.impostor.medianSamples} samples (${n.impostor.medianSeconds} s), <=3 ${n.impostor.detectedWithin?.[3]}%, never ${n.impostor.notDetected}%; family median ${n.impostorFamily.medianSamples}, <=3 ${n.impostorFamily.detectedWithin?.[3]}%, never ${n.impostorFamily.notDetected}%`);
+      out.push(`    per condition: ${Object.entries(n.perCondition).map(([c, v]) => `${c}: FA ${v.falseConfirmPer1000h}, median ${v.medianSamples}, <=3 ${v.detectedWithin3}%, family <=3 ${v.family3}%`).join(' | ')}`);
+    }
+    if (p.engineChecks) {
+      out.push(`\nChecks decided by the identity engine (assessCheck, 'relaxed'): pass / uncertain / pending / MISMATCH %, 3 frames | 6 frames`);
+      const f = (r: CheckOutcomeRates) => `${r.pass ?? '-'}/${r.uncertain ?? '-'}/${r.pending ?? '-'}/${r.mismatch ?? '-'} (n ${r.n})`;
+      for (const [c, v] of Object.entries(p.engineChecks)) {
+        out.push(`  ${c.padEnd(8)} genuine same ${f(v.genuineSame.frames3)} | ${f(v.genuineSame.frames6)}   genuine cross ${f(v.genuineCross.frames3)} | ${f(v.genuineCross.frames6)}   impostor ${f(v.impostor.frames3)} | ${f(v.impostor.frames6)}   family ${f(v.family.frames3)} | ${f(v.family.frames6)}`);
+      }
+    }
   }
   return out.join('\n');
 }

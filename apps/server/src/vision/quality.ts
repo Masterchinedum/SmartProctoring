@@ -8,17 +8,28 @@ import type { DetectedFace, HeadPose, QualityGate } from './types';
 import { interEyeDistance } from './detect';
 
 /**
- * Default gate for live webcam frames. Tuned on real photos plus synthetic degradations
- * (see docs/accuracy/identity.md); every value can be overridden per call via `AnalyzeOptions.gate`.
+ * Default gate for live webcam frames (identity v2). It only refuses frames on which face RECOGNITION is not
+ * reliable — measured on simulated laptop-webcam frames as the similarity of a frame to the same person's
+ * good-light template collapsing (docs/accuracy/identity-v2.md §4):
+ *   - face-region contrast (luma std) < 7: genuine similarity p05 0.03-0.10 (vs 0.65+ at >= 15), impostors alike
+ *   - face-region brightness < 40 (unchanged from v1: below it 33-50 % of genuine dim-room frames collapse to
+ *     similarity < 0.2 against the person's own good-light template) or > 235 (clipped)
+ *   - inter-eye distance < 20 px (at 20-24 px genuine similarity is still p05 0.91 in good light)
+ *   - detector score < 0.65 (occluded / barely a face), |yaw| > 30 deg or pitch outside [-35, 25] deg
+ *     (SFace degrades beyond ~35 deg; five-point pose jitters by ~3-6 deg), strong blur, cut-off, extra faces.
+ * Everything else is usable and graded good / fair / poor by `qualityBucket` (calibration.ts); poor frames are
+ * weak evidence (their calibrated LLR is small) instead of "unable to verify". The v1 gate (QUALITY_GATE_V1)
+ * refused ~100 % of dim-room and backlit frames on photometry alone. Every value can be overridden per call
+ * via `AnalyzeOptions.gate`.
  */
 export const QUALITY_GATE: Readonly<QualityGate> = Object.freeze({
-  minDetectionScore: 0.75,
-  minInterEyePx: 28,
+  minDetectionScore: 0.65,
+  minInterEyePx: 20,
   minBrightness: 40,
-  maxBrightness: 220,
-  minContrast: 18,
+  maxBrightness: 235,
+  minContrast: 7,
   minSharpness: 80,
-  maxAbsYawDeg: 25,
+  maxAbsYawDeg: 30,
   minPitchDeg: -35,
   maxPitchDeg: 25,
   secondaryFaceSizeRatio: 0.4,
@@ -354,6 +365,23 @@ export function guidanceForIssues(issues: readonly QualityIssue[]): string[] {
   }
   return out;
 }
+
+/**
+ * Candidate guidance for a USABLE frame of poor quality (dim, flat or backlit face, small face): the frame
+ * still counts as (weak) evidence, but better light or a closer position makes checks faster. Empty for
+ * good frames. Thresholds follow the 'poor' bucket of calibration.ts.
+ */
+export function advisoryGuidance(q: FaceQuality): string[] {
+  if (!q.usable) return [];
+  const issues: QualityIssue[] = [];
+  if (q.brightness < ADVISORY.minBrightness) issues.push('too_dark');
+  else if (q.contrast < ADVISORY.minContrast) issues.push('low_contrast');
+  if (q.interEyePx < ADVISORY.minInterEyePx) issues.push('face_too_small');
+  return guidanceForIssues(issues);
+}
+
+/** Soft limits behind `advisoryGuidance` (below them a usable frame is in the 'poor' bucket). */
+export const ADVISORY = Object.freeze({ minBrightness: 50, minContrast: 12, minInterEyePx: 24 });
 
 /**
  * Scalar "how good is this frame for enrolment/evidence" score in ~[0, 1]; used to pick the best

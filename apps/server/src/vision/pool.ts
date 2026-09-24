@@ -164,7 +164,13 @@ export class VisionWorkerPool {
     const req: TaskRequest = {
       type: 'analyze',
       image,
-      opts: { embed: opts.embed, faceCrop: opts.faceCrop, gate: opts.gate, ...(opts.embeddingVariants ? { embeddingVariants: opts.embeddingVariants } : {}) },
+      opts: {
+        embed: opts.embed,
+        faceCrop: opts.faceCrop,
+        gate: opts.gate,
+        ...(opts.embeddingVariants ? { embeddingVariants: opts.embeddingVariants } : {}),
+        ...(opts.enhanceLowLight != null ? { enhanceLowLight: opts.enhanceLowLight } : {}),
+      },
     };
     return this.submit(req, opts.priority ?? 'interactive').then((a) => reviveAnalysis(a as ImageAnalysis));
   }

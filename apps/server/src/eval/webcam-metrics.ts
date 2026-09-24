@@ -48,8 +48,16 @@ export interface Reference {
   ok: boolean;
   embeddings: Float32Array[];
   template: Float32Array | null;
-  /** Leave-one-out self-similarity of the gallery frames (session baseline). */
+  /** Leave-one-out self-similarity of the gallery frames (mean). */
   selfSimilarity: number | null;
+  /** Session baseline (leave-one-out scores of the gallery frames against the rest): mean, sd, n. */
+  baseline: SessionBaselineLike | null;
+}
+
+export interface SessionBaselineLike {
+  mean: number;
+  sd: number;
+  n: number;
 }
 
 const REF_MAX_YAW = 20;
@@ -85,7 +93,7 @@ export function buildReferences(data: WebcamData, p: PipelineSpec): Reference[] 
         frames.map((f) => asAnalysis(f, p)),
         { ...DEFAULT_IDENTITY_THRESHOLDS, match: p.match, mismatch: p.mismatch },
       );
-      refs.push({ ...base, ok: res.ok, embeddings: res.embeddings, template: res.ok ? templateFrom(res.embeddings) : null, selfSimilarity: null });
+      refs.push({ ...base, ok: res.ok, embeddings: res.embeddings, template: res.ok ? templateFrom(res.embeddings) : null, selfSimilarity: null, baseline: null });
     } else {
       const usable = frames
         .map((f) => ({ f, q: p.quality(f), e: f.embeddings?.[p.embedding] }))
@@ -93,11 +101,14 @@ export function buildReferences(data: WebcamData, p: PipelineSpec): Reference[] 
         .map((x) => x.e!);
       const ok = usable.length >= p.enrolMin;
       let self: number | null = null;
+      let baseline: SessionBaselineLike | null = null;
       if (ok && usable.length >= 2) {
         const loo = usable.map((e, i) => cosineSimilarity(e, templateFrom(usable.filter((_, j) => j !== i))));
         self = loo.reduce((a, b) => a + b, 0) / loo.length;
+        const sd = Math.sqrt(loo.reduce((a, b) => a + (b - self!) ** 2, 0) / Math.max(1, loo.length - 1));
+        baseline = { mean: self, sd, n: loo.length };
       }
-      refs.push({ ...base, ok, embeddings: ok ? usable : [], template: ok ? templateFrom(usable) : null, selfSimilarity: self });
+      refs.push({ ...base, ok, embeddings: ok ? usable : [], template: ok ? templateFrom(usable) : null, selfSimilarity: self, baseline });
     }
   }
   return refs;
@@ -172,6 +183,9 @@ export interface BurstTrial {
   scene: number;
   usableFrames: number;
   similarity: number | null;
+  /** Leave-one-out self-similarity of the reference gallery (session baseline), template scoring only. */
+  refSelf: number | null;
+  refBaseline: SessionBaselineLike | null;
   /** Check outcome for these frames (legacy: aggregateFrames; template: template score vs labels). */
   decision: IdentityDecision;
   bucket: QualityBucket | null;
@@ -242,6 +256,8 @@ export function scoreTrials(data: WebcamData, p: PipelineSpec, enrolConditions: 
         scene: b.scene,
         usableFrames: usable.length,
         similarity: s,
+        refSelf: ref.selfSimilarity,
+        refBaseline: ref.baseline,
         decision,
         bucket: modeBucket(buckets),
       });
@@ -381,6 +397,27 @@ export interface SprtParams {
   clear: number;
   maxSamples: number;
   llrClamp: number;
+  /** Positive evidence from 'poor' samples counts at most this much in the window (poor light alone cannot confirm). */
+  maxPoorEvidence?: number;
+}
+
+/** One sample's evidence: clamped LLR and the bucket it came from. */
+export interface SampleEvidence {
+  llr: number;
+  bucket?: QualityBucket | null;
+  /** Unusable sample: takes time but adds nothing to the window (as in the engine). */
+  unusable?: boolean;
+}
+
+/** Window sum with the poor-evidence cap (calibration.ts `windowEvidence` does the same for the engine). */
+export function windowSumCapped(win: readonly SampleEvidence[], maxPoor: number | undefined): number {
+  let sum = 0;
+  let poorPos = 0;
+  for (const e of win) {
+    if (e.bucket === 'poor' && e.llr > 0 && maxPoor != null) poorPos += e.llr;
+    else sum += e.llr;
+  }
+  return sum + (maxPoor != null ? Math.min(maxPoor, poorPos) : 0);
 }
 
 export interface SamplingSchedule {
@@ -403,16 +440,26 @@ export function sampleTimes(s: SamplingSchedule, hours = 1): number[] {
   return out;
 }
 
-/** Windowed accumulator exactly as documented in calibration.ts (`updateEvidence`). */
-export function runAccumulator(llrs: Iterable<number>, sprt: SprtParams, start: number[] = []): { confirmAt: number | null; suspectAt: number | null } {
-  const win: number[] = [...start];
+/** Windowed accumulator as documented in calibration.ts (CALIBRATION.sprt). */
+export function runAccumulator(
+  llrs: Iterable<number | SampleEvidence>,
+  sprt: SprtParams,
+  start: number[] = [],
+): { confirmAt: number | null; suspectAt: number | null } {
+  const win: SampleEvidence[] = start.map((llr) => ({ llr }));
   let i = 0;
   let suspectAt: number | null = null;
-  for (const raw of llrs) {
+  for (const item of llrs) {
+    if (typeof item !== 'number' && item.unusable) {
+      i++;
+      continue;
+    }
+    const raw = typeof item === 'number' ? item : item.llr;
+    const bucket = typeof item === 'number' ? null : (item.bucket ?? null);
     const l = Math.max(-sprt.llrClamp, Math.min(sprt.llrClamp, raw));
-    win.push(l);
+    win.push({ llr: l, bucket });
     if (win.length > sprt.maxSamples) win.shift();
-    const sum = win.reduce((a, b) => a + b, 0);
+    const sum = windowSumCapped(win, sprt.maxPoorEvidence);
     if (sum >= sprt.confirm) return { confirmAt: i, suspectAt: suspectAt ?? i };
     if (sum >= sprt.suspect && suspectAt == null) suspectAt = i;
     if (sum <= sprt.clear) win.length = 0;
@@ -432,6 +479,11 @@ export interface Session {
   usableRate: number;
   /** Similarities of the usable bursts (one per scene). */
   sims: number[];
+  /** Reference gallery self-similarity (session baseline); null for legacy references. */
+  refSelf: number | null;
+  refBaseline: SessionBaselineLike | null;
+  /** The usable bursts' (similarity, bucket) — samples are bootstrapped from these. */
+  bursts: { sim: number; bucket: QualityBucket }[];
 }
 
 /** Group burst trials into sessions: one reference x one probe photo x condition x resolution (scenes = samples). */
@@ -441,13 +493,14 @@ export function sessionsFrom(bursts: readonly BurstTrial[]): Session[] {
     const key = `${b.refKey}|${b.probeKey}`;
     let s = m.get(key);
     if (!s) {
-      s = { key, kind: b.kind, condition: b.condition, resolution: b.resolution, enrol: b.enrol, bucket: 'good', usableRate: 0, sims: [], total: 0, usable: 0 };
+      s = { key, kind: b.kind, condition: b.condition, resolution: b.resolution, enrol: b.enrol, bucket: 'good', usableRate: 0, sims: [], refSelf: b.refSelf, refBaseline: b.refBaseline, bursts: [], total: 0, usable: 0 };
       m.set(key, s);
     }
     s.total++;
     if (b.similarity == null || !b.bucket || b.usableFrames === 0) continue;
     s.usable++;
     s.sims.push(b.similarity);
+    s.bursts.push({ sim: b.similarity, bucket: b.bucket });
     if (b.bucket === 'poor' || (b.bucket === 'fair' && s.bucket === 'good')) s.bucket = b.bucket;
   }
   return [...m.values()].map(({ total, usable, ...rest }) => ({ ...rest, usableRate: total ? usable / total : 0 }));
@@ -527,11 +580,14 @@ export interface SequentialSimResult {
   medianSeconds?: number | null;
   p90Seconds?: number | null;
   notDetected?: number;
+  /** Impostor: % reaching at least 'suspect' within 3 samples / within 40 samples. */
+  suspectWithin3?: number;
+  suspectEver?: number;
 }
 
 /** Decision rule of the sequential swap test under evaluation. */
 export type SequentialRule =
-  | { type: 'sprt'; llr: (s: number, b: QualityBucket) => number; params: SprtParams }
+  | { type: 'sprt'; llr: (s: number, b: QualityBucket, session: Session) => number; params: SprtParams }
   /** Identity v1: `confirmations` consecutive per-sample mismatches (a match or unusable sample resets). */
   | { type: 'consecutive'; mismatch: number; confirmations: number };
 
@@ -559,18 +615,28 @@ export function simulateSequential(
   const schedule = opts.schedule ?? DEFAULT_SCHEDULE;
   const times = sampleTimes(schedule, opts.mode === 'genuine' ? (opts.hours ?? 1) : 1);
   const n = opts.mode === 'genuine' ? times.length : 40;
-  const runOne = (s: Session, mu: number): { confirmAt: number | null; suspectAt: number | null } => {
+  // Each sample: one of the session's usable bursts at random (its similarity and bucket) plus sample-to-sample noise.
+  const draw = (s: Session): { sim: number; bucket: QualityBucket } => {
+    const b = s.bursts[Math.min(s.bursts.length - 1, Math.floor(uni() * s.bursts.length))];
+    return { sim: b.sim + rng() * sdWithin[b.bucket], bucket: b.bucket };
+  };
+  const runOne = (s: Session, _mu: number): { confirmAt: number | null; suspectAt: number | null } => {
     if (rule.type === 'sprt') {
       const seq = (function* () {
-        for (let i = 0; i < n; i++) yield uni() < s.usableRate && s.sims.length ? rule.llr(mu + rng() * sdWithin[s.bucket], s.bucket) : 0;
+        for (let i = 0; i < n; i++) {
+          if (uni() < s.usableRate && s.bursts.length) {
+            const d = draw(s);
+            yield { llr: rule.llr(d.sim, d.bucket, s), bucket: d.bucket };
+          } else yield { llr: 0, unusable: true };
+        }
       })();
       const start = opts.startSum != null && opts.startSum !== 0 ? [opts.startSum] : [];
       return runAccumulator(seq, rule.params, start);
     }
     let streak = 0;
     for (let i = 0; i < n; i++) {
-      const usable = uni() < s.usableRate && s.sims.length > 0;
-      const sim = usable ? mu + rng() * sdWithin[s.bucket] : null;
+      const usable = uni() < s.usableRate && s.bursts.length > 0;
+      const sim = usable ? draw(s).sim : null;
       if (sim != null && sim < rule.mismatch) streak++;
       else streak = 0;
       if (streak >= rule.confirmations) return { confirmAt: i, suspectAt: i - rule.confirmations + 1 };
@@ -603,12 +669,18 @@ export function simulateSequential(
   }
   const delays: number[] = [];
   let never = 0;
+  let sus3 = 0;
+  let susEver = 0;
   for (const s of sessions) {
     const mu = s.sims.length ? s.sims.reduce((a, b) => a + b, 0) / s.sims.length : 0;
     for (let r = 0; r < runs; r++) {
       const res = runOne(s, mu);
       if (res.confirmAt == null) never++;
       else delays.push(res.confirmAt + 1);
+      if (res.suspectAt != null) {
+        susEver++;
+        if (res.suspectAt < 3) sus3++;
+      }
     }
   }
   const total = sessions.length * runs;
@@ -631,15 +703,49 @@ export function simulateSequential(
     medianSeconds: sec(med),
     p90Seconds: sec(p90),
     notDetected: Math.round((1000 * never) / Math.max(1, total)) / 10,
+    suspectWithin3: Math.round((1000 * sus3) / Math.max(1, total)) / 10,
+    suspectEver: Math.round((1000 * susEver) / Math.max(1, total)) / 10,
   };
 }
 
 /** LLR function from explicit bucket models (for what-if studies with candidate models). */
-export function llrFromModels(models: Record<QualityBucket, BucketModel>, clamp: number, monotone = true): (s: number, b: QualityBucket) => number {
+export function llrFromModels(models: Record<QualityBucket, BucketModel>, clamp: number, monotone = true): (s: number, b: QualityBucket, session?: Session) => number {
   return (s, b) => {
     const m = models[b];
     const x = monotone ? Math.min(s, m.genuine.mean) : s;
     const v = rawLLR(Math.max(x, monotone ? -1 : x), m);
     return Math.max(-clamp, Math.min(clamp, v));
   };
+}
+
+/** Frames of one check attempt: the frames of one burst (one scene) against one reference, or two scenes pooled. */
+export interface CheckAttempt {
+  kind: TrialKind;
+  condition: WebcamCondition;
+  resolution: WebcamResolution;
+  enrol: WebcamCondition;
+  frames: FrameTrial[];
+  refBaseline: SessionBaselineLike | null;
+}
+
+export function checkAttempts(frames: readonly FrameTrial[], bursts: readonly BurstTrial[], scenesPerAttempt: 1 | 2 = 1): CheckAttempt[] {
+  const selfOf = new Map<string, SessionBaselineLike | null>();
+  for (const b of bursts) selfOf.set(`${b.refKey}|${b.probeKey}`, b.refBaseline);
+  const m = new Map<string, CheckAttempt>();
+  for (const f of frames) {
+    // burstKey = identity|enrolCondition|photoKey|condition|resolution|scene
+    const parts = f.burstKey.split('|');
+    const scene = parts[parts.length - 1];
+    const base = parts.slice(0, -1).join('|');
+    const key = scenesPerAttempt === 2 ? base : `${base}|${scene}`;
+    let a = m.get(key);
+    if (!a) {
+      const refKey = `${parts[0]}|${parts[1]}`;
+      const probeKey = parts.slice(2, 5).join('|');
+      a = { kind: f.kind, condition: f.condition, resolution: f.resolution, enrol: f.enrol, frames: [], refBaseline: selfOf.get(`${refKey}|${probeKey}`) ?? null };
+      m.set(key, a);
+    }
+    a.frames.push(f);
+  }
+  return [...m.values()];
 }

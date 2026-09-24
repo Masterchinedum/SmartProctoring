@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { barPercent, evidenceTone, selfTestErrorMessage, similarityBand, summarizeProbes, type ProbeRecord } from './cameraTest';
+import { barPercent, evidenceTone, mismatchEvidence, selfTestErrorMessage, similarityBand, summarizeProbes, type ProbeRecord } from './cameraTest';
 import { NAV, staffPageTitle } from '../components/Shell';
 
 describe('camera & identity self-test helpers', () => {
@@ -43,5 +43,25 @@ describe('camera & identity self-test helpers', () => {
     expect(item).toMatchObject({ label: 'Camera & identity test', group: 'Tools' });
     expect(item?.adminOnly).toBeFalsy();
     expect(staffPageTitle('/admin/tools/camera-test')).toBe('Camera & identity test — SmartProctoring staff');
+  });
+});
+
+describe('mismatchEvidence (identity_mismatch details from the v2 engine)', () => {
+  it('lists the samples in time order with the posterior and LLR sum', () => {
+    const ev = mismatchEvidence({
+      posterior: 0.97,
+      llrSum: 5.4,
+      perSample: [
+        { identityCheckId: 'b', at: 20, similarity: 0.11, bucket: 'far', llr: 3.1, trigger: 'periodic' },
+        { identityCheckId: 'a', at: 10, similarity: 0.12, bucket: 'far', llr: 2.3, trigger: 'appearance_change' },
+      ],
+    });
+    expect(ev?.posterior).toBe(0.97);
+    expect(ev?.samples.map((s) => s.trigger)).toEqual(['appearance_change', 'periodic']);
+  });
+
+  it('is null for events without per-sample evidence', () => {
+    expect(mismatchEvidence({ against: 'id_photo' })).toBeNull();
+    expect(mismatchEvidence(null)).toBeNull();
   });
 });

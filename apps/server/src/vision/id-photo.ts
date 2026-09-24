@@ -33,7 +33,7 @@ export const ID_PHOTO_GUIDANCE: Record<QualityIssue, string> = {
 export const ID_PHOTO_MIN_TEMPLATE_STABILITY = 0.85;
 
 export async function processIdPhoto(vision: VisionService, image: Buffer): Promise<IdPhotoResult> {
-  const analysis = await vision.analyze(image, { embed: true, faceCrop: true, gate: ID_PHOTO_QUALITY_GATE });
+  const analysis = await vision.analyze(image, { embed: true, faceCrop: true, gate: ID_PHOTO_QUALITY_GATE, enhanceLowLight: false });
   let quality = analysis.quality;
   let accepted = quality.usable && analysis.embedding != null;
   let stability: number | null = null;
@@ -68,7 +68,7 @@ export async function templateStability(vision: VisionService, image: Buffer, em
   ];
   let min = 1;
   for (const v of variants) {
-    const a = await vision.analyze(v, { embed: true, gate: ID_PHOTO_QUALITY_GATE });
+    const a = await vision.analyze(v, { embed: true, gate: ID_PHOTO_QUALITY_GATE, enhanceLowLight: false });
     const sim = a.embedding ? cosine(embedding, a.embedding) : 0;
     min = Math.min(min, sim);
   }

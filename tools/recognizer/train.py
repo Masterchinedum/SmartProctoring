@@ -19,10 +19,13 @@ Loss (L2-normalised embeddings s = student, t = teacher target, over a batch of 
       + w_rel * mean_{i != j} (<s(deg_i), t_j> - <t_i, t_j>)^2      keep the teacher's impostor geometry
       + w_rel * mean_{i != j} (<s(clean_i), t_j> - <t_i, t_j>)^2
       (+ w_pix * mean|E(clean) - clean| / 255 for method B)
+      (+ w_nce * InfoNCE(s(deg_i) vs the teacher's clean embeddings of ALL training portraits, both orientations,
+         temperature tau): instance discrimination against fixed prototypes, still label-free; counteracts the
+         regression-to-the-mean of the cosine term, which raises impostor similarity on uninformative inputs)
 
 Validation (early stopping; never the evaluation identities): held-out portraits, degraded crops vs clean teacher
-embeddings: mean cosine, rank-1 identification among the validation gallery and the 99th-percentile impostor
-similarity, plus clean-input compatibility <s(clean), t(clean)>.
+embeddings: mean cosine, rank-1 identification among the validation gallery, TAR at FAR 1e-2 / 1e-3 (degraded probe
+vs clean template), 99th-percentile impostor similarity, and clean-input compatibility <s(clean), t(clean)>.
 """
 from __future__ import annotations
 
@@ -216,6 +219,10 @@ def validate(model: nn.Module, data: Data, max_items: int = 900) -> dict:
     cl = data.clean_t[gal_ids, 0]
     sc = torch.cat([F.normalize(model(cl[i : i + 64]), dim=1) for i in range(0, len(cl), 64)])
     compat = (sc * gallery).sum(1)
+    tar = {}
+    for far in (1e-2, 1e-3):
+        thr = torch.quantile(imp[torch.randperm(len(imp), generator=torch.Generator().manual_seed(0))[:200000]], 1 - far)
+        tar[f"tar_far{far:.0e}"] = float((genuine >= thr).float().mean())
     tags = data.deg_tags[js]
     per = {c: float(genuine[torch.from_numpy(np.char.startswith(tags.astype(str), c))].mean()) for c in ("good", "typical", "dim", "backlit", "sidelit")}
     return {
@@ -227,6 +234,7 @@ def validate(model: nn.Module, data: Data, max_items: int = 900) -> dict:
         "clean_compat_mean": float(compat.mean()),
         "clean_compat_min": float(compat.min()),
         "per_condition_genuine": per,
+        **tar,
         "n": len(js),
     }
 
@@ -244,6 +252,8 @@ def main() -> None:
     ap.add_argument("--w-clean", type=float, default=1.0)
     ap.add_argument("--w-rel", type=float, default=5.0)
     ap.add_argument("--w-pix", type=float, default=0.1)
+    ap.add_argument("--w-nce", type=float, default=0.0, help="InfoNCE of s(deg) against the teacher's clean embeddings of all training portraits")
+    ap.add_argument("--tau", type=float, default=0.07)
     ap.add_argument("--p-crop-aug", type=float, default=0.25, help="fraction of the degraded batch replaced by crop-level degradations of clean crops")
     ap.add_argument("--val-every", type=int, default=100)
     ap.add_argument("--patience", type=int, default=5)
@@ -270,7 +280,11 @@ def main() -> None:
     base_val = validate(model, data)
     print("step 0 val", json.dumps(base_val), flush=True)
     history = [{"step": 0, **base_val}]
-    score = lambda v: v["genuine_mean"] + 0.5 * v["rank1"] - max(0.0, 0.985 - v["clean_compat_mean"]) * 10  # noqa: E731
+    # early-stopping score: verification-relevant (TAR at low FAR on validation portraits), with a penalty when the
+    # student drifts from the teacher on clean input (compatibility with existing templates)
+    score = lambda v: v["tar_far1e-03"] + 0.5 * v["tar_far1e-02"] + 0.25 * v["genuine_mean"] - max(0.0, 0.985 - v["clean_compat_mean"]) * 10  # noqa: E731
+    bank = data.t[torch.from_numpy(data.train_src.astype(np.int64))].reshape(-1, 128)  # (2 * n_train, 128) fixed prototypes
+    bank_pos = {int(s_): k for k, s_ in enumerate(data.train_src)}
     best = score(base_val)
     best_step, bad = 0, 0
     torch.save({k: v for k, v in model.state_dict().items()}, out / "best.pt")
@@ -297,6 +311,10 @@ def main() -> None:
         l_clean = (1 - (sc * tc).sum(1)).mean()
         l_rel = rel_loss(sd, t) + rel_loss(sc, tc)
         loss = l_cos + args.w_clean * l_clean + args.w_rel * l_rel
+        if args.w_nce:
+            target = torch.tensor([2 * bank_pos[int(s_)] for s_ in srcs]) + fl
+            l_nce = F.cross_entropy(sd @ bank.T / args.tau, target)
+            loss = loss + args.w_nce * l_nce
         if args.method == "B" and args.w_pix:
             l_pix = (enhanced[args.batch :] - clean).abs().mean() / 255
             loss = loss + args.w_pix * l_pix
@@ -312,6 +330,7 @@ def main() -> None:
             history.append({"step": step, **v})
             sc_ = score(v)
             print(f"step {step} val {json.dumps(v)} score {sc_:.4f} (best {best:.4f} @ {best_step})", flush=True)
+            torch.save(model.state_dict(), out / "last.pt")
             if sc_ > best:
                 best, best_step, bad = sc_, step, 0
                 torch.save(model.state_dict(), out / "best.pt")

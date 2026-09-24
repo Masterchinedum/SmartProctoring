@@ -97,7 +97,8 @@ test('an answer typed just after the pause was approved is kept and saved after 
     let holdHeartbeats = true;
     await c.page.route('**/api/candidate/heartbeat', async (route) => {
       while (holdHeartbeats) await new Promise((r) => setTimeout(r, 100));
-      await route.continue();
+      // The route may already be removed (unroute below) when the held request is released.
+      await route.continue().catch(() => undefined);
     });
     await staff.decidePause(s.sessionId, request.id, true);
     await c.page.waitForTimeout(1_000);

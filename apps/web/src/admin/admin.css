@@ -499,4 +499,4 @@ details.policy-group > summary h3 { display: inline-flex; }
 .camtest-box { position: absolute; border: 3px solid #3ccf6e; border-radius: 6px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4); pointer-events: none; transition: all 0.12s linear; }
 .camtest-box-warn { border-color: #f0a830; }
 @media (prefers-reduced-motion: reduce) { .camtest-box { transition: none; } }
-.nav-group { margin: 10px 12px 2px; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
+.nav-group { margin: 10px 10px 2px; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #9aa5ba; }

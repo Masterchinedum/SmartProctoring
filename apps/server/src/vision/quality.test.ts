@@ -1,7 +1,20 @@
 import { QUALITY_GUIDANCE } from '@sp/shared';
 import { describe, expect, it } from 'vitest';
 import { syntheticLandmarks } from './fake';
-import { assessQuality, guidanceForIssues, ID_PHOTO_QUALITY_GATE, isCutOff, poseWithinGate, QUALITY_GATE, regateQuality, resolveGate, type FaceRegionStats, type QualityInput } from './quality';
+import {
+  advisoryGuidance,
+  assessQuality,
+  guidanceForIssues,
+  ID_PHOTO_QUALITY_GATE,
+  isCutOff,
+  poseWithinGate,
+  QUALITY_GATE,
+  QUALITY_GATE_V1,
+  regateQuality,
+  resolveGate,
+  type FaceRegionStats,
+  type QualityInput,
+} from './quality';
 import type { DetectedFace, HeadPose } from './types';
 
 function face(cx: number, cy: number, w: number, score = 0.93): DetectedFace {
@@ -41,21 +54,41 @@ describe('assessQuality', () => {
   });
 
   it('flags small, cut-off, turned, dark, bright, low-contrast, blurry and low-confidence faces', () => {
-    expect(assessQuality(input({ faces: [face(320, 240, 60)] })).issues).toContain('face_too_small');
+    expect(assessQuality(input({ faces: [face(320, 240, 45)] })).issues).toContain('face_too_small');
     expect(assessQuality(input({ faces: [face(20, 240, 200)] })).issues).toContain('face_cut_off');
     expect(assessQuality(input({ pose: { yawDeg: 31, pitchDeg: 0, rollDeg: 0 } })).issues).toContain('face_turned');
     expect(assessQuality(input({ pose: { yawDeg: 0, pitchDeg: -40, rollDeg: 0 } })).issues).toContain('face_turned');
     expect(assessQuality(input({ pose: { yawDeg: 0, pitchDeg: 30, rollDeg: 0 } })).issues).toContain('face_turned');
-    expect(assessQuality(input({ stats: { ...GOOD_STATS, brightness: 30 } })).issues).toContain('too_dark');
-    expect(assessQuality(input({ stats: { ...GOOD_STATS, brightness: 235 } })).issues).toContain('too_bright');
-    expect(assessQuality(input({ stats: { ...GOOD_STATS, contrast: 10 } })).issues).toContain('low_contrast');
+    expect(assessQuality(input({ stats: { ...GOOD_STATS, brightness: 20 } })).issues).toContain('too_dark');
+    expect(assessQuality(input({ stats: { ...GOOD_STATS, brightness: 240 } })).issues).toContain('too_bright');
+    expect(assessQuality(input({ stats: { ...GOOD_STATS, contrast: 5 } })).issues).toContain('low_contrast');
     expect(assessQuality(input({ stats: { ...GOOD_STATS, sharpness: 20 } })).issues).toEqual(['blurry']);
     expect(assessQuality(input({ faces: [face(320, 240, 200, 0.62)] })).issues).toEqual(['low_detection_confidence']);
   });
 
+  it('keeps dim-room, flat and small-but-recognisable faces usable (identity v2 gate)', () => {
+    // A typical dim-room webcam face: dark, low contrast, noisy (high raw Laplacian), 24 px between the eyes.
+    const dim = assessQuality(input({ faces: [face(320, 240, 60)], stats: { brightness: 45, contrast: 9, sharpness: 1500, rawLaplacianVar: 400 } }));
+    expect(dim.issues).toEqual([]);
+    expect(dim.usable).toBe(true);
+    // The v1 gate refused the same frame on photometry alone.
+    const v1 = assessQuality(input({ faces: [face(320, 240, 60)], stats: { brightness: 45, contrast: 9, sharpness: 1500, rawLaplacianVar: 400 } }), QUALITY_GATE_V1);
+    expect(v1.issues).toEqual(['low_contrast', 'face_too_small']);
+    expect(assessQuality(input({ pose: { yawDeg: 28, pitchDeg: 0, rollDeg: 0 } })).usable).toBe(true);
+  });
+
   it('does not add "blurry" on top of "too dark" (guidance stays actionable)', () => {
-    const q = assessQuality(input({ stats: { brightness: 20, contrast: 8, sharpness: 5, rawLaplacianVar: 1 } }));
+    const q = assessQuality(input({ stats: { brightness: 20, contrast: 5, sharpness: 5, rawLaplacianVar: 1 } }));
     expect(q.issues).toEqual(['too_dark', 'low_contrast']);
+  });
+
+  it('advisory guidance for usable but poor frames (dim, flat, small) and none for good frames', () => {
+    expect(advisoryGuidance(assessQuality(input()))).toEqual([]);
+    const dim = assessQuality(input({ stats: { brightness: 45, contrast: 9, sharpness: 1500, rawLaplacianVar: 400 } }));
+    expect(advisoryGuidance(dim)).toEqual([QUALITY_GUIDANCE.too_dark]);
+    const flat = assessQuality(input({ stats: { brightness: 90, contrast: 9, sharpness: 900, rawLaplacianVar: 400 } }));
+    expect(advisoryGuidance(flat)).toEqual([QUALITY_GUIDANCE.low_contrast]);
+    expect(advisoryGuidance({ ...dim, usable: false })).toEqual([]);
   });
 
   it('orders issues most-fundamental first', () => {
@@ -69,7 +102,9 @@ describe('gates', () => {
   it('pose window is asymmetric (frontal YuNet faces read slightly "down")', () => {
     expect(poseWithinGate(0, -30)).toBe(true);
     expect(poseWithinGate(0, 24)).toBe(true);
-    expect(poseWithinGate(26, 0)).toBe(false);
+    expect(poseWithinGate(29, 0)).toBe(true);
+    expect(poseWithinGate(31, 0)).toBe(false);
+    expect(poseWithinGate(26, 0, QUALITY_GATE_V1)).toBe(false);
     expect(poseWithinGate(0, -36)).toBe(false);
   });
 

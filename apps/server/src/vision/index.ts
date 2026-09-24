@@ -15,6 +15,7 @@ export {
   buildReference,
   aggregateFrames,
   CONFIDENCE_MARGIN,
+  MISMATCH_MIN_LLR,
   INCONCLUSIVE_GUIDANCE,
   NO_EMBEDDING_GUIDANCE,
   REFERENCE_MIN_FRAMES,
@@ -60,6 +61,8 @@ export {
   poseWithinGate,
   FRONTAL_PITCH_DEG,
   guidanceForIssues,
+  advisoryGuidance,
+  ADVISORY,
   qualityScore,
 } from './quality';
 export { processIdPhoto, ID_PHOTO_GUIDANCE } from './id-photo';

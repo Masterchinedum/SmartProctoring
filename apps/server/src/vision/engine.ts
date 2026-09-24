@@ -66,6 +66,17 @@ async function createSession(path: string, options: ort.InferenceSession.Session
   return model ? ort.InferenceSession.create(model, options) : ort.InferenceSession.create(path, options);
 }
 
+/**
+ * Faces found only on the enhanced (low-light) detection pass were not detectable in the original frame: their
+ * detector score is capped below the 'fair' quality bucket (calibration.ts), so they count as poor-quality
+ * evidence however confident the detector was on the enhanced copy.
+ */
+export const ENHANCED_DETECTION_MAX_SCORE = 0.79;
+
+function capEnhancedScores(faces: DetectedFace[]): DetectedFace[] {
+  return faces.map((f) => (f.score > ENHANCED_DETECTION_MAX_SCORE ? { ...f, score: ENHANCED_DETECTION_MAX_SCORE } : f));
+}
+
 export class VisionEngine {
   private readonly gate: QualityGate;
   private readonly detectThreshold: number;
@@ -117,7 +128,7 @@ export class VisionEngine {
   async detect(image: Buffer): Promise<DetectedFace[]> {
     const img = await decodeImage(image, this.maxDecodeSide);
     const faces = await this.detectDecoded(img);
-    return faces.length === 0 && this.enhanceLowLight ? this.detectDecoded(img, true) : faces;
+    return faces.length === 0 && this.enhanceLowLight ? capEnhancedScores(await this.detectDecoded(img, true)) : faces;
   }
 
   async analyze(image: Buffer, opts: AnalyzeOptions = {}): Promise<ImageAnalysis> {
@@ -125,7 +136,7 @@ export class VisionEngine {
     const img = await decodeImage(image, this.maxDecodeSide);
     const whole = wholeImageStats(img);
     let faces = await this.detectDecoded(img);
-    if (faces.length === 0 && this.enhanceLowLight) faces = await this.detectDecoded(img, true);
+    if (faces.length === 0 && (opts.enhanceLowLight ?? this.enhanceLowLight)) faces = capEnhancedScores(await this.detectDecoded(img, true));
     const primary = faces[0] ?? null;
 
     let aligned: AlignedFace | null = null;

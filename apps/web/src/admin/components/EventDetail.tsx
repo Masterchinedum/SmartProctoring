@@ -8,6 +8,7 @@ import { api, errorMessage, shouldRetry } from '../api/client';
 import { applyEvent, qk } from '../api/queries';
 import { formatDateTime, formatPercent } from '../lib/format';
 import { contextLabel, PERIOD_LABELS, SOURCE_LABELS, TRIGGER_LABELS } from '../lib/labels';
+import { mismatchEvidence } from '../lib/cameraTest';
 import { CategoryBadge, ReviewBadge, SeverityBadge } from './Badges';
 import { ErrorState, KeyValueTable, Loading } from './Common';
 import { evidenceAlt, EvidenceImage } from './EvidenceImage';
@@ -112,6 +113,8 @@ export function EventDetailBody({ event, sessionId }: { event: EventDTO; session
         <EvidenceGallery evidence={event.evidence} emptyText="No screenshots were captured for this event." context={event.title} />
       </section>
 
+      {event.type === 'identity_mismatch' ? <MismatchEvidenceSection details={event.details} /> : null}
+
       <section>
         <h3>Details</h3>
         <KeyValueTable data={event.details} />
@@ -132,6 +135,42 @@ export function EventDetailBody({ event, sessionId }: { event: EventDTO; session
         <NotesThread eventId={event.id} sessionId={sessionId} />
       </section>
     </div>
+  );
+}
+
+/** How the identity evidence accumulated (identity engine v2): one row per sample, LLR > 0 = evidence of a different person. */
+function MismatchEvidenceSection({ details }: { details: Record<string, unknown> }) {
+  const ev = mismatchEvidence(details);
+  if (!ev) return null;
+  return (
+    <section data-testid="mismatch-evidence">
+      <h3>How the evidence accumulated</h3>
+      <p className="small muted">
+        {ev.posterior != null ? <>Probability of a different person: <strong>{formatPercent(ev.posterior)}</strong>. </> : null}
+        {ev.llrSum != null ? <>Accumulated log-likelihood ratio {ev.llrSum.toFixed(2)} (positive = evidence of a different person). </> : null}
+        Each identity sample is a short burst of camera frames compared with the protected reference.
+      </p>
+      <table className="events-table">
+        <thead>
+          <tr>
+            <th scope="col">Time</th>
+            <th scope="col">Why sampled</th>
+            <th scope="col">Similarity</th>
+            <th scope="col">LLR</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ev.samples.map((x, i) => (
+            <tr key={i}>
+              <td>{x.at != null ? <Clock at={x.at} /> : '—'}</td>
+              <td>{x.trigger ? (TRIGGER_LABELS as Record<string, string>)[x.trigger] ?? x.trigger : '—'}</td>
+              <td>{x.similarity != null ? x.similarity.toFixed(2) : '—'}</td>
+              <td>{x.llr != null ? (x.llr >= 0 ? '+' : '') + x.llr.toFixed(2) : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }
 
