@@ -149,7 +149,7 @@ test('retention: an ended session past its retention is purged by retention:run 
   await expect(drawer.locator('.evidence-purged').first()).toContainText('Deleted under the retention policy');
   await expect(drawer.locator('img')).toHaveCount(0);
   await sp.goto(`/admin/sessions/${purged.sessionId}/compare/${mm!.id}`);
-  const refSection = sp.locator('section', { has: sp.getByRole('heading', { name: 'Original reference' }) });
+  const refSection = sp.locator('section', { has: sp.getByRole('heading', { name: /^(Original reference|Approved ID photo)$/ }) });
   await expect(refSection.locator('.evidence-purged')).toContainText('Deleted under the retention policy');
   await expect(sp.locator('.compare-page img')).toHaveCount(0);
   // The kept session still shows its images.
