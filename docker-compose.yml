@@ -1,0 +1,45 @@
+# Production-like stack: app + Postgres + Redis.
+#   cp .env.example .env   # fill EVIDENCE_KEY, SESSION_SECRET, BOOTSTRAP_ADMIN_PASSWORD, POSTGRES_PASSWORD
+#   docker compose up -d --build
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: proctor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: proctor
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proctor -d proctor"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://proctor:${POSTGRES_PASSWORD:-change-me}@postgres:5432/proctor
+      REDIS_URL: redis://redis:6379
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-fs}
+      STORAGE_DIR: /data/evidence
+    ports:
+      - "8080:8080"
+    volumes:
+      - evidence:/data/evidence
+
+volumes:
+  pgdata:
+  evidence:

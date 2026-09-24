@@ -74,6 +74,7 @@ export const EVENT_TYPES = [
   'session_submitted',
   'session_expired',
   'session_terminated',
+  'time_extended',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -385,6 +386,7 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
   session_submitted: { category: 'neutral', severity: 'info', title: 'Exam submitted', observation: 'The exam was submitted.', reviewerNote: '', sources: ['server_system'], span: false },
   session_expired: { category: 'neutral', severity: 'info', title: 'Time expired', observation: 'The exam time ran out and answers were submitted automatically.', reviewerNote: '', sources: ['server_system'], span: false },
   session_terminated: { category: 'neutral', severity: 'info', title: 'Exam terminated', observation: 'The exam was terminated by an administrator.', reviewerNote: '', sources: ['staff'], span: false },
+  time_extended: { category: 'neutral', severity: 'info', title: 'Time extended', observation: 'An administrator extended the exam time.', reviewerNote: 'Details include the added minutes and the reason.', sources: ['staff'], span: false },
 };
 
 /** Event types a candidate client is allowed to report. Everything else is server-authored. */

@@ -643,3 +643,110 @@ export type LiveMessage =
 export const ACCESS_LINK_PATH = '/take/'; // full link: `${PUBLIC_URL}/take/${accessToken}`
 
 export type { IdentityCheckTrigger };
+
+/* =================================================================== staff endpoint index
+ *
+ * Auth (no prefix):
+ *   POST /api/auth/login   {email,password}        -> { user: StaffUserDTO, org: { id, name } }
+ *   POST /api/auth/logout                          -> { ok: true }
+ *   GET  /api/auth/me                              -> { user: StaffUserDTO, org: { id, name } }   (401 if not logged in)
+ *
+ * Staff API (prefix /api/admin, cookie auth; role in brackets = minimum role):
+ *   GET  /dashboard                                -> DashboardDTO                                  [reviewer]
+ *   GET  /sessions?status=&examId=&q=&connection=&limit=&offset= -> Paged<SessionSummaryDTO>        [reviewer]
+ *   GET  /sessions/:id                             -> SessionDetailDTO                              [reviewer]
+ *   GET  /sessions/:id/events?category=&type=&severity=&review=&since= -> { items: EventDTO[] }     [reviewer]
+ *   GET  /sessions/:id/events.csv                  -> text/csv                                      [reviewer]
+ *   GET  /sessions/:id/timeline                    -> { items: TimelineItemDTO[] }                  [reviewer]
+ *   GET  /sessions/:id/report                      -> SessionReportDTO                              [reviewer]
+ *   POST /sessions/:id/notes {text}                -> NoteDTO                                       [reviewer]
+ *   POST /sessions/:id/pause-requests/:requestId/decision {approve,note?} -> SessionSummaryDTO     [reviewer]
+ *   POST /sessions/:id/hold {note?}                -> SessionSummaryDTO                             [reviewer]
+ *   POST /sessions/:id/release {note?,requireCheck,reEnroll} -> SessionSummaryDTO                   [reviewer]
+ *   POST /sessions/:id/terminate {reason}          -> SessionSummaryDTO                             [admin]
+ *   POST /sessions/:id/submit {note?}              -> SessionSummaryDTO   (staff-submit)            [admin]
+ *   POST /sessions/:id/legal-hold {enabled}        -> SessionSummaryDTO   (suspends retention purge) [admin]
+ *   POST /sessions/:id/regenerate-link             -> { accessLink }                                [admin]
+ *   POST /sessions/:id/extend {minutes,note?}      -> SessionSummaryDTO   (adds exam time; accommodations) [admin]
+ *   GET  /events?category=&severity=&review=&since=&limit= -> { items: LiveEventDTO[] }  (org-wide feed) [reviewer]
+ *   GET  /events/:id                               -> EventDTO                                      [reviewer]
+ *   POST /events/:id/review {status,note?}         -> EventDTO                                      [reviewer]
+ *   GET  /events/:id/notes                         -> { items: NoteDTO[] }                          [reviewer]
+ *   POST /events/:id/notes {text}                  -> NoteDTO                                       [reviewer]
+ *   GET  /identity/compare/:eventId                -> IdentityComparisonDTO                         [reviewer]
+ *   GET  /evidence/:id                             -> image/jpeg (decrypted; every access audit-logged) [reviewer]
+ *   GET  /exams                                    -> { items: ExamDTO[] }                          [reviewer]
+ *   POST /exams  ExamInput                         -> ExamDTO                                       [admin]
+ *   GET  /exams/:id                                -> ExamDTO                                       [reviewer]
+ *   PUT  /exams/:id  ExamInput                     -> ExamDTO                                       [admin]
+ *   POST /exams/:id/publish | /exams/:id/archive   -> ExamDTO                                       [admin]
+ *   GET  /exams/:id/sessions                       -> { items: SessionSummaryDTO[] }                [reviewer]
+ *   POST /exams/:id/assignments {candidateIds}     -> { items: AssignmentDTO[] }                    [admin]
+ *   GET  /candidates?q=                            -> { items: CandidateDTO[] }                     [reviewer]
+ *   POST /candidates  CandidateInput               -> CandidateDTO                                  [admin]
+ *   GET  /candidates/:id                           -> CandidateDTO                                  [reviewer]
+ *   PUT  /candidates/:id  CandidateInput           -> CandidateDTO                                  [admin]
+ *   DELETE /candidates/:id                         -> { ok }  (refused while a session is active)   [admin]
+ *   PUT  /candidates/:id/id-photo  (image/jpeg)    -> IdPhotoUploadResponse                         [admin]
+ *   DELETE /candidates/:id/id-photo                -> CandidateDTO                                  [admin]
+ *   GET  /settings                                 -> OrgSettingsDTO                                [admin]
+ *   PUT  /settings  Partial<OrgSettingsDTO>        -> OrgSettingsDTO                                [admin]
+ *   GET  /users                                    -> { items: StaffUserDTO[] }                     [admin]
+ *   POST /users {email,name,role,password}         -> StaffUserDTO                                  [admin; only owner may create owner/admin]
+ *   PUT  /users/:id {name?,role?,disabled?,password?} -> StaffUserDTO                               [admin]
+ *   GET  /audit-log?limit=&offset=&action=         -> Paged<AuditLogEntryDTO>                       [admin]
+ *   GET  /metrics/detection-quality?from=&to=      -> DetectionQualityDTO                           [reviewer]
+ *   WS   /live                                     -> LiveMessage frames                            [reviewer]
+ */
+
+export interface Paged<T> {
+  items: T[];
+  total: number;
+}
+
+export type LiveEventDTO = EventDTO & { candidateName: string; examTitle: string };
+
+export interface DashboardDTO {
+  serverTime: number;
+  /** All non-terminal sessions plus sessions that ended in the last 24 h. */
+  sessions: SessionSummaryDTO[];
+  /** Latest non-neutral events across the organisation (newest first, max 100). */
+  recentEvents: LiveEventDTO[];
+  pending: {
+    pauseRequests: { sessionId: string; candidateName: string; examTitle: string; request: PauseRequestDTO }[];
+    holds: { sessionId: string; candidateName: string; examTitle: string; hold: HoldDTO }[];
+  };
+}
+
+export const userCreateSchema = z.object({
+  email: z.string().email(),
+  name: z.string().min(1).max(200),
+  role: z.enum(STAFF_ROLES),
+  password: z.string().min(10).max(200),
+});
+export const userUpdateSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  role: z.enum(STAFF_ROLES).optional(),
+  disabled: z.boolean().optional(),
+  password: z.string().min(10).max(200).optional(),
+});
+export const settingsUpdateSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  evidenceRetentionDays: z.number().int().min(1).max(3650).optional(),
+  eventRetentionDays: z.number().int().min(30).max(3650).optional(),
+  privacyContact: z.string().max(500).optional(),
+  defaultPolicy: z.record(z.unknown()).optional(),
+  identityThresholds: z
+    .object({
+      match: z.number().min(0).max(1),
+      mismatch: z.number().min(0).max(1),
+      idPhotoMatch: z.number().min(0).max(1),
+      idPhotoMismatch: z.number().min(0).max(1),
+      mismatchConfirmations: z.number().int().min(1).max(10),
+    })
+    .partial()
+    .optional(),
+});
+export const legalHoldSchema = z.object({ enabled: z.boolean() });
+export const staffSubmitSchema = z.object({ note: z.string().max(1000).optional() });
+export const extendTimeSchema = z.object({ minutes: z.number().int().min(1).max(24 * 60), note: z.string().max(1000).optional() });
