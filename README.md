@@ -55,6 +55,11 @@ with per-session throttling. See [docs/INTEGRATION_API.md](docs/INTEGRATION_API.
 **Privacy** — explicit notice + consent, no continuous video, encrypted evidence, role-based access
 with audit logging, automatic retention purge with legal hold. See [docs/PRIVACY.md](docs/PRIVACY.md).
 
+**Accessibility** — WCAG 2.1 AA target for both apps: full keyboard operation, screen-reader
+announcements (polite / assertive only for blocking states), focus management, contrast-checked
+tokens, 320 px reflow, reduced motion; documented accommodations (e.g. no head-movement check, extra
+time) and known limits of camera proctoring. See [docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md).
+
 **Accuracy** — per-detection evaluation harnesses (identity: false-mismatch / missed-swap /
 unable-to-verify rates across lighting, blur, low-res cameras, occlusion, etc.; behaviour: precision,
 recall, false alerts per hour, onset latency, duplicate events) plus production precision from

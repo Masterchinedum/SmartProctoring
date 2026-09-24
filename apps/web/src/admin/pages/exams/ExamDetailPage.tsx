@@ -304,7 +304,7 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
           {m.isPending ? 'Assigning…' : `Assign ${selected.size || ''} selected`}
         </button>
       </div>
-      {m.isError ? <div className="banner banner-danger">{errorMessage(m.error)}</div> : null}
+      {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
       {candidates.isPending ? (
         <Loading />
       ) : candidates.isError ? (
@@ -364,7 +364,9 @@ function ExamSessions({ examId }: { examId: string }) {
               {q.data.items.map((s) => (
                 <tr key={s.id} onClick={() => navigate(`/admin/sessions/${s.id}`)}>
                   <td>
-                    <strong>{s.candidate.name}</strong>
+                    <Link to={`/admin/sessions/${s.id}`} onClick={(ev) => ev.stopPropagation()}>
+                      <strong>{s.candidate.name}</strong>
+                    </Link>
                     <div className="muted small">{s.candidate.email ?? s.candidate.externalId ?? ''}</div>
                   </td>
                   <td>

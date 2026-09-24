@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { announce } from '../../lib/a11y';
 import { errorMessage } from '../api/client';
 import { formatDetailValue, humanizeKey } from '../lib/format';
 import { describeDetailValue } from '../lib/labels';
@@ -105,6 +106,7 @@ export function CopyButton({ text, label = 'Copy', className = 'btn btn-sm' }: {
       ta.remove();
     }
     setCopied(true);
+    announce('Copied to the clipboard.', 'polite');
     setTimeout(() => setCopied(false), 1500);
   };
   return (
@@ -146,10 +148,10 @@ export function Pager({ total, limit, offset, onChange }: { total: number; limit
         {from}–{to} of {total}
       </span>
       <button type="button" className="btn btn-sm" disabled={offset === 0} onClick={() => onChange(Math.max(0, offset - limit))}>
-        ‹ Previous
+        <span aria-hidden>‹</span> Previous
       </button>
       <button type="button" className="btn btn-sm" disabled={offset + limit >= total} onClick={() => onChange(offset + limit)}>
-        Next ›
+        Next <span aria-hidden>›</span>
       </button>
     </div>
   );
@@ -157,5 +159,9 @@ export function Pager({ total, limit, offset, onChange }: { total: number; limit
 
 export function FormError({ error }: { error: unknown }) {
   if (!error) return null;
-  return <div className="banner banner-danger">{errorMessage(error)}</div>;
+  return (
+    <div className="banner banner-danger" role="alert">
+      {errorMessage(error)}
+    </div>
+  );
 }

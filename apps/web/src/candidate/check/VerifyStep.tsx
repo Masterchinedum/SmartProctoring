@@ -3,7 +3,7 @@ import { createLivenessTracker } from '@sp/detection';
 import type { CheckFrameResponse, CheckPurpose, CompleteCheckResponse, DeviceInfo, FaceObservation, LivenessStep, StartCheckResponse } from '@sp/shared';
 import { classifyApiError, type CandidateApi } from '../api';
 import { errorMessage, useController, useSnapshot } from '../context';
-import { CameraPreview, Spinner } from '../components/common';
+import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
 import { captureJpeg } from '../monitoring/frames';
 import { CheckProgress } from './progress';
 import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrameAnalysis';
@@ -451,13 +451,13 @@ export function VerifyStep({
   if (phase === 'expired' || phase === 'error') {
     return (
       <div className="stack" data-testid="verify-problem">
-        <h1>{phase === 'expired' ? 'The check took too long' : 'The check could not be completed'}</h1>
+        <ScreenHeading>{phase === 'expired' ? 'The check took too long' : 'The check could not be completed'}</ScreenHeading>
         <p>{phase === 'expired' ? 'For security, each check must be completed within a short time. Let’s try again.' : (error ?? 'Something went wrong.')}</p>
         <div className="row">
-          <button className="btn btn-primary" onClick={() => setAttempt((x) => x + 1)} data-testid="verify-retry">
+          <button type="button" className="btn btn-primary" onClick={() => setAttempt((x) => x + 1)} data-testid="verify-retry">
             Try again
           </button>
-          <button className="btn" onClick={onBackToSetup}>
+          <button type="button" className="btn" onClick={onBackToSetup}>
             Check my camera setup
           </button>
         </div>
@@ -467,7 +467,7 @@ export function VerifyStep({
 
   return (
     <div className="stack" data-testid="verify-step" data-phase={phase}>
-      <h1>{check?.liveness ? 'Live-person and identity check' : 'Identity check'}</h1>
+      <ScreenHeading title="Identity check">{check?.liveness ? 'Live-person and identity check' : 'Identity check'}</ScreenHeading>
       <p className="muted">
         {check?.liveness
           ? 'Follow the instructions below. We take a few pictures to confirm that a live person is in front of the camera and to compare your face with the identity reference.'
@@ -478,6 +478,7 @@ export function VerifyStep({
         <CameraPreview
           stream={camera.stream}
           className="cand-preview-large"
+          label="Your camera preview (mirrored)"
           overlay={
             arrow ? (
               <div className={`cand-arrow cand-arrow-${stepView?.action}`} aria-hidden="true">
@@ -487,7 +488,8 @@ export function VerifyStep({
           }
         />
         <div className="stack">
-          <div className="cand-instruction" role="status" aria-live="assertive" data-testid="verify-instruction">
+          {/* The current instruction as text, announced politely when it changes (the arrows are decorative). */}
+          <div className="cand-instruction" role="status" aria-live="polite" aria-atomic="true" data-testid="verify-instruction">
             {arrow && <span className="cand-instruction-arrow" aria-hidden="true">{arrow}</span>}
             <span>{headline}</span>
           </div>
@@ -501,27 +503,41 @@ export function VerifyStep({
           </div>
           {steps.length > 0 && (
             <ol className="cand-steps">
-              <li className={frontalCount >= (check?.frontalFramesRequired ?? 0) ? 'done' : phase === 'frontal' ? 'current' : ''}>Pictures of your face for the identity check</li>
+              <StepItem state={frontalCount >= (check?.frontalFramesRequired ?? 0) ? 'done' : phase === 'frontal' ? 'current' : ''}>Pictures of your face for the identity check</StepItem>
               {steps.map((s) => (
-                <li key={s.index} className={(run.current.perStep.get(s.index) ?? 0) >= FRAMES_PER_STEP ? 'done' : stepView?.index === s.index && phase === 'liveness' ? 'current' : ''}>
+                <StepItem key={s.index} state={(run.current.perStep.get(s.index) ?? 0) >= FRAMES_PER_STEP ? 'done' : stepView?.index === s.index && phase === 'liveness' ? 'current' : ''}>
                   {s.instruction}
-                </li>
+                </StepItem>
               ))}
             </ol>
           )}
-          {stepView?.problem && phase === 'liveness' && <p className="cand-guidance">{stepView.problem}</p>}
-          {guidance.length > 0 && (
-            <ul className="cand-guidance-list" aria-live="polite" data-testid="verify-guidance">
-              {guidance.map((g, i) => (
-                <li key={i}>{g}</li>
-              ))}
-            </ul>
-          )}
+          {/* Persistent live region for problems and guidance (announced politely when they change). */}
+          <div aria-live="polite" className="stack cand-live-slot" style={{ gap: 8 }}>
+            {stepView?.problem && phase === 'liveness' && <p className="cand-guidance">{stepView.problem}</p>}
+            {guidance.length > 0 && (
+              <ul className="cand-guidance-list" data-testid="verify-guidance">
+                {guidance.map((g, i) => (
+                  <li key={i}>{g}</li>
+                ))}
+              </ul>
+            )}
+          </div>
           {(phase === 'starting' || phase === 'completing' || vs.loading) && <Spinner label={phase === 'completing' ? 'Verifying…' : 'Please wait…'} />}
           {noVision && <p className="muted small">Automatic guidance is unavailable in this browser; follow the instructions and the pictures are checked on the server.</p>}
           {check && <p className="muted small">Attempts remaining after this one: {Math.max(0, check.attemptsRemaining - 1)}</p>}
         </div>
       </div>
     </div>
+  );
+}
+
+/** A step of the check: the state is shown by colour and a ✓ marker, and spelled out for screen readers. */
+function StepItem({ state, children }: { state: 'done' | 'current' | ''; children: React.ReactNode }) {
+  return (
+    <li className={state} aria-current={state === 'current' ? 'step' : undefined}>
+      {children}
+      {state === 'done' && <span className="sr-only"> (done)</span>}
+      {state === 'current' && <span className="sr-only"> (current step)</span>}
+    </li>
   );
 }

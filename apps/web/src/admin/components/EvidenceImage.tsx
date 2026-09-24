@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { EvidenceRefDTO } from '@sp/shared';
-import { formatDate, formatDateTime } from '../lib/format';
+import { formatDate, formatDateTime, formatTime } from '../lib/format';
 
 const KIND_LABELS: Record<EvidenceRefDTO['kind'], string> = {
   event_screenshot: 'Screenshot',
@@ -14,6 +14,23 @@ export function evidenceKindLabel(kind: EvidenceRefDTO['kind']): string {
   return KIND_LABELS[kind] ?? kind;
 }
 
+const ALT_KIND: Record<EvidenceRefDTO['kind'], string> = {
+  event_screenshot: 'Webcam screenshot',
+  identity_probe: 'Webcam identity sample',
+  identity_reference: 'Identity reference image',
+  id_photo: 'ID photo',
+  liveness_frame: 'Live-person check frame',
+};
+
+/**
+ * Text alternative for an evidence image: what it is, when it was captured and what it belongs to,
+ * e.g. "Webcam screenshot at 10:32:05 — More than one person in view".
+ */
+export function evidenceAlt(ev: Pick<EvidenceRefDTO, 'kind' | 'capturedAt'>, context?: string | null): string {
+  const base = `${ALT_KIND[ev.kind] ?? evidenceKindLabel(ev.kind)} at ${formatTime(ev.capturedAt)}`;
+  return context ? `${base} — ${context}` : base;
+}
+
 type Size = 'thumb' | 'small' | 'medium' | 'large';
 
 /**
@@ -24,13 +41,17 @@ export function EvidenceImage({
   evidence,
   size = 'medium',
   alt,
+  context,
   onOpen,
   caption,
   eager = false,
 }: {
   evidence: EvidenceRefDTO | null | undefined;
   size?: Size;
+  /** Explicit text alternative ('' = decorative, e.g. a thumbnail inside a labelled button). */
   alt?: string;
+  /** What the image belongs to (event title, check), appended to the default alt text. */
+  context?: string | null;
   onOpen?: () => void;
   caption?: boolean;
   /** Load immediately (e.g. printable report, where lazy images would be missing from the printout). */
@@ -59,10 +80,11 @@ export function EvidenceImage({
       </div>
     );
   }
+  const altText = alt ?? evidenceAlt(evidence, context);
   const img = (
     <img
       src={evidence.url}
-      alt={alt ?? `${evidenceKindLabel(evidence.kind)} captured ${formatDateTime(evidence.capturedAt)}`}
+      alt={altText}
       loading={eager ? 'eager' : 'lazy'}
       decoding="async"
       onError={() => setFailed(true)}
@@ -71,7 +93,7 @@ export function EvidenceImage({
   return (
     <figure className={cls}>
       {onOpen ? (
-        <button type="button" className="evidence-btn" onClick={onOpen} title="Open image">
+        <button type="button" className="evidence-btn" onClick={onOpen} title="Open image" aria-label={altText ? `${altText} (open larger)` : 'Open image'}>
           {img}
         </button>
       ) : (

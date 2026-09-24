@@ -103,17 +103,19 @@ function PolicyFieldRow({
 }) {
   const changed = value !== defaultValue;
   const id = `pf-${field.path.replace(/\./g, '-')}`;
+  // The default, help text and any error are the input's description (WCAG 1.3.1 / 3.3.1).
+  const hintId = `${id}-hint`;
   let input: React.ReactNode;
   if (field.kind === 'boolean') {
     input = (
       <label className="switch">
-        <input id={id} type="checkbox" checked={Boolean(value)} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+        <input id={id} type="checkbox" checked={Boolean(value)} disabled={disabled} onChange={(e) => onChange(e.target.checked)} aria-describedby={hintId} />
         <span>{value ? 'On' : 'Off'}</span>
       </label>
     );
   } else if (field.kind === 'enum') {
     input = (
-      <select id={id} value={String(value)} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+      <select id={id} value={String(value)} disabled={disabled} onChange={(e) => onChange(e.target.value)} aria-describedby={hintId}>
         {field.options?.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
@@ -122,16 +124,21 @@ function PolicyFieldRow({
       </select>
     );
   } else {
-    input = <NumberInput id={id} field={field} value={value as number | null} disabled={disabled} onChange={onChange} onInvalid={onInvalid} />;
+    input = <NumberInput id={id} hintId={hintId} field={field} value={value as number | null} disabled={disabled} onChange={onChange} onInvalid={onInvalid} />;
   }
   return (
     <div className={`policy-field${changed ? ' changed' : ''}`}>
       <label htmlFor={id} className="pf-label">
         {field.label}
-        {changed ? <span className="changed-dot" title="Changed from default" /> : null}
+        {changed ? (
+          <>
+            <span className="changed-dot" title="Changed from default" aria-hidden />
+            <span className="visually-hidden">(changed from default)</span>
+          </>
+        ) : null}
       </label>
       <div className="pf-input">{input}</div>
-      <div className="pf-hint small muted">
+      <div className="pf-hint small muted" id={hintId}>
         {defaultsLabel}: {formatPolicyValue(field, defaultValue)}
         {field.help ? <div className="pf-help">{field.help}</div> : null}
         {error ? <div className="text-danger">{error}</div> : null}
@@ -142,6 +149,7 @@ function PolicyFieldRow({
 
 function NumberInput({
   id,
+  hintId,
   field,
   value,
   disabled,
@@ -149,6 +157,7 @@ function NumberInput({
   onInvalid,
 }: {
   id: string;
+  hintId: string;
   field: PolicyField;
   value: number | null;
   disabled: boolean;
@@ -193,6 +202,7 @@ function NumberInput({
           }
         }}
         aria-invalid={Boolean(err)}
+        aria-describedby={err ? `${id}-err ${hintId}` : hintId}
       />
       {field.unit ? <span className="unit">{field.unit}</span> : null}
       {nullable ? (
@@ -217,7 +227,11 @@ function NumberInput({
           {field.nullLabel}
         </label>
       ) : null}
-      {err ? <span className="text-danger small">{err}</span> : null}
+      {err ? (
+        <span className="text-danger small" id={`${id}-err`} role="alert">
+          {err}
+        </span>
+      ) : null}
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { EVENT_CATALOG, type EventCategory, type LiveEventDTO, type SessionSummaryDTO } from '@sp/shared';
+import { announce, tabProps } from '../../lib/a11y';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { afterSessionAction, qk } from '../api/queries';
 import { useLiveMessages } from '../api/live';
@@ -26,6 +27,40 @@ import { EvidenceImage } from '../components/EvidenceImage';
 import { Clock, Countdown, LiveDuration, RelativeTime, ReportingInterrupted } from '../components/Time';
 
 const FLASH_MS = 10_000;
+/** New-flag announcements for screen readers: batched, and at most one every 15 s. */
+const FLAG_ANNOUNCE_GAP_MS = 15_000;
+const FLAG_ANNOUNCE_BATCH_MS = 2_000;
+
+/**
+ * Polite, rate-limited screen-reader announcements of new (non-neutral) flags: several flags arriving
+ * close together are summarised ("3 new flags. Latest: …") instead of interrupting the reviewer each time.
+ */
+function useFlagAnnouncer(): (e: LiveEventDTO) => void {
+  const pending = useRef<LiveEventDTO[]>([]);
+  const lastAt = useRef(0);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  return useCallback((e: LiveEventDTO) => {
+    pending.current.push(e);
+    if (timer.current) return;
+    const wait = Math.max(FLAG_ANNOUNCE_BATCH_MS, lastAt.current + FLAG_ANNOUNCE_GAP_MS - Date.now());
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      const list = pending.current;
+      pending.current = [];
+      if (!list.length) return;
+      lastAt.current = Date.now();
+      const latest = list[list.length - 1];
+      const what = `${CATEGORY_SHORT[latest.category]}: ${latest.title} — ${latest.candidateName}${latest.severity === 'high' ? ' (high severity)' : ''}`;
+      announce(list.length === 1 ? `New flag. ${what}.` : `${list.length} new flags. Latest: ${what}.`, 'polite');
+    }, wait);
+  }, []);
+}
 /** Cards rendered per board group before "Show all" (keeps large dashboards responsive; use search to find one). */
 const CARD_LIMIT = 60;
 
@@ -58,9 +93,13 @@ export function DashboardPage() {
       }, FLASH_MS),
     );
   }, []);
+  const announceFlag = useFlagAnnouncer();
   useLiveMessages(({ msg, isNew }) => {
     if (msg.type === 'event' && isNew && (msg.event.severity === 'high' || msg.event.category === 'integrity')) {
       flashIds([msg.event.id, msg.event.sessionId]);
+    }
+    if (msg.type === 'event' && isNew && msg.event.category !== 'neutral') {
+      announceFlag({ ...msg.event, candidateName: msg.candidateName, examTitle: msg.examTitle });
     }
   });
 
@@ -127,7 +166,7 @@ function NeedsAttention({ pauses, holds }: { pauses: AttentionPause[]; holds: Re
               {h.hold.message ? <div className="muted small">{h.hold.message}</div> : null}
             </div>
             <Link className="btn btn-primary btn-sm" to={`/admin/sessions/${h.sessionId}`}>
-              Review
+              Review<span className="visually-hidden"> hold of {h.candidateName}</span>
             </Link>
           </div>
         ))}
@@ -162,16 +201,24 @@ function PauseRequestItem({ item }: { item: AttentionPause }) {
         </div>
         {m.isError ? <div className="text-danger small">{errorMessage(m.error)}</div> : null}
       </div>
-      <input type="text" className="attention-note" placeholder="Note to candidate (optional)" value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} />
+      <input
+        type="text"
+        className="attention-note"
+        placeholder="Note to candidate (optional)"
+        aria-label={`Note to ${item.candidateName} (optional)`}
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        maxLength={1000}
+      />
       <div className="row nowrap">
         <button type="button" className="btn btn-primary btn-sm" disabled={m.isPending} onClick={() => m.mutate(true)}>
-          Approve
+          Approve<span className="visually-hidden"> pause for {item.candidateName}</span>
         </button>
         <button type="button" className="btn btn-sm" disabled={m.isPending} onClick={() => m.mutate(false)}>
-          Deny
+          Deny<span className="visually-hidden"> pause for {item.candidateName}</span>
         </button>
         <Link className="btn btn-sm" to={`/admin/sessions/${item.sessionId}`}>
-          Open
+          Open<span className="visually-hidden"> session of {item.candidateName}</span>
         </Link>
       </div>
     </div>
@@ -181,6 +228,7 @@ function PauseRequestItem({ item }: { item: AttentionPause }) {
 /* ------------------------------------------------------------------ session board */
 
 type BoardFilter = 'all' | BoardGroup;
+const FILTER_IDS: BoardFilter[] = ['all', ...BOARD_GROUPS];
 
 function SessionBoard({ groups, flash }: { groups: Record<BoardGroup, LiveSession[]>; flash: Set<string> }) {
   const [filter, setFilter] = useState<BoardFilter>('all');
@@ -192,25 +240,17 @@ function SessionBoard({ groups, flash }: { groups: Record<BoardGroup, LiveSessio
   return (
     <section className="board">
       <div className="board-toolbar">
+        {/* WAI-ARIA tabs filtering the board below (←/→/Home/End; automatic activation). */}
         <div className="chips" role="tablist" aria-label="Session status">
-          <button type="button" role="tab" aria-selected={filter === 'all'} className={`chip${filter === 'all' ? ' on' : ''}`} onClick={() => setFilter('all')}>
-            All <span className="chip-count">{total}</span>
-          </button>
-          {BOARD_GROUPS.map((g) => (
-            <button
-              key={g}
-              type="button"
-              role="tab"
-              aria-selected={filter === g}
-              className={`chip chip-group-${g}${filter === g ? ' on' : ''}`}
-              onClick={() => setFilter(g)}
-            >
-              {BOARD_GROUP_LABELS[g]} <span className="chip-count">{groups[g].length}</span>
+          {FILTER_IDS.map((g) => (
+            <button key={g} type="button" className={`chip${g === 'all' ? '' : ` chip-group-${g}`}${filter === g ? ' on' : ''}`} {...tabProps('board', FILTER_IDS, g, filter, setFilter)}>
+              {g === 'all' ? 'All' : BOARD_GROUP_LABELS[g]} <span className="chip-count">{g === 'all' ? total : groups[g].length}</span>
             </button>
           ))}
         </div>
         <input type="text" className="board-search" placeholder="Search candidate or exam…" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search sessions" />
       </div>
+      <div className="board-panel stack" role="tabpanel" id="board-panel" aria-labelledby={`board-tab-${filter}`}>
       {total === 0 ? (
         <EmptyState title="No exam sessions right now">
           Assign candidates to a published exam on the <Link to="/admin/exams">Exams</Link> page; their sessions appear here as soon as they open the link.
@@ -258,6 +298,7 @@ function SessionBoard({ groups, flash }: { groups: Record<BoardGroup, LiveSessio
           </div>
         );
       })}
+      </div>
     </section>
   );
 }
@@ -292,7 +333,8 @@ export function SessionCard({ s, flash }: { s: LiveSession; flash: boolean }) {
       <IdentityLine identity={s.identity} />
       <div className="sc-foot">
         <span className="sc-timer" title="Exam time remaining">
-          ⏱ <Countdown remainingMs={s.remainingMs} timerRunning={s.timerRunning} receivedAt={s.receivedAt} />
+          <span aria-hidden>⏱</span>
+          <span className="visually-hidden">Time remaining:</span> <Countdown remainingMs={s.remainingMs} timerRunning={s.timerRunning} receivedAt={s.receivedAt} />
         </span>
         <span className="muted small">
           {s.pauseCount} {s.pauseCount === 1 ? 'pause' : 'pauses'}

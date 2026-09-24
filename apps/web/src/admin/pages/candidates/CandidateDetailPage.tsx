@@ -201,8 +201,8 @@ function IdPhotoPanel({ candidate: c, canEdit }: { candidate: CandidateDTO; canE
           ) : null}
         </div>
       ) : null}
-      {localError ? <div className="banner banner-danger">{localError}</div> : null}
-      {upload.isError ? <div className="banner banner-danger">{errorMessage(upload.error)}</div> : null}
+      {localError ? <div className="banner banner-danger" role="alert">{localError}</div> : null}
+      {upload.isError ? <div className="banner banner-danger" role="alert">{errorMessage(upload.error)}</div> : null}
       {result ? (
         <div className={`banner ${result.accepted ? 'banner-success' : 'banner-warning'} stack`}>
           <strong>{result.accepted ? 'Photo accepted.' : 'Photo not accepted — the image is not suitable for dependable comparison.'}</strong>

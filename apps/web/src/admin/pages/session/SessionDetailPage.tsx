@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { EventDTO, SessionDetailDTO, TimelineItemDTO } from '@sp/shared';
+import { tabProps } from '../../../lib/a11y';
 import { api, shouldRetry } from '../../api/client';
 import { qk } from '../../api/queries';
 import { DEFAULT_FILTERS, type EventFilterState } from '../../lib/filters';
@@ -27,6 +28,7 @@ const TABS = [
   { id: 'notes', label: 'Notes' },
 ] as const;
 type TabId = (typeof TABS)[number]['id'];
+const TAB_IDS = TABS.map((t) => t.id);
 
 export function SessionDetailPage() {
   const { id = '' } = useParams();
@@ -74,15 +76,22 @@ export function SessionDetailPage() {
       <SessionHeader d={d} receivedAt={detail.dataUpdatedAt} />
       <PauseDecisionBanner d={d} />
       <SessionActions d={d} />
-      <div className="tabs" role="tablist">
+      {/* WAI-ARIA tabs: ←/→/Home/End move between tabs (automatic activation); Tab moves into the panel. */}
+      <div className="tabs" role="tablist" aria-label="Session details">
         {TABS.map((t) => (
-          <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} className={`tab${tab === t.id ? ' active' : ''}`} onClick={() => setParam('tab', t.id)}>
+          <button key={t.id} type="button" className={`tab${tab === t.id ? ' active' : ''}`} {...tabProps('session', TAB_IDS, t.id, tab, (id) => setParam('tab', id))}>
             {t.label}
-            {tabCount[t.id] ? <span className="tab-count">{tabCount[t.id]}</span> : null}
+            {tabCount[t.id] ? (
+              <span className="tab-count">
+                <span className="visually-hidden">(</span>
+                {tabCount[t.id]}
+                <span className="visually-hidden">)</span>
+              </span>
+            ) : null}
           </button>
         ))}
       </div>
-      <div className="tab-panel">
+      <div className="tab-panel" role="tabpanel" id="session-panel" aria-labelledby={`session-tab-${tab}`} tabIndex={0}>
         {tab === 'timeline' ? <TimelineTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} /> : null}
         {tab === 'events' ? <EventsTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} /> : null}
         {tab === 'identity' ? <IdentityTab d={d} onOpenEvent={openEvent} /> : null}

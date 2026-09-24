@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { CheckPurpose } from '@sp/shared';
+import { LiveAnnouncer } from '../lib/LiveAnnouncer';
+import { useCandidateAnnouncements } from './announcements';
 import { CandidateController, isVerifiedInstance } from './controller';
 import { ControllerProvider, useController, useSnapshot } from './context';
 import { CheckFlow } from './check/CheckFlow';
@@ -33,7 +35,9 @@ export default function CandidateApp() {
   }, [c]);
 
   useEffect(() => {
+    // Each screen sets its own title (ScreenHeading); this is the fallback while loading.
     document.title = 'Exam — SmartProctoring';
+    document.documentElement.lang ||= 'en';
     // Do not leak the access token through the Referer header to anything the page loads.
     let meta = document.querySelector<HTMLMetaElement>('meta[name="referrer"]');
     if (!meta) {
@@ -46,6 +50,7 @@ export default function CandidateApp() {
 
   return (
     <ControllerProvider controller={c}>
+      <LiveAnnouncer />
       <CandidateRouter />
     </ControllerProvider>
   );
@@ -54,6 +59,7 @@ export default function CandidateApp() {
 function CandidateRouter() {
   const ctrl = useController();
   const snap = useSnapshot();
+  useCandidateAnnouncements();
   // Local flow flags (buttons on paused / hold screens start a check).
   const [checkRequest, setCheckRequest] = useState<CheckPurpose | null>(null);
 

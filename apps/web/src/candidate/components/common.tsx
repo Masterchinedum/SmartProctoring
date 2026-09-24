@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react';
 import type { PrivacyNoticeDTO } from '@sp/shared';
 import { formatClock } from '@sp/shared';
+import { announce, countdownAnnouncement, useDialogFocus, useDocumentTitle, useFocusOnMount } from '../../lib/a11y';
 import { useController, useNow, useSnapshot } from '../context';
 
 /* ------------------------------------------------------------------ layout */
@@ -24,41 +25,51 @@ export function BrandHeader({ title, right }: { title?: string; right?: ReactNod
   );
 }
 
+/* ------------------------------------------------------------------ screen heading */
+
+/**
+ * The <h1> of a screen or check step: sets the document title and receives the focus when the screen
+ * appears, so keyboard and screen-reader users start at the new content (WCAG 2.4.2, 2.4.3).
+ */
+export function ScreenHeading({ children, title, id, className }: { children: ReactNode; title?: string; id?: string; className?: string }) {
+  const snap = useSnapshot();
+  const ref = useFocusOnMount<HTMLHeadingElement>();
+  const screen = title ?? (typeof children === 'string' ? children : null);
+  const exam = snap.state?.exam.title;
+  useDocumentTitle(screen ? `${screen}${exam && exam !== screen ? ` — ${exam}` : ''} — SmartProctoring` : null);
+  return (
+    <h1 ref={ref} tabIndex={-1} id={id} className={className}>
+      {children}
+    </h1>
+  );
+}
+
 /* ------------------------------------------------------------------ modal */
 
-export function Modal({ title, children, onClose, labelledBy }: { title: string; children: ReactNode; onClose?: () => void; labelledBy?: string }) {
+/**
+ * Modal dialog: focus moves in (to `[data-autofocus]` or the first control), Tab stays inside, the page
+ * behind is inert, Escape closes it when `onClose` is given (critical dialogs omit it), and focus returns
+ * to the opener when it closes.
+ */
+export function Modal({
+  title,
+  children,
+  onClose,
+  labelledBy,
+  describedBy,
+}: {
+  title: string;
+  children: ReactNode;
+  onClose?: () => void;
+  labelledBy?: string;
+  describedBy?: string;
+}) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const prev = document.activeElement as HTMLElement | null;
-    const el = ref.current;
-    const focusable = el?.querySelector<HTMLElement>('[data-autofocus]') ?? el?.querySelector<HTMLElement>('button, textarea, input, select, a[href]');
-    focusable?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && onClose) onClose();
-      if (e.key === 'Tab' && el) {
-        const items = [...el.querySelectorAll<HTMLElement>('button, textarea, input, select, a[href], [tabindex]:not([tabindex="-1"])')].filter((x) => !x.hasAttribute('disabled'));
-        if (items.length === 0) return;
-        const first = items[0];
-        const last = items[items.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      prev?.focus?.();
-    };
-  }, [onClose]);
+  useDialogFocus(ref, { onEscape: onClose ?? null });
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}>
-      <div className="modal cand-modal" role="dialog" aria-modal="true" aria-labelledby={labelledBy ?? id} ref={ref}>
+      <div className="modal cand-modal" role="dialog" aria-modal="true" aria-labelledby={labelledBy ?? id} aria-describedby={describedBy} ref={ref}>
         <h2 id={labelledBy ?? id}>{title}</h2>
         {children}
       </div>
@@ -112,7 +123,8 @@ export function PrivacyNotice({ notice, compact }: { notice: PrivacyNoticeDTO; c
 export function PrivacyNoticeDialog({ notice, onClose }: { notice: PrivacyNoticeDTO; onClose: () => void }) {
   return (
     <Modal title="What is monitored during your exam" onClose={onClose}>
-      <div className="cand-modal-scroll">
+      {/* Focusable so the notice can be scrolled with the keyboard. */}
+      <div className="cand-modal-scroll" tabIndex={0} role="region" aria-label="Privacy notice">
         <PrivacyNotice notice={notice} compact />
       </div>
       <div className="row" style={{ justifyContent: 'flex-end', marginTop: 12 }}>
@@ -146,27 +158,35 @@ export function CameraPreview({ stream, className, label = 'Your camera preview'
 
 /* ------------------------------------------------------------------ banners & toasts */
 
+/**
+ * "Live reporting is interrupted" inside a persistent assertive live region (a blocking state): the
+ * banner is announced when it appears; later changes of the waiting-items count are not re-announced
+ * (aria-relevant="additions").
+ */
 export function ReportingBanner() {
   const snap = useSnapshot();
-  if (!snap.reportingInterrupted) return null;
   return (
-    <div className="banner banner-warning cand-reporting" role="status" aria-live="polite" data-testid="reporting-banner">
-      Live reporting is interrupted. Your answers and monitoring data are saved on this device and will be sent automatically when the connection returns.
-      {snap.outbox && snap.outbox.size > 0 && <span className="muted small"> ({snap.outbox.size} item{snap.outbox.size === 1 ? '' : 's'} waiting)</span>}
+    <div className="cand-live-slot" aria-live="assertive" aria-relevant="additions">
+      {snap.reportingInterrupted && (
+        <div className="banner banner-warning cand-reporting" data-testid="reporting-banner">
+          Live reporting is interrupted. Your answers and monitoring data are saved on this device and will be sent automatically when the connection returns.
+          {snap.outbox && snap.outbox.size > 0 && <span className="muted small"> ({snap.outbox.size} item{snap.outbox.size === 1 ? '' : 's'} waiting)</span>}
+        </div>
+      )}
     </div>
   );
 }
 
+/** Notifications in a persistent polite live region: each is announced once when it appears. */
 export function Toasts() {
   const snap = useSnapshot();
   const c = useController();
-  if (snap.toasts.length === 0) return null;
   return (
-    <div className="cand-toasts" role="status" aria-live="polite">
+    <div className="cand-toasts" aria-live="polite" aria-relevant="additions">
       {snap.toasts.map((t) => (
         <div key={t.id} className={`cand-toast cand-toast-${t.kind}`}>
           <span>{t.message}</span>
-          <button className="cand-toast-close" aria-label="Dismiss" onClick={() => c.dismissToast(t.id)}>
+          <button type="button" className="cand-toast-close" aria-label="Dismiss notification" onClick={() => c.dismissToast(t.id)}>
             ×
           </button>
         </div>
@@ -177,16 +197,30 @@ export function Toasts() {
 
 /* ------------------------------------------------------------------ countdown */
 
-export function CountdownDisplay({ label = 'Time remaining' }: { label?: string }) {
+/**
+ * Remaining exam time. The value is a role="timer" (not a live region: it is never read out every
+ * second); with `announceMarks` the time left is announced politely at 10, 5 and 1 minute(s).
+ */
+export function CountdownDisplay({ label = 'Time remaining', announceMarks = false }: { label?: string; announceMarks?: boolean }) {
   const c = useController();
   useNow(500);
+  const labelId = useId();
   const ms = c.remainingMs();
   const running = c.countdown.running;
   const low = running && ms < 5 * 60_000;
+  const prev = useRef<number | null>(null);
+  useEffect(() => {
+    if (!announceMarks) return;
+    const msg = running ? countdownAnnouncement(prev.current, ms) : null;
+    prev.current = ms;
+    if (msg) announce(`${msg} Your answers are saved automatically.`, 'polite');
+  });
   return (
-    <div className={`cand-countdown ${low ? 'cand-countdown-low' : ''}`} aria-label={`${label}: ${formatClock(ms)}${running ? '' : ', clock stopped'}`} data-testid="countdown">
-      <span className="cand-countdown-label">{label}</span>
-      <span className="cand-countdown-value" role="timer">
+    <div className={`cand-countdown ${low ? 'cand-countdown-low' : ''}`} data-testid="countdown">
+      <span className="cand-countdown-label" id={labelId}>
+        {label}
+      </span>
+      <span className="cand-countdown-value" role="timer" aria-labelledby={labelId}>
         {formatClock(ms)}
       </span>
       {!running && <span className="badge badge-info">clock stopped</span>}

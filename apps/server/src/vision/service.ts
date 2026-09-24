@@ -46,7 +46,10 @@ export interface VisionServiceOptions {
   maxQueue?: number;
   /** Service-wide quality-gate override (per-call `AnalyzeOptions.gate` is applied on top). */
   gate?: Partial<QualityGate>;
-  /** Linux: nice increment of the vision threads so request handling wins under CPU saturation (env VISION_NICE, default 5). */
+  /**
+   * Linux: nice increment for the vision threads (env VISION_NICE, default 0). A positive value lets request
+   * handling win when the CPU is saturated, but on a shared host other processes then win over vision too.
+   */
   nice?: number;
   /** Worker entry override (tests). */
   workerScript?: WorkerScript;
@@ -191,7 +194,7 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
     if (threading.workers === 0) {
       backend = new InProcessBackend(await VisionEngine.create(engineOpts), new Limiter(threading.concurrency, maxQueue));
     } else {
-      const nice = options.nice ?? envInt(process.env.VISION_NICE) ?? 5;
+      const nice = options.nice ?? envInt(process.env.VISION_NICE) ?? 0;
       backend = await VisionWorkerPool.start({
         size: threading.workers,
         maxQueue,

@@ -217,7 +217,7 @@ function ReleaseDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (
             reference is kept for review. This action is audit-logged.
           </div>
         ) : null}
-        {m.isError ? <div className="banner banner-danger">{errorMessage(m.error)}</div> : null}
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
       </div>
     </Modal>
   );
@@ -247,14 +247,27 @@ function ExtendDialog({ sessionId, onDone, onCancel }: { sessionId: string; onDo
       <div className="stack">
         <label>
           Minutes to add
-          <input type="number" min={1} max={1440} step={1} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
+          <input
+            type="number"
+            min={1}
+            max={1440}
+            step={1}
+            value={minutes}
+            onChange={(e) => setMinutes(e.target.value)}
+            aria-invalid={!valid}
+            aria-describedby={!valid ? 'extend-minutes-error' : undefined}
+          />
         </label>
-        {!valid ? <div className="text-danger small">Enter a whole number of minutes between 1 and 1440.</div> : null}
+        {!valid ? (
+          <div className="text-danger small" id="extend-minutes-error">
+            Enter a whole number of minutes between 1 and 1440.
+          </div>
+        ) : null}
         <label>
           Reason (e.g. accommodation, technical problem)
           <textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} rows={2} />
         </label>
-        {m.isError ? <div className="banner banner-danger">{errorMessage(m.error)}</div> : null}
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
       </div>
     </Modal>
   );
@@ -301,7 +314,7 @@ function LegalHoldDialog({
           Removing the hold lets the normal retention schedule resume. Both actions are audit-logged.
         </p>
         <p className="muted small">Current state: {current === true ? 'on legal hold' : current === false ? 'not on legal hold' : 'not reported by the server'}.</p>
-        {error ? <div className="banner banner-danger">{error}</div> : null}
+        {error ? <div className="banner banner-danger" role="alert">{error}</div> : null}
       </div>
     </Modal>
   );
@@ -332,7 +345,15 @@ export function PauseDecisionBanner({ d }: { d: SessionDetailDTO }) {
         .
       </div>
       <div className="row">
-        <input type="text" placeholder="Note to candidate (optional)" value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} className="grow" />
+        <input
+          type="text"
+          placeholder="Note to candidate (optional)"
+          aria-label="Note to candidate (optional)"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          maxLength={1000}
+          className="grow"
+        />
         <button type="button" className="btn btn-primary btn-sm" disabled={m.isPending} onClick={() => m.mutate(true)}>
           Approve pause
         </button>

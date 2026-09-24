@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { qk } from '../api/queries';
 import { useMe } from '../auth';
+import { useDocumentTitle } from '../../lib/a11y';
 import { loginErrorMessage } from '../lib/auth-errors';
 
 function safeNext(next: string | null): string {
@@ -22,6 +23,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useDocumentTitle('Sign in — SmartProctoring staff');
 
   if (me.data) return <Navigate to={next} replace />;
 
@@ -41,14 +43,14 @@ export function LoginPage() {
   };
 
   return (
-    <div className="login-page">
-      <form className="card login-card stack" onSubmit={submit}>
+    <main className="login-page">
+      <form className="card login-card stack" onSubmit={submit} aria-labelledby="login-title">
         <div className="login-brand">
           <span className="brand-mark" aria-hidden>
             SP
           </span>
           <div>
-            <h1>SmartProctoring</h1>
+            <h1 id="login-title">SmartProctoring</h1>
             <div className="muted">Staff sign in</div>
           </div>
         </div>
@@ -70,6 +72,6 @@ export function LoginPage() {
         </button>
         <p className="muted small">Access to candidate evidence is restricted to authorised staff and every view is logged.</p>
       </form>
-    </div>
+    </main>
   );
 }

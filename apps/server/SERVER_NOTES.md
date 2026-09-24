@@ -54,7 +54,9 @@ src/
   services/rekey.ts    re-encryption after EVIDENCE_KEY rotation (all encrypted columns + evidence blobs)
   scripts/rekey-cli.ts `rekey [--dry-run]` (docs/OPERATIONS.md §3)
   scripts/seed.ts      demo data
-  vision/**, eval/**   vision agent
+  vision/**, eval/**   vision agent. vision/service.ts = facade (VisionService) over pool.ts: worker threads (worker.ts,
+                       bundled as dist/vision-worker.js) each running engine.ts (own onnxruntime sessions)
+  lib/load-monitor.ts  logs "server overloaded (...)" when the event loop / DB pool / vision queue saturate
 ```
 
 ## Writing staff routes (admin agent)
@@ -79,6 +81,10 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
 * Session lifecycle changes MUST go through services/session-actions.ts (they lock the row, record events/periods,
   queue candidate commands and publish realtime). `actor = { id: staff.id, orgId: staff.orgId, ip: req.ip }`.
   They return the fresh SessionSummaryDTO.
+* Realtime cost control (docs/PERFORMANCE.md): the notifier builds nothing for orgs without staff subscribers
+  (`bus.hasSubscribers`, Redis-wide via PUBSUB NUMSUB), batches loads (50 ms) and coalesces summaries per session
+  (<= 1 / 2 s). withSession passes `visible: false` when only heartbeat timestamps changed (dto.ts `staffVisibleKey`
+  — extend it when SessionSummaryDTO gains a field derived from exam_sessions); those refresh only every 30 s.
 * Other writes that change what staff dashboards show: call `ctx.live.eventChanged(eventId)` (after review/notes) or
   `ctx.live.sessionChanged(sessionId)`.
 * DTO loaders: `loadSessionSummaries(ctx, db, { orgId, where?, limit?, offset?, orderBy? })` (where can reference
@@ -157,6 +163,20 @@ candidate-state.ts (CandidateSessionState, instanceInControl).
   check is > 5 s old; closes with code 4401 after logout / revocation / disable. Session notes are pushed as
   `{ type: 'note' }` messages.
 * Logs never contain candidate tokens: `/take/<token>`, `?token=` and Authorization are redacted (lib/log-redact.ts).
+
+## Performance rules (hot paths; measured in docs/PERFORMANCE.md)
+* Never run CPU-heavy work on the main thread: onnxruntime's `run()` is synchronous (it blocked the event loop
+  for 47 % of the time at 500 candidates). New image work goes into the vision engine (worker threads).
+  `AnalyzeOptions.priority: 'background'` for work nobody waits on (identity samples).
+* The heartbeat is ONE guarded UPDATE (candidate-actions.ts `fastHeartbeat`, xmin = row version from candidate
+  auth); anything that needs more (commands, outage end, clock start/expiry, concurrent-use signal) falls back to
+  the locked path. Keep the two paths equivalent when changing heartbeat semantics (test/perf-paths.test.ts).
+* Candidate routes pass the principal (`c`) to services so withSession reuses its exam/org/candidate rows
+  (`SessionPreload`) instead of re-reading them. The candidate auth query is a named prepared statement.
+* exam_sessions: don't index a column the heartbeat writes (last_heartbeat_at, monitoring, updated_at, ...) —
+  heartbeat updates are HOT (no index maintenance) thanks to that and fillfactor 80 (migration 0004).
+* Server-generated evidence ids skip the existence check (storeEvidence); with no active webhook and no mailer
+  the integration outbox hook skips its savepoint (the lock query tells whether webhooks exist).
 
 ## Tests
 `pnpm --filter @sp/server test` (vitest, real Postgres at 127.0.0.1:5432, user postgres). `test/global-setup.ts`

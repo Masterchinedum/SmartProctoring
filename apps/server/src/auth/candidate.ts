@@ -47,16 +47,33 @@ export function instanceIdFrom(req: FastifyRequest): string | null {
   return v;
 }
 
-export async function resolveCandidateSession(ctx: Ctx, req: FastifyRequest, tokenOverride?: string | null): Promise<CandidatePrincipal> {
-  const token = tokenOverride ?? bearerToken(req);
-  if (!token || !TOKEN_RE.test(token)) throw new HttpError(401, 'invalid_token', 'This exam link is not valid. Check that you copied the whole link.');
-  const rows = await ctx.db
+function buildAuthQuery(db: Ctx['db']) {
+  return db
     .select({ session: examSessions, exam: exams, org: organizations, candidate: candidates, sessionVersion: sql<string>`${examSessions}.xmin::text` })
     .from(examSessions)
     .innerJoin(exams, eq(exams.id, examSessions.examId))
     .innerJoin(candidates, eq(candidates.id, examSessions.candidateId))
     .leftJoin(organizations, eq(organizations.id, examSessions.orgId))
-    .where(eq(examSessions.accessTokenHash, sha256Hex(token)));
+    .where(eq(examSessions.accessTokenHash, sql.placeholder('tokenHash')))
+    .prepare('sp_candidate_auth');
+}
+
+/**
+ * The most frequent query of the server (every candidate request) as a named prepared statement: built once per
+ * database handle, and Postgres plans it once per connection instead of on every request (planning this 4-table
+ * join costs several times its execution). With PgBouncer in transaction mode, enable max_prepared_statements.
+ */
+const authQueries = new WeakMap<object, ReturnType<typeof buildAuthQuery>>();
+function authQuery(db: Ctx['db']) {
+  let q = authQueries.get(db);
+  if (!q) authQueries.set(db, (q = buildAuthQuery(db)));
+  return q;
+}
+
+export async function resolveCandidateSession(ctx: Ctx, req: FastifyRequest, tokenOverride?: string | null): Promise<CandidatePrincipal> {
+  const token = tokenOverride ?? bearerToken(req);
+  if (!token || !TOKEN_RE.test(token)) throw new HttpError(401, 'invalid_token', 'This exam link is not valid. Check that you copied the whole link.');
+  const rows = await authQuery(ctx.db).execute({ tokenHash: sha256Hex(token) });
   const row = rows[0];
   if (!row) throw new HttpError(401, 'invalid_token', 'This exam link is not valid or has been replaced. Contact your exam administrator.');
   return {

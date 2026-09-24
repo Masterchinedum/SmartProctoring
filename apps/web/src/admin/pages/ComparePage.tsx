@@ -123,7 +123,7 @@ function ReferenceColumn({ c }: { c: IdentityComparisonDTO }) {
         <div className="compare-images">
           {c.reference.images.map((img, i) => (
             <figure key={img.id} className="compare-figure">
-              <EvidenceImage evidence={img} size="large" onOpen={() => setOpen(i)} />
+              <EvidenceImage evidence={img} size="large" onOpen={() => setOpen(i)} context="original reference" />
               <figcaption className="small">
                 <strong>Reference</strong> · {formatDateTime(img.capturedAt)}
               </figcaption>
@@ -155,7 +155,7 @@ function ProbesColumn({ c }: { c: IdentityComparisonDTO }) {
           {probes.map((p) => (
             <figure key={p.check.id} className={`compare-figure probe-${p.check.decision}`}>
               {p.image ? (
-                <EvidenceImage evidence={p.image} size="large" onOpen={() => setOpen(withImg.indexOf(p))} />
+                <EvidenceImage evidence={p.image} size="large" onOpen={() => setOpen(withImg.indexOf(p))} context={items[withImg.indexOf(p)]?.caption} />
               ) : (
                 <div className="evidence evidence-large evidence-missing" title="Images of routine samples that matched are not stored (data minimisation)">
                   <span>Image not kept — routine samples that match are not stored</span>

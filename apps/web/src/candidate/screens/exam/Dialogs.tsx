@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { formatDuration, type CandidateSessionState } from '@sp/shared';
 import { errorMessage, formatTime, useController } from '../../context';
 import { Modal, Spinner } from '../../components/common';
@@ -22,13 +22,19 @@ export function PauseDialog({ state, onClose }: { state: CandidateSessionState; 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [reasonMissing, setReasonMissing] = useState(false);
+  const reasonRef = useRef<HTMLTextAreaElement>(null);
+  const errorId = useId();
   const avail = pauseAvailability(state);
 
   const submit = async () => {
     if (p.requireReason && !reason.trim()) {
       setError('Please give a reason for the pause.');
+      setReasonMissing(true);
+      reasonRef.current?.focus();
       return;
     }
+    setReasonMissing(false);
     setBusy(true);
     setError(null);
     try {
@@ -58,7 +64,8 @@ export function PauseDialog({ state, onClose }: { state: CandidateSessionState; 
 
   if (pending) {
     return (
-      <Modal title="Waiting for approval" onClose={onClose}>
+      // Keyed: switching from the form to this view remounts the dialog, so the focus moves to "Keep working".
+      <Modal key="pending" title="Waiting for approval" onClose={onClose}>
         <div className="stack" data-testid="pause-pending">
           <p>
             Your pause request was sent at {formatTime(pending.requestedAt)} and is waiting for the exam administrator. You can keep working on your exam while you
@@ -74,10 +81,10 @@ export function PauseDialog({ state, onClose }: { state: CandidateSessionState; 
             </div>
           )}
           <div className="row" style={{ justifyContent: 'flex-end' }}>
-            <button className="btn" onClick={cancel} disabled={busy}>
+            <button type="button" className="btn" onClick={cancel} disabled={busy}>
               Cancel request
             </button>
-            <button className="btn btn-primary" onClick={onClose} data-autofocus>
+            <button type="button" className="btn btn-primary" onClick={onClose} data-autofocus>
               Keep working
             </button>
           </div>
@@ -87,7 +94,7 @@ export function PauseDialog({ state, onClose }: { state: CandidateSessionState; 
   }
 
   return (
-    <Modal title="Pause the exam" onClose={busy ? undefined : onClose}>
+    <Modal key="form" title="Pause the exam" onClose={busy ? undefined : onClose}>
       <div className="stack" data-testid="pause-dialog">
         <ul>
           <li>While paused, camera monitoring stops completely and nothing is observed.</li>
@@ -101,18 +108,32 @@ export function PauseDialog({ state, onClose }: { state: CandidateSessionState; 
         </ul>
         <label>
           Reason {p.requireReason ? '(required)' : '(optional)'}
-          <textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} rows={3} data-testid="pause-reason" data-autofocus />
+          <textarea
+            ref={reasonRef}
+            value={reason}
+            onChange={(e) => {
+              setReason(e.target.value);
+              if (reasonMissing && e.target.value.trim()) setReasonMissing(false);
+            }}
+            maxLength={1000}
+            rows={3}
+            required={p.requireReason}
+            aria-invalid={reasonMissing || undefined}
+            aria-describedby={error ? errorId : undefined}
+            data-testid="pause-reason"
+            data-autofocus
+          />
         </label>
         {error && (
-          <div className="banner banner-danger" role="alert">
+          <div className="banner banner-danger" role="alert" id={errorId}>
             {error}
           </div>
         )}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
-          <button className="btn" onClick={onClose} disabled={busy}>
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>
             Continue exam
           </button>
-          <button className="btn btn-primary" onClick={submit} disabled={busy} data-testid="pause-confirm">
+          <button type="button" className="btn btn-primary" onClick={submit} disabled={busy} data-testid="pause-confirm">
             {busy ? 'Pausing…' : p.requireApproval ? 'Request pause' : 'Pause exam'}
           </button>
         </div>
@@ -125,6 +146,7 @@ export function SubmitDialog({ total, answered, onClose }: { total: number; answ
   const ctrl = useController();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const summaryId = useId();
   const unanswered = total - answered;
   const submit = async () => {
     setBusy(true);
@@ -137,9 +159,9 @@ export function SubmitDialog({ total, answered, onClose }: { total: number; answ
     }
   };
   return (
-    <Modal title="Submit your exam?" onClose={busy ? undefined : onClose}>
+    <Modal title="Submit your exam?" onClose={busy ? undefined : onClose} describedBy={summaryId}>
       <div className="stack" data-testid="submit-dialog">
-        <p>
+        <p id={summaryId}>
           You have answered <strong>{answered}</strong> of <strong>{total}</strong> questions.
           {unanswered > 0 && (
             <>
@@ -155,10 +177,10 @@ export function SubmitDialog({ total, answered, onClose }: { total: number; answ
           </div>
         )}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
-          <button className="btn" onClick={onClose} disabled={busy} data-autofocus>
+          <button type="button" className="btn" onClick={onClose} disabled={busy} data-autofocus>
             Back to exam
           </button>
-          <button className="btn btn-primary" onClick={submit} disabled={busy} data-testid="submit-confirm">
+          <button type="button" className="btn btn-primary" onClick={submit} disabled={busy} data-testid="submit-confirm">
             {busy ? 'Submitting…' : 'Submit exam'}
           </button>
         </div>

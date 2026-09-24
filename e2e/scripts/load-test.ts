@@ -8,7 +8,13 @@
  *   FACES_DIR=/path/to/face/jpegs  tsx scripts/load-test.ts
  *
  * FACES_DIR must contain face JPEGs (one per simulated person is ideal; they are reused round-robin).
- * Prints a latency table and writes JSON to OUT (default ./load-report.json).
+ * Prints a latency table (whole run, and the steady phase after the ramp) and writes JSON to OUT
+ * (default ./load-report.json).
+ *
+ * Optional: STAFF_WS=<n> keeps n staff dashboards connected to /api/admin/live during the run (realtime
+ * summaries are only built while someone listens); SAMPLE_SEC=<s> changes the identity-sample interval
+ * (SAMPLE_SEC=1 with enough candidates saturates the vision pool: see "identity samples/s").
+ * docs/PERFORMANCE.md describes the method and the reference results.
  */
 import { randomUUID } from 'node:crypto';
 import { readdirSync, writeFileSync } from 'node:fs';
@@ -25,16 +31,22 @@ const EVENT_SEC = 20;
 const ANSWER_SEC = 25;
 const FACES_DIR = process.env.FACES_DIR ?? '/tmp/claude-0/faces/deepface';
 const OUT = process.env.OUT ?? 'load-report.json';
+const STAFF_WS = Number(process.env.STAFF_WS ?? 0);
+/** The steady phase starts this long after the ramp (the last check-ins settle). */
+const STEADY_AFTER_RAMP_MS = 15_000;
 
-type Stat = { lat: number[]; errors: Record<string, number>; ok: number };
+type Stat = { lat: number[]; at: number[]; errors: Record<string, number>; ok: number };
 const stats = new Map<string, Stat>();
 function record(label: string, ms: number, status: number | string) {
   let s = stats.get(label);
-  if (!s) stats.set(label, (s = { lat: [], errors: {}, ok: 0 }));
+  if (!s) stats.set(label, (s = { lat: [], at: [], errors: {}, ok: 0 }));
   s.lat.push(ms);
+  s.at.push(Date.now());
   if (typeof status === 'number' && status < 400) s.ok++;
   else s.errors[String(status)] = (s.errors[String(status)] ?? 0) + 1;
 }
+const checkInFailures = new Map<string, number>();
+const failCheckIn = (why: string) => checkInFailures.set(why, (checkInFailures.get(why) ?? 0) + 1);
 const pct = (a: number[], p: number) => (a.length ? a[Math.min(a.length - 1, Math.floor((p / 100) * a.length))] : NaN);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -119,19 +131,19 @@ class Candidate {
 
   async checkIn(): Promise<boolean> {
     const st = await this.call('GET session', 'GET', '/session');
-    if (st.__error) return false;
+    if (st.__error) return (failCheckIn(`session ${st.__error}`), false);
     await this.call('POST consent', 'POST', '/consent', { json: { noticeVersion: st.consent.notice.version, accepted: true } });
     const chk = await this.call('POST checks', 'POST', '/checks', {
       json: { purpose: 'initial', clientInstanceId: this.instance, device: { cameraLabel: 'Load Test Camera', cameraIdHash: 'f'.repeat(64), userAgent: 'load-test', screen: { width: 1920, height: 1080, isExtended: false } } },
     });
-    if (chk.__error) return false;
+    if (chk.__error) return (failCheckIn(`start check ${chk.__error}`), false);
     for (let i = 0; i < Math.max(3, chk.frontalFramesRequired ?? 3); i++) {
       await this.call('POST check frame', 'POST', `/checks/${chk.checkId}/frames`, { jpeg: this.nextFrame(), query: { step: 'frontal', capturedAt: Date.now() } });
     }
     const done = await this.call('POST check complete', 'POST', `/checks/${chk.checkId}/complete`);
-    if (done.outcome !== 'passed') return false;
+    if (done.outcome !== 'passed') return (failCheckIn(done.__error ? `complete ${done.__error}` : `${done.outcome}: ${String(done.message ?? '').slice(0, 70)}`), false);
     const started = await this.call('POST start', 'POST', '/start');
-    if (started.__error) return false;
+    if (started.__error) return (failCheckIn(`start ${started.__error}`), false);
     this.status = 'active';
     this.questionIds = (started.questions ?? []).map((q: { id: string }) => q.id);
     return true;
@@ -196,6 +208,18 @@ async function main() {
   }
   const cands = links.map((l, i) => new Candidate(l.split('/take/')[1], faces[i % faces.length]));
 
+  // Staff dashboards: realtime messages are only built while someone listens.
+  const wsCounts: Record<string, number> = {};
+  const sockets: WebSocket[] = [];
+  for (let i = 0; i < STAFF_WS; i++) {
+    const ws = new WebSocket(`${BASE.replace(/^http/, 'ws')}/api/admin/live`, { headers: { cookie, origin: BASE } } as unknown as string[]);
+    ws.onmessage = (e) => {
+      const type = (JSON.parse(String(e.data)) as { type: string }).type;
+      wsCounts[type] = (wsCounts[type] ?? 0) + 1;
+    };
+    sockets.push(ws);
+  }
+
   const t0 = Date.now();
   const endAt = t0 + (RAMP_SEC + DURATION_SEC) * 1000;
   let checkedIn = 0;
@@ -210,20 +234,44 @@ async function main() {
   const progress = setInterval(() => console.log(`t+${Math.round((Date.now() - t0) / 1000)}s  checked-in ${checkedIn}/${N}  failed ${failedCheckIn}`), 15_000);
   await Promise.all(runs);
   clearInterval(progress);
+  for (const ws of sockets) ws.close();
 
+  const steadyFrom = t0 + RAMP_SEC * 1000 + STEADY_AFTER_RAMP_MS;
+  const steadySec = Math.max(1, (endAt - steadyFrom) / 1000);
+  const table = (from: number, secs: number | null) =>
+    [...stats.entries()]
+      .map(([label, s]) => {
+        const lat = s.lat.filter((_, i) => s.at[i] >= from).sort((a, b) => a - b);
+        const n = lat.length;
+        return { label, n, perSec: secs ? Math.round((n / secs) * 10) / 10 : null, p50: pct(lat, 50), p95: pct(lat, 95), p99: pct(lat, 99), max: lat[n - 1] ?? NaN };
+      })
+      .filter((r) => r.n > 0);
   const rows = [...stats.entries()].map(([label, s]) => {
     const lat = [...s.lat].sort((a, b) => a - b);
     return { label, n: lat.length, ok: s.ok, errors: s.errors, p50: pct(lat, 50), p95: pct(lat, 95), p99: pct(lat, 99), max: lat[lat.length - 1] };
   });
+  const steady = table(steadyFrom, steadySec);
   const health = await fetch(`${BASE}/api/health`).then((r) => r.json()).catch(() => null);
-  console.log('\nendpoint                 count     ok   p50ms   p95ms   p99ms   maxms  errors');
+  console.log('\nwhole run (ramp + steady)');
+  console.log('endpoint                 count     ok   p50ms   p95ms   p99ms   maxms  errors');
   for (const r of rows) {
     console.log(
       `${r.label.padEnd(22)} ${String(r.n).padStart(7)} ${String(r.ok).padStart(6)} ${r.p50.toFixed(0).padStart(7)} ${r.p95.toFixed(0).padStart(7)} ${r.p99.toFixed(0).padStart(7)} ${r.max.toFixed(0).padStart(7)}  ${JSON.stringify(r.errors)}`,
     );
   }
-  console.log(`\nchecked in ${checkedIn}/${N}, failed ${failedCheckIn}`);
-  writeFileSync(OUT, JSON.stringify({ at: new Date().toISOString(), N, RAMP_SEC, DURATION_SEC, SAMPLE_SEC, checkedIn, failedCheckIn, rows, health }, null, 2));
+  console.log(`\nsteady phase (from ${RAMP_SEC}+${STEADY_AFTER_RAMP_MS / 1000} s, ${steadySec.toFixed(0)} s)`);
+  console.log('endpoint                 count  req/s   p50ms   p95ms   p99ms   maxms');
+  for (const r of steady) {
+    console.log(`${r.label.padEnd(22)} ${String(r.n).padStart(7)} ${String(r.perSec).padStart(6)} ${r.p50.toFixed(0).padStart(7)} ${r.p95.toFixed(0).padStart(7)} ${r.p99.toFixed(0).padStart(7)} ${r.max.toFixed(0).padStart(7)}`);
+  }
+  const samples = steady.find((r) => r.label === 'POST identity sample');
+  console.log(`\nchecked in ${checkedIn}/${N}, failed ${failedCheckIn}${checkInFailures.size ? ` ${JSON.stringify(Object.fromEntries(checkInFailures))}` : ''}`);
+  if (samples) console.log(`identity samples/s (steady): ${samples.perSec}`);
+  if (STAFF_WS) console.log(`staff WebSocket messages: ${JSON.stringify(wsCounts)}`);
+  writeFileSync(
+    OUT,
+    JSON.stringify({ at: new Date().toISOString(), N, RAMP_SEC, DURATION_SEC, SAMPLE_SEC, STAFF_WS, checkedIn, failedCheckIn, checkInFailures: Object.fromEntries(checkInFailures), rows, steady, wsCounts, health }, null, 2),
+  );
 }
 
 main().catch((e) => {

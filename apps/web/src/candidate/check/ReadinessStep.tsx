@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isVirtualCameraLabel } from '@sp/detection';
 import { useController, useSnapshot } from '../context';
-import { CameraPreview, Spinner } from '../components/common';
+import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
 import { allRequiredPass, evaluateReadiness, ReadinessSmoother, type ReadinessItem } from './readiness';
 import { useFrameAnalysis } from './useFrameAnalysis';
 
@@ -54,7 +54,7 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
 
   return (
     <div className="stack">
-      <h1>Camera check</h1>
+      <ScreenHeading>Camera check</ScreenHeading>
       {intro && <p>{intro}</p>}
       <p className="muted">
         Sit where you will take the exam, in a well-lit place, with your face in the middle of the picture. The preview is mirrored like a mirror; nothing is recorded
@@ -62,7 +62,7 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
       </p>
       <div className="cand-setup">
         <div className="stack">
-          <CameraPreview stream={camera.stream} className="cand-preview-large" />
+          <CameraPreview stream={camera.stream} className="cand-preview-large" label="Your camera preview (mirrored)" />
           <label>
             Camera
             <select
@@ -83,7 +83,7 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
             <div className="banner banner-warning" role="alert">
               {camera.problem}
               <div style={{ marginTop: 8 }}>
-                <button className="btn btn-sm" onClick={() => void ctrl.camera.start()}>
+                <button type="button" className="btn btn-sm" onClick={() => void ctrl.camera.start()}>
                   Try again
                 </button>
               </div>
@@ -93,7 +93,8 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
         <div className="stack">
           <h2>Checklist</h2>
           {vs.loading && <Spinner label="Loading the camera check…" />}
-          <ul className="cand-checklist" data-testid="readiness-checklist" aria-live="polite">
+          {/* Not a live region (it updates with every analysed frame); the status line below is. */}
+          <ul className="cand-checklist" data-testid="readiness-checklist">
             {shown.map((it) => (
               <li key={it.id} className={it.ok ? 'ok' : it.required ? 'fail' : 'warn'} data-item={it.id} data-ok={it.ok ? '1' : '0'}>
                 <span className="cand-check-icon" aria-hidden="true">
@@ -102,7 +103,7 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
                 <div>
                   <div>
                     {it.label}
-                    <span className="sr-only">{it.ok ? ' — OK' : ' — not yet'}</span>
+                    <span className="sr-only">{it.ok ? ' — OK' : it.required ? ' — not yet' : ' — warning'}</span>
                   </div>
                   {!it.ok && <div className="muted small">{it.guidance}</div>}
                 </div>
@@ -114,13 +115,16 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
               The automatic camera check could not start in this browser. You can continue — the image will be checked when you verify your identity.
             </div>
           )}
-          {firstFailing && !analysisUnavailable && (
-            <p className="cand-guidance" role="status">
-              {firstFailing.guidance}
-            </p>
-          )}
+          {/* Persistent live region: the current instruction is announced (politely) when it changes. */}
+          <div role="status" aria-atomic="true" className="cand-live-slot" data-testid="readiness-status">
+            {firstFailing && !analysisUnavailable ? (
+              <p className="cand-guidance">{firstFailing.guidance}</p>
+            ) : ready && !analysisUnavailable ? (
+              <p className="cand-status-ok">All checks passed. Select Continue.</p>
+            ) : null}
+          </div>
           <div className="row">
-            <button className="btn btn-primary btn-lg" disabled={!ready} onClick={onReady} data-testid="readiness-continue">
+            <button type="button" className="btn btn-primary btn-lg" disabled={!ready} onClick={onReady} data-testid="readiness-continue">
               Continue
             </button>
           </div>

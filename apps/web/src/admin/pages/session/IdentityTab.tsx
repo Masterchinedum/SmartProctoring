@@ -133,7 +133,12 @@ export function IdentityTab({ d, onOpenEvent }: { d: SessionDetailDTO; onOpenEve
                     </td>
                     <td>
                       {c.probeEvidence ? (
-                        <EvidenceImage evidence={c.probeEvidence} size="thumb" onOpen={() => setLightbox(withImages.indexOf(c))} />
+                        <EvidenceImage
+                          evidence={c.probeEvidence}
+                          size="thumb"
+                          onOpen={() => setLightbox(withImages.indexOf(c))}
+                          context={`identity check (${TRIGGER_LABELS[c.trigger] ?? c.trigger}), ${DECISION_LABELS[c.decision] ?? c.decision}`}
+                        />
                       ) : (
                         <span className="muted small" title="Images of routine matching samples are not kept (data minimisation)">
                           not kept

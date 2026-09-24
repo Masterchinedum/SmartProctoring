@@ -54,6 +54,7 @@ export class RedisBus implements RealtimeBus {
     private readonly pub: import('ioredis').Redis,
     private readonly sub: import('ioredis').Redis,
     private readonly onError: (err: Error) => void,
+    private readonly remoteTtlMs: number,
   ) {
     this.local.setMaxListeners(0);
     this.sub.on('message', (channel: string, payload: string) => {
@@ -71,7 +72,7 @@ export class RedisBus implements RealtimeBus {
     this.sub.subscribe(SUBSCRIBED_CHANNEL).catch(this.onError);
   }
 
-  static async connect(url: string, onError: (err: Error) => void = () => {}): Promise<RedisBus> {
+  static async connect(url: string, onError: (err: Error) => void = () => {}, busOpts: { remoteTtlMs?: number } = {}): Promise<RedisBus> {
     const Redis = await loadRedisClass(); // bundle-safe (see lib/redis.ts)
     const opts = { maxRetriesPerRequest: null, enableReadyCheck: true, lazyConnect: true } as const;
     const pub = new Redis(url, opts);
@@ -79,7 +80,7 @@ export class RedisBus implements RealtimeBus {
     pub.on('error', onError);
     sub.on('error', onError);
     await Promise.all([pub.connect(), sub.connect()]);
-    return new RedisBus(pub, sub, onError);
+    return new RedisBus(pub, sub, onError, busOpts.remoteTtlMs ?? REMOTE_SUBSCRIBERS_TTL_MS);
   }
 
   publish(orgId: string, msg: LiveMessage): void {
@@ -110,7 +111,7 @@ export class RedisBus implements RealtimeBus {
     const now = Date.now();
     let entry = this.remote.get(orgId);
     if (!entry) this.remote.set(orgId, (entry = { has: true, at: 0, refreshing: false }));
-    if (now - entry.at > REMOTE_SUBSCRIBERS_TTL_MS && !entry.refreshing) {
+    if (now - entry.at > this.remoteTtlMs && !entry.refreshing) {
       entry.refreshing = true;
       const e = entry;
       this.pub

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createBaselineCalibrator } from '@sp/detection';
 import type { Baseline } from '@sp/shared';
 import { useSnapshot } from '../context';
-import { CameraPreview } from '../components/common';
+import { CameraPreview, ScreenHeading } from '../components/common';
 import { plausibleFaces, useFrameAnalysis } from './useFrameAnalysis';
 
 /** Minimum time the candidate holds still, even if enough samples arrive sooner. */
@@ -45,10 +45,10 @@ export function CalibrationStep({ onDone }: { onDone: (b: Baseline | null) => vo
 
   return (
     <div className="stack" data-testid="calibration-step">
-      <h1>Hold still and look at the screen</h1>
+      <ScreenHeading>Hold still and look at the screen</ScreenHeading>
       <p>We are measuring your normal sitting position so that ordinary movements are not mistaken for looking away. This takes a few seconds.</p>
       <div className="cand-setup">
-        <CameraPreview stream={camera.stream} className="cand-preview-large" />
+        <CameraPreview stream={camera.stream} className="cand-preview-large" label="Your camera preview (mirrored)" />
         <div className="stack">
           <div className="cand-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)} aria-label="Calibration progress">
             <div className="cand-progress-bar" style={{ width: `${Math.round(progress * 100)}%` }} />

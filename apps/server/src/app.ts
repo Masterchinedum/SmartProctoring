@@ -12,6 +12,7 @@ import type { Ctx } from './context.js';
 import { createDatabase, migrate, type Database } from './db/index.js';
 import { createKeyring } from './lib/crypto.js';
 import { HttpError } from './lib/errors.js';
+import { LoadMonitor } from './lib/load-monitor.js';
 import { appLoggerOptions } from './lib/log-redact.js';
 import { connectRateLimitRedis, RATE_LIMIT_NAMESPACE } from './lib/redis.js';
 import { createStorage, type BlobStorage } from './lib/storage.js';
@@ -237,13 +238,17 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   });
 
   if (opts.bootstrap !== false) await bootstrapAdmin(ctx);
+  // Warns (at most once a minute) when this instance is at its knee: event loop lagging, DB pool or vision queue.
+  const loadMonitor = new LoadMonitor({ pool: database.pool, vision, log: app.log });
   if (opts.jobs ?? config.sweeperEnabled) {
     app.addHook('onReady', async () => {
       ctx.jobs.start();
+      loadMonitor.start();
     });
   }
 
   app.addHook('onClose', async () => {
+    loadMonitor.stop();
     await ctx.jobs.stop();
     ctx.live.close();
     await owned.bus?.close();

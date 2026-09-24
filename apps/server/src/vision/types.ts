@@ -45,6 +45,12 @@ export interface AnalyzeOptions {
   faceCrop?: boolean;
   /** Override (part of) the quality gate used to compute `quality.issues` / `quality.usable`. */
   gate?: Partial<QualityGate>;
+  /**
+   * Scheduling hint when the vision pool is busy: 'interactive' (default) — someone is waiting for the answer
+   * (check frames, ID photos); 'background' — may wait a few seconds (mid-exam identity samples). Implementations
+   * may ignore it.
+   */
+  priority?: 'interactive' | 'background';
 }
 
 export interface VisionService {

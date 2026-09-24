@@ -3,7 +3,10 @@
  * analyses one image at a time; the main thread only queues work and receives plain results, so inference
  * (synchronous in onnxruntime-node) and the JS pixel loops never block HTTP / database work.
  *
- *  - FIFO queue; more than `maxQueue` waiting analyses => VisionBusyError (HTTP 503 + Retry-After).
+ *  - Two FIFO queues: 'interactive' work (a candidate waits: check frames) goes before 'background' work
+ *    (identity samples); background work that waited BACKGROUND_MAX_WAIT_MS alternates with interactive work
+ *    (no starvation either way). More than `maxQueue` waiting analyses of one priority => VisionBusyError
+ *    (HTTP 503 + Retry-After).
  *  - A worker that crashes fails only its in-flight analysis and is replaced (with backoff).
  *  - Idle workers are unref'ed, so a forgotten pool never keeps a CLI process alive.
  */
@@ -84,9 +87,15 @@ function createWorker(script: WorkerScript, workerData: VisionWorkerData): Worke
 
 type TaskRequest = { type: 'analyze'; image: Uint8Array; opts: AnalyzeOptions } | { type: 'detect'; image: Uint8Array };
 
+export type VisionPriority = 'interactive' | 'background';
+
+/** Background work that waited this long alternates with interactive work instead of waiting behind it. */
+export const BACKGROUND_MAX_WAIT_MS = 5_000;
+
 interface Task {
   id: number;
   req: TaskRequest;
+  enqueuedAt: number;
   resolve: (v: ImageAnalysis | DetectedFace[]) => void;
   reject: (err: Error) => void;
 }
@@ -102,6 +111,8 @@ export interface VisionPoolOptions {
   maxQueue: number;
   workerData: VisionWorkerData;
   script?: WorkerScript;
+  /** Default BACKGROUND_MAX_WAIT_MS. */
+  backgroundMaxWaitMs?: number;
   /** Called when a worker dies unexpectedly (logging). */
   onWorkerExit?: (info: { code: number; error: Error | null }) => void;
 }
@@ -112,7 +123,8 @@ const MAX_RESPAWN_DELAY_MS = 30_000;
 
 export class VisionWorkerPool {
   private readonly slots: Slot[] = [];
-  private readonly queue: Task[] = [];
+  private readonly queues: Record<VisionPriority, Task[]> = { interactive: [], background: [] };
+  private lastWasOverdue = false;
   private nextId = 1;
   private closed = false;
   private respawnFailures = 0;
@@ -145,32 +157,51 @@ export class VisionWorkerPool {
     return n;
   }
   get queued(): number {
-    return this.queue.length;
+    return this.queues.interactive.length + this.queues.background.length;
   }
 
   analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis> {
-    return this.submit({ type: 'analyze', image, opts: { embed: opts.embed, faceCrop: opts.faceCrop, gate: opts.gate } }).then((a) => reviveAnalysis(a as ImageAnalysis));
+    const req: TaskRequest = { type: 'analyze', image, opts: { embed: opts.embed, faceCrop: opts.faceCrop, gate: opts.gate } };
+    return this.submit(req, opts.priority ?? 'interactive').then((a) => reviveAnalysis(a as ImageAnalysis));
   }
 
   detect(image: Buffer): Promise<DetectedFace[]> {
-    return this.submit({ type: 'detect', image }) as Promise<DetectedFace[]>;
+    return this.submit({ type: 'detect', image }, 'interactive') as Promise<DetectedFace[]>;
   }
 
-  private submit(req: TaskRequest): Promise<ImageAnalysis | DetectedFace[]> {
+  private submit(req: TaskRequest, priority: VisionPriority): Promise<ImageAnalysis | DetectedFace[]> {
     if (this.closed) return Promise.reject(new VisionClosedError());
+    const queue = this.queues[priority];
     const free = this.slots.some((s) => s.ready && !s.task);
-    if (!free && this.queue.length >= this.opts.maxQueue) return Promise.reject(new VisionBusyError());
+    if (!free && queue.length >= this.opts.maxQueue) return Promise.reject(new VisionBusyError());
     return new Promise((resolve, reject) => {
-      this.queue.push({ id: this.nextId++, req, resolve, reject });
+      queue.push({ id: this.nextId++, req, enqueuedAt: Date.now(), resolve, reject });
       this.pump();
     });
   }
 
+  private nextTask(): Task | undefined {
+    const bg = this.queues.background;
+    const inter = this.queues.interactive;
+    // Overdue background work alternates with interactive work, so neither class can starve the other.
+    const overdue = bg.length > 0 && Date.now() - bg[0].enqueuedAt >= (this.opts.backgroundMaxWaitMs ?? BACKGROUND_MAX_WAIT_MS);
+    if (inter.length && !(overdue && !this.lastWasOverdue)) {
+      this.lastWasOverdue = false;
+      return inter.shift();
+    }
+    this.lastWasOverdue = overdue;
+    return bg.shift();
+  }
+
+  private rejectQueued(err: Error): void {
+    for (const t of [...this.queues.interactive.splice(0), ...this.queues.background.splice(0)]) t.reject(err);
+  }
+
   private pump(): void {
-    while (this.queue.length) {
+    while (this.queued) {
       const slot = this.slots.find((s) => s.ready && !s.task);
       if (!slot) return;
-      const task = this.queue.shift()!;
+      const task = this.nextTask()!;
       slot.task = task;
       slot.worker.ref();
       // The image is copied (structured clone): the caller keeps using its buffer (evidence storage).
@@ -205,13 +236,14 @@ export class VisionWorkerPool {
           this.pump();
         } else if (msg.type === 'init_error') {
           exitError = reviveError(msg.error);
+          void worker.terminate(); // -> 'exit' rejects the start
         } else if (msg.type === 'result') {
           const task = slot.task;
           if (!task || task.id !== msg.id) return;
           slot.task = null;
           if (msg.ok) task.resolve((msg.analysis ?? msg.faces)!);
           else task.reject(reviveError(msg.error));
-          if (!this.queue.length) worker.unref();
+          if (!this.queued) worker.unref();
           this.pump();
           if (this.inFlight === 0) for (const w of this.idleWaiters.splice(0)) w();
         }
@@ -235,7 +267,7 @@ export class VisionWorkerPool {
           // A replacement failed to start (models unreadable, out of memory...): fail waiting work instead of
           // letting it hang, and keep trying in the background.
           this.lastInitError = err;
-          if (!this.slots.some((s) => s.ready)) for (const t of this.queue.splice(0)) t.reject(err);
+          if (!this.slots.some((s) => s.ready)) this.rejectQueued(err);
         } else if (!this.closed) {
           this.opts.onWorkerExit?.({ code, error: exitError });
         }
@@ -266,7 +298,7 @@ export class VisionWorkerPool {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    for (const t of this.queue.splice(0)) t.reject(new VisionClosedError());
+    this.rejectQueued(new VisionClosedError());
     if (this.inFlight > 0) await new Promise<void>((r) => this.idleWaiters.push(r));
     await Promise.all(
       [...this.slots].map(

@@ -1,7 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { useDialogFocus } from '../../lib/a11y';
 
-/** Accessible modal dialog (Escape / backdrop click closes; focus moves into the dialog). */
+/**
+ * Accessible modal dialog: Escape / backdrop click closes; focus moves to the first field (else the
+ * primary button), Tab stays inside, the page behind is inert, and focus returns to the opener.
+ */
 export function Modal({
   title,
   onClose,
@@ -17,23 +21,20 @@ export function Modal({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  useEffect(() => {
-    const prev = document.activeElement as HTMLElement | null;
-    const first = ref.current?.querySelector<HTMLElement>('input:not([type=hidden]), textarea, select, button.btn-primary, button');
-    first?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      prev?.focus?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useDialogFocus(ref, {
+    onEscape: onClose,
+    initialFocus: () => {
+      const el = ref.current;
+      if (!el) return null;
+      return (
+        el.querySelector<HTMLElement>('[data-autofocus]') ??
+        el.querySelector<HTMLElement>('.modal-body :is(input:not([type=hidden]):not([disabled]), textarea:not([disabled]), select:not([disabled]))') ??
+        el.querySelector<HTMLElement>('.modal-foot .btn-primary:not([disabled]), .modal-foot .btn-danger:not([disabled])') ??
+        el.querySelector<HTMLElement>('.modal-foot button:not([disabled])') ??
+        el.querySelector<HTMLElement>('.modal-head button')
+      );
+    },
+  });
   return createPortal(
     <div
       className="modal-backdrop"
@@ -111,7 +112,11 @@ export function ConfirmDialog({
             <textarea value={text} onChange={(e) => setText(e.target.value)} maxLength={1000} rows={3} />
           </label>
         ) : null}
-        {error ? <div className="banner banner-danger">{error}</div> : null}
+        {error ? (
+          <div className="banner banner-danger" role="alert">
+            {error}
+          </div>
+        ) : null}
       </div>
     </Modal>
   );

@@ -117,7 +117,15 @@ export function CategoryCounts({ counts, compact = false }: { counts: { integrit
       {items.map(([c, n]) => (
         <span key={c} className={`cat-count cat-count-${c}${n === 0 ? ' zero' : ''}`} title={`${CATEGORY_LABELS[c]}: ${n}`}>
           <span className={`cat-dot cat-dot-${c}`} aria-hidden />
-          {compact ? n : `${n} ${CATEGORY_SHORT[c].toLowerCase()}`}
+          {compact ? (
+            // Not by colour alone: a visible initial, and the full category name for screen readers.
+            <>
+              <span aria-hidden>{CATEGORY_SHORT[c][0]}</span>
+              <span className="visually-hidden">{CATEGORY_SHORT[c]}:</span> {n}
+            </>
+          ) : (
+            `${n} ${CATEGORY_SHORT[c].toLowerCase()}`
+          )}
         </span>
       ))}
     </span>

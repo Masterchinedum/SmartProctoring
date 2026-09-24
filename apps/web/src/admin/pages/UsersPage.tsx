@@ -55,7 +55,7 @@ export function UsersPage() {
           </div>
         ))}
       </div>
-      {update.isError ? <div className="banner banner-danger">{errorMessage(update.error)}</div> : null}
+      {update.isError ? <div className="banner banner-danger" role="alert">{errorMessage(update.error)}</div> : null}
       {q.isPending ? (
         <Loading />
       ) : q.isError ? (
@@ -199,7 +199,7 @@ function CreateUserModal({ roles, onClose }: { roles: StaffRole[]; onClose: () =
           {password && password.length < 10 ? <span className="text-danger small">At least 10 characters</span> : null}
         </label>
         <p className="muted small">Share the password with the user through a secure channel.</p>
-        {m.isError ? <div className="banner banner-danger">{errorMessage(m.error)}</div> : null}
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
       </form>
     </Modal>
   );
@@ -238,7 +238,7 @@ function ResetPasswordModal({ user, onClose }: { user: StaffUserDTO; onClose: ()
             New password (at least 10 characters)
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
           </label>
-          {m.isError ? <div className="banner banner-danger">{errorMessage(m.error)}</div> : null}
+          {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
         </div>
       )}
     </Modal>

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { AnswerValue } from '@sp/shared';
+import { useDialogFocus, useDocumentTitle } from '../../../lib/a11y';
 import { useController, useSnapshot } from '../../context';
 import { CameraPreview, CountdownDisplay, PrivacyNoticeDialog, ReportingBanner, Spinner, Toasts } from '../../components/common';
 import { PauseDialog, pauseAvailability, SubmitDialog } from './Dialogs';
@@ -58,6 +59,8 @@ export function ExamScreen() {
     if (pendingPause) setDialog((d) => d ?? 'pause');
   }, [pendingPause]);
 
+  useDocumentTitle(`${questions.length ? `Question ${current + 1} of ${questions.length}` : 'Exam'} — ${state.exam.title} — SmartProctoring`);
+
   if (!answers || !snap.answersReady) {
     return (
       <div className="cand-page">
@@ -72,56 +75,59 @@ export function ExamScreen() {
   const pa = pauseAvailability(state);
   const mon = snap.monitoring;
   const monState = !snap.monitoringActive ? 'off' : (mon?.state ?? 'off');
-  const cameraProblem = snap.camera.state !== 'live' && snap.monitoringActive ? snap.camera.problem ?? 'The camera is not available. We are trying to reconnect it.' : null;
+  const cameraProblem = snap.camera.state !== 'live' && snap.monitoringActive ? (snap.camera.problem ?? 'The camera is not available. We are trying to reconnect it.') : null;
+  const hasBanners = snap.reportingInterrupted || !!cameraProblem || snap.prompts.length > 0 || snap.timeUp;
 
   return (
     <div className="cand-exam" data-testid="exam-screen">
+      <a className="skip-link" href="#exam-question" onClick={(e) => {
+        e.preventDefault();
+        (document.getElementById(`q-${q?.id}-heading`) ?? document.getElementById('exam-question'))?.focus();
+      }}>
+        Skip to the question
+      </a>
       <header className="cand-exam-header">
         <div className="cand-exam-title">
-          <strong>{state.exam.title}</strong>
+          <h1>{state.exam.title}</h1>
           <span className="muted small">{state.candidate.name}</span>
         </div>
-        <CountdownDisplay />
+        <CountdownDisplay announceMarks />
         <div className="spacer" />
         <div className={`cand-selfview cand-mon-${monState}`}>
           <CameraPreview stream={snap.camera.stream} className="cand-preview-mini" label="Your camera (self-view)" />
           <div className="stack" style={{ gap: 2 }}>
+            {/* The dot's colour repeats the text; the text alone carries the status. */}
             <span className="cand-mon-status" data-testid="monitoring-status">
               <span className={`cand-dot cand-dot-${monState}`} aria-hidden="true" />
               {STATUS_TEXT[monState] ?? 'Monitoring active'}
             </span>
-            <button className="cand-link" onClick={() => setDialog('privacy')} data-testid="what-is-monitored">
+            <button type="button" className="cand-link" aria-haspopup="dialog" onClick={() => setDialog('privacy')} data-testid="what-is-monitored">
               Monitoring active — what is monitored?
             </button>
           </div>
         </div>
         {pa.allowed && (
-          <button className="btn" onClick={() => setDialog('pause')} data-testid="pause-button">
+          <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setDialog('pause')} data-testid="pause-button">
             {pendingPause ? 'Pause requested…' : 'Pause'}
           </button>
         )}
-        <button className="btn btn-primary" onClick={() => setDialog('submit')} data-testid="submit-button">
+        <button type="button" className="btn btn-primary" aria-haspopup="dialog" onClick={() => setDialog('submit')} data-testid="submit-button">
           Submit
         </button>
       </header>
 
-      <div className="cand-exam-banners">
+      {/* Persistent live regions: "reporting interrupted" is assertive (it blocks), the rest polite. */}
+      <div className="cand-exam-banners" role={hasBanners ? 'region' : undefined} aria-label={hasBanners ? 'Exam messages' : undefined}>
         <ReportingBanner />
-        {cameraProblem && (
-          <div className="banner banner-warning" role="status">
-            {cameraProblem}
-          </div>
-        )}
-        {snap.prompts.map((p) => (
-          <div key={p.key} className={`banner ${p.severity === 'warning' ? 'banner-warning' : 'banner-info'} cand-prompt`} role="status" aria-live="polite" data-testid="candidate-prompt">
-            {p.message}
-          </div>
-        ))}
-        {snap.timeUp && (
-          <div className="banner banner-info" role="status">
-            Time is up. Your answers are being submitted…
-          </div>
-        )}
+        <div className="cand-live-slot" aria-live="polite" aria-relevant="additions text">
+          {cameraProblem && <div className="banner banner-warning">{cameraProblem}</div>}
+          {snap.prompts.map((p) => (
+            <div key={p.key} className={`banner ${p.severity === 'warning' ? 'banner-warning' : 'banner-info'} cand-prompt`} data-testid="candidate-prompt">
+              {p.message}
+            </div>
+          ))}
+          {snap.timeUp && <div className="banner banner-info">Time is up. Your answers are being submitted…</div>}
+        </div>
       </div>
 
       <div className="cand-exam-body">
@@ -148,24 +154,26 @@ export function ExamScreen() {
             })}
           </ol>
         </nav>
-        <main className="cand-exam-main">
+        <main className="cand-exam-main" id="exam-question" aria-label="Current question" tabIndex={-1}>
           {q ? (
             <>
-              <QuestionView key={q.id} question={q} value={answers.get(q.id)} onChange={setAnswer} />
+              {/* Keyed by question: its heading receives the focus whenever the question changes. */}
+              <QuestionView key={q.id} question={q} value={answers.get(q.id)} onChange={setAnswer} total={questions.length} />
               <div className="row cand-exam-nav">
-                <button className="btn" onClick={() => setCurrent((c) => Math.max(0, c - 1))} disabled={current === 0} data-testid="prev-question">
-                  ← Previous
+                <button type="button" className="btn" onClick={() => setCurrent((c) => Math.max(0, c - 1))} disabled={current === 0} data-testid="prev-question">
+                  <span aria-hidden="true">←</span> Previous
                 </button>
-                <span className="muted small" aria-live="polite">
+                {/* Re-created per question, so only a change on this question (first answer) is announced. */}
+                <span key={q.id} className="muted small" role="status" data-testid="autosave-status">
                   {answers.isAnswered(q.id) ? 'Answer saved automatically' : 'Not answered yet'}
                 </span>
                 <div className="spacer" />
                 {current < questions.length - 1 ? (
-                  <button className="btn btn-primary" onClick={() => setCurrent((c) => Math.min(questions.length - 1, c + 1))} data-testid="next-question">
-                    Next →
+                  <button type="button" className="btn btn-primary" onClick={() => setCurrent((c) => Math.min(questions.length - 1, c + 1))} data-testid="next-question">
+                    Next <span aria-hidden="true">→</span>
                   </button>
                 ) : (
-                  <button className="btn btn-primary" onClick={() => setDialog('submit')}>
+                  <button type="button" className="btn btn-primary" aria-haspopup="dialog" onClick={() => setDialog('submit')}>
                     Review and submit
                   </button>
                 )}
@@ -178,17 +186,7 @@ export function ExamScreen() {
         </main>
       </div>
 
-      {requireFs && !fullscreen && !dialog && (
-        <div className="cand-fs-overlay" role="dialog" aria-modal="true" aria-labelledby="fs-title" data-testid="fullscreen-overlay">
-          <div className="card stack" style={{ maxWidth: 480 }}>
-            <h2 id="fs-title">Return to fullscreen</h2>
-            <p>This exam must be taken in fullscreen mode. Leaving fullscreen is recorded for the exam administrator. Your answers are saved.</p>
-            <button className="btn btn-primary btn-lg" onClick={() => void enterFullscreen()} autoFocus data-testid="fullscreen-return">
-              Return to fullscreen
-            </button>
-          </div>
-        </div>
-      )}
+      {requireFs && !fullscreen && !dialog && <FullscreenOverlay />}
 
       {dialog === 'pause' && <PauseDialog state={state} onClose={() => setDialog(null)} />}
       {dialog === 'submit' && <SubmitDialog total={questions.length} answered={answeredCount} onClose={() => setDialog(null)} />}
@@ -210,9 +208,26 @@ function TraceTools() {
   return (
     <div className="card cand-trace" data-testid="trace-tools">
       <strong>Evaluation trace</strong> <span className="muted small">{t.observationCount} observations recorded</span>{' '}
-      <button className="btn btn-sm" onClick={() => t.download()} data-testid="trace-download">
+      <button type="button" className="btn btn-sm" onClick={() => t.download()} data-testid="trace-download">
         Download trace (JSONL)
       </button>
+    </div>
+  );
+}
+
+/** Blocking dialog while a fullscreen exam is not fullscreen (no Escape: it must be answered). */
+function FullscreenOverlay() {
+  const ref = useRef<HTMLDivElement>(null);
+  useDialogFocus(ref, { initialFocus: () => ref.current?.querySelector<HTMLElement>('[data-testid="fullscreen-return"]') });
+  return (
+    <div className="cand-fs-overlay" role="dialog" aria-modal="true" aria-labelledby="fs-title" aria-describedby="fs-desc" data-testid="fullscreen-overlay" ref={ref}>
+      <div className="card stack" style={{ maxWidth: 480 }}>
+        <h2 id="fs-title">Return to fullscreen</h2>
+        <p id="fs-desc">This exam must be taken in fullscreen mode. Leaving fullscreen is recorded for the exam administrator. Your answers are saved.</p>
+        <button type="button" className="btn btn-primary btn-lg" onClick={() => void enterFullscreen()} data-testid="fullscreen-return">
+          Return to fullscreen
+        </button>
+      </div>
     </div>
   );
 }

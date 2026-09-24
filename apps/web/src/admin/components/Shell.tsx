@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { LiveAnnouncer } from '../../lib/LiveAnnouncer';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { qk } from '../api/queries';
@@ -26,11 +27,33 @@ const NAV: NavItem[] = [
   { to: '/admin/users', label: 'Users', adminOnly: true },
 ];
 
+/** Document title per route (WCAG 2.4.2): "<page> — SmartProctoring staff". */
+export function staffPageTitle(pathname: string): string {
+  const p = pathname.replace(/\/+$/, '');
+  const rules: [RegExp, string][] = [
+    [/^\/admin$/, 'Live dashboard'],
+    [/^\/admin\/sessions\/[^/]+\/compare\/[^/]+$/, 'Compare images'],
+    [/^\/admin\/sessions\/[^/]+\/report$/, 'Session report'],
+    [/^\/admin\/sessions\/[^/]+$/, 'Session details'],
+    [/^\/admin\/exams\/new$/, 'New exam'],
+    [/^\/admin\/exams\/[^/]+\/edit$/, 'Edit exam'],
+    [/^\/admin\/exams\/[^/]+$/, 'Exam details'],
+    [/^\/admin\/candidates\/[^/]+$/, 'Candidate details'],
+  ];
+  for (const [re, t] of rules) if (re.test(p)) return `${t} — SmartProctoring staff`;
+  const nav = NAV.find((n) => n.to !== '/admin' && p === n.to);
+  return `${nav ? nav.label : 'Staff'} — SmartProctoring staff`;
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   const { user, org, isAdmin } = useAuth();
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
   const [loggingOut, setLoggingOut] = useState(false);
+  useEffect(() => {
+    document.title = staffPageTitle(location.pathname);
+  }, [location.pathname]);
 
   const logout = async () => {
     setLoggingOut(true);
@@ -46,7 +69,14 @@ export function Shell({ children }: { children: ReactNode }) {
 
   return (
     <div className="admin-shell">
-      <aside className="admin-nav">
+      <a className="skip-link" href="#admin-main" onClick={(e) => {
+        e.preventDefault();
+        document.getElementById('admin-main')?.focus();
+      }}>
+        Skip to main content
+      </a>
+      <LiveAnnouncer />
+      <aside className="admin-nav" aria-label="Staff navigation">
         <div className="admin-brand">
           <span className="brand-mark" aria-hidden>
             SP
@@ -58,7 +88,7 @@ export function Shell({ children }: { children: ReactNode }) {
             </div>
           </div>
         </div>
-        <nav>
+        <nav aria-label="Main">
           {NAV.filter((n) => !n.adminOnly || isAdmin).map((n) => (
             <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
               {n.label}
@@ -79,7 +109,7 @@ export function Shell({ children }: { children: ReactNode }) {
           </button>
         </div>
       </aside>
-      <main className="admin-main">
+      <main className="admin-main" id="admin-main" tabIndex={-1}>
         <LiveBanner />
         {children}
       </main>
@@ -90,7 +120,13 @@ export function Shell({ children }: { children: ReactNode }) {
 function LiveDot() {
   const { status } = useLive();
   const label = status === 'open' ? 'Live updates connected' : status === 'reconnecting' ? 'Live updates disconnected' : 'Connecting…';
-  return <span className={`live-dot live-${status}`} title={label} aria-label={label} />;
+  // The dot's colour is repeated as text for assistive technology (and as a tooltip).
+  return (
+    <>
+      <span className={`live-dot live-${status}`} title={label} aria-hidden />
+      <span className="visually-hidden">({label})</span>
+    </>
+  );
 }
 
 /** Shown whenever the realtime channel is down. */

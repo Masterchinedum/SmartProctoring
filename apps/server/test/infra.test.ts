@@ -6,6 +6,7 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
+import { createDatabase, migrate } from '../src/db/index.js';
 import { staffUsers } from '../src/db/schema.js';
 import { createKeyring, hashPassword, isJpeg, verifyPassword } from '../src/lib/crypto.js';
 import { MemoryStorage } from '../src/lib/storage.js';
@@ -96,6 +97,17 @@ describe('config', () => {
     expect(dev.warnings.join(' ')).toMatch(/DEVELOPMENT key/);
     expect(dev.port).toBe(8080);
   });
+
+  it('reads capacity settings (Postgres pool, statement timeout, vision workers)', () => {
+    const dflt = loadConfig({});
+    expect(dflt.db).toEqual({ poolMax: 20, statementTimeoutMs: 60_000 });
+    expect(dflt.visionWorkers).toBeNull(); // derived from VISION_THREADS / CPU count by the vision service
+    const tuned = loadConfig({ PG_POOL_MAX: '40', PG_STATEMENT_TIMEOUT_MS: '0', VISION_WORKERS: '0', VISION_CONCURRENCY: '3' });
+    expect(tuned.db).toEqual({ poolMax: 40, statementTimeoutMs: 0 });
+    expect(tuned.visionWorkers).toBe(0);
+    expect(tuned.visionConcurrency).toBe(3);
+    expect(() => loadConfig({ PG_POOL_MAX: 'many' })).toThrow(/Invalid integer/);
+  });
 });
 
 describe('realtime bus', () => {
@@ -141,6 +153,19 @@ describe('bootstrap and static web', () => {
     env = await createTestEnv();
   });
   afterAll(async () => env?.close());
+
+  it('applies the statement timeout to pooled connections, and migrations lift it', async () => {
+    const db = createDatabase(env.ctx.config.databaseUrl, { max: 2, statementTimeoutMs: 1234 });
+    try {
+      const { rows } = await db.pool.query('show statement_timeout');
+      expect(rows[0].statement_timeout).toBe('1234ms');
+      await migrate(db); // already migrated: runs with statement_timeout 0, then restores it
+      const after = await db.pool.query('show statement_timeout');
+      expect(after.rows[0].statement_timeout).toBe('1234ms');
+    } finally {
+      await db.close();
+    }
+  });
 
   it('creates the first owner only when no staff exist', async () => {
     const ctx = { ...env.ctx, config: { ...env.ctx.config, bootstrap: { email: 'boot@example.com', password: 'Bootstrap-Pass-1', orgName: 'Boot Org' } } };

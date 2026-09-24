@@ -64,7 +64,8 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
 
   const active = await loadActiveReference(ctx, ctx.db, session.id);
   if (!active) throw invalidState('No identity reference exists for this exam');
-  const analysis: ImageAnalysis = await ctx.vision.analyze(jpeg, { embed: true, faceCrop: true });
+  // Background priority: nobody waits on a mid-exam sample, while check-in frames keep a candidate waiting.
+  const analysis: ImageAnalysis = await ctx.vision.analyze(jpeg, { embed: true, faceCrop: true, priority: 'background' });
 
   const out = await withSession(ctx, session.id, async (m) => {
     const [dup] = await m.tx

@@ -40,7 +40,10 @@ export function EventsTab({
           className="sort-btn"
           onClick={() => setSort((s) => ({ key, dir: s.key === key ? (s.dir === 'asc' ? 'desc' : 'asc') : key === 'time' ? 'asc' : 'desc' }))}
         >
-          {label} {active ? (sort.dir === 'asc' ? '▲' : '▼') : <span className="muted">↕</span>}
+          {label}{' '}
+          <span aria-hidden className={active ? undefined : 'muted'}>
+            {active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕'}
+          </span>
         </button>
       </th>
     );
@@ -67,6 +70,7 @@ export function EventsTab({
             </thead>
             <tbody>
               {rows.map((e) => (
+                // The whole row is clickable with a mouse; the title is the keyboard-accessible control.
                 <tr key={e.id} onClick={() => onOpenEvent(e.id)} className={`row-cat-${e.category}`}>
                   <td className="nowrap">
                     <Clock at={e.startedAt} />
@@ -74,7 +78,17 @@ export function EventsTab({
                   <td>
                     <div className="row tight">
                       <CategoryBadge category={e.category} />
-                      <strong>{e.title}</strong>
+                      <button
+                        type="button"
+                        className="link-btn row-open"
+                        aria-haspopup="dialog"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          onOpenEvent(e.id);
+                        }}
+                      >
+                        <strong>{e.title}</strong>
+                      </button>
                       {e.status === 'open' ? <span className="badge badge-warning">Ongoing</span> : null}
                       {e.deliveredLate ? <span className="badge badge-technical">Delivered late</span> : null}
                     </div>

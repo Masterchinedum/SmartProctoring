@@ -130,7 +130,7 @@ function ApiKeysSection({ status }: { status: IntegrationStatusDTO | undefined }
           {create.isPending ? 'Creating…' : 'Create API key'}
         </button>
       </form>
-      {create.isError ? <div className="banner banner-danger">{errorMessage(create.error)}</div> : null}
+      {create.isError ? <div className="banner banner-danger" role="alert">{errorMessage(create.error)}</div> : null}
       {q.isPending ? (
         <Loading />
       ) : q.isError ? (
@@ -263,8 +263,8 @@ function WebhooksSection({ status }: { status: IntegrationStatusDTO | undefined 
           {testResult.delivery.status === 'succeeded' ? `delivered (HTTP ${testResult.delivery.lastStatusCode}).` : `failed — ${deliveryResult(testResult.delivery)}`}
         </div>
       ) : null}
-      {test.isError ? <div className="banner banner-danger">{errorMessage(test.error)}</div> : null}
-      {toggle.isError ? <div className="banner banner-danger">{errorMessage(toggle.error)}</div> : null}
+      {test.isError ? <div className="banner banner-danger" role="alert">{errorMessage(test.error)}</div> : null}
+      {toggle.isError ? <div className="banner banner-danger" role="alert">{errorMessage(toggle.error)}</div> : null}
       {q.isPending ? (
         <Loading />
       ) : q.isError ? (
@@ -483,7 +483,7 @@ function WebhookModal({ webhook, httpsRequired, onClose, onCreated }: { webhook:
           <input type="checkbox" checked={d.active} onChange={(e) => set({ active: e.target.checked })} />
           <span>Active{webhook && !webhook.active && d.active ? ' (enabling resets the failure count and sends waiting notifications)' : ''}</span>
         </label>
-        {save.isError ? <div className="banner banner-danger">{errorMessage(save.error)}</div> : null}
+        {save.isError ? <div className="banner banner-danger" role="alert">{errorMessage(save.error)}</div> : null}
       </form>
     </Modal>
   );
@@ -518,7 +518,7 @@ function DeliveriesModal({ webhook, onClose }: { webhook: WebhookDTO; onClose: (
     >
       <div className="stack">
         <p className="muted small">The latest 100 deliveries. Redelivering sends the same notification again with the same delivery id, so receivers can ignore duplicates.</p>
-        {redeliver.isError ? <div className="banner banner-danger">{errorMessage(redeliver.error)}</div> : null}
+        {redeliver.isError ? <div className="banner banner-danger" role="alert">{errorMessage(redeliver.error)}</div> : null}
         {q.isPending ? (
           <Loading />
         ) : q.isError ? (
@@ -702,8 +702,8 @@ function EmailAlertsForm({ settings, status }: { settings: OrgSettingsDTO; statu
           {saved && !dirty ? <span className="text-success">Saved.</span> : null}
           {test.isSuccess ? <span className="text-success">Test email sent to {test.data.recipients.join(', ')}.</span> : null}
         </div>
-        {save.isError ? <div className="banner banner-danger">{errorMessage(save.error)}</div> : null}
-        {test.isError ? <div className="banner banner-danger">{errorMessage(test.error)}</div> : null}
+        {save.isError ? <div className="banner banner-danger" role="alert">{errorMessage(save.error)}</div> : null}
+        {test.isError ? <div className="banner banner-danger" role="alert">{errorMessage(test.error)}</div> : null}
       </form>
     </section>
   );

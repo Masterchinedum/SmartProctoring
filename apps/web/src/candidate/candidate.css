@@ -1,7 +1,5 @@
 /* Candidate app styles. Base tokens and primitives come from src/styles.css. */
 
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-
 .cand-page { min-height: 100%; padding: 16px; background: var(--bg); }
 .cand-container { max-width: 880px; margin: 0 auto; }
 .cand-container-wide { max-width: 1100px; }
@@ -11,7 +9,9 @@
 .cand-lead { font-size: 16px; }
 .cand-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .cand-link { background: none; border: none; padding: 0; color: var(--primary); text-decoration: underline; cursor: pointer; font: inherit; font-size: 12px; text-align: left; }
-.cand-link:focus-visible, .btn:focus-visible, .cand-qnav-item:focus-visible { outline: 3px solid #9bb7f5; outline-offset: 2px; }
+/* Keyboard focus: the global :focus-visible ring in styles.css (>= 3:1 contrast). */
+/* An empty persistent live region inside a .stack must not add a gap (it cannot be display:none). */
+.stack > .cand-live-slot:empty { margin-top: -12px; }
 
 .cand-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 16px; margin: 0; }
 .cand-facts div { background: var(--surface-2); border-radius: var(--radius); padding: 8px 10px; }
@@ -28,6 +28,7 @@
 .cand-checklist li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); }
 .cand-check-icon { flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; background: var(--surface-2); color: var(--text-muted); }
 .cand-checklist li.ok .cand-check-icon { background: #e5f5ec; color: var(--success); }
+.cand-status-ok { font-size: 15px; font-weight: 600; color: #155f34; background: #eaf7ef; border: 1px solid #b9e2c8; border-radius: var(--radius); padding: 8px 12px; margin: 0; }
 .cand-checklist li.fail .cand-check-icon { background: #fdecea; color: var(--danger); }
 .cand-checklist li.warn .cand-check-icon { background: #fff4e0; color: var(--warning); }
 .cand-checklist li.ok { border-color: #b9e2c8; }
@@ -72,7 +73,7 @@
 .cand-exam { min-height: 100%; display: flex; flex-direction: column; background: var(--bg); }
 .cand-exam-header { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border); box-shadow: var(--shadow); }
 .cand-exam-title { display: flex; flex-direction: column; min-width: 0; max-width: 320px; }
-.cand-exam-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cand-exam-title h1 { font-size: 14px; font-weight: 700; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cand-countdown { display: flex; align-items: baseline; gap: 8px; }
 .cand-countdown-label { font-size: 12px; color: var(--text-muted); }
 .cand-countdown-value { font-family: var(--mono); font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -85,21 +86,39 @@
 .cand-dot-degraded { background: var(--cat-technical); }
 .cand-dot-off { background: #9aa3b2; }
 
-.cand-exam-banners { display: flex; flex-direction: column; gap: 8px; padding: 8px 16px 0; }
-.cand-exam-banners:empty { display: none; }
+.cand-exam-banners { display: flex; flex-direction: column; padding: 8px 16px 0; }
+.cand-exam-banners > .cand-live-slot { display: flex; flex-direction: column; gap: 8px; }
+.cand-exam-banners > .cand-live-slot:not(:empty) + .cand-live-slot:not(:empty) { margin-top: 8px; }
+/* The live regions stay in the page (they must exist before a message appears) but take no space. */
+.cand-exam-banners:not(:has(.banner)) { padding-top: 0; }
 .cand-exam-body { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 16px; padding: 16px; flex: 1; max-width: 1200px; width: 100%; margin: 0 auto; }
 @media (max-width: 760px) { .cand-exam-body { grid-template-columns: 1fr; } }
+/* Small or zoomed viewports (200-400 % zoom, phones): the header scrolls away instead of covering the
+   question (WCAG 1.4.10 reflow). */
+@media (max-width: 760px), (max-height: 560px) {
+  .cand-exam-header { position: static; }
+  .cand-qnav { position: static; }
+  .cand-exam-title { max-width: 100%; }
+}
 .cand-qnav { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; align-self: start; position: sticky; top: 76px; }
 .cand-qnav ol { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); gap: 6px; }
 .cand-qnav-item { width: 100%; aspect-ratio: 1; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); font: inherit; font-weight: 600; cursor: pointer; position: relative; }
 .cand-qnav-item.answered { background: #e5f5ec; border-color: #9fd3b3; color: #155f34; }
 .cand-qnav-item.answered::after { content: ''; position: absolute; right: 3px; top: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
-.cand-qnav-item.current { outline: 2px solid var(--primary); outline-offset: 1px; }
+.cand-qnav-item.current { border-color: var(--primary); box-shadow: inset 0 0 0 2px var(--primary); text-decoration: underline; text-underline-offset: 3px; }
 .cand-exam-main { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .cand-question { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 16px 18px; margin: 0; min-width: 0; }
-.cand-question-legend { display: flex; gap: 10px; align-items: baseline; padding: 0 6px; }
+/* The legend (number, points, prompt) is floated so it lays out inside the fieldset box like normal content. */
+.cand-question-legend { float: left; width: 100%; padding: 0; margin: 0 0 14px; }
+.cand-question-legend + * { clear: both; }
+.cand-question-head { display: flex; gap: 10px; align-items: baseline; }
+.cand-question-legend h2 { font-size: 15px; margin: 0; }
+.cand-question-legend .cand-question-prompt { display: block; margin: 6px 0 0; }
+.cand-question-hint { display: block; margin-top: 8px; }
 .cand-question-number { font-weight: 700; }
-.cand-question-prompt { font-size: 16px; margin: 6px 0 14px; }
+.cand-answer-label { font-weight: 600; font-size: 13px; }
+.cand-field-error { color: var(--danger); font-weight: 600; }
+.cand-question-prompt { font-size: 16px; font-weight: 400; }
 .cand-options { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
 .cand-option { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; font-size: 15px; }
 .cand-option.selected { border-color: var(--primary); background: #eef3fe; }

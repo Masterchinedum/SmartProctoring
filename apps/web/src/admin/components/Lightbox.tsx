@@ -1,35 +1,60 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { EvidenceRefDTO } from '@sp/shared';
+import { useDialogFocus } from '../../lib/a11y';
 import { formatDate, formatDateTime } from '../lib/format';
-import { evidenceKindLabel } from './EvidenceImage';
+import { evidenceAlt, evidenceKindLabel } from './EvidenceImage';
 
 export interface LightboxItem {
   evidence: EvidenceRefDTO;
   caption?: string;
+  /** Text alternative; defaults to e.g. "Webcam screenshot at 10:32:05 — <caption>". */
+  alt?: string;
 }
 
-/** Full-screen image viewer with keyboard navigation (← → Esc). */
+/**
+ * Full-screen image viewer (modal): ← / → move between images, Escape closes, Tab stays inside, and
+ * focus returns to the thumbnail that opened it. The position ("2 of 5") is announced politely.
+ */
 export function Lightbox({ items, index, onClose }: { items: LightboxItem[]; index: number; onClose: () => void }) {
   const [i, setI] = useState(Math.min(Math.max(0, index), Math.max(0, items.length - 1)));
   const [failed, setFailed] = useState<Record<string, boolean>>({});
   const n = items.length;
+  const ref = useRef<HTMLDivElement>(null);
+  useDialogFocus(ref, { onEscape: onClose, initialFocus: () => ref.current?.querySelector<HTMLElement>('.lightbox-close') });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        onClose();
-      } else if (e.key === 'ArrowRight') setI((x) => (x + 1) % n);
-      else if (e.key === 'ArrowLeft') setI((x) => (x - 1 + n) % n);
+      // Only while this viewer is the top-most dialog (see useDialogFocus).
+      if (!ref.current || ref.current.closest('[inert]')) return;
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setI((x) => (x + 1) % n);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setI((x) => (x - 1 + n) % n);
+      }
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
-  }, [n, onClose]);
+  }, [n]);
   if (n === 0) return null;
   const item = items[i];
   const ev = item.evidence;
+  const label = item.caption ?? evidenceKindLabel(ev.kind);
+  const alt = item.alt ?? evidenceAlt(ev, item.caption);
   return createPortal(
-    <div className="lightbox" role="dialog" aria-modal="true" aria-label="Image viewer" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div
+      className="lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image viewer"
+      aria-describedby="lightbox-help"
+      ref={ref}
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <p id="lightbox-help" className="visually-hidden">
+        {n > 1 ? 'Use the left and right arrow keys to move between images. ' : ''}Press Escape to close.
+      </p>
       <button type="button" className="lightbox-close" aria-label="Close" onClick={onClose}>
         ×
       </button>
@@ -46,7 +71,7 @@ export function Lightbox({ items, index, onClose }: { items: LightboxItem[]; ind
         ) : failed[ev.id] ? (
           <div className="lightbox-missing">Image unavailable</div>
         ) : (
-          <img src={ev.url} alt={item.caption ?? evidenceKindLabel(ev.kind)} onError={() => setFailed((f) => ({ ...f, [ev.id]: true }))} />
+          <img src={ev.url} alt={alt} onError={() => setFailed((f) => ({ ...f, [ev.id]: true }))} />
         )}
       </div>
       {n > 1 ? (
@@ -54,17 +79,17 @@ export function Lightbox({ items, index, onClose }: { items: LightboxItem[]; ind
           ›
         </button>
       ) : null}
-      <div className="lightbox-caption">
-        <strong>{item.caption ?? evidenceKindLabel(ev.kind)}</strong> · captured {formatDateTime(ev.capturedAt)}
+      <div className="lightbox-caption" aria-live="polite" aria-atomic="true">
+        <strong>{label}</strong> · captured {formatDateTime(ev.capturedAt)}
         {n > 1 ? (
           <span className="muted">
             {' '}
-            · {i + 1} / {n}
+            · image {i + 1} of {n}
           </span>
         ) : null}
         {ev.available ? (
           <a className="lightbox-open" href={ev.url} target="_blank" rel="noreferrer">
-            Open original
+            Open original<span className="visually-hidden"> (opens in a new tab)</span>
           </a>
         ) : null}
       </div>

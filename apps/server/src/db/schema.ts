@@ -330,7 +330,10 @@ export const examSessions = pgTable(
     index('exam_sessions_org_status_idx').on(t.orgId, t.status),
     index('exam_sessions_exam_idx').on(t.examId),
     index('exam_sessions_candidate_idx').on(t.candidateId),
-    index('exam_sessions_heartbeat_idx').on(t.connection, t.lastHeartbeatAt),
+    // Sweeper look-ups (jobs/sweeper.ts). Neither index contains a column the routine heartbeat writes
+    // (last_heartbeat_at, monitoring, ...), so heartbeat updates stay HOT (no index maintenance per heartbeat).
+    index('exam_sessions_online_idx').on(t.status).where(sql`${t.connection} = 'online'`),
+    index('exam_sessions_running_idx').on(t.status).where(sql`${t.runningSince} is not null`),
   ],
 );
 

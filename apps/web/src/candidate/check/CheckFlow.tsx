@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { Baseline, CheckPurpose, CompleteCheckResponse, StartCheckResponse } from '@sp/shared';
 import { useController, useSnapshot } from '../context';
-import { BrandHeader, ContactLine, Page, Toasts } from '../components/common';
+import { BrandHeader, ContactLine, Page, ScreenHeading, Toasts } from '../components/common';
 import { enterFullscreen } from '../screens/exam/ExamScreen';
 import { CalibrationStep } from './CalibrationStep';
 import { ReadinessStep } from './ReadinessStep';
@@ -79,16 +79,16 @@ export function CheckFlow({ purpose, onCancel }: { purpose: CheckPurpose; onCanc
   if (step === 'intro' && intro) {
     body = (
       <div className="stack" data-testid="check-intro" data-purpose={purpose}>
-        <h1>{intro.title}</h1>
+        <ScreenHeading>{intro.title}</ScreenHeading>
         {intro.body.map((p, i) => (
           <p key={i}>{p}</p>
         ))}
         <div className="row">
-          <button className="btn btn-primary btn-lg" onClick={() => setStep('camera')} data-testid="check-intro-continue">
+          <button type="button" className="btn btn-primary btn-lg" onClick={() => setStep('camera')} data-testid="check-intro-continue">
             Start the check
           </button>
           {onCancel && (
-            <button className="btn" onClick={onCancel}>
+            <button type="button" className="btn" onClick={onCancel}>
               Back
             </button>
           )}
@@ -137,11 +137,11 @@ function CheckResult({ purpose, res, onRetry, onBackToSetup }: { purpose: CheckP
     };
     return (
       <div className="stack" data-testid="check-passed">
-        <h1>Check complete</h1>
+        <ScreenHeading>Check complete</ScreenHeading>
         <div className="banner banner-success">{res.message || 'Thank you — you can continue your exam.'}</div>
         <p>Your answers and remaining time are exactly as you left them.{requireFs ? ' The exam continues in fullscreen mode.' : ''}</p>
         <div className="row">
-          <button className="btn btn-primary btn-lg" onClick={cont} disabled={busy} data-testid="check-continue" autoFocus>
+          <button type="button" className="btn btn-primary btn-lg" onClick={cont} disabled={busy} data-testid="check-continue">
             {purpose === 'resume' ? 'Resume exam' : 'Continue exam'}
           </button>
         </div>
@@ -160,7 +160,7 @@ function CheckResult({ purpose, res, onRetry, onBackToSetup }: { purpose: CheckP
     const guidance = [...new Set([...res.guidance, ...livenessHelp])];
     return (
       <div className="stack" data-testid="check-retry">
-        <h1>Let’s try that again</h1>
+        <ScreenHeading>Let’s try that again</ScreenHeading>
         <p className="cand-lead">{res.message || 'We could not complete the check this time.'}</p>
         {guidance.length > 0 && (
           <ul className="cand-guidance-list" data-testid="check-retry-guidance">
@@ -173,10 +173,10 @@ function CheckResult({ purpose, res, onRetry, onBackToSetup }: { purpose: CheckP
           Attempts remaining: <strong>{res.attemptsRemaining}</strong>
         </p>
         <div className="row">
-          <button className="btn btn-primary btn-lg" onClick={onRetry} data-testid="check-try-again" autoFocus>
+          <button type="button" className="btn btn-primary btn-lg" onClick={onRetry} data-testid="check-try-again">
             Try again
           </button>
-          <button className="btn" onClick={onBackToSetup}>
+          <button type="button" className="btn" onClick={onBackToSetup}>
             Check my camera setup
           </button>
         </div>
@@ -188,7 +188,7 @@ function CheckResult({ purpose, res, onRetry, onBackToSetup }: { purpose: CheckP
   // failed
   return (
     <div className="stack" data-testid="check-failed">
-      <h1>The check could not be completed</h1>
+      <ScreenHeading>The check could not be completed</ScreenHeading>
       <p className="cand-lead">{res.message}</p>
       {res.guidance.length > 0 && (
         <ul className="cand-guidance-list">
@@ -198,7 +198,7 @@ function CheckResult({ purpose, res, onRetry, onBackToSetup }: { purpose: CheckP
         </ul>
       )}
       <div className="row">
-        <button className="btn btn-primary" onClick={() => void ctrl.applyState(res.state)}>
+        <button type="button" className="btn btn-primary" onClick={() => void ctrl.applyState(res.state)}>
           Continue
         </button>
       </div>

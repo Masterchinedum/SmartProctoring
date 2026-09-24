@@ -29,6 +29,13 @@
       "when": 1790231786881,
       "tag": "0003_security_followup",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790238304636,
+      "tag": "0004_hot_heartbeat_indexes",
+      "breakpoints": true
     }
   ]
 }

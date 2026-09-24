@@ -1,15 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CATEGORY_LABELS, EVENT_CATALOG, type EventDTO, type EvidenceRefDTO, type NoteDTO, type ReviewStatus } from '@sp/shared';
+import { useDialogFocus } from '../../lib/a11y';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { applyEvent, qk } from '../api/queries';
 import { formatDateTime, formatPercent } from '../lib/format';
 import { contextLabel, PERIOD_LABELS, SOURCE_LABELS, TRIGGER_LABELS } from '../lib/labels';
 import { CategoryBadge, ReviewBadge, SeverityBadge } from './Badges';
 import { ErrorState, KeyValueTable, Loading } from './Common';
-import { EvidenceImage } from './EvidenceImage';
+import { evidenceAlt, EvidenceImage } from './EvidenceImage';
 import { Lightbox, type LightboxItem } from './Lightbox';
 import { Clock, LiveDuration, RelativeTime } from './Time';
 
@@ -23,17 +24,14 @@ export function EventDrawer({ eventId, sessionId, initial, onClose }: { eventId:
     placeholderData: initial,
     retry: shouldRetry,
   });
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !document.querySelector('.lightbox, .modal-backdrop')) onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  // Focus moves into the drawer (its heading once loaded), stays there, Escape closes it (unless a
+  // lightbox / dialog is open above it) and the focus returns to the row that opened it.
+  const ref = useRef<HTMLElement>(null);
+  useDialogFocus(ref, { onEscape: onClose, initialFocus: () => ref.current?.querySelector<HTMLElement>('.drawer-head button') });
 
   return createPortal(
     <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <aside className="drawer" role="dialog" aria-modal="true" aria-label="Event details">
+      <aside className="drawer" role="dialog" aria-modal="true" aria-label={q.data ? `Event details: ${q.data.title}` : 'Event details'} ref={ref}>
         <div className="drawer-head">
           <span className="muted small">Event details</span>
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
@@ -111,7 +109,7 @@ export function EventDetailBody({ event, sessionId }: { event: EventDTO; session
 
       <section>
         <h3>Screenshots</h3>
-        <EvidenceGallery evidence={event.evidence} emptyText="No screenshots were captured for this event." />
+        <EvidenceGallery evidence={event.evidence} emptyText="No screenshots were captured for this event." context={event.title} />
       </section>
 
       <section>
@@ -180,15 +178,26 @@ export function EventContext({ context }: { context: Record<string, unknown> }) 
   );
 }
 
-export function EvidenceGallery({ evidence, emptyText, captions }: { evidence: EvidenceRefDTO[]; emptyText: string; captions?: string[] }) {
+export function EvidenceGallery({
+  evidence,
+  emptyText,
+  captions,
+  context,
+}: {
+  evidence: EvidenceRefDTO[];
+  emptyText: string;
+  captions?: string[];
+  /** What the images belong to (e.g. the event title), used in their text alternatives. */
+  context?: string;
+}) {
   const [open, setOpen] = useState<number | null>(null);
   if (!evidence.length) return <div className="muted small">{emptyText}</div>;
-  const items: LightboxItem[] = evidence.map((e, i) => ({ evidence: e, caption: captions?.[i] }));
+  const items: LightboxItem[] = evidence.map((e, i) => ({ evidence: e, caption: captions?.[i] ?? context, alt: evidenceAlt(e, context ?? captions?.[i]) }));
   return (
     <>
       <div className="gallery">
         {evidence.map((e, i) => (
-          <EvidenceImage key={e.id} evidence={e} size="medium" onOpen={() => setOpen(i)} caption />
+          <EvidenceImage key={e.id} evidence={e} size="medium" onOpen={() => setOpen(i)} caption context={context ?? captions?.[i]} />
         ))}
       </div>
       {open != null ? <Lightbox items={items} index={open} onClose={() => setOpen(null)} /> : null}
@@ -249,7 +258,11 @@ export function ReviewPanel({ event }: { event: EventDTO }) {
         <strong>Reviewed</strong>: you checked the evidence and the observation stands. <strong>Dismissed</strong>: a false positive (e.g. a poster detected as a
         face). Neither is a finding of misconduct.
       </div>
-      {m.isError ? <div className="banner banner-danger">{errorMessage(m.error)}</div> : null}
+      {m.isError ? (
+        <div className="banner banner-danger" role="alert">
+          {errorMessage(m.error)}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -277,12 +290,23 @@ export function NotesThread({ eventId, sessionId }: { eventId: string; sessionId
           if (text.trim()) m.mutate();
         }}
       >
-        <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Add a note for other reviewers…" maxLength={5000} rows={2} />
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Add a note for other reviewers…"
+          aria-label="Add a note for other reviewers"
+          maxLength={5000}
+          rows={2}
+        />
         <div className="row">
           <button type="submit" className="btn btn-sm" disabled={!text.trim() || m.isPending}>
             {m.isPending ? 'Adding…' : 'Add note'}
           </button>
-          {m.isError ? <span className="text-danger small">{errorMessage(m.error)}</span> : null}
+          {m.isError ? (
+            <span className="text-danger small" role="alert">
+              {errorMessage(m.error)}
+            </span>
+          ) : null}
         </div>
       </form>
     </div>

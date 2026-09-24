@@ -172,7 +172,9 @@ function TimelineCheckRow({ check: c }: { check: IdentityCheckDTO }) {
           {issues.length ? <span className="small muted">Image quality: {issues.map(qualityIssueLabel).join(', ')}</span> : null}
           {c.context.precededBy.length ? <span className="small muted">After: {c.context.precededBy.map(contextLabel).join(' · ')}</span> : null}
         </span>
-        {c.probeEvidence ? <EvidenceImage evidence={c.probeEvidence} size="thumb" alt="Identity sample" onOpen={() => setOpen(true)} /> : null}
+        {c.probeEvidence ? (
+          <EvidenceImage evidence={c.probeEvidence} size="thumb" context={`identity check (${TRIGGER_LABELS[c.trigger] ?? c.trigger})`} onOpen={() => setOpen(true)} />
+        ) : null}
       </div>
       {open && c.probeEvidence ? <Lightbox items={[{ evidence: c.probeEvidence, caption: `Identity sample (${TRIGGER_LABELS[c.trigger]})` }]} index={0} onClose={() => setOpen(false)} /> : null}
     </li>

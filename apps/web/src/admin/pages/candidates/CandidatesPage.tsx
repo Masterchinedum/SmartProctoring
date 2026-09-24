@@ -141,7 +141,7 @@ export function CandidateFormModal({ candidate, onClose, onSaved }: { candidate?
           External ID (optional, e.g. student number)
           <input type="text" value={externalId} onChange={(e) => setExternalId(e.target.value)} maxLength={200} />
         </label>
-        {m.isError ? <div className="banner banner-danger">{errorMessage(m.error)}</div> : null}
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
       </form>
     </Modal>
   );

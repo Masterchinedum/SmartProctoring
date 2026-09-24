@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { formatDuration, type EndReason } from '@sp/shared';
 import { errorMessage, formatDateTime, formatTime, useController, useSnapshot } from '../context';
-import { BrandHeader, CameraPreview, ContactLine, CountdownDisplay, Page, PrivacyNoticeDialog, ReportingBanner, Spinner, Toasts } from '../components/common';
+import { BrandHeader, CameraPreview, ContactLine, CountdownDisplay, Page, PrivacyNoticeDialog, ReportingBanner, ScreenHeading, Spinner, Toasts } from '../components/common';
 import { enterFullscreen } from './exam/ExamScreen';
 
 /* ------------------------------------------------------------------ ready */
@@ -37,10 +37,10 @@ export function ReadyScreen() {
       <BrandHeader title={state.exam.title} />
       <main className="stack">
         <section className="card stack" data-testid="ready-screen">
-          <h1>You are ready to start</h1>
+          <ScreenHeading>You are ready to start</ScreenHeading>
           <div className="banner banner-success">Your camera and identity checks are complete.</div>
           <div className="cand-setup">
-            <CameraPreview stream={snap.camera.stream} className="cand-preview-medium" />
+            <CameraPreview stream={snap.camera.stream} className="cand-preview-medium" label="Your camera preview (mirrored)" />
             <div className="stack">
               <dl className="cand-facts">
                 <div>
@@ -71,7 +71,7 @@ export function ReadyScreen() {
                 )}
                 <li>
                   Monitoring runs while the exam is active.{' '}
-                  <button className="cand-link" onClick={() => setShowNotice(true)}>
+                  <button type="button" className="cand-link" onClick={() => setShowNotice(true)}>
                     What is monitored?
                   </button>
                 </li>
@@ -84,7 +84,7 @@ export function ReadyScreen() {
             </div>
           )}
           <div className="row">
-            <button className="btn btn-primary btn-lg" onClick={start} disabled={busy} data-testid="start-exam">
+            <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy} data-testid="start-exam">
               {busy ? 'Starting…' : 'Start exam'}
             </button>
           </div>
@@ -111,7 +111,7 @@ export function PausedScreen({ onResume }: { onResume: () => void }) {
       <main className="stack">
         <ReportingBanner />
         <section className="card stack" data-testid="paused-screen">
-          <h1>Your exam is paused</h1>
+          <ScreenHeading>Your exam is paused</ScreenHeading>
           <dl className="cand-facts">
             <div>
               <dt>Paused</dt>
@@ -139,7 +139,7 @@ export function PausedScreen({ onResume }: { onResume: () => void }) {
             {p.maxPauseDurationSec != null && <li>If the pause lasts longer than {formatDuration(p.maxPauseDurationSec * 1000)}, an administrator must approve before you can continue.</li>}
           </ul>
           <div className="row">
-            <button className="btn btn-primary btn-lg" onClick={onResume} data-testid="resume-button">
+            <button type="button" className="btn btn-primary btn-lg" onClick={onResume} data-testid="resume-button">
               Resume exam
             </button>
           </div>
@@ -165,8 +165,11 @@ export function HoldScreen({ onReverify }: { onReverify: () => void }) {
       <main className="stack">
         <ReportingBanner />
         <section className="card stack" data-testid="hold-screen">
-          <h1>Your exam is on hold</h1>
-          <p className="cand-lead">{hold?.message ?? 'Your exam is on hold while an administrator reviews it.'}</p>
+          <ScreenHeading>Your exam is on hold</ScreenHeading>
+          {/* Blocking state: announced assertively when the screen appears (the heading also gets the focus). */}
+          <p className="cand-lead" role="alert">
+            {hold?.message ?? 'Your exam is on hold while an administrator reviews it.'}
+          </p>
           <dl className="cand-facts">
             {hold?.since && (
               <div>
@@ -183,11 +186,12 @@ export function HoldScreen({ onReverify }: { onReverify: () => void }) {
           <p>Your answers and remaining time are saved. This page updates automatically when the administrator responds; you can also close it and open the exam link later.</p>
           <div className="row">
             {hold?.canReverify && (
-              <button className="btn btn-primary btn-lg" onClick={onReverify} data-testid="reverify-button">
+              <button type="button" className="btn btn-primary btn-lg" onClick={onReverify} data-testid="reverify-button">
                 Verify again
               </button>
             )}
             <button
+              type="button"
               className="btn"
               disabled={refreshing}
               onClick={async () => {
@@ -235,7 +239,7 @@ export function EndedScreen() {
       <BrandHeader title={state.exam.title} />
       <main className="stack">
         <section className="card stack" data-testid="ended-screen" data-status={state.session.status}>
-          <h1>{terminated ? 'Your exam has ended' : 'Your exam has been submitted'}</h1>
+          <ScreenHeading>{terminated ? 'Your exam has ended' : 'Your exam has been submitted'}</ScreenHeading>
           <p className="cand-lead">{endText(state.session.endReason, terminated)}</p>
           {!terminated && <p>Thank you. Monitoring has stopped and your camera is off. You can close this window.</p>}
           {terminated && <p>Monitoring has stopped and your camera is off. If you have questions about this, contact your exam administrator.</p>}
@@ -261,19 +265,19 @@ export function FatalScreen({ kind, message }: { kind: 'invalid_link' | 'superse
         <section className="card stack" data-testid={kind === 'superseded' ? 'superseded-screen' : 'invalid-link-screen'} role="alert">
           {kind === 'superseded' ? (
             <>
-              <h1>This exam continues in another window</h1>
+              <ScreenHeading>This exam continues in another window</ScreenHeading>
               <p className="cand-lead">The exam was opened in another browser window or on another device, so this window has been disconnected.</p>
               <p>Your answers are saved. Continue in the other window — or, if you want to continue here instead, reload this page. You will repeat the camera and identity check.</p>
               <p className="muted small">{message}</p>
               <div className="row">
-                <button className="btn btn-primary" onClick={() => window.location.reload()}>
+                <button type="button" className="btn btn-primary" onClick={() => window.location.reload()}>
                   Continue in this window
                 </button>
               </div>
             </>
           ) : (
             <>
-              <h1>This exam link is not valid</h1>
+              <ScreenHeading>This exam link is not valid</ScreenHeading>
               <p className="cand-lead">{message}</p>
               <p>Check that you opened the complete link from your invitation. If the problem continues, contact your exam administrator for a new link.</p>
             </>
@@ -292,10 +296,10 @@ export function LoadingScreen({ error, onRetry }: { error: string | null; onRetr
         <section className="card stack">
           {error ? (
             <>
-              <h1>We could not load your exam</h1>
+              <ScreenHeading>We could not load your exam</ScreenHeading>
               <p role="alert">{error}</p>
               <div className="row">
-                <button className="btn btn-primary" onClick={onRetry}>
+                <button type="button" className="btn btn-primary" onClick={onRetry}>
                   Try again
                 </button>
               </div>
