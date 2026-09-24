@@ -148,6 +148,8 @@ export class MonitoringRuntime {
   private unsubCamera: (() => void) | null = null;
   private degraded: { id: string; version: number; startedAt: number; reason: string } | null = null;
   private followUpTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Label of the next routine burst: 'server_request' while the server's evidence is not clear yet. */
+  private routineLabel: 'periodic' | 'server_request' = 'periodic';
   private readonly removers: (() => void)[] = [];
   private readonly pendingWrites = new Set<Promise<void>>();
 
@@ -416,7 +418,8 @@ export class MonitoringRuntime {
     }
     this.pushEpisodes(out.episodes ?? []);
     for (const s of out.signals ?? []) {
-      if (s.kind === 'identity_sample') this.requestSample(s.trigger, 'engine');
+      // A routine sample due on the server's schedule is its request while the evidence is not clear yet.
+      if (s.kind === 'identity_sample') this.requestSample(s.trigger === 'periodic' ? this.routineLabel : s.trigger, 'engine');
       else this.deps.onSignal?.(s);
     }
   }
@@ -499,20 +502,22 @@ export class MonitoringRuntime {
       this.deps.onSignal?.({ kind: 'candidate_prompt_clear', key: 'identity_guidance' });
     }
     if (!this.running) return;
-    // Cadence: the server's next routine sample time; faster while its evidence is 'suspect'; else the policy's.
-    const suspect = res.evidence?.state === 'suspect' || res.evidence?.state === 'confirmed_mismatch';
-    const next = res.nextSampleInMs != null && Number.isFinite(res.nextSampleInMs) ? res.nextSampleInMs : suspect ? SUSPECT_INTERVAL_MS : null;
+    const c = routineCadence(res);
+    this.routineLabel = c.label;
+    // A routine sample requested while this answer was on its way is superseded by the server's new schedule.
+    if (c.inMs != null) this.bursts.dropPending('periodic');
     try {
-      this.engine.scheduleIdentitySample(next, this.now());
+      this.engine.scheduleIdentitySample(c.inMs, this.now());
     } catch (e) {
       console.warn('[monitoring] scheduleIdentitySample failed', e);
     }
-    if (res.followUpInMs != null) {
+    if (c.followUpInMs != null) {
+      // An older server (no nextSampleInMs): its follow-up sample, as before.
       if (this.followUpTimer) clearTimeout(this.followUpTimer);
       this.followUpTimer = setTimeout(() => {
         this.followUpTimer = null;
         this.requestSample('follow_up', 'server');
-      }, Math.max(500, res.followUpInMs));
+      }, Math.max(500, c.followUpInMs));
     }
   }
 
@@ -653,4 +658,22 @@ export function stripDescriptors(obs: FrameObservation): FrameObservation {
       return rest;
     }),
   };
+}
+
+/**
+ * Cadence after the final answer of a burst (identity engine v2): the next routine burst after
+ * `nextSampleInMs`, labelled 'server_request' while the server wants a faster look (a follow-up was asked for,
+ * or the evidence is 'monitoring' / 'suspect'), else 'periodic'. Without nextSampleInMs: 3 s while suspect, else
+ * the policy interval. An older server (no nextSampleInMs field at all) gets its follow-up sample as before.
+ */
+export function routineCadence(res: IdentitySampleResponse): { inMs: number | null; label: 'periodic' | 'server_request'; followUpInMs: number | null } {
+  const state = res.evidence?.state;
+  const v2 = res.nextSampleInMs !== undefined || res.evidence !== undefined || res.burst !== undefined;
+  const label: 'periodic' | 'server_request' = v2 && (res.followUpInMs != null || state === 'suspect' || state === 'monitoring' || state === 'confirmed_mismatch') ? 'server_request' : 'periodic';
+  const suspect = state === 'suspect' || state === 'confirmed_mismatch';
+  let inMs: number | null = null;
+  if (res.nextSampleInMs != null && Number.isFinite(res.nextSampleInMs)) inMs = Math.max(0, res.nextSampleInMs);
+  else if (v2 && res.followUpInMs != null) inMs = Math.max(0, res.followUpInMs);
+  else if (suspect) inMs = SUSPECT_INTERVAL_MS;
+  return { inMs, label, followUpInMs: !v2 && res.followUpInMs != null ? res.followUpInMs : null };
 }

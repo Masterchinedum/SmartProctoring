@@ -57,6 +57,7 @@ import {
   decideIdentity,
   deserializeEmbeddings,
   CALIBRATION,
+  cosineSimilarity,
   guidanceForIssues,
   INCONCLUSIVE_GUIDANCE,
   LIVENESS_DEFAULTS,
@@ -70,6 +71,7 @@ import {
   type LivenessFrame,
 } from '../vision/index.js';
 import { assessCheck, CHECK_EVIDENCE, sampleLabel, type CheckAssessment } from './identity-evidence.js';
+import { secondOpinion, secondOpinionDetails, type SecondOpinionRecord } from './identity-external.js';
 import { buildGallery, ENROL_TARGET_FRAMES, identityFrameIndexes, probeEvidence, scoreReference, type GalleryResult, type ProbeEvidence } from './identity-gallery.js';
 import { buildCandidateState, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { readEvidence, storeEvidence } from './evidence.js';
@@ -695,13 +697,71 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
     }
   }
 
+  // ---- optional external second opinion (docs/EXTERNAL_VERIFIER.md). Outside the lock: it may wait for a network
+  // call. Off by default: secondOpinion() then returns null without loading anything, and nothing below changes.
+  let second: SecondOpinionRecord | null = null;
+  let idPhotoSecond: SecondOpinionRecord | null = null;
+  const opinionBase = { org: org ?? null, consentAcceptedAt: s0.consentAcceptedAt, sessionId };
+  if (purpose === 'initial' && reference?.ok) {
+    if (idPhoto && cand.idPhotoEvidenceId) {
+      // The approved ID photo comparison, judged with the ID-photo thresholds.
+      const photoId = cand.idPhotoEvidenceId;
+      idPhotoSecond = await secondOpinion(ctx, {
+        ...opinionBase,
+        kind: 'check_in',
+        internal: { decision: idPhoto.decision, similarity: idPhoto.similarity },
+        thresholds: { match: thresholds.idPhotoMatch, mismatch: thresholds.idPhotoMismatch },
+        images: async () => {
+          const [photo] = await ctx.db.select().from(evidence).where(eq(evidence.id, photoId));
+          const ref = photo ? await readEvidence(ctx, photo) : null;
+          const probe = refImages?.full ?? refImages?.crop ?? null;
+          return ref && probe ? { reference: [ref], probe } : null;
+        },
+      });
+      if (idPhotoSecond?.changed) idPhoto = { ...idPhoto, decision: idPhotoSecond.decision, confidence: idPhotoSecond.decision === 'inconclusive' ? 0.5 : idPhoto.confidence };
+    } else if (livenessOk) {
+      // No ID photo: the enrolment's own consistency — the reference frame vs the accepted frame taken last.
+      const lastIdx = Math.max(-1, ...reference.accepted.filter((i) => i !== reference!.bestIndex));
+      const last = lastIdx >= 0 ? prepared.frontal[lastIdx] : undefined;
+      const best = prepared.frontal[reference.bestIndex];
+      if (last?.analysis.embedding && best?.analysis.embedding) {
+        second = await secondOpinion(ctx, {
+          ...opinionBase,
+          kind: 'check_in',
+          internal: { decision: 'match', similarity: Math.round(cosineSimilarity(best.analysis.embedding, last.analysis.embedding) * 10000) / 10000 },
+          thresholds,
+          images: async () => {
+            const probe = await loadImages(ctx, last);
+            const ref = refImages?.full ?? refImages?.crop ?? null;
+            const p = probe?.full ?? probe?.crop ?? null;
+            return ref && p ? { reference: [ref], probe: p } : null;
+          },
+        });
+      }
+    }
+  } else if (aggregate && active && !reEnroll && (livenessOk || aggregate.decision === 'mismatch')) {
+    const ref = active;
+    second = await secondOpinion(ctx, {
+      ...opinionBase,
+      kind: 'resume',
+      internal: { decision: aggregate.decision, similarity: aggregate.similarity },
+      thresholds,
+      images: async () => {
+        const probe = probeImages?.full ?? probeImages?.crop ?? null;
+        const refs = await referenceImageBuffers(ctx, ref.ref.imageEvidenceIds);
+        return probe && refs.length ? { reference: refs, probe } : null;
+      },
+    });
+    if (second?.changed) aggregate = withSecondOpinion(aggregate, second);
+  }
+
   // ---- apply under the session lock
   const outcome = await withSession(ctx, sessionId, async (m) => {
     const [cur] = await m.tx.select().from(checks).where(eq(checks.id, check.id)).for('update');
     if (!cur || cur.status !== 'open') throw conflict('check_closed', 'This check is no longer open. Start a new check.');
     if (m.session.activeInstanceId !== instanceId) throw conflict('superseded', SUPERSEDED_MESSAGE);
     if (requiredCheckFor(m.session, instanceId) !== purpose) throw conflict('check_not_required', 'This check is no longer needed.', { requiredCheck: requiredCheckFor(m.session, instanceId) });
-    const ctxInfo: ApplyCtx = { m, ctx, check, policy, thresholds, liveness, livenessOk, reference, aggregate, active, refImages, probeImages, idPhoto, prepared, instanceId };
+    const ctxInfo: ApplyCtx = { m, ctx, check, policy, thresholds, liveness, livenessOk, reference, aggregate, active, refImages, probeImages, idPhoto, prepared, instanceId, second, idPhotoSecond };
     const out = purpose === 'initial' ? await applyInitial(ctxInfo) : await applyContinuation(ctxInfo);
     const status = out.outcome === 'passed' ? 'passed' : out.outcome === 'retry' ? 'retry' : out.outcome === 'held' ? 'held' : 'failed';
     const response = {
@@ -735,6 +795,30 @@ interface ApplyCtx {
   idPhoto: { decision: IdentityDecision; similarity: number | null; confidence: number } | null;
   prepared: PreparedFrames;
   instanceId: string;
+  /** External second opinion on this check's identity decision (null when not asked — the default). */
+  second: SecondOpinionRecord | null;
+  /** External second opinion on the ID-photo comparison (initial check). */
+  idPhotoSecond: SecondOpinionRecord | null;
+}
+
+/** Reference images for an external comparison: full frames first, then face crops. */
+async function referenceImageBuffers(ctx: Ctx, ids: string[]): Promise<Buffer[]> {
+  if (!ids.length) return [];
+  const rows = await ctx.db.select().from(evidence).where(inArray(evidence.id, ids));
+  const ordered = [...rows].sort((a, b) => (a.reason === 'frame' ? 0 : 1) - (b.reason === 'frame' ? 0 : 1));
+  const out: Buffer[] = [];
+  for (const r of ordered) {
+    const data = await readEvidence(ctx, r);
+    if (data) out.push(data);
+  }
+  return out;
+}
+
+/** The check decision after the external second opinion (fusion table, docs/EXTERNAL_VERIFIER.md §5). */
+function withSecondOpinion(agg: ContinuationIdentity, r: SecondOpinionRecord): ContinuationIdentity {
+  if (!r.changed) return agg;
+  if (r.decision === 'inconclusive') return { ...agg, decision: 'inconclusive', confidence: 0.5, guidance: [INCONCLUSIVE_GUIDANCE] };
+  return { ...agg, decision: r.decision, confidence: Math.max(0.5, Math.round((1 - agg.assessment.posterior) * 10000) / 10000), guidance: [] };
 }
 
 async function insertIdentityCheck(a: ApplyCtx, fields: Partial<typeof identityChecks.$inferInsert> & { decision: IdentityDecision; confidence: number }): Promise<IdentityCheck> {
@@ -785,7 +869,7 @@ async function retryOrHold(a: ApplyCtx, why: { message: string; guidance: string
       startedAt: firstAt[0]?.issuedAt.getTime() ?? check.issuedAt.getTime(),
       endedAt: m.now,
       confidence: why.identity?.confidence ?? null,
-      details: { purpose: check.purpose, attempts: used, lastReason: why.reason, guidance: why.guidance, livenessPassed: a.livenessOk },
+      details: { purpose: check.purpose, attempts: used, lastReason: why.reason, guidance: why.guidance, livenessPassed: a.livenessOk, ...secondOpinionDetails(a.second) },
       context: { checkId: check.id },
     });
     if (why.identity) await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, why.identity.id));
@@ -814,6 +898,20 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     const q = a.prepared.frontal.map((f) => f.analysis.quality).find((x) => !x.usable) ?? a.prepared.frontal[0]?.analysis.quality ?? null;
     const idRow = await insertIdentityCheck(a, { decision: 'unable_to_verify', confidence: 1, quality: q, guidance, context: { precededBy: [], periodKind: 'check_in', secondsSincePreviousMatch: null } });
     return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance, identity: idRow, reason: 'reference_not_established' });
+  }
+  if (a.second && a.second.decision !== 'match') {
+    // The external second opinion contradicted a borderline enrolment (frames possibly of different people):
+    // no reference is established from them; retry (flagged for review in the check's context).
+    const guidance = [INCONCLUSIVE_GUIDANCE];
+    const idRow = await insertIdentityCheck(a, {
+      decision: 'inconclusive',
+      similarity: a.second.record.internal.similarity,
+      confidence: 0.5,
+      quality: reference.quality,
+      guidance,
+      context: { precededBy: [], periodKind: 'check_in', secondsSincePreviousMatch: null, secondOpinion: a.second },
+    });
+    return retryOrHold(a, { message: IDENTITY_RETRY_MESSAGE, guidance, identity: idRow, reason: 'second_opinion_inconclusive' });
   }
 
   // Establish the protected reference.
@@ -855,13 +953,13 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     referenceId: refId,
     probeEvidenceId: images[0]?.id ?? null,
     frameEvidenceId: images[1]?.id ?? null,
-    context: { precededBy: [], periodKind: 'check_in', secondsSincePreviousMatch: null, referenceCreated: true },
+    context: { precededBy: [], periodKind: 'check_in', secondsSincePreviousMatch: null, referenceCreated: true, ...(a.second ? { secondOpinion: a.second } : {}) },
   });
   await m.addEvent({
     type: 'checkin_completed',
     // The catalog text mentions the live-person check; say accurately when the exam rules turned it off.
     observation: liveness ? undefined : 'The camera readiness check was completed; the live-person check is disabled by the exam rules.',
-    details: { checkId: a.check.id, livenessSteps: liveness?.steps.length ?? 0, liveness: liveness ? 'passed' : 'off' },
+    details: { checkId: a.check.id, livenessSteps: liveness?.steps.length ?? 0, liveness: liveness ? 'passed' : 'off', ...secondOpinionDetails(a.second) },
   });
   await m.addEvent({ type: 'reference_created', source: 'server_identity', details: { referenceId: refId, version: maxVersion + 1, embeddingCount: reference.gallery.length, framesAccepted: reference.accepted.length, baseline: reference.baseline } });
   m.set({ verifiedInstanceId: a.instanceId, checkAttemptsResetAt: new Date(m.now) });
@@ -890,12 +988,12 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
       quality: reference.quality,
       referenceId: refId,
       probeEvidenceId: images[0]?.id ?? null,
-      context: { precededBy: [], periodKind: 'check_in', secondsSincePreviousMatch: null, against: 'id_photo' },
+      context: { precededBy: [], periodKind: 'check_in', secondsSincePreviousMatch: null, against: 'id_photo', ...(a.idPhotoSecond ? { secondOpinion: a.idPhotoSecond } : {}) },
     });
     await m.addEvent({
       type: 'id_photo_compared',
       source: 'server_identity',
-      details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity, policy: policy.identity.idPhotoComparison, identityCheckId: photoRow.id },
+      details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity, policy: policy.identity.idPhotoComparison, identityCheckId: photoRow.id, ...secondOpinionDetails(a.idPhotoSecond) },
     });
     if (a.idPhoto.decision === 'mismatch') {
       const ev = await m.addEvent({
@@ -903,7 +1001,7 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
         source: 'server_identity',
         confidence: a.idPhoto.confidence,
         observation: 'The candidate at check-in may not be the person in the approved identity photo.',
-        details: { against: 'id_photo', similarity: a.idPhoto.similarity, thresholds: { match: a.thresholds.idPhotoMatch, mismatch: a.thresholds.idPhotoMismatch }, identityCheckIds: [photoRow.id] },
+        details: { against: 'id_photo', similarity: a.idPhoto.similarity, thresholds: { match: a.thresholds.idPhotoMatch, mismatch: a.thresholds.idPhotoMismatch }, identityCheckIds: [photoRow.id], ...secondOpinionDetails(a.idPhotoSecond) },
         context: { precededBy: [], periodKind: 'check_in', trigger: 'id_photo' },
       });
       await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, photoRow.id));
@@ -917,7 +1015,7 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     if (policy.identity.idPhotoComparison === 'required' && a.idPhoto.decision !== 'match') {
       // Inconclusive / unable to verify is NOT a mismatch: a distinct reason so staff and candidate are told the truth.
       const reason = a.idPhoto.decision === 'mismatch' ? 'id_photo_mismatch' : 'id_photo_unverifiable';
-      await holdNow(m, { reason, details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity } });
+      await holdNow(m, { reason, details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity, ...(a.idPhotoSecond ? { needsHumanReview: a.idPhotoSecond.needsHumanReview } : {}) } });
       outcome = { ...outcome, outcome: 'held', message: m.session.holdMessage ?? '' };
     }
   }
@@ -983,6 +1081,7 @@ async function applyContinuation(a: ApplyCtx): Promise<Outcome> {
     evidence: aggregate
       ? { status: aggregate.assessment.status, llr: aggregate.assessment.llr, posterior: aggregate.assessment.posterior, usableFrames: aggregate.assessment.usable, calibrationVersion: CALIBRATION.version }
       : undefined,
+    ...(a.second ? { secondOpinion: a.second } : {}),
   };
   const quality = aggregate?.bestProbeIndex != null ? a.prepared.frontal[aggregate.bestProbeIndex]?.analysis.quality : (a.prepared.frontal[0]?.analysis.quality ?? null);
   // Only the reverify check of a hold released with reEnroll=true may replace the reference (see reEnrollmentApplies).
@@ -1200,6 +1299,7 @@ async function recordReferenceMismatch(
       calibrationVersion: CALIBRATION.version,
       identityCheckIds: [idRow.id],
       referenceId: a.active?.ref.id ?? null,
+      ...secondOpinionDetails(a.second),
       ...(o.extraDetails ?? {}),
     },
     context: { ...o.context, trigger: TRIGGER_FOR[purpose], environmentNotes: o.environmentNotes },
@@ -1283,7 +1383,7 @@ async function continueAfterPass(
     idPhoto: null,
     attemptsRemaining: policy.identity.maxVerificationAttempts,
   };
-  if (!t.flagged) await m.addEvent({ type: 'identity_verified', source: 'server_identity', confidence: idRow.confidence, details: { purpose, similarity: t.similarity, identityCheckId: idRow.id } });
+  if (!t.flagged) await m.addEvent({ type: 'identity_verified', source: 'server_identity', confidence: idRow.confidence, details: { purpose, similarity: t.similarity, identityCheckId: idRow.id, ...secondOpinionDetails(a.second) } });
   m.set({ verifiedInstanceId: a.instanceId, checkAttemptsResetAt: new Date(m.now), lastVerifiedHeartbeatAt: new Date(m.now), lastHeartbeatAt: new Date(m.now), lastHeartbeatInstanceId: a.instanceId, connection: 'online' });
 
   if (m.session.status === 'ready') {

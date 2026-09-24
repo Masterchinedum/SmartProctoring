@@ -150,6 +150,8 @@ export function label(p: PipelineSpec, usable: boolean, s: number | null): Ident
 
 export interface FrameTrial {
   kind: TrialKind;
+  /** `${refKey}|${probeKey}|${scene}`: frames of one burst against one reference. */
+  burstKey: string;
   condition: WebcamCondition;
   resolution: WebcamResolution;
   enrol: WebcamCondition;
@@ -214,7 +216,7 @@ export function scoreTrials(data: WebcamData, p: PipelineSpec, enrolConditions: 
       for (const x of fq) {
         const s = x.e ? frameScore(p, x.e, ref) : null;
         const ok = x.q.usable && x.e != null;
-        frameT.push({ kind, condition: b.condition, resolution: b.resolution, enrol: ref.condition, usable: ok, similarity: s, decision: label(p, ok, s), bucket: ok ? bucketOf(x.q) : null, quality: x.q });
+        frameT.push({ kind, burstKey: `${ref.identity}|${ref.condition}|${b.key}`, condition: b.condition, resolution: b.resolution, enrol: ref.condition, usable: ok, similarity: s, decision: label(p, ok, s), bucket: ok ? bucketOf(x.q) : null, quality: x.q });
       }
       let s: number | null = null;
       let decision: IdentityDecision;
@@ -449,6 +451,35 @@ export function sessionsFrom(bursts: readonly BurstTrial[]): Session[] {
     if (b.bucket === 'poor' || (b.bucket === 'fair' && s.bucket === 'good')) s.bucket = b.bucket;
   }
   return [...m.values()].map(({ total, usable, ...rest }) => ({ ...rest, usableRate: total ? usable / total : 0 }));
+}
+
+/**
+ * Within-session sd of a sample (burst template) similarity per bucket, from FRAME noise: the pooled scatter of
+ * usable frames around their burst mean (sigma_frame), divided by sqrt(frames per burst), plus a movement term
+ * (pose / expression / position changes between samples) taken from good-light scene-to-scene scatter.
+ * Scene-to-scene scatter in poor light also contains exposure / noise-level changes BETWEEN simulated scenes
+ * (a different room), which overstates the variation between two samples of one candidate.
+ */
+export function withinSessionSdFromFrames(frames: readonly FrameTrial[], movementSd: number, framesPerBurst = 3): Record<QualityBucket, number> {
+  const groups = new Map<string, FrameTrial[]>();
+  for (const f of frames) {
+    if (!f.usable || f.similarity == null || !f.bucket || !f.kind.startsWith('genuine')) continue;
+    groups.set(f.burstKey, [...(groups.get(f.burstKey) ?? []), f]);
+  }
+  const acc: Record<QualityBucket, { ss: number; n: number }> = { good: { ss: 0, n: 0 }, fair: { ss: 0, n: 0 }, poor: { ss: 0, n: 0 } };
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    const m = g.reduce((a, f) => a + f.similarity!, 0) / g.length;
+    for (const f of g) {
+      acc[f.bucket!].ss += (f.similarity! - m) ** 2;
+      acc[f.bucket!].n += (g.length - 1) / g.length;
+    }
+  }
+  const r = (b: QualityBucket) => {
+    const sf = acc[b].n > 0 ? Math.sqrt(acc[b].ss / acc[b].n) : 0.05;
+    return round3(Math.sqrt((sf * sf) / framesPerBurst + movementSd * movementSd));
+  };
+  return { good: r('good'), fair: r('fair'), poor: r('poor') };
 }
 
 /** Within-session sd of burst similarity per bucket, from sessions with >= 2 scenes (pooled). */

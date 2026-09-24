@@ -207,6 +207,24 @@ const fused = fuseWithExternal({ decision, similarity }, opinion, fusionPolicyFo
 * Use the ID-photo thresholds (`idPhotoMatch` / `idPhotoMismatch`) in `fusionPolicyFor` when the internal decision
   was an ID-photo comparison.
 
+### Where the identity engine asks (apps/server/src/services/identity-external.ts)
+
+Always outside the session lock; when the verifier does not apply (the default), nothing is loaded or sent and the
+engine behaves exactly as without the feature.
+
+| Decision point | When | Internal opinion fused | Images sent (reference → probe) | Effect of the fused decision |
+|---|---|---|---|---|
+| `check_in` | initial check with an approved ID photo (`idPhotoComparison` on) | the ID-photo comparison, **ID-photo thresholds** | approved ID photo → best check-in frame | replaces the ID-photo decision (advisory / required policy as before) |
+| `check_in` | initial check without an ID photo comparison | the enrolment's own consistency (`match`, cosine of the two frames) | best reference frame → the accepted frame taken last | not `match` ⇒ no reference, retry (`second_opinion_inconclusive`) |
+| `resume` | resume / reconnect / reverify check (not an authorised re-enrolment) | the check's decision (accumulated evidence) and its mean-embedding score | reference images (full frame first) → the check's best probe frame | replaces the check decision (inconclusive ⇒ retry with guidance) |
+| `suspected_swap` | the evidence accumulator is about to confirm a possible different person | `mismatch` with the confirming sample's score | reference images → that sample's frame | `mismatch` ⇒ `identity_mismatch` + hold / flag as before; `inconclusive` ⇒ **not confirmed**: `identity_unverifiable` (uncertain, `needsHumanReview`), and borderline confirmations are held off for 5 min without asking again (a clear internal mismatch still confirms, with `needsHumanReview`) |
+
+Routine samples are never sent. The confirming sample's request waits for the answer (≤ `EXTERNAL_VERIFIER_TIMEOUT_MS`);
+a lost answer is asked again after 15 s. Records: identity check `context.secondOpinion` (outcome, fused and internal
+decision, bands, explanation, provider similarity — no images), `IdentityCheckDTO.secondOpinion`, and on the events it
+affected (`identity_mismatch`, `identity_verified`, `identity_unverifiable`, `id_photo_compared`, `checkin_completed`)
+`details.secondOpinion` + `details.needsHumanReview` for the staff UI.
+
 ## 7. Adding another provider (e.g. a licensed on-premises SDK)
 
 1. Implement `ExternalVerifier` (`apps/server/src/verifiers/types.ts`):

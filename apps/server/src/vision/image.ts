@@ -127,6 +127,16 @@ export async function resizeRgb(img: RgbImage, width: number, height: number): P
   return { data: toRgb(data, info.width, info.height, info.channels), width: info.width, height: info.height };
 }
 
+/** Gaussian blur of an RGB image (libvips, off the main thread). */
+export async function blurRgb(img: RgbImage, sigma: number): Promise<RgbImage> {
+  if (sigma < 0.3) return img;
+  const { data, info } = await sharp(img.data, { raw: { width: img.width, height: img.height, channels: 3 } })
+    .blur(sigma)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  return { data: toRgb(data, info.width, info.height, info.channels), width: info.width, height: info.height };
+}
+
 /** Encode a region of an RGB image as JPEG. */
 export async function encodeJpegRegion(
   img: RgbImage,
@@ -256,9 +266,8 @@ export function hammingHex(a: string, b: string): number {
 
 /* ------------------------------------------------------------------------------ low-light enhancement */
 
-/** Frames darker / flatter than this get a second detection pass on an enhanced copy when the first finds no face. */
-export const ENHANCE_MAX_BRIGHTNESS = 100;
-export const ENHANCE_MAX_CONTRAST = 45;
+/** Denoise applied (at detector scale) before the local-contrast enhancement of the second detection pass. */
+export const DETECT_ENHANCE_BLUR_SIGMA = 2;
 
 /**
  * Local-contrast enhancement for face DETECTION in dark, flat or backlit webcam frames (the detector misses

@@ -139,7 +139,8 @@ checks.ts (start/frames/complete: adaptive progress, liveness, gallery reference
 re-enrolment), identity-samples.ts (bursts, evidence accumulator -> identity_mismatch / identity_unverifiable,
 camera_feed_suspect), identity-evidence.ts (PURE: per-session normalisation, LLR accumulator, check assessment,
 cadence, identitySampleRequest), identity-gallery.ts (PURE: enrolment gallery + baseline, burst aggregation),
-identity-selftest.ts (staff camera self-test, in-memory; routes/admin/tools.ts), ingest.ts (events batch, evidence PUT),
+identity-selftest.ts (staff camera self-test, in-memory; routes/admin/tools.ts), identity-external.ts (optional external
+second opinion at check-in / resume / suspected swap, outside the session lock; docs/EXTERNAL_VERIFIER.md §6), ingest.ts (events batch, evidence PUT),
 candidate-actions.ts (consent, start, answers, heartbeat + command queue, pause, submit),
 candidate-state.ts (CandidateSessionState, instanceInControl).
 

@@ -9,8 +9,31 @@ import { fixtureAvailable, fixturePath, type FixtureName } from './fixtures';
  * Timing notes (from the candidate app's own drafts):
  *  - the camera (and the Y4M video, from frame 0) starts at the camera check and stays on through the exam;
  *    closing the page or pausing stops it, so the next camera start replays the file from the beginning;
- *  - the readiness checklist is smoothed over ~8 analysed frames, calibration takes >= 2.5 s;
+ *    the app asks for 1280×720 (ideal); the file-backed fake camera delivers the Y4M's own 640×480;
+ *  - the readiness checklist is smoothed over ~8 analysed frames, calibration takes >= 2.5 s; only camera
+ *    frames and exactly one face block the checklist (size / lighting / sharpness are warnings);
+ *  - the identity check is adaptive: frontal frames while the server wants more (CheckFrameResponse.progress),
+ *    liveness frames at the peak of each head turn with in-place re-prompts, /complete when the server can
+ *    decide — `verify-step` carries data-phase (frontal / liveness / completing) and data-stage (liveness:
+ *    move / hold / verify / retry);
+ *  - identity samples are bursts (policy.identity.burstSize frames, one request each, shared burstId) — the
+ *    server decides each burst as ONE identity check;
  *  - a reload is a NEW client instance by design (reconnect check), so tests never reload by accident.
+ *
+ * Test ids added with identity v2 (all earlier ids are unchanged):
+ *   readiness-warning        advisory readiness hint shown while Continue is already enabled
+ *   verify-step              + data-stage (liveness: move | hold | verify | retry)
+ *   verify-frontal-progress  "Pictures of your face: n of m" (server's running frontal need)
+ *   verify-step-progress     head-movement progress bar of the current liveness step
+ *   verify-hold              "Hold still" bar while the head is at the peak of a turn
+ *   verify-reprompt          in-place re-prompt when the server did not accept a step ("a little further")
+ *   debug-overlay            only with ?debug=1 on the take URL; inside: debug-camera-resolution,
+ *                            debug-check-frame, debug-check-progress, debug-identity, debug-next-sample,
+ *                            debug-triggers
+ *   staff /admin/tools/camera-test: camera-test-enrol, camera-test-probe, camera-test-reset,
+ *                            camera-test-message, camera-test-camera, camera-test-result,
+ *                            camera-test-similarity, camera-test-evidence (+ data-state), camera-test-guidance,
+ *                            camera-test-history
  */
 
 export function skipUnlessFixtures(...names: FixtureName[]): void {
@@ -135,14 +158,33 @@ export class CandidatePage {
     await this.tid('consent-continue').click();
   }
 
-  /** Every required readiness item must be green before continuing. */
-  async passReadiness(timeout = 90_000): Promise<void> {
+  /**
+   * Readiness: the blocking items (camera frames, exactly one face) must be green before continuing. Size /
+   * position, lighting and sharpness are advice only (the server judges usability during the check): with
+   * `strict` they must be green too, otherwise they are only logged when they show a warning.
+   */
+  async passReadiness(timeout = 90_000, opts: { strict?: boolean } = {}): Promise<void> {
     await expect(this.tid('readiness-checklist')).toBeVisible();
     await expect(this.tid('readiness-continue')).toBeEnabled({ timeout });
-    for (const id of ['frames', 'one_face', 'size_position', 'lighting', 'sharpness']) {
-      await expect(this.page.locator(`[data-testid="readiness-checklist"] [data-item="${id}"]`)).toHaveAttribute('data-ok', '1');
+    const item = (id: string) => this.page.locator(`[data-testid="readiness-checklist"] [data-item="${id}"]`);
+    for (const id of ['frames', 'one_face']) await expect(item(id)).toHaveAttribute('data-ok', '1');
+    for (const id of ['size_position', 'lighting', 'sharpness']) {
+      if (opts.strict) await expect(item(id)).toHaveAttribute('data-ok', '1');
+      else if ((await item(id).getAttribute('data-ok')) !== '1') console.log(`[readiness] advisory item "${id}" shows a warning (continuing)`);
     }
     await this.tid('readiness-continue').click();
+  }
+
+  /**
+   * The adaptive identity check (VerifyStep) as the candidate sees it: phase (starting / frontal / liveness /
+   * completing), liveness stage (move / hold / verify / retry) and the instruction text. For diagnostics.
+   */
+  async verifyState(): Promise<{ phase: string | null; stage: string | null; instruction: string }> {
+    const step = this.tid('verify-step');
+    const phase = await step.getAttribute('data-phase', { timeout: 1000 }).catch(() => null);
+    const stage = await step.getAttribute('data-stage', { timeout: 1000 }).catch(() => null);
+    const instruction = (await this.tid('verify-instruction').innerText({ timeout: 1000 }).catch(() => '')).replace(/\s+/g, ' ');
+    return { phase, stage, instruction };
   }
 
   /** Readiness → calibration → identity frames → outcome screen. */

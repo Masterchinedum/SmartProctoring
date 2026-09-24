@@ -6,6 +6,7 @@ import { useCandidateAnnouncements } from './announcements';
 import { CandidateController, isVerifiedInstance } from './controller';
 import { ControllerProvider, useController, useSnapshot } from './context';
 import { CheckFlow } from './check/CheckFlow';
+import { DebugOverlay } from './DebugOverlay';
 import { ExamScreen } from './screens/exam/ExamScreen';
 import { EndedScreen, FatalScreen, HoldScreen, LoadingScreen, PausedScreen, ReadyScreen } from './screens/StatusScreens';
 import { WelcomeScreen } from './screens/Welcome';
@@ -52,6 +53,7 @@ export default function CandidateApp() {
     <ControllerProvider controller={c}>
       <LiveAnnouncer />
       <CandidateRouter />
+      {c.debug.enabled && <DebugOverlay />}
     </ControllerProvider>
   );
 }

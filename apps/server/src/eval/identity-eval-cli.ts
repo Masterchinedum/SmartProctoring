@@ -3,6 +3,7 @@
  *
  *   pnpm --filter @sp/server eval:identity -- --dataset <dir> [--perturb] [--out report.json]
  *   pnpm --filter @sp/server eval:identity -- --pairs <master.csv> [--images <dir>] [--perturb] [--out report.json]
+ *   pnpm --filter @sp/server eval:identity -- --webcam [--quick] [--shards 3] [--out report.json]   (see webcam-cli.ts)
  *
  * Options:
  *   --dataset <dir>        folder dataset <dir>/<subject>/<cond>[+<cond>]__<name>.jpg ("reference" tag enrols)
@@ -25,7 +26,10 @@ import { createVisionService } from '../vision/service';
 import { PERTURBATIONS, formatReport, runFolderEval, runPairsEval, type EvalReport } from './identity-eval';
 
 async function main(): Promise<number> {
+  const argv = process.argv.slice(2).filter((a, i) => !(i === 0 && a === '--'));
+  if (argv.includes('--webcam')) return (await import('./webcam-cli')).runWebcamCli(argv);
   const { values } = parseArgs({
+    args: argv,
     options: {
       dataset: { type: 'string' },
       pairs: { type: 'string' },
@@ -49,6 +53,7 @@ async function main(): Promise<number> {
     console.log(
       [
         'Usage: eval:identity (--dataset <dir> | --pairs <csv> [--images <dir>]) [--perturb] [--only a,b] [--size 640]',
+        '       eval:identity --webcam [--quick] [--shards 3] [--no-legacy] [--runs 100] [--facesets <dir>] [--out report.json]',
         '       [--match 0.45 --mismatch 0.28 --confirmations 2] [--interval 30] [--models <dir>] [--no-anonymize] [--out report.json]',
         '',
         `Perturbations: ${PERTURBATIONS.map((p) => p.name).join(', ')}`,

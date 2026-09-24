@@ -59,6 +59,13 @@
 .cand-arrow-look_up { top: 12px; left: 50%; transform: translateX(-50%); }
 .cand-arrow-look_down { top: auto; bottom: 12px; left: 50%; transform: translateX(-50%); }
 .cand-arrow-center { left: 50%; transform: translate(-50%, -50%); font-size: 40px; }
+/* Head movement reached: "hold still" feedback (green instruction, hold bar). */
+.cand-instruction-hold { background: #eaf7ef; color: #155f34; }
+.cand-arrow-hold { color: rgba(140, 235, 170, 0.95); }
+.cand-hold { display: flex; align-items: center; gap: 10px; font-weight: 600; color: #155f34; }
+.cand-hold > span { flex: none; }
+.cand-hold > .cand-progress { flex: 1; }
+.cand-progress-hold .cand-progress-bar { background: var(--success); transition: width 0.1s linear; }
 .cand-steps { margin: 0; padding-left: 22px; color: var(--text-muted); }
 .cand-steps li.current { color: var(--text); font-weight: 600; }
 .cand-steps li.done { color: var(--success); }
@@ -141,3 +148,16 @@
 .cand-toast-success { border-color: #b9e2c8; background: #eaf7ef; }
 .cand-toast-close { border: none; background: none; font-size: 18px; line-height: 1; cursor: pointer; color: var(--text-muted); }
 .cand-reporting { font-size: 14px; }
+
+/* ---------------------------------------------------------------- debug overlay (?debug=1 only) */
+.cand-debug { position: fixed; left: 8px; bottom: 8px; z-index: 1200; width: min(380px, calc(100vw - 16px)); max-height: 60vh; overflow: auto; background: rgba(12, 16, 24, 0.9); color: #e6ebf2; font: 11px/1.4 var(--mono); border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35); }
+.cand-debug h2 { font: 700 11px/1.4 var(--mono); margin: 6px 0 2px; color: #9fc3ff; text-transform: uppercase; letter-spacing: 0.04em; }
+.cand-debug table { border-collapse: collapse; width: 100%; }
+.cand-debug th { text-align: left; font-weight: 400; color: #aab4c3; padding: 0 8px 0 0; white-space: nowrap; vertical-align: top; }
+.cand-debug td { padding: 0; overflow-wrap: anywhere; }
+.cand-debug ol { margin: 0; padding-left: 16px; }
+.cand-debug-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.cand-debug-head button { background: none; border: 1px solid #56627a; color: #e6ebf2; border-radius: 4px; font: inherit; cursor: pointer; padding: 0 6px; }
+.cand-debug .bad { color: #ff9c8f; }
+.cand-debug .good { color: #8fe3a8; }
+.cand-debug .warn { color: #ffd27a; }

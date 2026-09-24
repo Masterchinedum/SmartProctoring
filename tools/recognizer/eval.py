@@ -28,6 +28,9 @@ Protocols
   mixed    (--mixed) enrolment templates computed with the BASELINE model (existing stored templates) and probes
            with the candidate: backward compatibility without re-enrolment.
 
+Pooled pseudo-conditions: webcam_all = the 5 simulator conditions together (PRIMARY endpoint), stress_all = the 3
+derived stress conditions together.
+
 Metrics per condition: n trials (and identity / photo clusters), genuine mean / 5th pct, impostor 99th pct / max,
 EER, TAR @ FAR 1e-2 and 1e-3, family-impostor mean / max. 95 % confidence intervals by an identity-cluster
 bootstrap (identities resampled with replacement; trials weighted by identity multiplicity), and PAIRED bootstrap
@@ -49,7 +52,8 @@ from prep import views
 
 FRAMES = FACESETS / "_frames"
 SIM_DIR = "v3"
-CONDITIONS = ["clean", "good", "typical", "dim", "backlit", "sidelit", "lowres", "noisy", "compressed"]
+CONDITIONS = ["clean", "webcam_all", "good", "typical", "dim", "backlit", "sidelit", "stress_all", "lowres", "noisy", "compressed"]
+POOLED = {"webcam_all": ("good", "typical", "dim", "backlit", "sidelit"), "stress_all": ("lowres", "noisy", "compressed")}
 DERIVED = ("lowres", "noisy", "compressed")
 NEAR_DUP = 0.97
 
@@ -78,8 +82,15 @@ def _derive(rgb: np.ndarray, kind: str, seed: int) -> np.ndarray:
 
 
 def load_records(frames_dir: Path) -> list[dict]:
+    """Records of ONE analysis pipeline key (the one with the most records; shards merged)."""
+    by_key = {}
+    for f in frames_dir.glob("analysis-*.jsonl"):
+        k = f.name.split("-")[1].split(".")[0]
+        by_key.setdefault(k, []).append(f)
+    key = max(by_key, key=lambda k: sum(sum(1 for _ in open(f)) for f in by_key[k]))
+    print(f"analysis pipeline key {key} ({len(by_key)} keys found)")
     recs = {}
-    for f in sorted(frames_dir.glob("analysis-*.jsonl")):
+    for f in sorted(by_key[key]):
         for line in open(f):
             if not line.strip():
                 continue
@@ -191,14 +202,14 @@ def build_trials(d: dict, E_enrol: np.ndarray, E_probe: np.ndarray, base_clean: 
     if cond == "clean":
         pm = kind == "clean"
     else:
-        pm = (kind == "probe") & (condition == cond)
+        pm = (kind == "probe") & np.isin(condition, POOLED.get(cond, (cond,)))
         if usable_only:
             pm &= d["usable"]
     pidx = np.nonzero(pm)[0]
     if three and cond != "clean":
         groups = {}
         for i in pidx:
-            groups.setdefault((photo[i], d["resolution"][i], d["scene"][i]), []).append(i)
+            groups.setdefault((photo[i], condition[i], d["resolution"][i], d["scene"][i]), []).append(i)
         P = np.stack([l2n(E_probe[g].mean(0)) for g in groups.values()])
         p_photo = np.array([k[0] for k in groups])
         p_first = np.array([g[0] for g in groups.values()])

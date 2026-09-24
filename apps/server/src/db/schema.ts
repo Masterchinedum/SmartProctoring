@@ -255,6 +255,12 @@ export interface IdentityEngineState {
   sampleRequest: { trigger: IdentityCheckTrigger; since: number } | null;
   /** Bursts whose frames are still arriving (identity_sample_frames). */
   pendingBursts: PendingBurst[];
+  /**
+   * Optional external second opinion (identity-external.ts): a suspected swap about to be confirmed waits for it
+   * (the confirming identity check), and a provider's "same person" holds off borderline confirmations until `until`.
+   */
+  secondOpinionPending: { checkId: string; since: number } | null;
+  secondOpinionVeto: { checkId: string; until: number } | null;
 }
 
 /** A burst of identity frames being collected (IdentitySampleQuery burstId / burstIndex / burstSize). */

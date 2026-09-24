@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { setUnauthorizedHandler } from './api/client';
@@ -23,6 +23,8 @@ import { AuditLogPage } from './pages/AuditLogPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { IntegrationsPage } from './pages/IntegrationsPage';
 import { UsersPage } from './pages/UsersPage';
+// Loads the in-browser face models (MediaPipe): only fetched when the tool is opened.
+const CameraTestPage = lazy(() => import('./pages/tools/CameraTestPage').then((m) => ({ default: m.CameraTestPage })));
 import './admin.css';
 
 /** Staff application, mounted at /admin/*. */
@@ -47,6 +49,14 @@ export default function AdminApp() {
         <Route path="settings" element={<AdminOnly><SettingsPage /></AdminOnly>} />
         <Route path="integrations" element={<AdminOnly><IntegrationsPage /></AdminOnly>} />
         <Route path="users" element={<AdminOnly><UsersPage /></AdminOnly>} />
+        <Route
+          path="tools/camera-test"
+          element={
+            <Suspense fallback={<Loading label="Loading the camera test…" />}>
+              <CameraTestPage />
+            </Suspense>
+          }
+        />
         <Route path="*" element={<EmptyState title="Page not found">This page does not exist.</EmptyState>} />
       </Route>
     </Routes>

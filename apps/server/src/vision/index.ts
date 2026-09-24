@@ -39,9 +39,20 @@ export {
   type BucketThresholds,
   type Calibration,
 } from './calibration';
-export { verifyLiveness, checkStepFrame, stepDelta, LIVENESS_DEFAULTS, LIVENESS_REASONS, type LivenessOptions } from './liveness';
+export {
+  verifyLiveness,
+  checkStepFrame,
+  stepDelta,
+  LIVENESS_DEFAULTS,
+  LIVENESS_REASONS,
+  FRONTAL_MIN_SIMILARITY,
+  TURNED_MIN_SIMILARITY,
+  type LivenessOptions,
+  type StepFrameFeedback,
+} from './liveness';
 export {
   QUALITY_GATE,
+  QUALITY_GATE_V1,
   ID_PHOTO_QUALITY_GATE,
   resolveGate,
   assessQuality,
@@ -60,7 +71,12 @@ export {
   EMBEDDING_DIM,
   EMBEDDING_FORMAT_VERSION,
   EMBEDDING_MODEL_SFACE_2021DEC,
+  EMBEDDING_MODEL_SFACE_2021DEC_FLIP,
+  EMBEDDING_MODEL_CURRENT,
+  COMPATIBLE_EMBEDDING_MODELS,
+  DEFAULT_EMBEDDING_RECIPE,
 } from './embeddings';
+export { RECIPE_V1, RECIPE_V2, type EmbeddingRecipe, type IlluminationNormalization } from './embed-prep';
 export { hammingHex, dhashFromGray, VisionInputError, MAX_INPUT_PIXELS } from './image';
 export { resolveModelsDir, VisionModelsNotFoundError } from './models';
 export { FakeVisionService, fakeEmbedding, fakeAnalysis, syntheticLandmarks, type FakeImageSpec, type FakeVisionOptions } from './fake';

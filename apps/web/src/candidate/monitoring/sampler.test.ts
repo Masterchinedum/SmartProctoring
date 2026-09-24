@@ -161,7 +161,7 @@ describe('BurstSampler', () => {
     ]);
   });
 
-  it('stops sending when any frame puts the exam on hold', async () => {
+  it('a hold reported by any frame wins: no burst decision is taken from the other frames', async () => {
     const t = setup({
       send: vi.fn(async (frame: BurstFrame, q: Q) => {
         void frame;
@@ -170,8 +170,37 @@ describe('BurstSampler', () => {
     });
     t.s.request('periodic');
     for (let i = 0; i < 4; i++) await t.frame(200);
-    expect(t.deps.send).toHaveBeenCalledTimes(1);
     expect(t.responses[0].res.status).toBe('on_hold');
+    expect(t.responses).toHaveLength(1);
+    expect(t.done).toHaveLength(0);
+  });
+
+  it('sends the frames concurrently; the answer that completes the burst is the decision, whatever its index', async () => {
+    const resolvers: ((r: IdentitySampleResponse) => void)[] = [];
+    const t = setup({ send: vi.fn(() => new Promise<IdentitySampleResponse>((r) => resolvers.push(r))) });
+    t.s.request('appearance_change');
+    await t.frame(200);
+    await t.frame(200);
+    const sending = t.frame(200); // completes the burst: resolves once the server answered
+    await vi.waitFor(() => expect(t.deps.send).toHaveBeenCalledTimes(3)); // all in flight at once
+    const burst = (received: number, complete: boolean) => ({ id: 'id-1', received, size: 3, complete });
+    resolvers[2](response({ burst: burst(1, false) }));
+    resolvers[0](response({ burst: burst(2, false) }));
+    resolvers[1](response({ burst: burst(3, true), nextSampleInMs: 2500, evidence: { state: 'suspect', swapProbability: 0.7, samples: 3 } }));
+    await sending;
+    expect(t.done).toHaveLength(1);
+    expect(t.responses.map((r) => r.final)).toEqual([false, false, true]);
+    expect(t.s.last?.response?.nextSampleInMs).toBe(2500);
+    expect(t.s.lastEvidence?.state).toBe('suspect');
+  });
+
+  it('dropPending forgets a waiting routine sample (the server rescheduled it)', () => {
+    const t = setup();
+    t.s.request('periodic');
+    t.s.dropPending('track_break');
+    expect(t.s.pendingTrigger()).toBe('periodic');
+    t.s.dropPending('periodic');
+    expect(t.s.pendingTrigger()).toBeNull();
   });
 
   it('a burst size of 1 sends plain samples (no burst parameters)', async () => {

@@ -88,6 +88,10 @@ export interface WebcamDataOptions {
   concurrency?: number;
   /** Use cached analyses only (skip frames that were not analysed yet). */
   cachedOnly?: boolean;
+  /** Identifies the vision-service configuration in the analysis cache key (e.g. 'v1', 'v2'). */
+  engineTag?: string;
+  /** Use this analysis-cache key instead of the computed one (re-reading an older cache). */
+  cacheKey?: string;
 }
 
 /** Deterministic 31-bit seed from a string. */
@@ -194,10 +198,10 @@ export async function renderJob(dir: string, job: FrameJob, srcCache: Map<string
 
 /* ------------------------------------------------------------------------------ analysis cache */
 
-function pipelineKey(opts: WebcamDataOptions): string {
+export function pipelineKey(opts: WebcamDataOptions): string {
   const recipes = (opts.recipes ?? []).map((r) => `${r.id}:${r.normalize}:${r.flip}`).join(',');
   return createHash('sha256')
-    .update(JSON.stringify({ SIM_VERSION, recipes, gate: opts.gate ?? {}, def: `${DEFAULT_EMBEDDING_RECIPE.id}:${DEFAULT_EMBEDDING_RECIPE.normalize}:${DEFAULT_EMBEDDING_RECIPE.flip}` }))
+    .update(JSON.stringify({ SIM_VERSION, recipes, gate: opts.gate ?? {}, ...(opts.engineTag ? { engine: opts.engineTag } : {}), def: `${DEFAULT_EMBEDDING_RECIPE.id}:${DEFAULT_EMBEDDING_RECIPE.normalize}:${DEFAULT_EMBEDDING_RECIPE.flip}` }))
     .digest('hex')
     .slice(0, 12);
 }
@@ -260,7 +264,7 @@ export async function buildWebcamData(vision: VisionService, opts: WebcamDataOpt
     writeFileSync(sourcesFile, JSON.stringify(sources.map((s) => ({ ...s, file: s.file.slice(faceset.dir.length + 1) }))));
   }
   const jobs = planFrames(sources, opts).filter((_, i) => !opts.shard || i % opts.shard.count === opts.shard.index);
-  const key = pipelineKey(opts);
+  const key = opts.cacheKey ?? pipelineKey(opts);
   const cacheFile = join(framesDir, `analysis-${key}${opts.shard ? `-shard${opts.shard.index}` : ''}.jsonl`);
   const cache = loadCache(cacheFile);
   if (!opts.shard) {

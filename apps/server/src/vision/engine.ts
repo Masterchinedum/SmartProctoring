@@ -13,7 +13,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { alignFace, type AlignedFace } from './align';
 import { DEFAULT_DETECT_THRESHOLD, YUNET_INPUT_SIZE, decodeToDetectedFaces, interEyeDistance, packBgrPlanar, planDetectorInput } from './detect';
-import { DEFAULT_MAX_DECODE_SIDE, decodeImage, decodeRegion, encodeJpegRegion, resizeRgb, wholeImageStats, type RgbImage } from './image';
+import { DEFAULT_MAX_DECODE_SIDE, DETECT_ENHANCE_BLUR_SIGMA, blurRgb, decodeImage, decodeRegion, encodeJpegRegion, enhanceForDetection, resizeRgb, wholeImageStats, type RgbImage } from './image';
 import { SFACE_MODEL_FILE, YUNET_MODEL_FILE } from './models';
 import { removeInitializersFromInputs } from './onnx-model';
 import { DEFAULT_EMBEDDING_RECIPE } from './embeddings';
@@ -34,6 +34,13 @@ export interface VisionEngineOptions {
   gate?: Partial<QualityGate>;
   /** How `ImageAnalysis.embedding` is computed (default DEFAULT_EMBEDDING_RECIPE). */
   embedding?: EmbeddingRecipe;
+  /**
+   * When the detector finds no face, run it again on a denoised, locally contrast-enhanced copy (default true).
+   * Dim-room / backlit webcam frames: detection 64 % -> 90 %+ on the simulator (docs/accuracy/identity-v2.md);
+   * costs one extra detector pass (~30 ms) on face-less frames only. The enhanced copy is used to find the
+   * face; statistics, alignment and the embedding use the original pixels.
+   */
+  enhanceLowLight?: boolean;
 }
 
 /** Faces this small (inter-ocular px in the sampled image) are re-sampled from the full-resolution original. */
@@ -64,6 +71,7 @@ export class VisionEngine {
   private readonly detectThreshold: number;
   private readonly maxDecodeSide: number;
   private readonly recipe: EmbeddingRecipe;
+  private readonly enhanceLowLight: boolean;
   /** Reusable detector input buffers (4.9 MB each), one per concurrent analysis (in-process mode). */
   private readonly tensorPool: Float32Array[] = [];
 
@@ -76,6 +84,7 @@ export class VisionEngine {
     this.detectThreshold = opts.detectThreshold ?? DEFAULT_DETECT_THRESHOLD;
     this.maxDecodeSide = opts.maxDecodeSide ?? DEFAULT_MAX_DECODE_SIDE;
     this.recipe = opts.embedding ?? DEFAULT_EMBEDDING_RECIPE;
+    this.enhanceLowLight = opts.enhanceLowLight ?? true;
   }
 
   static async create(opts: VisionEngineOptions): Promise<VisionEngine> {
@@ -106,14 +115,17 @@ export class VisionEngine {
 
   /** Detect faces only (no alignment / embedding), in original-image coordinates, primary first. */
   async detect(image: Buffer): Promise<DetectedFace[]> {
-    return this.detectDecoded(await decodeImage(image, this.maxDecodeSide));
+    const img = await decodeImage(image, this.maxDecodeSide);
+    const faces = await this.detectDecoded(img);
+    return faces.length === 0 && this.enhanceLowLight ? this.detectDecoded(img, true) : faces;
   }
 
   async analyze(image: Buffer, opts: AnalyzeOptions = {}): Promise<ImageAnalysis> {
     const gate = opts.gate ? resolveGate(opts.gate, this.gate) : this.gate;
     const img = await decodeImage(image, this.maxDecodeSide);
     const whole = wholeImageStats(img);
-    const faces = await this.detectDecoded(img);
+    let faces = await this.detectDecoded(img);
+    if (faces.length === 0 && this.enhanceLowLight) faces = await this.detectDecoded(img, true);
     const primary = faces[0] ?? null;
 
     let aligned: AlignedFace | null = null;
@@ -150,9 +162,10 @@ export class VisionEngine {
     };
   }
 
-  private async detectDecoded(img: RgbImage & { origWidth: number; origHeight: number }): Promise<DetectedFace[]> {
+  private async detectDecoded(img: RgbImage & { origWidth: number; origHeight: number }, enhanced = false): Promise<DetectedFace[]> {
     const plan = planDetectorInput(img.width, img.height);
-    const detImg = plan.resize ? await resizeRgb(img, plan.width, plan.height) : img;
+    let detImg = plan.resize ? await resizeRgb(img, plan.width, plan.height) : img;
+    if (enhanced) detImg = enhanceForDetection(await blurRgb(detImg, DETECT_ENHANCE_BLUR_SIGMA), 6, 3);
     const tensor = packBgrPlanar(detImg, YUNET_INPUT_SIZE, this.tensorPool.pop());
     let outputs: ort.InferenceSession.ReturnType;
     try {

@@ -168,6 +168,10 @@ const CONTEXT_LABELS: Record<string, string> = {
   hold: 'Exam was on hold',
   on_hold: 'Exam was on hold',
   hold_released: 'Hold was released',
+  face_track_break: 'Face briefly left the view or the face track jumped',
+  track_break: 'Face briefly left the view or the face track jumped',
+  appearance_change: 'Face appearance changed abruptly',
+  exam_start: 'Exam had just started or resumed',
 };
 
 export function contextLabel(key: string): string {

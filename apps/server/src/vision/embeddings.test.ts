@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { deserializeEmbeddings, EmbeddingFormatError, readEmbeddingHeader, serializeEmbeddings } from './embeddings';
+import {
+  COMPATIBLE_EMBEDDING_MODELS,
+  deserializeEmbeddings,
+  EMBEDDING_MODEL_CURRENT,
+  EMBEDDING_MODEL_SFACE_2021DEC,
+  EMBEDDING_MODEL_SFACE_2021DEC_FLIP,
+  EmbeddingFormatError,
+  readEmbeddingHeader,
+  serializeEmbeddings,
+} from './embeddings';
 
 function randomUnit(seed: number): Float32Array {
   const v = new Float32Array(128);
@@ -18,10 +27,18 @@ describe('embedding serialization', () => {
     const embs = [randomUnit(1), randomUnit(2), randomUnit(3)];
     const buf = serializeEmbeddings(embs);
     expect(buf.length).toBe(12 + 3 * 128 * 4);
-    expect(readEmbeddingHeader(buf)).toEqual({ version: 1, modelId: 1, dim: 128, count: 3 });
+    expect(readEmbeddingHeader(buf)).toEqual({ version: 1, modelId: EMBEDDING_MODEL_CURRENT, dim: 128, count: 3 });
     const back = deserializeEmbeddings(buf);
     expect(back).toHaveLength(3);
     back.forEach((e, i) => expect(Array.from(e)).toEqual(Array.from(embs[i])));
+  });
+
+  it('writes the flip-TTA model id and still reads references stored by identity v1 (same embedding space)', () => {
+    expect(EMBEDDING_MODEL_CURRENT).toBe(EMBEDDING_MODEL_SFACE_2021DEC_FLIP);
+    expect(COMPATIBLE_EMBEDDING_MODELS).toEqual([EMBEDDING_MODEL_SFACE_2021DEC, EMBEDDING_MODEL_SFACE_2021DEC_FLIP]);
+    const v1 = serializeEmbeddings([randomUnit(5)], EMBEDDING_MODEL_SFACE_2021DEC);
+    expect(readEmbeddingHeader(v1).modelId).toBe(1);
+    expect(deserializeEmbeddings(v1)).toHaveLength(1);
   });
 
   it('round-trips an empty list', () => {

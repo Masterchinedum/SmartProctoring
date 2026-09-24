@@ -37,7 +37,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from common import WORK, sface_torch, write_json
+from common import WORK, fold_bn, sface_torch, write_json
 
 # features index of the PReLU block that ends each named layer (conv_1 = 0, conv_k_dw = 2k-3, conv_k = 2k-2)
 LAYER_END = {f"conv_{k}": 2 * k - 2 for k in range(2, 15)} | {"conv_1": 0}
@@ -85,7 +85,7 @@ class EnhancedSFace(nn.Module):
 
 
 def build_student(method: str, train_upto: str, enh_c1: int = 16, enh_c2: int = 32, enh_blocks: int = 2):
-    base = sface_torch()
+    base = fold_bn(sface_torch())
     for p in base.parameters():
         p.requires_grad_(False)
     if method == "A":
@@ -152,10 +152,16 @@ class Data:
         n = len(self.clean)
         cl = torch.from_numpy(self.clean).permute(0, 3, 1, 2).contiguous()
         self.clean_t = torch.stack([cl, cl.flip(3)], 1)  # (N, 2, 3, 112, 112): [orig, mirrored]
-        teacher = sface_torch()
-        with torch.no_grad():
-            t = [F.normalize(teacher(self.clean_t[i : i + 64].reshape(-1, 3, 112, 112)), dim=1).view(-1, 2, 128) for i in range(0, n, 32)]
-        self.t = torch.cat(t)  # (N, 2, 128)
+        cache = path.with_suffix(".teacher.npy")
+        if cache.exists() and cache.stat().st_mtime >= path.stat().st_mtime:
+            self.t = torch.from_numpy(np.load(cache))
+        else:
+            teacher = sface_torch()
+            with torch.no_grad():
+                t = [F.normalize(teacher(self.clean_t[i : i + 32].reshape(-1, 3, 112, 112)), dim=1).view(-1, 2, 128) for i in range(0, n, 32)]
+            self.t = torch.cat(t)  # (N, 2, 128): teacher embedding of the clean crop, [original, mirrored]
+            np.save(cache, self.t.numpy())
+        assert self.t.shape == (n, 2, 128)
         self.train_src = np.nonzero(~self.is_val)[0]
         self.val_src = np.nonzero(self.is_val)[0]
         by = {}

@@ -10,13 +10,13 @@ import type { FaceObservation, IdentityCheckTrigger, IdentityEvidenceDTO, Identi
  *   follow-ups (followUpInMs)                                                   ┘    priority, stale ones expire)
  *        └─► burst: on each ANALYSED frame with exactly one usable face, ≥ 150 ms after the previous burst
  *            frame, crop the face at native resolution ─► burstSize frames (or what was collected within
- *            2.5 s) ─► sent as separate requests sharing burstId (burstIndex / burstSize), in order.
+ *            2.5 s) ─► sent concurrently as separate requests sharing burstId (burstIndex / burstSize).
  *
  * Every frame of a burst is a different camera frame (the runtime only analyses new frames). The server's
  * answer to the last frame carries the burst decision, the next routine sample time (nextSampleInMs) and the
  * accumulated evidence; intermediate answers only matter when they put the exam on hold.
  *
- * A request budget keeps the page under the server's per-link rate limit (identity/sample: 60 per minute):
+ * A request budget keeps the page under the server's per-link rate limit (identity/sample: 240 per minute):
  * a burst starts only when all its frames fit in the last minute's budget.
  */
 
@@ -83,12 +83,15 @@ export class SampleTriggerQueue {
   }
 }
 
-/** Sliding one-minute request budget. */
+/**
+ * Sliding one-minute request budget, below the server's identity/sample rate limit (240 per minute per link)
+ * with room for samples the outbox delivers later.
+ */
 export class RequestBudget {
   private readonly times: number[] = [];
 
   constructor(
-    readonly maxPerWindow = 48,
+    readonly maxPerWindow = 180,
     readonly windowMs = 60_000,
   ) {}
 
@@ -284,38 +287,52 @@ export class BurstSampler {
     }
   }
 
+  /**
+   * Send the burst's frames concurrently (the server takes them in any order and decides the burst when the last
+   * one arrives — one round trip instead of three). The answer carrying `burst.complete` is the decision (an older
+   * server without burst bookkeeping: the last frame's answer). A hold reported by any frame wins. Frames that
+   * could not be sent go to the outbox, in index order, with their burst metadata.
+   */
   private async sendBurst(b: ActiveBurst): Promise<void> {
     const frames = [...b.frames].sort((x, y) => x.capturedAt - y.capturedAt);
     const size = frames.length;
     const multi = this.size > 1;
     this.budget.spend(this.deps.mono(), size);
     let last: IdentitySampleResponse | null = null;
-    for (let i = 0; i < size; i++) {
-      if (this.stopped) return;
-      const f = frames[i];
-      const q = { trigger: b.trigger, capturedAt: f.capturedAt, ...(multi ? { burstId: b.id, burstIndex: i, burstSize: size } : {}) };
-      try {
-        const res = await this.deps.send(f, q);
-        const final = i === size - 1 || res.burst?.complete === true;
-        this.deps.onResponse(res, final);
-        if (res.status === 'on_hold' || res.hold) return;
-        if (final) last = res;
-      } catch (e) {
-        const r = await this.deps.onSendFailed(f, q, e);
-        if (r === 'fatal') return;
-        // Queued: the remaining frames of the burst go to the outbox too (same burst, in order).
-        if (r === 'queued') {
-          for (let j = i + 1; j < size; j++) {
-            const g = frames[j];
-            await this.deps.onSendFailed(g, { trigger: b.trigger, ...(multi ? { burstId: b.id, burstIndex: j, burstSize: size } : {}) }, e);
-          }
-          break;
+    let decided = false;
+    let held = false;
+    const failed: { i: number; f: BurstFrame; q: { trigger: IdentityCheckTrigger; capturedAt: number; burstId?: string; burstIndex?: number; burstSize?: number }; e: unknown }[] = [];
+    await Promise.all(
+      frames.map(async (f, i) => {
+        const q = { trigger: b.trigger, capturedAt: f.capturedAt, ...(multi ? { burstId: b.id, burstIndex: i, burstSize: size } : {}) };
+        try {
+          const res = await this.deps.send(f, q);
+          if (this.stopped || held) return;
+          const final = !decided && (res.burst ? res.burst.complete === true : i === size - 1);
+          if (final) decided = true;
+          this.deps.onResponse(res, final);
+          if (res.status === 'on_hold' || res.hold) held = true;
+          else if (final) last = res;
+        } catch (e) {
+          failed.push({ i, f, q, e });
         }
-      }
+      }),
+    );
+    if (this.stopped) return;
+    failed.sort((x, y) => x.i - y.i);
+    for (const x of failed) {
+      if ((await this.deps.onSendFailed(x.f, x.q, x.e)) === 'fatal') return;
     }
-    if (last?.evidence) this.lastEvidence = last.evidence;
-    this.last = { burstId: b.id, trigger: b.trigger, frames: size, response: last, at: this.deps.now() };
+    if (held) return;
+    const final = last as IdentitySampleResponse | null;
+    if (final?.evidence) this.lastEvidence = final.evidence;
+    this.last = { burstId: b.id, trigger: b.trigger, frames: size, response: final, at: this.deps.now() };
     this.deps.onBurstDone?.(this.last);
+  }
+
+  /** Forget a waiting trigger of this kind (e.g. a routine sample the server's new schedule replaces). */
+  dropPending(trigger: IdentityCheckTrigger): void {
+    if (this.queue.peek(this.deps.mono()) === trigger) this.queue.clear();
   }
 
   stop(): void {

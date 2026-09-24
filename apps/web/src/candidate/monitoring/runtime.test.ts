@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { eventUpsertSchema, type EpisodeUpdate } from '@sp/shared';
 import { DEFAULT_POLICY, type IdentitySampleResponse } from '@sp/shared';
 import { vi } from 'vitest';
-import { episodeToUpsert, MonitoringRuntime, SampleTriggerQueue, toFlushReason, type RuntimeDeps } from './runtime';
+import { episodeToUpsert, MonitoringRuntime, routineCadence, SampleTriggerQueue, stripDescriptors, toFlushReason, type RuntimeDeps } from './runtime';
 import { TraceRecorder, traceEnabled } from './trace';
 
 describe('episodeToUpsert', () => {
@@ -142,5 +142,44 @@ describe('MonitoringRuntime.handleSampleResult', () => {
     rt.handleSampleResult({ ...result('mismatch'), status: 'on_hold' });
     expect(deps.onHold).toHaveBeenCalled();
     expect(deps.onSignal).not.toHaveBeenCalled();
+  });
+});
+
+describe('routineCadence (server-driven sampling)', () => {
+  const base: IdentitySampleResponse = {
+    result: { id: 'r', trigger: 'periodic', decision: 'match', similarity: 0.7, confidence: 0.9, quality: null, guidance: [], at: 1 },
+    followUpInMs: null,
+    status: 'active',
+    hold: null,
+  };
+
+  it('v2: next routine burst after nextSampleInMs — periodic while the evidence is consistent', () => {
+    expect(routineCadence({ ...base, nextSampleInMs: 6000, evidence: { state: 'consistent', swapProbability: 0.01, samples: 4 } })).toEqual({ inMs: 6000, label: 'periodic', followUpInMs: null });
+  });
+
+  it('v2: labelled server_request while a follow-up is wanted or the evidence is monitoring / suspect', () => {
+    expect(routineCadence({ ...base, nextSampleInMs: 2500, followUpInMs: 2500, evidence: { state: 'consistent', swapProbability: 0.2, samples: 2 } }).label).toBe('server_request');
+    expect(routineCadence({ ...base, nextSampleInMs: 3000, evidence: { state: 'monitoring', swapProbability: 0.3, samples: 3 } }).label).toBe('server_request');
+    expect(routineCadence({ ...base, nextSampleInMs: 2000, evidence: { state: 'suspect', swapProbability: 0.7, samples: 3 } })).toEqual({ inMs: 2000, label: 'server_request', followUpInMs: null });
+  });
+
+  it('v2 without a time: 3 s while suspect, else the policy interval', () => {
+    expect(routineCadence({ ...base, nextSampleInMs: null, evidence: { state: 'suspect', swapProbability: 0.7, samples: 3 } }).inMs).toBe(3000);
+    expect(routineCadence({ ...base, nextSampleInMs: null, evidence: { state: 'consistent', swapProbability: 0, samples: 3 } }).inMs).toBeNull();
+  });
+
+  it('an older server (no v2 fields): its follow-up sample as before, routine sampling at the policy interval', () => {
+    expect(routineCadence({ ...base, followUpInMs: 4000 })).toEqual({ inMs: null, label: 'periodic', followUpInMs: 4000 });
+  });
+});
+
+describe('stripDescriptors', () => {
+  it('removes the appearance descriptors from traced observations (and keeps everything else)', () => {
+    const face = { box: { x: 0, y: 0, w: 0.3, h: 0.4 }, score: 0.9, yaw: 1, pitch: 2, roll: 0, gazeX: 0, gazeY: 0, visibility: 1, cutOff: false };
+    const obs = { t: 1, camera: 'live' as const, frame: null, faces: [{ ...face, descriptor: { patch: new Float32Array(256), geom: [1] } }], objects: null };
+    const out = stripDescriptors(obs);
+    expect('descriptor' in out.faces[0]).toBe(false);
+    expect(out.faces[0]).toEqual(face);
+    expect(stripDescriptors({ ...obs, faces: [face] }).faces[0]).toBe(face);
   });
 });

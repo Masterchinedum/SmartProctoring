@@ -452,6 +452,23 @@ export interface IdentityCheckDTO {
   context: { precededBy: string[]; periodKind: PeriodKind | null; secondsSincePreviousMatch: number | null };
   /** For check-in / resume / reconnect checks: false when the live-person (liveness) part was not passed. */
   livenessPassed?: boolean | null;
+  /**
+   * External second opinion on this check, when the organisation enabled one (docs/EXTERNAL_VERIFIER.md). `decision`
+   * above is the fused decision; `needsHumanReview` = the two opinions disagree (show it to reviewers).
+   */
+  secondOpinion?: IdentitySecondOpinionDTO | null;
+}
+
+export interface IdentitySecondOpinionDTO {
+  provider: string | null;
+  /** fuseWithExternal outcome, e.g. 'agree', 'resolved_by_external', 'downgraded_to_inconclusive', 'disagreement_flagged', 'external_unusable'. */
+  outcome: string;
+  internalDecision: IdentityDecision;
+  needsHumanReview: boolean;
+  /** Provider similarity 0..1 (null when it could not answer). */
+  externalSimilarity: number | null;
+  /** Reviewer-facing sentence naming both opinions. */
+  explanation: string;
 }
 
 export interface IdentityReferenceDTO {

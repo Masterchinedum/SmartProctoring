@@ -18,6 +18,7 @@ import { VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript
 import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate } from './types';
 import { DEFAULT_DETECT_THRESHOLD } from './detect';
 import { DEFAULT_MAX_DECODE_SIDE } from './image';
+import type { EmbeddingRecipe } from './embed-prep';
 
 export { VisionBusyError, VisionClosedError };
 
@@ -46,6 +47,10 @@ export interface VisionServiceOptions {
   maxQueue?: number;
   /** Service-wide quality-gate override (per-call `AnalyzeOptions.gate` is applied on top). */
   gate?: Partial<QualityGate>;
+  /** Embedding recipe (default DEFAULT_EMBEDDING_RECIPE; evaluation of older pipelines only). */
+  embedding?: EmbeddingRecipe;
+  /** Second, low-light-enhanced detection pass when no face is found (default true). */
+  enhanceLowLight?: boolean;
   /**
    * Linux: nice increment for the vision threads (env VISION_NICE, default 0). A positive value lets request
    * handling win when the CPU is saturated, but on a shared host other processes then win over vision too.
@@ -188,6 +193,8 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
       detectThreshold: options.detectThreshold ?? DEFAULT_DETECT_THRESHOLD,
       maxDecodeSide: options.maxDecodeSide ?? DEFAULT_MAX_DECODE_SIDE,
       gate: options.gate,
+      ...(options.embedding ? { embedding: options.embedding } : {}),
+      ...(options.enhanceLowLight != null ? { enhanceLowLight: options.enhanceLowLight } : {}),
     };
     const maxQueue = options.maxQueue ?? 256;
     let backend: Backend;

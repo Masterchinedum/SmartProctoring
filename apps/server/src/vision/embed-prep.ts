@@ -9,6 +9,7 @@
  *     'gamma'    'stretch' preceded by a gamma that moves the face-region median luma to 118
  *     'clahe'    contrast-limited adaptive histogram equalisation of luma (4x4 tiles, clip 2.5), applied as
  *                a per-pixel luma gain to R, G, B
+ *     'denoise'  3x3 binomial smoothing only
  *     'denoise-stretch'  3x3 binomial denoise, then 'stretch' with the contrast gain capped at 2.5
  *     'soft'     3x3 binomial denoise, grey world, gamma to median 118, contrast gain capped at 2
  *   test-time augmentation: `flip` also embeds the horizontally mirrored crop; the recipe's embedding is
@@ -16,7 +17,7 @@
  */
 import type { AlignedFace } from './align';
 
-export type IlluminationNormalization = 'none' | 'stretch' | 'gamma' | 'clahe' | 'denoise-stretch' | 'soft';
+export type IlluminationNormalization = 'none' | 'stretch' | 'gamma' | 'clahe' | 'denoise' | 'denoise-stretch' | 'soft';
 
 export interface EmbeddingRecipe {
   id: string;
@@ -26,6 +27,15 @@ export interface EmbeddingRecipe {
 
 /** Recipe of embedding model id 1 (the original pipeline): raw crop, single view. */
 export const RECIPE_V1: Readonly<EmbeddingRecipe> = Object.freeze({ id: 'v1-raw', normalize: 'none', flip: false });
+
+/**
+ * Recipe of embedding model id 2 (identity v2): raw crop + its mirror image, normalize(e(x) + e(flip x)).
+ * On the webcam simulator flip TTA separates genuine from impostor slightly better in good / fair light
+ * (d' +0.03..0.07, EER in fair light 0.34 % -> 0.30 %) and is neutral in poor light; every photometric
+ * normalisation tried (grey-world + stretch, gamma, CLAHE, denoise variants) made SFace WORSE in good light
+ * and did not help reliably in dim light (docs/accuracy/identity-v2.md §5). Costs a second SFace run.
+ */
+export const RECIPE_V2: Readonly<EmbeddingRecipe> = Object.freeze({ id: 'v2-flip', normalize: 'none', flip: true });
 
 /** Inner face region of the 112x112 template used for statistics (eyes, nose, mouth, cheeks). */
 const R_X0 = 24;
@@ -196,6 +206,8 @@ export function normalizedInput(face: AlignedFace, mode: IlluminationNormalizati
       return stretch(face, true);
     case 'clahe':
       return clahe(face);
+    case 'denoise':
+      return binomial(face);
     case 'denoise-stretch':
       return stretch({ ...face, rgb: binomial(face) }, false, 2.5);
     case 'soft':

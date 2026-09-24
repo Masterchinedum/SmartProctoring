@@ -13,13 +13,17 @@ import { DEFAULT_IDENTITY_THRESHOLDS, LIVENESS_ACTIONS, type IdentityThresholds,
 import type { ImageAnalysis, LivenessChallengeSpec, LivenessFrame, QualityGate } from './types';
 import { hammingHex } from './image';
 import { cosineSimilarity, templateFrom } from './identity';
+import { qualityBucket, type QualityBucket } from './calibration';
 import { FRONTAL_PITCH_DEG, QUALITY_GATE, poseWithinGate } from './quality';
 
 export interface LivenessOptions {
   /** A step passes when the pose change reaches this fraction of the target (default 0.6). */
   minFractionOfTarget: number;
-  /** Minimum similarity of a turned (step) frame to the frontal frames (default 0.30). */
-  turnedMinSimilarity: number;
+  /**
+   * Minimum similarity of a turned (step) frame to the frontal template. Default: TURNED_MIN_SIMILARITY for the
+   * frame's quality bucket (0.30; 0.25 for poor frames). A number overrides it for every bucket.
+   */
+  turnedMinSimilarity?: number;
   /** Frames of different steps must differ by MORE than this many dHash bits (default 2). */
   minFrameHamming: number;
   /** Clock-skew tolerance around [issuedAt, expiresAt], ms (default 1000). */
@@ -45,23 +49,31 @@ export interface LivenessOptions {
   minFramesAgreeing: number;
   /**
    * Frontal frames must be mutually consistent: each frontal frame against the template (mean) of the other
-   * frontal frames must reach this similarity (default FRONTAL_MIN_SIMILARITY). When not set explicitly, a
-   * `thresholds.match` below it is used instead (organisations with a stricter match threshold keep it).
+   * frontal frames must reach this similarity. Default: FRONTAL_MIN_SIMILARITY for the frame's quality bucket.
    */
   frontalMinSimilarity?: number;
 }
 
 /**
- * Consistency floors measured on the webcam simulator (docs/accuracy/identity-v2.md §6): frames of ONE person
- * captured seconds apart score >= 0.45 against each other in 99 % of dim-room bursts once unusable frames are
- * excluded, and >= 0.9 in good light; different people score <= 0.3.
+ * Identity-consistency floors inside a challenge, per quality bucket of the frame (webcam simulator,
+ * docs/accuracy/identity-v2.md §7):
+ *   frontal: a frame vs the template of the other frontal frames (same person, seconds apart). Genuine p01:
+ *            good 0.94, fair ~0.83, poor (dim room) 0.30; different people: p99 0.31-0.37.
+ *   turned:  a head-turn frame (|yaw| 15-35 deg) vs the frontal template. Genuine p05: good 0.54, fair 0.41-0.50,
+ *            poor ~0.24-0.4 (few samples); different people: p99 0.30-0.39.
+ * The floors only guard against a person change DURING the challenge; the identity decision itself is the
+ * comparison with the reference / ID photo.
  */
-export const FRONTAL_MIN_SIMILARITY = 0.4;
-export const TURNED_MIN_SIMILARITY = 0.3;
+export const FRONTAL_MIN_SIMILARITY: Readonly<Record<QualityBucket, number>> = Object.freeze({ good: 0.45, fair: 0.4, poor: 0.3 });
+export const TURNED_MIN_SIMILARITY: Readonly<Record<QualityBucket, number>> = Object.freeze({ good: 0.3, fair: 0.3, poor: 0.25 });
+
+/** Bucket of a liveness frame, ignoring head pose (turned frames are turned on purpose). */
+function frameBucket(a: ImageAnalysis): QualityBucket {
+  return qualityBucket({ ...a.quality, yawDeg: 0, pitchDeg: FRONTAL_PITCH_DEG });
+}
 
 export const LIVENESS_DEFAULTS: Readonly<LivenessOptions> = Object.freeze({
   minFractionOfTarget: 0.6,
-  turnedMinSimilarity: TURNED_MIN_SIMILARITY,
   minFramesAgreeing: 2,
   minFrameHamming: 2,
   clockToleranceMs: 1000,
@@ -180,7 +192,10 @@ export function checkStepFrame(
   return directional >= need ? { satisfied: true, ...base } : { satisfied: false, ...base, reason: directional < 0 ? 'Head moved the wrong way' : 'Turn a little further' };
 }
 
-/** Verify a completed liveness challenge. Pure function; all inputs come from server-side analyses. */
+/**
+ * Verify a completed liveness challenge. Pure function; all inputs come from server-side analyses. `thresholds` is kept for API compatibility: identity consistency inside
+ * the challenge uses the per-bucket floors above (FRONTAL_MIN_SIMILARITY / TURNED_MIN_SIMILARITY).
+ */
 export function verifyLiveness(
   spec: LivenessChallengeSpec,
   frames: readonly LivenessFrame[],
@@ -236,11 +251,12 @@ export function verifyLiveness(
   const frontalEmb = frontal.map((f) => f.analysis.embedding).filter((e): e is Float32Array => e != null);
   if (frontal.length > 0 && frontalEmb.length < frontal.length) reasons.add(LIVENESS_REASONS.noEmbedding);
   // Each frontal frame against the template of the others (one noisy frame cannot drag every pair down).
-  const frontalFloor = o.frontalMinSimilarity ?? Math.min(FRONTAL_MIN_SIMILARITY, thresholds.match);
-  if (frontalEmb.length >= 2) {
-    for (let i = 0; i < frontalEmb.length; i++) {
-      const others = templateFrom(frontalEmb.filter((_, j) => j !== i));
-      if (cosineSimilarity(frontalEmb[i], others) < frontalFloor) reasons.add(LIVENESS_REASONS.frontalInconsistent);
+  const frontalWithEmb = frontal.filter((f) => f.analysis.embedding != null);
+  if (frontalWithEmb.length >= 2) {
+    for (let i = 0; i < frontalWithEmb.length; i++) {
+      const others = templateFrom(frontalWithEmb.filter((_, j) => j !== i).map((f) => f.analysis.embedding!));
+      const floor = o.frontalMinSimilarity ?? FRONTAL_MIN_SIMILARITY[frameBucket(frontalWithEmb[i].analysis)];
+      if (cosineSimilarity(frontalWithEmb[i].analysis.embedding!, others) < floor) reasons.add(LIVENESS_REASONS.frontalInconsistent);
     }
   }
   const frontalTemplate = frontalEmb.length ? templateFrom(frontalEmb) : null;
@@ -260,7 +276,8 @@ export function verifyLiveness(
   // Every non-frontal frame must be the same person as the frontal frames.
   const identityOk = (f: LivenessFrame): boolean => {
     if (!f.analysis.embedding || !frontalTemplate) return false;
-    return cosineSimilarity(f.analysis.embedding, frontalTemplate) >= o.turnedMinSimilarity;
+    const floor = o.turnedMinSimilarity ?? TURNED_MIN_SIMILARITY[frameBucket(f.analysis)];
+    return cosineSimilarity(f.analysis.embedding, frontalTemplate) >= floor;
   };
 
   const qualifying = new Map<number, LivenessFrame>();

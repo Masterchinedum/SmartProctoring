@@ -16,6 +16,7 @@ import {
   sessionsFrom,
   simulateSequential,
   withinSessionSd,
+  withinSessionSdFromFrames,
   type BucketFit,
   type ConditionTable,
   type PipelineSpec,
@@ -79,7 +80,9 @@ function sequentialFor(p: PipelineSpec, data: WebcamData, runs: number): Pipelin
   const all = scoreTrials(data, p, ['good', 'typical', 'dim', 'backlit']);
   // A session compares probes with a reference enrolled in the same or a better condition.
   const sessions = sessionsFrom(all.bursts.filter((b) => b.enrol === 'good' || b.enrol === 'typical' || b.enrol === b.condition));
-  const sd = withinSessionSd(sessions.filter((s) => s.kind === 'genuine_same'));
+  // Movement between samples ~ good-light scene-to-scene scatter; frame noise from the scatter inside bursts.
+  const sceneSd = withinSessionSd(sessions.filter((s) => s.kind === 'genuine_same'));
+  const sd = withinSessionSdFromFrames(all.frames, sceneSd.good);
   const rule: SequentialRule =
     p.scoring === 'legacy'
       ? { type: 'consecutive', mismatch: p.mismatch, confirmations: DEFAULT_IDENTITY_THRESHOLDS.mismatchConfirmations }
@@ -131,7 +134,7 @@ export function pipelineReport(data: WebcamData, p: PipelineSpec, opts: { runs?:
   };
 }
 
-export function buildWebcamReport(data: WebcamData, pipelines: PipelineSpec[], opts: { runs?: number } = {}): WebcamReport {
+export function buildWebcamReport(data: WebcamData, pipelines: (PipelineSpec | { pipeline: PipelineSpec; data: WebcamData })[], opts: { runs?: number } = {}): WebcamReport {
   const ids = new Map<string, number>();
   for (const s of data.sources) ids.set(s.identity, (ids.get(s.identity) ?? 0) + 1);
   const ms = data.records.map((r) => r.analyzeMs).filter((v) => Number.isFinite(v));
@@ -146,7 +149,7 @@ export function buildWebcamReport(data: WebcamData, pipelines: PipelineSpec[], o
       families: new Set(data.sources.map((s) => s.family).filter(Boolean)).size,
     },
     latencyMs: { analyzeMean: ms.length ? Math.round((ms.reduce((a, b) => a + b, 0) / ms.length) * 10) / 10 : null },
-    pipelines: pipelines.map((p) => pipelineReport(data, p, opts)),
+    pipelines: pipelines.map((p) => ('pipeline' in p ? pipelineReport(p.data, p.pipeline, opts) : pipelineReport(data, p, opts))),
     assumptions: [
       'Sampling: every 6 s for the first 3 min, then every 15 s; one sample = one burst of 3 frames (one scene).',
       'Consecutive samples of a candidate share person, room, camera and lighting; only frame noise and small movements vary: sample similarity ~ N(session mean, within-session sd of the bucket), sd estimated from the scatter between two independently placed scenes (an upper bound for a seated candidate).',

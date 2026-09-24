@@ -10,6 +10,8 @@ import {
   type ExamClock,
   type HoldDTO,
   type IdentityCheckDTO,
+  type IdentityDecision,
+  type IdentitySecondOpinionDTO,
   type NoteDTO,
   type PauseRequestDTO,
   type PeriodDTO,
@@ -183,6 +185,28 @@ export function toIdentityCheckDTO(row: IdentityCheck, probe: EvidenceRow | null
       secondsSincePreviousMatch: c.secondsSincePreviousMatch ?? null,
     },
     livenessPassed: livenessFromContext(c as unknown as Record<string, unknown>),
+    // Only present when an external second opinion was asked (off by default): the DTO is otherwise unchanged.
+    ...withSecondOpinion(secondOpinionFromContext(c as unknown as Record<string, unknown>)),
+  };
+}
+
+function withSecondOpinion(so: IdentitySecondOpinionDTO | null): { secondOpinion?: IdentitySecondOpinionDTO } {
+  return so ? { secondOpinion: so } : {};
+}
+
+/** The external second opinion stored with a check (services/identity-external.ts SecondOpinionRecord), if any. */
+function secondOpinionFromContext(c: Record<string, unknown>): IdentitySecondOpinionDTO | null {
+  const r = c.secondOpinion as
+    | { provider?: string | null; outcome?: string; internalDecision?: IdentityDecision; needsHumanReview?: boolean; explanation?: string; record?: { external?: { similarity?: number | null } | null } }
+    | undefined;
+  if (!r || typeof r !== 'object' || typeof r.outcome !== 'string') return null;
+  return {
+    provider: r.provider ?? null,
+    outcome: r.outcome,
+    internalDecision: r.internalDecision ?? 'inconclusive',
+    needsHumanReview: r.needsHumanReview === true,
+    externalSimilarity: r.record?.external?.similarity ?? null,
+    explanation: r.explanation ?? '',
   };
 }
 

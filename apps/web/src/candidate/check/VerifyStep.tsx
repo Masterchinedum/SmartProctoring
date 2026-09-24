@@ -20,9 +20,13 @@ import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrame
  *  3. POST complete as soon as the server can decide (progress.canComplete) → passed / retry / held / failed.
  */
 
-/** Frames captured at the peak of each head movement (one more per in-place re-prompt, 3 in total per step). */
-export const FRAMES_PER_STEP = 2;
-export const MAX_FRAMES_PER_STEP = 3;
+/**
+ * Frames captured at the peak of each head movement, per prompt; a step the server has not accepted is
+ * re-prompted in place with another round, up to 6 frames per step (the server judges windows of 3 frames and
+ * refuses a 7th frame with 429).
+ */
+export const FRAMES_PER_STEP = 3;
+export const MAX_FRAMES_PER_STEP = 6;
 /**
  * Client-side "frontal" gate: relative to the candidate's calibrated centre pose when known (camera
  * placement varies), otherwise a margin inside the server's quality gate (|yaw| ≤ 25°,

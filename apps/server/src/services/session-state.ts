@@ -71,6 +71,8 @@ export const EMPTY_IDENTITY_STATE: IdentityEngineState = {
   activeSince: null,
   sampleRequest: null,
   pendingBursts: [],
+  secondOpinionPending: null,
+  secondOpinionVeto: null,
 };
 
 export function identityState(s: Pick<ExamSession, 'identityState'>): IdentityEngineState {
@@ -435,6 +437,8 @@ export class SessionMutation {
       lastSampleDhash: null,
       evidence: { ...EMPTY_ACCUMULATOR, window: [] },
       pendingBursts: [],
+      secondOpinionPending: null,
+      secondOpinionVeto: null,
       activeSince: active ? this.now : null,
       sampleRequest: active ? { trigger: 'exam_start', since: this.now } : null,
     });

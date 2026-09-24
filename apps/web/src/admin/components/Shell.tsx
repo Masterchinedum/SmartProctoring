@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { LiveAnnouncer } from '../../lib/LiveAnnouncer';
 import { useQueryClient } from '@tanstack/react-query';
@@ -13,9 +13,11 @@ interface NavItem {
   label: string;
   end?: boolean;
   adminOnly?: boolean;
+  /** Heading shown above the first item of a group (e.g. "Tools"). */
+  group?: string;
 }
 
-const NAV: NavItem[] = [
+export const NAV: NavItem[] = [
   { to: '/admin', label: 'Live', end: true },
   { to: '/admin/sessions', label: 'Sessions' },
   { to: '/admin/exams', label: 'Exams' },
@@ -25,6 +27,7 @@ const NAV: NavItem[] = [
   { to: '/admin/settings', label: 'Settings', adminOnly: true },
   { to: '/admin/integrations', label: 'Integrations', adminOnly: true },
   { to: '/admin/users', label: 'Users', adminOnly: true },
+  { to: '/admin/tools/camera-test', label: 'Camera & identity test', group: 'Tools' },
 ];
 
 /** Document title per route (WCAG 2.4.2): "<page> — SmartProctoring staff". */
@@ -39,6 +42,7 @@ export function staffPageTitle(pathname: string): string {
     [/^\/admin\/exams\/[^/]+\/edit$/, 'Edit exam'],
     [/^\/admin\/exams\/[^/]+$/, 'Exam details'],
     [/^\/admin\/candidates\/[^/]+$/, 'Candidate details'],
+    [/^\/admin\/tools\/camera-test$/, 'Camera & identity test'],
   ];
   for (const [re, t] of rules) if (re.test(p)) return `${t} — SmartProctoring staff`;
   const nav = NAV.find((n) => n.to !== '/admin' && p === n.to);
@@ -89,11 +93,18 @@ export function Shell({ children }: { children: ReactNode }) {
           </div>
         </div>
         <nav aria-label="Main">
-          {NAV.filter((n) => !n.adminOnly || isAdmin).map((n) => (
-            <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
-              {n.label}
-              {n.to === '/admin' ? <LiveDot /> : null}
-            </NavLink>
+          {NAV.filter((n) => !n.adminOnly || isAdmin).map((n, i, list) => (
+            <Fragment key={n.to}>
+              {n.group && n.group !== list[i - 1]?.group ? (
+                <div className="nav-group" aria-hidden="true">
+                  {n.group}
+                </div>
+              ) : null}
+              <NavLink to={n.to} end={n.end} className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} aria-label={n.group ? `${n.group}: ${n.label}` : undefined}>
+                {n.label}
+                {n.to === '/admin' ? <LiveDot /> : null}
+              </NavLink>
+            </Fragment>
           ))}
         </nav>
         <div className="admin-user">

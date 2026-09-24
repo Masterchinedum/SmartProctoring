@@ -119,7 +119,10 @@ frames (similarity ≥ match), non-identical frames, and completion inside the e
 Optional external second opinion (off by default; `docs/EXTERNAL_VERIFIER.md`): at check-in, resume and suspected
 swaps an organisation may also ask a provider (AWS Rekognition CompareFaces, or another `ExternalVerifier`) and
 combine its answer with the internal decision (`verifiers/fusion.ts`: it can settle an inconclusive result or flag a
-disagreement for review, never raise a mismatch alone; failures fall back to the internal decision).
+disagreement for review, never raise a mismatch alone; failures fall back to the internal decision). Wired in
+`services/identity-external.ts`, outside the session lock: a suspected swap waits for the answer before
+`identity_mismatch` is raised; a confident "same person" against borderline evidence becomes an uncertain
+`identity_unverifiable` with `needsHumanReview` instead (EXTERNAL_VERIFIER.md §6).
 
 ## 5. Monitoring engine (browser, `@sp/detection`)
 
@@ -135,8 +138,24 @@ create events. Detectors: absence, multiple people (faces + COCO person boxes), 
 repeated look-away, same-direction attention pattern, unusual movement (repeated exits / far from
 baseline), obstruction (cut off / low visibility / person without face), phone & other objects,
 camera covered, frozen, lighting, replay/loop (dHash sequence repetition with motion), virtual camera
-label, camera disconnect/permission. Identity sample triggers: face return after absence, camera
-reconnect, after multiple people, after obstruction, and periodic.
+label, camera disconnect/permission.
+
+Identity samples (browser side). The camera runs at 1280×720 (ideal; whatever the device gives); MediaPipe
+analyses a ≤ 640 px copy, and identity evidence (check frames, samples) is a face-centred square crop
+(~2.4× the face box, ≤ 720 px, JPEG 0.92) of the NATIVE frame (full frame without a face box); event
+screenshots stay ≤ 640×480 full frames. A sample is a **burst** of `policy.identity.burstSize` distinct
+analysed frames ~200 ms apart with exactly one usable face, sent concurrently as separate requests sharing
+`burstId`. "Usable" is deliberately lenient (one face, not cut off, not badly obstructed, roughly frontal):
+lighting and image quality are the server's call, so a dim room never silences sampling. Triggers, highest
+priority first: `track_break` (the single-face track was interrupted: face missing 0.25–3 s, a brief second
+face, or a face-box jump / scale change between consecutive analysed frames), `appearance_change` (a 16×16
+face-aligned grey patch + landmark ratios moved away from a rolling baseline of the recent stable track for
+≥ 300 ms; pose-aware threshold), `exam_start` (at every start / resume / reconnect / hold release, and
+whenever the server asks via `identitySample`), `server_request` / `follow_up`, `camera_reconnect`,
+`after_multiple_people`, `face_return`, `after_obstruction`, `periodic` (every `startupIntervalSec` during
+`startupWindowSec`, then `periodicCheckIntervalSec`, unless the server's `nextSampleInMs` says otherwise).
+The two quick-swap triggers are rate-limited to one per 4 s (a trigger inside the window is deferred, not
+lost). Tuning evidence: packages/detection/src/engine/detectors/continuity.ts.
 
 ## 6. Events, evidence, delivery
 

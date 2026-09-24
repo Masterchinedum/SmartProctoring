@@ -4,13 +4,14 @@ import type { CheckFrameResponse, CheckProgressDTO, StartCheckResponse } from '@
  * Adaptive frame collection for a check (initial / resume / reconnect / reverify) — what to send next and
  * when to ask the server for its verdict. The server is authoritative; this only follows its lead:
  *
- *  v2 (CheckFrameResponse.progress present):
- *   - frontal frames while progress.frontalNeeded > 0, up to StartCheckResponse.maxFrontalFrames;
- *   - liveness steps in order; a step the server reports unsatisfied is re-prompted in place (the liveness
- *     tracker handles the in-place retry; see its `verdict`);
- *   - /complete as soon as progress.canComplete and the liveness steps are resolved (satisfied, or their frame
- *     budget used up), or when there is nothing left the client could add.
- *  v1 (no progress — an older server): frontalFramesRequired accepted frontal frames (giving up after
+ *  v2 (CheckFrameResponse.progress present — identity engine v2):
+ *   1. `frontalFramesRequired` frontal frames (5 when a reference is built, 3 for a comparison);
+ *   2. the liveness steps in order; after each step frame `progress.steps[i].satisfied` — a step the server
+ *      has not accepted is re-prompted in place (liveness tracker `verdict`), up to 6 frames per step;
+ *   3. more frontal frames while `progress.frontalNeeded > 0` (up to `maxFrontalFrames`, 10), with the
+ *      server's guidance shown live;
+ *   4. /complete as soon as `progress.canComplete` (or when there is nothing left the client could add).
+ *  v1 (no progress — an older server): frontalFramesRequired ACCEPTED frontal frames (giving up after
  *   `maxFrontalRejections` rejected ones so the server records "unable to verify" with its guidance), then the
  *   liveness steps, then /complete.
  */
@@ -122,7 +123,7 @@ export class AdaptiveCheck {
   wantsFrontal(): boolean {
     if (this.framesExhausted || this.frontalSent >= this.maxFrontal) return false;
     const p = this.progressDTO;
-    if (p) return p.frontalNeeded > 0;
+    if (p) return this.frontalSent < this.required || p.frontalNeeded > 0;
     if (this.frontalAnswered === 0 && this.frontalSent === 0) return this.required > 0;
     return this.frontalAccepted < this.required && this.frontalRejected < (this.opts.maxFrontalRejections ?? V1_MAX_FRONTAL_REJECTIONS);
   }
@@ -140,16 +141,17 @@ export class AdaptiveCheck {
   phase(livenessDone: boolean, inflight: number): AdaptivePhase {
     if (this.framesExhausted) return 'complete';
     const livenessPending = this.hasLiveness && !livenessDone;
-    const accepted = this.acceptedFrontal();
-    const waiting: AdaptivePhase = this.hasLiveness && accepted >= this.required ? 'liveness' : 'frontal';
+    const waiting: AdaptivePhase = this.hasLiveness && this.frontalSent >= this.required ? 'liveness' : 'frontal';
     const p = this.progressDTO;
     if (p) {
-      if (inflight === 0 && p.canComplete && (!livenessPending || p.identity === 'likely_mismatch')) return 'complete';
-      // The minimum frontal frames first (the server's reference pose); more frontal frames after the steps.
-      if (this.wantsFrontal() && (accepted < this.required || !livenessPending)) return 'frontal';
-      // Frontal budget used up without enough usable frames: the server explains why ("unable to verify").
-      if (accepted < this.required) return inflight === 0 ? 'complete' : 'frontal';
+      if (inflight === 0 && p.canComplete) return 'complete';
+      // 1. the initial frontal frames (the server's reference pose / first evidence)
+      if (this.frontalSent < Math.min(this.required, this.maxFrontal)) return 'frontal';
+      // 2. the liveness steps, in order
       if (livenessPending) return 'liveness';
+      // 3. more frontal frames while the server's evidence is not yet sufficient either way
+      if (p.frontalNeeded > 0 && this.frontalSent < this.maxFrontal) return 'frontal';
+      // 4. nothing left the client could add: the server decides
       return inflight === 0 ? 'complete' : waiting;
     }
     if (this.frontalGaveUp()) return inflight === 0 ? 'complete' : 'frontal';

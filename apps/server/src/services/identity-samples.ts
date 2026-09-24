@@ -26,10 +26,10 @@ import { and, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { events, evidence, examSessions, identityChecks, identitySampleFrames, type ExamSession, type IdentityCheck, type IdentityCheckContext, type IdentityEngineState, type IdentitySampleFrame, type PendingBurst } from '../db/schema.js';
 import { invalidState } from '../lib/errors.js';
-import { CALIBRATION, decideIdentity, deserializeEmbeddings, hammingHex, serializeEmbeddings, type ImageAnalysis } from '../vision/index.js';
+import { CALIBRATION, decideIdentity, deserializeEmbeddings, hammingHex, posteriorSwap, serializeEmbeddings, type ImageAnalysis } from '../vision/index.js';
 import { assertInControl } from './candidate-state.js';
 import { toHoldDTO } from './dto.js';
-import { purgeEvidenceRows, storeEvidence } from './evidence.js';
+import { purgeEvidenceRows, readEvidence, storeEvidence } from './evidence.js';
 import { analysisFromSummary, copyEvidence, loadActiveReference, precedingContext, sampleFrameAad, summarizeAnalysis, toIdentityResultDTO, type ActiveReference } from './identity-common.js';
 import {
   accumulate,
@@ -47,6 +47,10 @@ import {
 import { aggregateBurst, scoreReference } from './identity-gallery.js';
 import { sessionHasEvidenceCapacity } from './session-limits.js';
 import { holdNow, identityState, withSession, type SessionMutation, type SessionPreload } from './session-state.js';
+import { secondOpinion, secondOpinionApplies, secondOpinionDetails, type SecondOpinionRecord } from './identity-external.js';
+import { loadOrg, orgThresholds } from './org.js';
+import { fusionPolicyFor } from '../verifiers/index.js';
+import { internalStrength } from '../verifiers/fusion.js';
 
 /** An incomplete burst is decided on the frames received this long after its first frame. */
 export const BURST_TIMEOUT_MS = 3_000;
@@ -149,6 +153,7 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
   // routine samples may wait a few seconds while check-in frames keep a candidate waiting.
   const analysis: ImageAnalysis = await ctx.vision.analyze(jpeg, { embed: true, faceCrop: true, priority: URGENT_TRIGGERS.has(q.trigger) ? 'interactive' : 'background' });
   const isBurst = q.burstId != null && (q.burstSize ?? 1) > 1;
+  const secondOpinionRequests: string[] = [];
 
   const out = await withSession(
     ctx,
@@ -169,7 +174,7 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
         if (open && !open.observed && at < open.startedAt.getTime()) recordOnly = true;
         else throw invalidState('The exam is not active');
       }
-      const env = await sampleEnv(m, active, jpeg.length);
+      const env = await sampleEnv(m, active, jpeg.length, secondOpinionRequests);
 
       // Bursts whose remaining frames never came are decided on what arrived (which may put the exam on hold).
       await decideStaleBursts(m, env, isBurst ? q.burstId! : null);
@@ -251,7 +256,27 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
     preload,
   );
   if ('replay' in out) return out.kind === 'check' ? replayCheck(ctx, session.id, out.replay as IdentityCheck) : replayFrame(ctx, session.id, out.replay as IdentitySampleFrame);
-  return out;
+  if (!secondOpinionRequests.length) return out;
+  // A suspected swap waited for the organisation's external second opinion: ask it now (outside the lock), apply the
+  // fused result, and answer with the session as it is afterwards (possibly on hold).
+  for (const checkId of secondOpinionRequests) {
+    try {
+      await resolveSwapSecondOpinion(ctx, session.id, checkId);
+    } catch (err) {
+      // The pending request is retried by the next confirming sample after SECOND_OPINION_PENDING_MS.
+      ctx.log.error({ err, sessionId: session.id, checkId }, 'applying the external second opinion failed');
+    }
+  }
+  const [after] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, session.id));
+  const running = after.status === 'active';
+  return {
+    ...out,
+    status: after.status,
+    hold: toHoldDTO(after),
+    evidence: toEvidenceDTO(identityState(after).evidence),
+    nextSampleInMs: running ? (out.nextSampleInMs ?? null) : null,
+    followUpInMs: running ? out.followUpInMs : null,
+  };
 }
 
 /* =================================================================== deciding samples */
@@ -263,10 +288,15 @@ interface SampleEnv {
   policy: ProctoringPolicy;
   thresholds: Awaited<ReturnType<SessionMutation['thresholds']>>;
   jpegBytes: number;
+  /**
+   * Identity checks whose suspected swap waits for the external second opinion: the caller resolves them after the
+   * transaction (resolveSwapSecondOpinion — a network call must not run under the session lock).
+   */
+  secondOpinionRequests: string[];
 }
 
-async function sampleEnv(m: SessionMutation, active: ActiveReference, jpegBytes: number): Promise<SampleEnv> {
-  return { ctx: m.ctx, active, baseline: active.ref.baseline ?? null, policy: await m.policy(), thresholds: await m.thresholds(), jpegBytes };
+async function sampleEnv(m: SessionMutation, active: ActiveReference, jpegBytes: number, secondOpinionRequests: string[] = []): Promise<SampleEnv> {
+  return { ctx: m.ctx, active, baseline: active.ref.baseline ?? null, policy: await m.policy(), thresholds: await m.thresholds(), jpegBytes, secondOpinionRequests };
 }
 
 function wantImages(env: SampleEnv, label: IdentityDecision, fe: FrameEvidence, st: IdentityEngineState): boolean {
@@ -600,8 +630,21 @@ async function applyEvidence(
 
   // ---- possible different person
   let held = false;
-  if (res.transition === 'confirmed' && !st.openMismatchEventId) {
-    const evId = await openMismatch(m, env, res.acc.window, row, res.sum, res.posterior);
+  const gate = res.transition === 'confirmed' && !st.openMismatchEventId ? await swapGate(m, env, st, row) : null;
+  if (gate === 'request' || gate === 'pending' || gate === 'vetoed') {
+    // Not confirmed (yet): the external second opinion is asked after this transaction, is still being asked, or
+    // recently said "same person" about evidence this borderline. The evidence stays 'suspect' (fast sampling).
+    st.evidence = { ...st.evidence, state: 'suspect', confirmedAt: null, clearStreak: 0 };
+    if (gate === 'request') {
+      st.secondOpinionPending = { checkId: row.id, since: m.now };
+      env.secondOpinionRequests.push(row.id);
+    } else if (gate === 'vetoed') {
+      st.evidence = { ...st.evidence, window: st.evidence.window.slice(-1) };
+      await noteSecondOpinionDisagreement(m, st, row, null);
+    }
+  } else if (gate === 'proceed' || gate === 'proceed_after_veto') {
+    const extra = gate === 'proceed_after_veto' ? { needsHumanReview: true, secondOpinionVetoOverriddenBy: 'clear_internal_evidence', secondOpinionCheckId: st.secondOpinionVeto?.checkId ?? null } : {};
+    const evId = await openMismatch(m, env, res.acc.window, row, res.sum, res.posterior, extra);
     st.openMismatchEventId = evId;
     st.followUpRequestedAt = null;
     if (env.policy.identity.onMismatch === 'hold_for_review') {
@@ -638,7 +681,7 @@ function perSample(e: EvidenceEntry) {
   return { identityCheckId: e.id, at: e.at, similarity: e.similarity, bucket: e.bucket, llr: e.llr, trigger: e.trigger };
 }
 
-async function openMismatch(m: SessionMutation, env: SampleEnv, window: readonly EvidenceEntry[], row: IdentityCheck, sum: number, posterior: number): Promise<string> {
+async function openMismatch(m: SessionMutation, env: SampleEnv, window: readonly EvidenceEntry[], row: IdentityCheck, sum: number, posterior: number, extra: Record<string, unknown> = {}): Promise<string> {
   const ids = window.map((e) => e.id);
   const rows = ids.length ? await m.tx.select().from(identityChecks).where(inArray(identityChecks.id, ids)) : [row];
   const contributing = window.filter((e) => e.llr > 0);
@@ -669,6 +712,7 @@ async function openMismatch(m: SessionMutation, env: SampleEnv, window: readonly
       sprt: { suspect: CALIBRATION.sprt.suspect, confirm: CALIBRATION.sprt.confirm, clear: CALIBRATION.sprt.clear },
       thresholds: { match: env.thresholds.match, mismatch: env.thresholds.mismatch },
       referenceId: env.active.ref.id,
+      ...extra,
     },
     context: { precededBy, trigger: contributing[0]?.trigger ?? row.trigger, periodKind: row.context?.periodKind ?? null },
   });
@@ -736,6 +780,7 @@ export async function decideStaleBurstsForAll(ctx: Ctx, limit = 200): Promise<nu
     .limit(limit);
   let n = 0;
   for (const { id } of rows) {
+    const secondOpinionRequests: string[] = [];
     try {
       n += await withSession(ctx, id, async (m) => {
         const st = identityState(m.session);
@@ -746,9 +791,10 @@ export async function decideStaleBurstsForAll(ctx: Ctx, limit = 200): Promise<nu
           return 0;
         }
         const before = st.pendingBursts.length;
-        await decideStaleBursts(m, await sampleEnv(m, active, 0), null);
+        await decideStaleBursts(m, await sampleEnv(m, active, 0, secondOpinionRequests), null);
         return before - identityState(m.session).pendingBursts.length;
       });
+      for (const checkId of secondOpinionRequests) await resolveSwapSecondOpinion(ctx, id, checkId);
     } catch (err) {
       ctx.log.error({ err, sessionId: id }, 'deciding stale identity bursts failed');
     }
@@ -757,3 +803,141 @@ export async function decideStaleBurstsForAll(ctx: Ctx, limit = 200): Promise<nu
 }
 
 export { windowSum };
+
+/* =================================================================== external second opinion (suspected swap) */
+
+/** A pending second opinion older than this is considered lost (e.g. the server restarted) and asked again. */
+export const SECOND_OPINION_PENDING_MS = 15_000;
+/** After the provider said "same person" about borderline evidence, borderline confirmations are held off this long. */
+export const SECOND_OPINION_VETO_MS = 5 * 60_000;
+
+type SwapGate = 'proceed' | 'proceed_after_veto' | 'request' | 'pending' | 'vetoed';
+
+/**
+ * What to do when the accumulator is about to confirm a possible different person. Without an applicable external
+ * verifier (the default) always 'proceed' — exactly the behaviour without the feature.
+ */
+async function swapGate(m: SessionMutation, env: SampleEnv, st: IdentityEngineState, row: IdentityCheck): Promise<SwapGate> {
+  if (!secondOpinionApplies(env.ctx, await m.org(), 'suspected_swap', m.session.consentAcceptedAt)) return 'proceed';
+  const now = m.now;
+  if (st.secondOpinionVeto && now < st.secondOpinionVeto.until) {
+    // A clear internal mismatch is never held off by an external opinion (fusion principle 3); a borderline one is.
+    const strength = internalStrength({ decision: 'mismatch', similarity: row.similarity ?? null }, fusionPolicyFor(env.thresholds));
+    return strength === 'borderline' ? 'vetoed' : 'proceed_after_veto';
+  }
+  if (st.secondOpinionPending && now - st.secondOpinionPending.since < SECOND_OPINION_PENDING_MS) return 'pending';
+  return 'request';
+}
+
+/**
+ * The internal evidence pointed to a different person but the external provider disagreed (fused result
+ * inconclusive): an uncertain observation for human review (identity_unverifiable, details.needsHumanReview) —
+ * never "possible different person".
+ */
+async function noteSecondOpinionDisagreement(m: SessionMutation, st: IdentityEngineState, row: IdentityCheck, record: SecondOpinionRecord | null): Promise<void> {
+  const at = row.at.getTime();
+  if (st.openUnverifiableEventId) {
+    const [cur] = await m.tx.select().from(events).where(eq(events.id, st.openUnverifiableEventId));
+    if (cur) {
+      const d = cur.details as { identityCheckIds?: string[] };
+      await m.updateEvent(cur.id, {
+        details: {
+          ...cur.details,
+          needsHumanReview: true,
+          reason: 'second_opinion_disagrees',
+          ...(record ? { secondOpinion: record } : {}),
+          identityCheckIds: [...(d.identityCheckIds ?? []), row.id].slice(-MAX_PER_SAMPLE_DETAILS),
+          lastSampleAt: at,
+        },
+      });
+      await m.tx.update(identityChecks).set({ eventId: cur.id }).where(eq(identityChecks.id, row.id));
+      return;
+    }
+  }
+  const ev = await m.addEvent({
+    type: 'identity_unverifiable',
+    source: 'server_identity',
+    open: true,
+    startedAt: at,
+    confidence: null,
+    observation:
+      'The camera images pointed to a possible change of person, but an independent second comparison indicated the same person. The identity could not be confirmed either way; flagged for human review.',
+    details: { reason: 'second_opinion_disagrees', needsHumanReview: true, similarity: row.similarity, trigger: row.trigger, identityCheckIds: [row.id], ...(record ? { secondOpinion: record } : {}) },
+    context: { precededBy: row.context?.precededBy ?? [], periodKind: row.context?.periodKind ?? null },
+  });
+  st.openUnverifiableEventId = ev.id;
+  await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, row.id));
+  const imgs = [row.probeEvidenceId, row.frameEvidenceId].filter((x): x is string => !!x);
+  if (imgs.length) await m.tx.update(evidence).set({ eventId: ev.id }).where(inArray(evidence.id, imgs));
+}
+
+/**
+ * Ask the external verifier about a suspected swap (outside any lock), then apply the fused result:
+ *  - mismatch (the provider agrees, is unavailable / uncertain, or contradicts a CLEAR internal mismatch — then with
+ *    needsHumanReview): confirm now — identity_mismatch with the second opinion in its details, hold / flag per policy;
+ *  - inconclusive (the provider is confident it is the same person and the internal evidence was borderline): do not
+ *    confirm; identity_unverifiable (uncertain, needsHumanReview) and borderline confirmations are held off for
+ *    SECOND_OPINION_VETO_MS.
+ * Nothing happens when the request was superseded meanwhile (pause, hold, new period) or the evidence faded.
+ */
+export async function resolveSwapSecondOpinion(ctx: Ctx, sessionId: string, checkId: string): Promise<void> {
+  const [s] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, sessionId));
+  const [row] = await ctx.db.select().from(identityChecks).where(eq(identityChecks.id, checkId));
+  if (!s || !row) return;
+  const org = await loadOrg(ctx.db, s.orgId);
+  const active = await loadActiveReference(ctx, ctx.db, sessionId);
+  if (!active) return;
+  const record = await secondOpinion(ctx, {
+    org,
+    kind: 'suspected_swap',
+    internal: { decision: 'mismatch', similarity: row.similarity ?? null },
+    thresholds: orgThresholds(org),
+    consentAcceptedAt: s.consentAcceptedAt,
+    sessionId,
+    images: async () => {
+      const probeId = row.frameEvidenceId ?? row.probeEvidenceId;
+      const [probeRow] = probeId ? await ctx.db.select().from(evidence).where(and(eq(evidence.id, probeId), isNull(evidence.purgedAt))) : [];
+      const probe = probeRow ? await readEvidence(ctx, probeRow) : null;
+      const refRows = active.ref.imageEvidenceIds.length ? await ctx.db.select().from(evidence).where(inArray(evidence.id, active.ref.imageEvidenceIds)) : [];
+      const refs: Buffer[] = [];
+      for (const r of [...refRows].sort((a, b) => (a.reason === 'frame' ? 0 : 1) - (b.reason === 'frame' ? 0 : 1))) {
+        const data = await readEvidence(ctx, r);
+        if (data) refs.push(data);
+      }
+      return probe && refs.length ? { reference: refs, probe } : null;
+    },
+  });
+  await withSession(ctx, sessionId, async (m) => {
+    if (record) {
+      const [cur] = await m.tx.select({ context: identityChecks.context }).from(identityChecks).where(eq(identityChecks.id, checkId));
+      if (cur) await m.tx.update(identityChecks).set({ context: { ...cur.context, secondOpinion: record } }).where(eq(identityChecks.id, checkId));
+    }
+    const st = identityState(m.session);
+    if (st.secondOpinionPending?.checkId !== checkId) return; // superseded (pause / hold / new period) or resolved
+    st.secondOpinionPending = null;
+    const sum = windowSum(st.evidence.window);
+    if (m.session.status !== 'active' || st.openMismatchEventId || sum < CALIBRATION.sprt.confirm) {
+      m.setIdentityState(st);
+      return;
+    }
+    const decision = record?.decision ?? 'mismatch';
+    if (decision === 'mismatch') {
+      const env = await sampleEnv(m, active, 0);
+      const posterior = Math.round(posteriorSwap(sum) * 10000) / 10000;
+      st.evidence = { ...st.evidence, state: 'confirmed_mismatch', confirmedAt: m.now, clearStreak: 0 };
+      const evId = await openMismatch(m, env, st.evidence.window, row, sum, posterior, secondOpinionDetails(record));
+      st.openMismatchEventId = evId;
+      st.followUpRequestedAt = null;
+      m.setIdentityState(st);
+      if (env.policy.identity.onMismatch === 'hold_for_review') {
+        await holdNow(m, { reason: 'identity_mismatch', source: 'server_identity', details: { eventId: evId, trigger: row.trigger, posterior, ...(record ? { needsHumanReview: record.needsHumanReview } : {}) } });
+      }
+      return;
+    }
+    // The provider is confident it is the same person and the internal evidence was borderline: not confirmed.
+    st.secondOpinionVeto = { checkId, until: m.now + SECOND_OPINION_VETO_MS };
+    st.evidence = { ...st.evidence, state: 'monitoring', window: [], confirmedAt: null, clearStreak: 0 };
+    await noteSecondOpinionDisagreement(m, st, row, record);
+    m.setIdentityState(st);
+  });
+}

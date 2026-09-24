@@ -1,0 +1,9 @@
+# Python tooling for tools/recognizer (training + evaluation only; nothing here ships with the server).
+# All permissively licensed: BSD-3 (torch, numpy), Apache-2.0 (onnx, opencv-python-headless), MIT (onnxruntime),
+# MIT-CMU/HPND (pillow). CPU-only PyTorch from PyPI is sufficient.
+torch>=2.3
+onnx>=1.16
+onnxruntime>=1.18
+numpy>=1.26
+pillow>=10.0
+opencv-python-headless>=4.9

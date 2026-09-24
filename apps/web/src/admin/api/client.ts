@@ -16,6 +16,7 @@ import type {
   ExamInput,
   IdentityComparisonDTO,
   IdPhotoUploadResponse,
+  IdentityTestResponse,
   IntegrationStatusDTO,
   LiveEventDTO,
   NoteDTO,
@@ -245,6 +246,11 @@ export const api = {
   webhookDelivery: (deliveryId: string) => request<WebhookDeliveryDTO>('GET', `${A}/webhooks/deliveries/${enc(deliveryId)}`),
   redeliverWebhook: (deliveryId: string) => request<WebhookDeliveryDTO>('POST', `${A}/webhooks/deliveries/${enc(deliveryId)}/redeliver`),
   testEmail: (to?: string) => request<{ ok: true; recipients: string[] }>('POST', `${A}/email-alerts/test`, { body: to ? { to } : {} }),
+
+  // ---- tools
+  /** Camera self-test of the identity pipeline (nothing stored; transient per-user gallery, 15 min). */
+  identityTest: (testId: string, mode: 'enroll' | 'probe' | 'reset', jpeg?: Blob) =>
+    request<IdentityTestResponse>('POST', `${A}/tools/identity-test`, { query: { testId, mode }, blob: jpeg }),
   // ---- external second-opinion face verifier (settings: updateSettings({ externalVerifier }))
   verifierInfo: () => request<ExternalVerifierInfoDTO>('GET', `${A}/verifiers`),
   testVerifier: (jpeg: Blob) => request<ExternalVerifierTestResultDTO>('POST', `${A}/verifiers/test`, { blob: jpeg }),

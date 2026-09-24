@@ -23,10 +23,10 @@ import { clamp01 } from '../util/math';
  * `framesPerStep` frames are captured while the candidate holds.
  *
  * With `awaitVerdict` the tracker then waits for the host's `verdict(stepIndex, satisfied)` (from the
- * server's per-frame answer) before moving on — steps must reach the server in order, so a step the server
- * did not accept is re-prompted IN PLACE ("turn a little further and hold", a larger client target, one more
- * frame) up to `maxFramesPerStep` frames in total (the server only considers the first 3 frames of a step);
- * after that the tracker moves on and the server decides at completion.
+ * server's per-frame answer, CheckProgressDTO.steps) before moving on — steps must reach the server in order,
+ * so a step the server did not accept is re-prompted IN PLACE ("turn a little further and hold", a larger
+ * client target, another round of frames at the new peak) up to `maxFramesPerStep` frames in total (server v2:
+ * 6 — two windows of 3); after that the tracker moves on and the server decides at completion.
  * Exactly one visible, uncut face is required at all times; otherwise `problem` explains what to fix.
  */
 export interface LivenessProgress {
@@ -90,7 +90,7 @@ export function createLivenessTracker(opts: {
   framesPerStep?: number;
   /** Wait for verdict() after the frames of a step (default false: advance after framesPerStep). */
   awaitVerdict?: boolean;
-  /** Frames per step in total, including re-prompts (default 3 — the server considers the first 3). */
+  /** Frames per step in total, including re-prompts (default 3; the v2 server accepts 6 per step). */
   maxFramesPerStep?: number;
 }): LivenessTracker {
   const steps = opts.steps ?? [];
@@ -299,7 +299,8 @@ export function createLivenessTracker(opts: {
       lastCaptureAt = t;
       capturedOff = Math.max(capturedOff, capturedCandidateOff);
       if (s.action === 'center' && lastPose) centreSamples.push(lastPose);
-      const roundSize = retrying ? 1 : framesPerStep;
+      // A re-prompt captures another round at the new peak, within the step's frame budget.
+      const roundSize = retrying ? Math.max(1, Math.min(framesPerStep, maxFrames - (capturedTotal - captured))) : framesPerStep;
       if (captured >= roundSize) {
         if (s.action === 'center' && centreSamples.length && !centre) {
           centre = {
@@ -311,10 +312,10 @@ export function createLivenessTracker(opts: {
         if (awaitVerdict) {
           waiting = true;
           holdStart = null;
-          last = { ...last, readyToCapture: false, stage: 'verify', message: 'Good — now look back at the screen' };
+          last = { ...last, readyToCapture: false, stage: 'verify', message: 'Good — now look back at the screen', captured: capturedTotal };
         } else advance();
       } else {
-        last = { ...last, readyToCapture: false };
+        last = { ...last, readyToCapture: false, captured: capturedTotal };
       }
     },
     verdict(stepIndex: number, satisfied: boolean) {

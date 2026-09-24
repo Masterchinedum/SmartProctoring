@@ -403,3 +403,25 @@ def sface_torch(path: Path | str = SFACE_ONNX):
             return self.fc_bn(self.fc(torch.flatten(x, 1)))
 
     return SFace().eval()
+
+
+def fold_bn(model):
+    """Fold every frozen (eval-mode) BatchNorm2d of the conv blocks into its convolution (conv gets a bias; BN
+    becomes Identity). Exactly the same function; ~12 % faster to train, and fine-tuning conv weight + bias spans the
+    same functions as fine-tuning conv weight + BN affine with frozen statistics."""
+    import torch
+    from torch import nn
+
+    for blk in model.features:
+        conv, bn = blk.conv, blk.bn
+        if isinstance(bn, nn.Identity):
+            continue
+        std = torch.sqrt(bn.running_var + bn.eps)
+        scale = bn.weight / std
+        new = nn.Conv2d(conv.in_channels, conv.out_channels, conv.kernel_size, conv.stride, conv.padding, groups=conv.groups, bias=True)
+        with torch.no_grad():
+            new.weight.copy_(conv.weight * scale.view(-1, 1, 1, 1))
+            new.bias.copy_(bn.bias - bn.running_mean * scale)
+        blk.conv = new
+        blk.bn = nn.Identity()
+    return model

@@ -229,4 +229,29 @@ describe('LivenessTracker', () => {
     expect(p.action).toBe('turn_left');
     expect(p.progress).toBeCloseTo(0.5, 2);
   });
+
+  it('awaitVerdict with rounds of 3 frames and 6 per step (server v2): two full rounds, then move on', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_right', 'turn_left'), targetYawDeg: 20, targetPitchDeg: 12, framesPerStep: 3, maxFramesPerStep: 6, awaitVerdict: true });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    let t = 0;
+    const round = (yaw: number) => {
+      let n = 0;
+      for (let i = 0; i < 40 && n < 3; i++, t += 100) {
+        const p = tr.update(face({ yaw }), 1, t);
+        if (p.readyToCapture) {
+          tr.markCaptured(t);
+          n++;
+        }
+      }
+      return n;
+    };
+    expect(round(-24)).toBe(3);
+    expect(tr.current().stage).toBe('verify');
+    tr.verdict(0, false);
+    expect(tr.current().stage).toBe('retry');
+    expect(round(-32)).toBe(3); // another full round at the new peak (≥ 24 + 6°)
+    expect(tr.current().captured).toBe(6);
+    tr.verdict(0, false); // budget used up
+    expect(tr.current().action).toBe('turn_left');
+  });
 });

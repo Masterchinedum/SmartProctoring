@@ -67,6 +67,9 @@ describe('labels', () => {
   it('labels context keys', () => {
     expect(contextLabel('session_resumed')).toBe('Exam was resumed');
     expect(contextLabel('face_absence')).toBe('Face left the camera view');
+    expect(contextLabel('face_track_break')).toMatch(/briefly left the view/);
+    expect(contextLabel('appearance_change')).toMatch(/appearance changed/);
+    expect(contextLabel('exam_start')).toMatch(/just started or resumed/);
     expect(contextLabel('phone_detected')).toBe('Preceded by: Phone visible');
     expect(contextLabel('someThing')).toBe('Some thing');
   });
