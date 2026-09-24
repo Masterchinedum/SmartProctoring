@@ -142,7 +142,7 @@ if (scen('genuine-long').length) {
 if (scen('liveness').length || scen('liveness-still').length) {
   out.push('### Active liveness at check-in\n');
   const rows: string[][] = [];
-  for (const [cs, rs] of groupBy(scen('liveness'), (r) => r.case)) {
+  for (const [cs, rs] of groupBy(scen('liveness'), (r) => `${r.case}${r.poseSmoothing && r.poseSmoothing !== 'on' ? ' (raw pose, A/B)' : ''}`)) {
     rows.push([
       cs,
       rs[0]!.camera ?? '–',

@@ -101,12 +101,28 @@ async function loadSource(who: string): Promise<Source> {
   return { jpeg, rgb: data, w, h, landmarks, ie: ie * scale };
 }
 
+/**
+ * A head pose: `amp` = warp amplitude of the source photo (nose shift in inter-ocular units, > 0 = subject's left);
+ * `mirror` = the rendered LEFT turn by `amp`, mirrored about the eye midpoint when composed — used for right turns
+ * where the warp saturates on that side of an (already slightly turned) photo. The embedding is flip-invariant (flip
+ * test-time augmentation), so the mirrored face is the same identity for the server; pose estimators see an
+ * ordinary right turn of the same magnitude as the left one.
+ */
+interface TurnPose {
+  amp: number;
+  mirror: boolean;
+}
+const FRONTAL: TurnPose = { amp: 0, mirror: false };
+
 /** Head turn on the source photo: shift the nose region (and a little of the face) sideways relative to the eyes. */
-const warpCache = new Map<string, Promise<Buffer>>();
-function warpedSource(who: string, amp: number): Promise<Buffer> {
+const warpCache = new Map<string, Promise<{ jpeg: Buffer; landmarks: Pt[] }>>();
+function warpedSource(who: string, amp: number): Promise<{ jpeg: Buffer; landmarks: Pt[] }> {
   const key = `${who}:${amp.toFixed(2)}`;
   let p = warpCache.get(key);
-  if (!p) warpCache.set(key, (p = makeWarp(who, amp)));
+  if (!p) {
+    p = (async () => ({ jpeg: await makeWarp(who, amp), landmarks: (await source(who)).landmarks }))();
+    warpCache.set(key, p);
+  }
   return p;
 }
 
@@ -140,14 +156,21 @@ async function makeWarp(who: string, amp: number): Promise<Buffer> {
  * Warp amplitudes giving +TURN_DEG (subject's left, yaw+) and −TURN_DEG of yaw, measured by YuNet on the RENDERED
  * webcam frame of `who` in `scene` (good light) — the webcam's downscale / blur shrink the measured turn.
  */
-const turnCache = new Map<string, Promise<{ left: number; right: number; yaw0: number }>>();
-function turnAmps(who: string, scene: string): Promise<{ left: number; right: number; yaw0: number }> {
+interface TurnCalibration {
+  left: number;
+  right: number;
+  /** Right turns use the mirrored left turn (the warp could not reach the target to the right). */
+  rightMirror: boolean;
+  yaw0: number;
+}
+const turnCache = new Map<string, Promise<TurnCalibration>>();
+function turnAmps(who: string, scene: string): Promise<TurnCalibration> {
   const key = `${who}/${scene}`;
   let p = turnCache.get(key);
   if (!p) {
     p = (async () => {
       const yawAt = async (amp: number) => {
-        const r = await render(who, scene, 'good', amp, 0);
+        const r = await render(who, scene, 'good', { amp, mirror: false }, 0);
         const jpeg = await sharp(r.rgb, { raw: { width: r.w, height: r.h, channels: 3 } }).jpeg({ quality: 95 }).toBuffer();
         return (await vision.analyze(jpeg, {})).pose?.yawDeg ?? NaN;
       };
@@ -160,14 +183,16 @@ function turnAmps(who: string, scene: string): Promise<{ left: number; right: nu
           const amp = Math.round(a * 100) / 100;
           const d = dir * ((await yawAt(dir * amp)) - yaw0);
           if (!Number.isFinite(d)) continue;
-          if (d >= TURN_DEG) return dir * amp;
+          if (d >= TURN_DEG) return { amp: dir * amp, reached: true };
           if (d > best.d) best = { amp, d };
         }
-        log(`head-turn for ${who} in ${scene} (${dir > 0 ? 'left' : 'right'}): target ${TURN_DEG}° not reached, using ${best.d.toFixed(1)}°`);
-        return dir * best.amp;
+        log(`head-turn for ${who} in ${scene} (${dir > 0 ? 'left' : 'right'}): target ${TURN_DEG}° not reached (at most ${best.d.toFixed(1)}°)`);
+        return { amp: dir * best.amp, reached: false };
       };
-      const r = { left: await solve(1), right: await solve(-1), yaw0 };
-      log(`head-turn amplitudes for ${who} in ${scene}: left ${r.left}, right ${r.right} (frontal yaw ${yaw0.toFixed(1)}°, target ±${TURN_DEG}°)`);
+      const left = await solve(1);
+      const right = await solve(-1);
+      const r: TurnCalibration = { left: left.amp, right: right.reached || !left.reached ? right.amp : -left.amp, rightMirror: !right.reached && left.reached, yaw0 };
+      log(`head-turn amplitudes for ${who} in ${scene}: left ${r.left}, right ${r.rightMirror ? `mirrored left ${-r.right}` : r.right} (frontal yaw ${yaw0.toFixed(1)}°, target ±${TURN_DEG}°)`);
       return r;
     })();
     turnCache.set(key, p);
@@ -175,11 +200,13 @@ function turnAmps(who: string, scene: string): Promise<{ left: number; right: nu
   return p;
 }
 
-/** Warp amplitude for a normalised turn u ∈ [-1, 1] (u > 0 = subject's left), quantised to 0.01. */
-async function ampFor(s: Shot, u: number): Promise<number> {
-  if (Math.abs(u) < 1e-6) return 0;
+/** Head pose for a normalised turn u ∈ [-1, 1] (u > 0 = subject's left), amplitude quantised to 0.01. */
+async function ampFor(s: Shot, u: number): Promise<TurnPose> {
+  if (Math.abs(u) < 1e-6) return FRONTAL;
   const t = await turnAmps(s.who, s.scene);
-  return Math.round((u > 0 ? u * t.left : -u * t.right) * 100) / 100;
+  if (u > 0) return { amp: Math.round(u * t.left * 100) / 100, mirror: false };
+  if (t.rightMirror) return { amp: Math.round(-u * -t.right * 100) / 100, mirror: true };
+  return { amp: Math.round(-u * t.right * 100) / 100, mirror: false };
 }
 
 /* ------------------------------------------------------------------------------------ renders */
@@ -197,12 +224,13 @@ async function decodeRaster(jpeg: Buffer): Promise<Raster> {
   return { rgb: data, w: info.width, h: info.height };
 }
 
-/** One webcam-sim render (cached on disk): person `who` (or the empty room when who = null) at head-turn `amp`. */
-function render(who: string | null, scene: string, cond: RwCondition, amp: number, frameSeed: number): Promise<Raster> {
+/** One webcam-sim render (cached on disk): person `who` (or the empty room when who = null) in head pose `pose`. */
+function render(who: string | null, scene: string, cond: RwCondition, pose: TurnPose, frameSeed: number): Promise<Raster> {
+  if (pose.mirror) throw new Error('render(): mirrored poses are composed from the left turn (paint mirror)');
   const sc = job.scenes[scene]!;
   const srcFile = who ? join(job.facesetsDir, job.people[who]!.file) : '';
   const key = createHash('sha256')
-    .update(JSON.stringify({ who, file: job.people[who ?? '']?.file ?? null, mtime: who ? String(readFileSync(srcFile).length) : '', sc, cond, amp: amp.toFixed(2), frameSeed, SIM_HASH, v: 2 }))
+    .update(JSON.stringify({ who, file: job.people[who ?? '']?.file ?? null, mtime: who ? String(readFileSync(srcFile).length) : '', sc, cond, amp: pose.amp.toFixed(2), frameSeed, SIM_HASH, v: 2 }))
     .digest('hex')
     .slice(0, 24);
   let p = renderCache.get(key);
@@ -211,12 +239,13 @@ function render(who: string | null, scene: string, cond: RwCondition, amp: numbe
     const file = join(job.cacheDir, `${key}.jpg`);
     if (existsSync(file)) return decodeRaster(readFileSync(file));
     const s = await source(who ?? firstPerson());
-    const src = who ? await warpedSource(who, amp) : s.jpeg;
+    const w = who ? await warpedSource(who, pose.amp) : null;
+    const src = w ? w.jpeg : s.jpeg;
     // The empty room: the same scene with the subject placed far outside the source image.
-    const landmarks = who ? s.landmarks : s.landmarks.map((q) => ({ x: q.x + 1e6, y: q.y + 1e6 }));
+    const landmarks = w ? w.landmarks : s.landmarks.map((q) => ({ x: q.x + 1e6, y: q.y + 1e6 }));
     const fr = await simulateWebcamFrame(src, { landmarks }, { condition: cond, resolution: sc.resolution, sceneSeed: sc.sceneSeed, frameSeed, interEye720: sc.interEye720, jitter: 'burst' });
     writeFileSync(file, fr.jpeg);
-    if (who && frameSeed % 100 === 1 && Math.abs(amp) < 1e-6) renderParams.set(`${who}/${scene}/${cond}`, fr.params);
+    if (who && frameSeed % 100 === 1 && Math.abs(pose.amp) < 1e-6) renderParams.set(`${who}/${scene}/${cond}`, fr.params);
     return decodeRaster(fr.jpeg);
   })();
   renderCache.set(key, p);
@@ -247,7 +276,7 @@ function layerOf(who: string, scene: string): Promise<Layer> {
 }
 
 async function makeLayer(who: string, scene: string): Promise<Layer> {
-  const r = await render(who, scene, 'good', 0, 0);
+  const r = await render(who, scene, 'good', FRONTAL, 0);
   const jpeg = await sharp(r.rgb, { raw: { width: r.w, height: r.h, channels: 3 } }).jpeg({ quality: 95 }).toBuffer();
   const a = await vision.analyze(jpeg, {});
   if (!a.primary) throw new Error(`no face found in the render of ${who} in ${scene}`);
@@ -292,7 +321,7 @@ function matchedRoom(who: string, scene: string, cond: RwCondition): Promise<Flo
   let p = matchCache.get(key);
   if (!p) {
     p = (async () => {
-      const [room, person, layer] = await Promise.all([render(null, scene, cond, 0, 1), render(who, scene, cond, 0, 1), layerOf(who, scene)]);
+      const [room, person, layer] = await Promise.all([render(null, scene, cond, FRONTAL, 1), render(who, scene, cond, FRONTAL, 1), layerOf(who, scene)]);
       const out = new Float32Array(room.rgb.length);
       for (let c = 0; c < 3; c++) {
         let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
@@ -316,7 +345,7 @@ function matchedRoom(who: string, scene: string, cond: RwCondition): Promise<Flo
 }
 
 async function rawRoom(scene: string, cond: RwCondition): Promise<Float32Array> {
-  const r = await render(null, scene, cond, 0, 1);
+  const r = await render(null, scene, cond, FRONTAL, 1);
   return Float32Array.from(r.rgb);
 }
 
@@ -332,22 +361,28 @@ interface Placed {
   /** Offset in output px. */
   dx: number;
   dy: number;
-  /** Head turn amplitude (source warp). */
-  amp: number;
+  /** Head turn (source warp, possibly mirrored). */
+  amp: TurnPose;
   alpha: number;
 }
 
-/** Paint a person layer onto `out` (float RGB) with an integer offset. */
-function paint(out: Float32Array, W: number, H: number, frame: Raster, layer: Layer, dx: number, dy: number, alpha: number): void {
+/**
+ * Paint a person layer onto `out` (float RGB) with an integer offset; `mirror` reflects the layer (person and mask)
+ * about the vertical line through its eye midpoint.
+ */
+function paint(out: Float32Array, W: number, H: number, frame: Raster, layer: Layer, dx: number, dy: number, alpha: number, mirror = false): void {
   const ix = Math.round(dx);
   const iy = Math.round(dy);
   const src = frame.rgb;
   const m = layer.mask;
+  const ex2 = Math.round(2 * layer.eyeMid.x);
   for (let y = Math.max(0, iy); y < Math.min(H, H + iy); y++) {
     const sy = y - iy;
     let o = (y * W + Math.max(0, ix)) * 3;
     for (let x = Math.max(0, ix); x < Math.min(W, W + ix); x++, o += 3) {
-      const si = sy * W + (x - ix);
+      const lx = mirror ? ex2 - (x - ix) : x - ix;
+      if (lx < 0 || lx >= W) continue;
+      const si = sy * W + lx;
       const a = m[si] * alpha;
       if (a <= 0) continue;
       const s3 = si * 3;
@@ -433,7 +468,7 @@ async function frameAt(spec: RwFixtureSpec, W: number, H: number, seg: RwSegment
     const l = await layerFor(seg.leave);
     const e = smooth(tSeg / seg.seconds);
     const sw = sway(t, l.ie, loop);
-    people.push({ shot: seg.leave, dx: sw.dx + e * 1.2 * l.ie, dy: sw.dy - e * (l.eyeMid.y + 3.4 * l.ie), amp: 0, alpha: 1 });
+    people.push({ shot: seg.leave, dx: sw.dx + e * 1.2 * l.ie, dy: sw.dy - e * (l.eyeMid.y + 3.4 * l.ie), amp: FRONTAL, alpha: 1 });
     bg = await matchedRoom(seg.leave.who, seg.leave.scene, seg.leave.cond);
   } else if ('empty' in seg) {
     // Auto-exposure re-adapts to the empty room over ~1 s.
@@ -446,7 +481,7 @@ async function frameAt(spec: RwFixtureSpec, W: number, H: number, seg: RwSegment
     const l = await layerFor(seg.enter);
     const e = smooth(tSeg / seg.seconds);
     const sw = sway(t, l.ie, loop);
-    people.push({ shot: seg.enter, dx: sw.dx + (1 - e) * 1.6 * l.ie, dy: sw.dy - (1 - e) * (l.eyeMid.y + 3.4 * l.ie), amp: 0, alpha: 1 });
+    people.push({ shot: seg.enter, dx: sw.dx + (1 - e) * 1.6 * l.ie, dy: sw.dy - (1 - e) * (l.eyeMid.y + 3.4 * l.ie), amp: FRONTAL, alpha: 1 });
     const raw = await rawRoom(seg.enter.scene, seg.enter.cond);
     const to = await matchedRoom(seg.enter.who, seg.enter.scene, seg.enter.cond);
     bg = new Float32Array(raw.length);
@@ -455,8 +490,8 @@ async function frameAt(spec: RwFixtureSpec, W: number, H: number, seg: RwSegment
     // Two complete compositions, cross-dissolved.
     const [s1, s2] = seg.blend;
     const a = smooth(tSeg / seg.seconds);
-    const c1 = await compose(W, H, [{ shot: s1, ...(await swayed(s1, t, loop)), amp: 0, alpha: 1 }], await matchedRoom(s1.who, s1.scene, s1.cond), fIdx);
-    const c2 = await compose(W, H, [{ shot: s2, ...(await swayed(s2, t, loop)), amp: 0, alpha: 1 }], await matchedRoom(s2.who, s2.scene, s2.cond), fIdx);
+    const c1 = await compose(W, H, [{ shot: s1, ...(await swayed(s1, t, loop)), amp: FRONTAL, alpha: 1 }], await matchedRoom(s1.who, s1.scene, s1.cond), fIdx);
+    const c2 = await compose(W, H, [{ shot: s2, ...(await swayed(s2, t, loop)), amp: FRONTAL, alpha: 1 }], await matchedRoom(s2.who, s2.scene, s2.cond), fIdx);
     for (let i = 0; i < c1.length; i++) c1[i] += a * (c2[i] - c1[i]);
     return c1;
   } else {
@@ -466,8 +501,8 @@ async function frameAt(spec: RwFixtureSpec, W: number, H: number, seg: RwSegment
     const l2 = await layerFor(s2);
     const w1 = await swayed(s1, t, loop);
     const w2 = await swayed(s2, t, loop);
-    people.push({ shot: s1, dx: w1.dx - e * (l1.eyeMid.x + 2.8 * l1.ie), dy: w1.dy, amp: 0, alpha: 1 });
-    people.push({ shot: s2, dx: w2.dx + (1 - e) * (W - l2.eyeMid.x + 2.8 * l2.ie), dy: w2.dy, amp: 0, alpha: 1 });
+    people.push({ shot: s1, dx: w1.dx - e * (l1.eyeMid.x + 2.8 * l1.ie), dy: w1.dy, amp: FRONTAL, alpha: 1 });
+    people.push({ shot: s2, dx: w2.dx + (1 - e) * (W - l2.eyeMid.x + 2.8 * l2.ie), dy: w2.dy, amp: FRONTAL, alpha: 1 });
     const b1 = await matchedRoom(s1.who, s1.scene, s1.cond);
     const b2 = await matchedRoom(s2.who, s2.scene, s2.cond);
     bg = new Float32Array(b1.length);
@@ -487,11 +522,11 @@ let seedBase = 0;
 async function compose(W: number, H: number, people: Placed[], bg: Float32Array, fIdx: number): Promise<Float32Array> {
   const out = Float32Array.from(bg);
   for (const p of people) {
-    const turning = Math.abs(p.amp) > 1e-6;
+    const turning = Math.abs(p.amp.amp) > 1e-6;
     const k = turning ? K_TURN : K_STEADY;
-    const frame = await render(p.shot.who, p.shot.scene, p.shot.cond, p.amp, seedBase + 1 + (fIdx % k));
+    const frame = await render(p.shot.who, p.shot.scene, p.shot.cond, { amp: p.amp.amp, mirror: false }, seedBase + 1 + (fIdx % k));
     if (frame.w !== W || frame.h !== H) throw new Error(`render size ${frame.w}x${frame.h} != ${W}x${H}`);
-    paint(out, W, H, frame, await layerOf(p.shot.who, p.shot.scene), p.dx, p.dy, p.alpha);
+    paint(out, W, H, frame, await layerOf(p.shot.who, p.shot.scene), p.dx, p.dy, p.alpha, p.amp.mirror);
   }
   return out;
 }

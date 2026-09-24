@@ -234,7 +234,7 @@ export function rwFixtureAvailable(name: RwFixtureName): boolean {
  * fixture), TURNS when head turns / glances change (rebuilds only fixtures with head movement). A change of the
  * simulator (webcam-sim.ts) rebuilds everything.
  */
-export const RW_BUILDER_VERSION = { compose: 3, turns: 4 } as const;
+export const RW_BUILDER_VERSION = { compose: 3, turns: 6 } as const;
 const SIMULATOR = join(REPO_DIR, 'apps/server/src/eval/webcam-sim.ts');
 
 function hasTurns(spec: RwFixtureSpec): boolean {

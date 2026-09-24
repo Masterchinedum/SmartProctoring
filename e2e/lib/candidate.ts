@@ -178,6 +178,8 @@ export class CandidatePage {
   static async open(browser: Browser | null, link: string, opts: { context?: BrowserContext } = {}): Promise<CandidatePage> {
     const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, permissions: ['camera'] }));
     await context.addInitScript(TRACK_CAMERA_STREAMS);
+    // A/B measurement of the check's pose smoothing (apps/web/src/candidate/check/poseFilter.ts): raw poses.
+    if (process.env.E2E_RAW_POSE === '1') await context.addInitScript('window.__spRawPose = true;');
     const page = await context.newPage();
     const c = new CandidatePage(context, page);
     OPEN_CANDIDATE_PAGES.add(c);

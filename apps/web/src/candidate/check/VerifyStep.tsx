@@ -47,6 +47,10 @@ export function isFrontal(face: Pose, centre: Pose | null): boolean {
 
 const MIN_CAPTURE_SPACING_MS = 300;
 
+/** Measurement hook only (e2e A/B of the pose smoothing): `window.__spRawPose = true` feeds the raw pose. */
+const smootherFor = () =>
+  new PoseSmoother(typeof window !== 'undefined' && (window as { __spRawPose?: boolean }).__spRawPose === true ? { minWindowMs: 0, maxWindowMs: 0 } : {});
+
 type Phase = 'starting' | 'frontal' | 'liveness' | 'completing' | 'expired' | 'error';
 
 export async function deviceInfo(ctrl: { camera: { state: { info: { label: string; deviceIdHash: string; width: number; height: number } | null } }; }): Promise<DeviceInfo> {
@@ -114,7 +118,7 @@ export function VerifyStep({
     /** When to hand the attempt to the server although the guided capture did not finish. */
     progress: new CheckProgress(),
     /** Noise-adaptive pose smoothing for the liveness tracker (dim-light pose jitter, poseFilter.ts). */
-    pose: new PoseSmoother(),
+    pose: smootherFor(),
   });
 
   const setPhaseBoth = (p: Phase) => {
@@ -160,7 +164,7 @@ export function VerifyStep({
       r.tracker = null;
       r.trackerCentred = false;
       r.completing = false;
-      r.pose = new PoseSmoother();
+      r.pose = smootherFor();
       const b = ctrl.currentBaseline();
       r.centre = b && b.samples > 0 ? { yaw: b.yaw, pitch: b.pitch } : null;
       r.progress.start(performance.now());
