@@ -168,7 +168,10 @@ export async function buildIdentityComparison(ctx: Pick<Ctx, 'db' | 'now'>, orgI
     return { check, image };
   });
 
-  const sims = related.map((c) => c.similarity).filter((s): s is number => s != null && Number.isFinite(s));
+  // The range describes the samples behind the event (linked checks); without any, every check in its span.
+  const hasSim = (c: IdentityCheckDTO) => c.similarity != null && Number.isFinite(c.similarity);
+  const linkedWithSim = related.filter((c) => linkedIds.has(c.id) && hasSim(c));
+  const sims = (linkedWithSim.length ? linkedWithSim : related.filter(hasSim)).map((c) => c.similarity as number);
   const similarity: IdentityComparisonDTO['similarity'] = {
     min: sims.length ? Math.min(...sims) : null,
     max: sims.length ? Math.max(...sims) : null,

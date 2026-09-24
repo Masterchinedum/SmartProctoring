@@ -19,8 +19,6 @@ import { and, desc, eq, gte, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { evaluationReports, events, examSessions, identityChecks } from '../db/schema.js';
 
-export const DEFAULT_METRICS_WINDOW_MS = 30 * 24 * 3600_000;
-
 const zeroDecisions = (): Record<IdentityDecision, number> => Object.fromEntries(IDENTITY_DECISIONS.map((d) => [d, 0])) as Record<IdentityDecision, number>;
 
 export interface OfflineEvaluationEntry {

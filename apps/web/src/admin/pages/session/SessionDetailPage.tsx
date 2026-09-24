@@ -130,11 +130,18 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
       </div>
       {s.reportingInterruptedSince ? <ReportingInterrupted since={s.reportingInterruptedSince} /> : null}
       {s.hold ? (
-        <div className="banner banner-danger">
-          <strong>On hold:</strong> {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason} — since {formatDateTime(s.hold.since)} (<RelativeTime at={s.hold.since} />).
-          {s.hold.message ? <div className="small">{s.hold.message}</div> : null}
-          {s.hold.canReverify ? <div className="small">The candidate may attempt to re-verify themselves.</div> : null}
-        </div>
+        s.hold.canReverify ? (
+          <div className="banner banner-warning">
+            <strong>Waiting for the candidate to re-verify.</strong> The exam stays on hold until the candidate passes a fresh camera and identity check (original hold:{' '}
+            {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason}, since {formatDateTime(s.hold.since)}).
+            {s.hold.message ? <div className="small">Message shown to the candidate: “{s.hold.message}”</div> : null}
+          </div>
+        ) : (
+          <div className="banner banner-danger">
+            <strong>On hold:</strong> {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason} — since {formatDateTime(s.hold.since)} (<RelativeTime at={s.hold.since} />).
+            {s.hold.message ? <div className="small">Message shown to the candidate: “{s.hold.message}”</div> : null}
+          </div>
+        )
       ) : null}
       <div className="facts">
         <Fact label="Time remaining">

@@ -123,10 +123,6 @@ export class GazeDetector {
     return this.host.policy.enabled.lookingAway;
   }
 
-  get lookingAway(): boolean {
-    return this.sustained.active;
-  }
-
   step(ctx: TickContext): void {
     if (!this.enabled) return;
     const t = ctx.t;
@@ -160,13 +156,6 @@ export class GazeDetector {
     this.glances = [];
     this.repeated = newPattern('repeated_looking_away', 0);
     this.offscreen.clear();
-  }
-
-  /** Open pattern episode types (for status). */
-  patternOpen(): boolean {
-    if (this.repeated.open) return true;
-    for (const p of this.offscreen.values()) if (p.open) return true;
-    return false;
   }
 
   private resetSustainedStats(): void {
@@ -209,13 +198,10 @@ export class GazeDetector {
       return;
     }
     if (!g0) return;
-    if (away === false) {
-      g0.firstNonAway ??= t;
-      if (t - g0.lastAway > GLANCE_GAP_MS) this.finalize(g0, g0.firstNonAway);
-      return;
-    }
-    // Unassessable (face lost / obstructed): the glance ends where observation ended.
-    this.finalize(g0, g0.firstNonAway ?? t);
+    // Not away, or not assessable (face lost / obstructed for a frame): a single such tick inside a
+    // glance is tolerated; longer, and the glance ends where it was last observed away.
+    g0.firstNonAway ??= t;
+    if (t - g0.lastAway > GLANCE_GAP_MS) this.finalize(g0, g0.firstNonAway);
   }
 
   private finalize(g: Glance, end: number): void {

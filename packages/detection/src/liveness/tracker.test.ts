@@ -87,6 +87,27 @@ describe('LivenessTracker', () => {
     expect(hold(tr, 1300, 600, { yaw: 2, pitch: -15 }).readyToCapture).toBe(true);
   });
 
+  it('the center step accepts any steady pose in a generous absolute window (not absolute 0,0)', () => {
+    // Laptop camera below the eyes: a candidate looking at the screen reads pitch ≈ −28°.
+    const tr = createLivenessTracker({ steps: steps('center', 'look_up'), targetYawDeg: 20, targetPitchDeg: 12, framesPerStep: 1 });
+    let p = hold(tr, 0, 300, { yaw: 12, pitch: -28 });
+    expect(p.action).toBe('center');
+    expect(p.readyToCapture).toBe(false); // not held long enough yet
+    p = hold(tr, 400, 300, { yaw: 12, pitch: -28 });
+    expect(p.readyToCapture).toBe(true);
+    tr.markCaptured(700);
+    // The next step is measured from that centre: −28 + 12 = −16 is "up".
+    p = hold(tr, 800, 500, { yaw: 12, pitch: -15 });
+    expect(p.action).toBe('look_up');
+    expect(p.readyToCapture).toBe(true);
+    // Outside the sanity window (|pitch| > 35) or moving → not accepted.
+    const out = createLivenessTracker({ steps: steps('center'), targetYawDeg: 20, targetPitchDeg: 12 });
+    expect(hold(out, 0, 1000, { yaw: 0, pitch: -45 }).readyToCapture).toBe(false);
+    let q = out.current();
+    for (let x = 0; x < 1000; x += 100) q = out.update(face({ yaw: x % 200 ? 8 : -8, pitch: -10 }), 1, 2000 + x);
+    expect(q.readyToCapture).toBe(false);
+  });
+
   it('an explicit center step sets the centre from its captured frames', () => {
     const tr = createLivenessTracker({ steps: steps('center', 'turn_right'), targetYawDeg: 20, targetPitchDeg: 12, framesPerStep: 1 });
     let p = hold(tr, 0, 500, { yaw: 8, pitch: 2 });

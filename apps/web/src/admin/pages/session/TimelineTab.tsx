@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import type { EventDTO, IdentityCheckDTO } from '@sp/shared';
+import { EVENT_CATALOG, type EventDTO, type IdentityCheckDTO } from '@sp/shared';
 import { api, shouldRetry } from '../../api/client';
 import { qk } from '../../api/queries';
 import { filterTimeline, filtersActive, presentTypes, type EventFilterState } from '../../lib/filters';
@@ -137,7 +137,7 @@ function TimelineEventRow({ event: e, onOpen }: { event: EventDTO; onOpen: () =>
           {!neutral || e.observation !== e.title ? <span className="tl-obs">{e.observation}</span> : null}
           {!neutral ? (
             <span className="tl-meta small muted">
-              {e.endedAt != null || e.status === 'open' ? (
+              {EVENT_CATALOG[e.type]?.span !== false ? (
                 <>
                   Duration <LiveDuration from={e.startedAt} to={e.endedAt} />
                 </>

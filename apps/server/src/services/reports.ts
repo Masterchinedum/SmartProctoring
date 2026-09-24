@@ -56,7 +56,7 @@ const HOLD_REASON_TEXT: Record<HoldReason, string> = {
   identity_unverifiable: 'identity could not be verified after several attempts',
   id_photo_mismatch: 'the live image may not match the approved ID photo',
   pause_limit: 'the pause was longer than the exam rules allow',
-  staff: 'placed on hold by a staff member',
+  staff: 'a staff member placed it on hold',
 };
 
 const DETECTOR_LABELS: Record<keyof ProctoringPolicy['detection']['enabled'], string> = {

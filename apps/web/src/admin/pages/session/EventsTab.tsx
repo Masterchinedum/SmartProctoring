@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { EVENT_CATALOG } from '@sp/shared';
 import { api, shouldRetry } from '../../api/client';
 import { qk } from '../../api/queries';
 import { eventMatches, presentTypes, sortEvents, type EventFilterState, type EventSortKey } from '../../lib/filters';
@@ -82,7 +83,7 @@ export function EventsTab({
                   <td>
                     <SeverityBadge severity={e.severity} />
                   </td>
-                  <td className="nowrap">{e.endedAt != null || e.status === 'open' ? <LiveDuration from={e.startedAt} to={e.endedAt} /> : <span className="muted">instant</span>}</td>
+                  <td className="nowrap">{EVENT_CATALOG[e.type]?.span !== false ? <LiveDuration from={e.startedAt} to={e.endedAt} /> : <span className="muted">instant</span>}</td>
                   <td>{e.confidence != null ? formatPercent(e.confidence) : <span className="muted">n/a</span>}</td>
                   <td>
                     {e.category === 'neutral' ? <span className="muted small">n/a</span> : <ReviewBadge status={e.review.status} />}

@@ -1,7 +1,7 @@
 /**
  * Staff API — detection quality.
  *
- *   GET  /metrics/detection-quality?from=&to=   -> DetectionQualityDTO                         [reviewer]
+ *   GET  /metrics/detection-quality?from=&to=   -> DetectionQualityDTO  (defaults: from=0 i.e. all time, to=now) [reviewer]
  *   POST /metrics/offline-evaluation            -> { id, kind, createdAt }                      [admin]
  *        body: the JSON report written by an eval CLI (e.g. `eval:identity --out report.json`),
  *        or { kind, report }. Stored in evaluation_reports; the latest report per kind is returned
@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { getStaff, requireStaff } from '../../auth/staff.js';
 import { audit } from '../../lib/audit.js';
 import { validationFailed } from '../../lib/errors.js';
-import { DEFAULT_METRICS_WINDOW_MS, detectionQuality, offlineReportKind, storeOfflineEvaluation } from '../../services/metrics.js';
+import { detectionQuality, offlineReportKind, storeOfflineEvaluation } from '../../services/metrics.js';
 import { blankToUndefined } from './common.js';
 
 export const OFFLINE_REPORT_MAX_BYTES = 10 * 1024 * 1024;
@@ -25,8 +25,9 @@ export const metricsRoutes: FastifyPluginAsync = async (app) => {
   app.get('/metrics/detection-quality', { preHandler: requireStaff('reviewer') }, async (req) => {
     const staff = getStaff(req);
     const q = rangeSchema.parse(blankToUndefined(req.query));
+    // No range = all time (the web's "All time" option sends neither bound).
     const to = q.to ?? ctx.now();
-    const from = q.from ?? to - DEFAULT_METRICS_WINDOW_MS;
+    const from = q.from ?? 0;
     if (from > to) throw validationFailed('Invalid range', [{ path: 'from', message: '`from` must not be after `to`' }]);
     return detectionQuality(ctx, staff.orgId, from, to);
   });

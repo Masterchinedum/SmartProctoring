@@ -165,3 +165,42 @@ describe('period arithmetic', () => {
     expect(unionDurationMs([e(0, 10), e(5, 20), e(30, 40)], 100)).toBe(30);
   });
 });
+
+describe('report: disconnections and holds', () => {
+  it('accounts a reconnect gap as disconnected (not observed) and describes a hold released with a fresh check', async () => {
+    const cand = await env.newCandidate('Rex Reconnect');
+    const s = await env.newSession({ candidateId: cand.id });
+    const c = await startedSession(env, env.candidateClient(s.token));
+    env.clock.advance(MIN);
+    json(await hb(c));
+    const lastHeartbeat = env.clock.t;
+    // The browser crashes; 2 minutes later the candidate reopens the link in a new browser.
+    env.clock.advance(2 * MIN);
+    const c2 = c.withInstance(`inst-new-${Date.now()}`);
+    const reconnectStart = env.clock.t;
+    expect((await runCheck(env, c2, 'reconnect')).complete!.outcome).toBe('passed');
+    env.clock.advance(MIN);
+    // Staff hold the exam, then release it requiring a fresh identity check, which the candidate passes.
+    json(await reviewer.post(`/sessions/${s.id}/hold`, { note: 'Phone call to candidate' }));
+    env.clock.advance(4 * MIN);
+    json(await reviewer.post(`/sessions/${s.id}/release`, { requireCheck: true }));
+    env.clock.advance(30_000);
+    expect((await runCheck(env, c2, 'reverify')).complete!.outcome).toBe('passed');
+    env.clock.advance(MIN);
+    json(await c2.req('POST', '/api/candidate/submit'));
+
+    const r = json<SessionReportDTO>(await reviewer.get(`/sessions/${s.id}/report`));
+    const disc = r.periods.find((p) => p.kind === 'disconnected')!;
+    expect(disc).toMatchObject({ startedAt: lastHeartbeat, endedAt: reconnectStart, observed: false });
+    expect(r.totals.disconnectedMs).toBe(2 * MIN);
+    const held = r.periods.find((p) => p.kind === 'on_hold')!;
+    expect(r.totals.heldMs).toBe(held.endedAt! - held.startedAt);
+    expect(r.totals.heldMs).toBeGreaterThanOrEqual(4 * MIN + 30_000);
+    expect(r.totals.unobservedMs).toBe(r.totals.disconnectedMs + r.totals.heldMs);
+    const text = r.observations.join('\n');
+    expect(text).toMatch(/The candidate’s browser was disconnected from \d\d:\d\d UTC to \d\d:\d\d UTC \(2m 00s\); this period was not observed\./);
+    expect(text).toMatch(/The exam was on hold from \d\d:\d\d UTC for \d+m \d\ds because a staff member placed it on hold; a staff member released the hold at \d\d:\d\d UTC and required a fresh identity check and the candidate passed the identity check at \d\d:\d\d UTC\. This period was not observed\./);
+    expect(r.limitations.join('\n')).toMatch(/No observations were made during unobserved periods: disconnection at \d\d:\d\d UTC \(2m 00s\) and hold at \d\d:\d\d UTC/);
+    expect(r.identity.summary).toMatch(/^The person in view matched the identity reference at check-in, after 2 reconnections or re-verifications/);
+  });
+});

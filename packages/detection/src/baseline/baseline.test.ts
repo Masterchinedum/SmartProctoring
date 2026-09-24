@@ -45,6 +45,16 @@ describe('BaselineCalibrator', () => {
     expect(cal.ready()).toBe(true);
   });
 
+  it('accepts a steady but strongly pitched pose (camera below the eyes); rejects implausible poses', () => {
+    const cal = createBaselineCalibrator();
+    for (let i = 0; i < 15; i++) cal.add(obs(i * 0.2, { faces: [face({ pitch: -32 + (i % 3) - 1 })] }));
+    expect(cal.ready()).toBe(true);
+    expect(cal.result()!.pitch).toBeCloseTo(-32, 0);
+    const bad = createBaselineCalibrator();
+    for (let i = 0; i < 15; i++) bad.add(obs(i * 0.2, { faces: [face({ pitch: -55 })] }));
+    expect(bad.progress()).toBe(0);
+  });
+
   it('result() is null until enough samples', () => {
     const cal = createBaselineCalibrator({ minSamples: 5 });
     cal.add(obs(0, {}));

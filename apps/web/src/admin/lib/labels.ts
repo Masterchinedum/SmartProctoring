@@ -190,3 +190,27 @@ export function decisionCategory(decision: IdentityDecision): EventCategory {
   if (decision === 'match') return 'neutral';
   return 'uncertain';
 }
+
+/**
+ * Human wording for known enum values inside event details/context/audit metadata (quality issues,
+ * triggers, decisions, period kinds, event types, other snake_case codes). Returns null when the value
+ * is not a string (or list of strings) so the caller can fall back to generic formatting.
+ */
+export function describeDetailValue(key: string, value: unknown): string | null {
+  const k = key.toLowerCase();
+  const one = (v: string): string => {
+    if (/issue/.test(k)) return qualityIssueLabel(v);
+    if (/trigger/.test(k)) return (TRIGGER_LABELS as Record<string, string>)[v] ?? humanizeKey(v);
+    if (/decision/.test(k)) return (DECISION_LABELS as Record<string, string>)[v] ?? humanizeKey(v);
+    if (/periodkind|^during$/.test(k)) return (PERIOD_LABELS as Record<string, string>)[v] ?? humanizeKey(v);
+    if ((EVENT_CATALOG as Record<string, unknown>)[v]) return eventTypeTitle(v);
+    if (/^[a-z]+(_[a-z]+)+$/.test(v)) return humanizeKey(v);
+    return v;
+  };
+  if (typeof value === 'string') return one(value);
+  if (Array.isArray(value) && value.length > 0 && value.every((x) => typeof x === 'string')) {
+    const mapped = (value as string[]).map(one);
+    return mapped.join(mapped.every((s) => /[.!?]$/.test(s)) ? ' ' : ', ');
+  }
+  return null;
+}

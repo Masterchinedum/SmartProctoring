@@ -10,7 +10,7 @@
 .brand-name { font-weight: 700; color: #fff; }
 .brand-org { font-size: 12px; color: #8f9ab0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .admin-nav nav { display: flex; flex-direction: column; gap: 2px; }
-.nav-link { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 6px; color: #cfd6e4; text-decoration: none; font-weight: 500; }
+.nav-link { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 10px; border-radius: 6px; color: #cfd6e4; text-decoration: none; font-weight: 500; }
 .nav-link:hover { background: #20283a; color: #fff; }
 .nav-link.active { background: #2459d6; color: #fff; }
 .admin-user { margin-top: auto; padding: 12px 6px 4px; border-top: 1px solid #2a3244; display: flex; flex-direction: column; gap: 6px; }
@@ -173,6 +173,7 @@ table.table tr.row-unobserved td { background: repeating-linear-gradient(135deg,
 .session-card.sc-offline { border-left-color: var(--danger); border-left-style: dashed; }
 .session-card.sc-invited, .session-card.sc-ready { border-left-color: var(--info); }
 .session-card.sc-submitted, .session-card.sc-terminated { border-left-color: var(--border); opacity: 0.9; }
+.show-more { margin-top: 8px; }
 .sc-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
 .sc-name { font-weight: 700; }
 .sc-who { min-width: 0; }
@@ -281,7 +282,7 @@ table.table tr.row-unobserved td { background: repeating-linear-gradient(135deg,
 .sh-top { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .sh-top h1 { margin: 0 0 4px; }
 .sh-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-start; }
-.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px 16px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 16px; }
 .fact-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
 .fact-value { font-weight: 500; }
 .sh-monitor { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

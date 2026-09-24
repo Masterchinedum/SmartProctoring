@@ -5,6 +5,7 @@ import type { AuditLogEntryDTO } from '@sp/shared';
 import { api, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { formatDateTime, formatDetailValue, humanizeKey } from '../lib/format';
+import { describeDetailValue } from '../lib/labels';
 import { EmptyState, ErrorState, Loading, PageHeader, Pager } from '../components/Common';
 
 const LIMIT = 50;
@@ -154,7 +155,7 @@ function AuditMeta({ meta }: { meta: Record<string, unknown> }) {
     <span className="kv-inline">
       {entries.slice(0, 6).map(([k, v]) => (
         <span key={k}>
-          <span className="muted">{humanizeKey(k)}:</span> {truncate(formatDetailValue(k, v), 80)}
+          <span className="muted">{humanizeKey(k)}:</span> {truncate(describeDetailValue(k, v) ?? formatDetailValue(k, v), 80)}
         </span>
       ))}
       {entries.length > 6 ? <span className="muted">+{entries.length - 6} more</span> : null}

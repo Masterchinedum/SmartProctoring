@@ -5,6 +5,7 @@ import type { AuditLogEntryDTO, OrgSettingsDTO, StaffUserDTO } from '@sp/shared'
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { organizations, staffUsers } from '../../src/db/schema.js';
+
 import { createTestEnv, type TestEnv } from '../helpers.js';
 import { json, staffApi, userRow, type Api } from './fixtures.js';
 
@@ -68,6 +69,8 @@ describe('settings', () => {
     const [org] = await env.ctx.db.select().from(organizations).where(eq(organizations.id, env.org.id));
     expect(org.name).toBe('Test University (Main)');
     expect(org.settings.defaultPolicy).toEqual({ pause: { requireReason: true } });
+    // only explicit overrides are stored (defaults keep coming from the code)
+    expect(org.settings.identityThresholds).toEqual({ match: 0.5, mismatch: 0.3, mismatchConfirmations: 3 });
     // exams inherit the org default policy
     const exam = json(await reviewer.get(`/exams/${env.exam.id}`));
     expect(exam.policy.pause.requireReason).toBe(true);

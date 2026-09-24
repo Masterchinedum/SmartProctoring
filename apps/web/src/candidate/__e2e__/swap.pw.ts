@@ -3,7 +3,8 @@ import { acceptConsent, answerFirstQuestions, candidateState, createSession, lau
 
 /**
  * Scenario 3 — possible person swap during the active exam.
- * Fake camera: candidate A (reference) for 90 s, empty room for 6 s, then a different person B.
+ * Fake camera: candidate A (reference) for 90 s, empty room for 6 s, then a different person B
+ * (both faces roughly frontal so the server can make a dependable comparison).
  * Expected: the face returning after the absence triggers an identity sample; the server finds a
  * non-match, asks for a follow-up sample, confirms, flags `identity_mismatch` and (policy
  * hold_for_review) holds the exam. The candidate sees a calm hold screen.

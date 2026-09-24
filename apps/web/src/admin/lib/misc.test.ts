@@ -8,7 +8,7 @@ import { backoffMs, liveUrl } from '../api/live';
 import { roleAtLeast } from '../auth';
 import { validateSettingsDraft } from '../pages/SettingsPage';
 import { assignableRoles } from '../pages/UsersPage';
-import { contextLabel, decisionCategory } from './labels';
+import { contextLabel, decisionCategory, describeDetailValue } from './labels';
 
 describe('fitWithin', () => {
   it('scales the longest side down to the limit without upscaling', () => {
@@ -52,6 +52,17 @@ describe('labels', () => {
     expect(decisionCategory('inconclusive')).toBe('uncertain');
     expect(decisionCategory('mismatch')).toBe('integrity');
     expect(decisionCategory('match')).toBe('neutral');
+  });
+  it('describes known enum values in details', () => {
+    expect(describeDetailValue('issues', ['too_dark', 'low_contrast'])).toBe('Too dark, Low contrast');
+    expect(describeDetailValue('trigger', 'periodic')).toBe('Routine sample');
+    expect(describeDetailValue('lastDecision', 'unable_to_verify')).toBe('Could not verify (image quality)');
+    expect(describeDetailValue('closedBy', 'identity_match')).toBe('Identity match');
+    expect(describeDetailValue('type', 'phone_detected')).toBe('Phone visible');
+    expect(describeDetailValue('guidance', ['Turn on a light.', 'Hold still.'])).toBe('Turn on a light. Hold still.');
+    expect(describeDetailValue('label', 'cell phone')).toBe('cell phone');
+    expect(describeDetailValue('eventId', '0f9e-12ab')).toBe('0f9e-12ab');
+    expect(describeDetailValue('score', 0.5)).toBeNull();
   });
   it('labels context keys', () => {
     expect(contextLabel('session_resumed')).toBe('Exam was resumed');

@@ -1,6 +1,6 @@
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { CATEGORY_LABELS, EVENT_CATEGORIES, type SessionReportDTO } from '@sp/shared';
+import { CATEGORY_LABELS, EVENT_CATALOG, EVENT_CATEGORIES, type SessionReportDTO } from '@sp/shared';
 import { api, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { formatDateTime, formatDuration, formatPercent, formatSimilarity, formatTime } from '../lib/format';
@@ -262,7 +262,7 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
                   </div>
                   <div>{e.observation}</div>
                   <div className="small muted">
-                    {e.durationMs != null ? <>Duration {formatDuration(e.durationMs)} · </> : e.endedAt == null ? <>Ongoing · </> : null}
+                    {EVENT_CATALOG[e.type]?.span === false ? null : e.durationMs != null && e.endedAt != null ? <>Duration {formatDuration(e.durationMs)} · </> : <>Ongoing · </>}
                     {e.confidence != null ? <>confidence {formatPercent(e.confidence)} · </> : null}
                     {e.deliveredLate ? <>delivered late · </> : null}
                     {formatDateTime(e.startedAt)}

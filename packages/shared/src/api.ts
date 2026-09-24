@@ -700,7 +700,9 @@ export type { IdentityCheckTrigger };
  *   PUT  /users/:id {name?,role?,disabled?,password?} -> StaffUserDTO                               [admin]
  *   GET  /audit-log?limit=&offset=&action=         -> Paged<AuditLogEntryDTO>                       [admin]
  *   GET  /metrics/detection-quality?from=&to=      -> DetectionQualityDTO                           [reviewer]
- *   WS   /live                                     -> LiveMessage frames                            [reviewer]
+ *   POST /metrics/offline-evaluation  (JSON report from an eval CLI, or {kind, report}) -> { id, kind, createdAt } [admin]
+ *        (DetectionQualityDTO.offlineEvaluation is then { reports: [{ id, kind, createdAt, global, report }] })
+ *   WS   /live                                    -> LiveMessage frames                            [reviewer]
  */
 
 export interface Paged<T> {

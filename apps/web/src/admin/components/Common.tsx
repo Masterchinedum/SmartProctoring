@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { errorMessage } from '../api/client';
 import { formatDetailValue, humanizeKey } from '../lib/format';
+import { describeDetailValue } from '../lib/labels';
 
 export function EmptyState({ title, children, icon = '○' }: { title: string; children?: ReactNode; icon?: string }) {
   return (
@@ -72,7 +73,7 @@ function ValueCell({ k, v }: { k: string; v: unknown }) {
         <span className="kv-inline">
           {entries.map(([ik, iv]) => (
             <span key={ik}>
-              <span className="muted">{humanizeKey(ik)}:</span> {formatDetailValue(ik, iv)}
+              <span className="muted">{humanizeKey(ik)}:</span> {describeDetailValue(ik, iv) ?? formatDetailValue(ik, iv)}
             </span>
           ))}
         </span>
@@ -80,7 +81,7 @@ function ValueCell({ k, v }: { k: string; v: unknown }) {
     }
     return <pre className="kv-json">{JSON.stringify(v, null, 2)}</pre>;
   }
-  return <>{formatDetailValue(k, v)}</>;
+  return <>{describeDetailValue(k, v) ?? formatDetailValue(k, v)}</>;
 }
 
 export function CopyButton({ text, label = 'Copy', className = 'btn btn-sm' }: { text: string; label?: string; className?: string }) {

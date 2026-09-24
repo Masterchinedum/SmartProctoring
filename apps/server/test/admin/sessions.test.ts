@@ -145,7 +145,14 @@ describe('session detail and timeline', () => {
     const t2 = json(await reviewer.get(`/sessions/${env.session.id}/timeline`)).items as TimelineItemDTO[];
     const key = (i: TimelineItemDTO) => `${i.kind}:${i.kind === 'period' ? i.period.id : i.kind === 'event' ? i.event.id : i.check.id}`;
     expect(t1.map(key)).toEqual(t2.map(key));
-    for (let i = 1; i < t1.length; i++) expect(compareTimelineItems(t1[i - 1], t1[i])).toBeLessThanOrEqual(0);
+    const rank = { period: 0, event: 1, identity_check: 2 } as const;
+    for (let i = 1; i < t1.length; i++) {
+      const [a, b] = [t1[i - 1], t1[i]];
+      expect(a.at).toBeLessThanOrEqual(b.at);
+      if (a.at === b.at) expect(rank[a.kind]).toBeLessThanOrEqual(rank[b.kind]);
+    }
+    // periods at the same instant stay in a total order, as do identity checks
+    for (let i = 1; i < t1.length; i++) if (t1[i - 1].kind !== 'event' || t1[i].kind !== 'event') expect(compareTimelineItems(t1[i - 1], t1[i])).toBeLessThanOrEqual(0);
     const kinds = new Set(t1.map((i) => i.kind));
     expect(kinds).toEqual(new Set(['period', 'event', 'identity_check']));
     // At the pause instant the paused period comes before the session_paused event.

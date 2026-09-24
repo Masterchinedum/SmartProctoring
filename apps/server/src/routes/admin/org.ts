@@ -85,26 +85,29 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       const [org] = await tx.select().from(organizations).where(eq(organizations.id, staff.orgId)).for('update');
       if (!org) throw notFound('Organisation not found');
       const cur = orgSettings(org);
-      const next: OrgSettings = { ...cur, identityThresholds: { ...cur.identityThresholds } };
-      const issues: { path: string; message: string }[] = [];
-
-      if (body.evidenceRetentionDays !== undefined) next.evidenceRetentionDays = body.evidenceRetentionDays;
-      if (body.eventRetentionDays !== undefined) next.eventRetentionDays = body.eventRetentionDays;
-      if (next.eventRetentionDays < next.evidenceRetentionDays) {
-        issues.push({ path: 'eventRetentionDays', message: 'Event records must be kept at least as long as the evidence images' });
-      }
-      if (body.privacyContact !== undefined) next.privacyContact = body.privacyContact.trim();
+      // Only explicit overrides are stored (defaults are filled in by orgSettings()), so improved defaults
+      // keep reaching organisations that never customised a value.
+      const stored: Partial<OrgSettings> = { ...(org.settings ?? {}) };
+      if (body.evidenceRetentionDays !== undefined) stored.evidenceRetentionDays = body.evidenceRetentionDays;
+      if (body.eventRetentionDays !== undefined) stored.eventRetentionDays = body.eventRetentionDays;
+      if (body.privacyContact !== undefined) stored.privacyContact = body.privacyContact.trim();
       if (body.identityThresholds) {
-        next.identityThresholds = { ...next.identityThresholds, ...Object.fromEntries(Object.entries(body.identityThresholds).filter(([, v]) => v !== undefined)) };
-        const t = next.identityThresholds;
-        if (!(t.mismatch < t.match)) issues.push({ path: 'identityThresholds.mismatch', message: 'The mismatch threshold must be lower than the match threshold' });
-        if (!(t.idPhotoMismatch < t.idPhotoMatch)) issues.push({ path: 'identityThresholds.idPhotoMismatch', message: 'The ID-photo mismatch threshold must be lower than the ID-photo match threshold' });
+        const provided = Object.fromEntries(Object.entries(body.identityThresholds).filter(([, v]) => v !== undefined));
+        stored.identityThresholds = { ...(stored.identityThresholds ?? {}), ...provided } as OrgSettings['identityThresholds'];
       }
       if (body.defaultPolicy !== undefined) {
         const policy = sanitizePolicyInput(body.defaultPolicy);
         mergePolicy(undefined, policy); // throws ZodError (400) with field paths when invalid
-        next.defaultPolicy = policy;
+        stored.defaultPolicy = policy;
       }
+      const next = orgSettings({ settings: stored });
+      const issues: { path: string; message: string }[] = [];
+      if (next.eventRetentionDays < next.evidenceRetentionDays) {
+        issues.push({ path: 'eventRetentionDays', message: 'Event records must be kept at least as long as the evidence images' });
+      }
+      const t = next.identityThresholds;
+      if (!(t.mismatch < t.match)) issues.push({ path: 'identityThresholds.mismatch', message: 'The mismatch threshold must be lower than the match threshold' });
+      if (!(t.idPhotoMismatch < t.idPhotoMatch)) issues.push({ path: 'identityThresholds.idPhotoMismatch', message: 'The ID-photo mismatch threshold must be lower than the ID-photo match threshold' });
       if (issues.length) throw validationFailed('Invalid settings', issues);
 
       const name = body.name !== undefined ? body.name.trim() : org.name;
@@ -115,7 +118,7 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       ];
       const [row] = await tx
         .update(organizations)
-        .set({ name, settings: { ...(org.settings ?? {}), ...next }, updatedAt: new Date(now) })
+        .set({ name, settings: stored, updatedAt: new Date(now) })
         .where(eq(organizations.id, staff.orgId))
         .returning();
       await audit(tx, {

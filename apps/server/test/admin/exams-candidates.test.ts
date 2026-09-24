@@ -219,18 +219,19 @@ describe('candidates', () => {
   it('rejects an unusable ID photo with guidance and stores nothing', async () => {
     const cand = json<CandidateDTO>(await admin.post('/candidates', { name: 'Nina NoFace' }));
     const before = (await env.ctx.db.select().from(evidence)).length;
-    const res = await admin.jpeg(`/candidates/${cand.id}/id-photo`, { person: null });
-    expect(res.statusCode).toBe(422);
-    const body = res.json();
-    expect(body).toMatchObject({ error: 'id_photo_rejected', accepted: false, quality: { usable: false, issues: ['no_face'] }, candidate: { id: cand.id, idPhoto: null } });
+    const body = json(await admin.jpeg(`/candidates/${cand.id}/id-photo`, { person: null }));
+    expect(body).toMatchObject({ accepted: false, quality: { usable: false, issues: ['no_face'] }, candidate: { id: cand.id, idPhoto: null } });
     expect(body.guidance[0]).toMatch(/No face was found/);
-    expect(body.message).toBe(body.guidance[0]);
+    const [rej] = await env.ctx.db.select().from(auditLog).where(and(eq(auditLog.action, 'candidate.id_photo_rejected'), eq(auditLog.targetId, cand.id)));
+    expect(rej.meta).toEqual({ issues: ['no_face'] });
     expect((await env.ctx.db.select().from(evidence)).length).toBe(before);
     const [row] = await env.ctx.db.select().from(candidates).where(eq(candidates.id, cand.id));
     expect(row.idPhotoEmbedding).toBeNull();
 
-    const two = await admin.jpeg(`/candidates/${cand.id}/id-photo`, { person: 'x', faces: 2 });
-    expect(two.json().guidance.join(' ')).toMatch(/More than one face/);
+    const two = json(await admin.jpeg(`/candidates/${cand.id}/id-photo`, { person: 'x', faces: 2 }));
+    expect(two.accepted).toBe(false);
+    expect(two.guidance.join(' ')).toMatch(/More than one face/);
+    expect((await admin.jpeg(`/candidates/${cand.id}/id-photo`, { corrupt: true })).json()).toMatchObject({ error: 'invalid_image' });
     expect((await admin.inject({ method: 'PUT', url: `/api/admin/candidates/${cand.id}/id-photo`, headers: { 'content-type': 'image/jpeg' }, payload: Buffer.from('not a jpeg at all') })).statusCode).toBe(415);
     expect((await admin.inject({ method: 'PUT', url: `/api/admin/candidates/${cand.id}/id-photo`, headers: { 'content-type': 'image/png' }, payload: Buffer.from([1, 2, 3]) })).statusCode).toBe(415);
     const big = Buffer.concat([FakeVisionService.encode({ person: 'x' }), Buffer.alloc(5 * 1024 * 1024 + 10)]);

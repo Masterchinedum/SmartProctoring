@@ -12,8 +12,9 @@
  * ID photo upload: the photo is analysed under the ID-photo quality gate. If accepted, the JPEG is
  * stored as encrypted evidence (kind id_photo) and the face template encrypted with AAD
  * `idphoto:<candidateId>`; a previous photo is purged. If not accepted, NOTHING is stored and the
- * response is 422 with a body that is both an ApiError (error/message/details) and an
- * IdPhotoUploadResponse (accepted=false, quality, guidance, candidate).
+ * response (200) is the same IdPhotoUploadResponse with accepted=false, the quality measurements and
+ * guidance for the staff member (the shared contract; the web UI shows the guidance). A body that is not
+ * a JPEG is 415; an unreadable JPEG is 422 invalid_image; more than 5 MB is 413.
  */
 import { candidateInputSchema, TERMINAL_STATUSES, type CandidateDTO, type IdPhotoUploadResponse } from '@sp/shared';
 import { and, asc, desc, eq, ilike, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
@@ -206,7 +207,7 @@ export const candidatesRoutes: FastifyPluginAsync = async (app) => {
 
   /* ------------------------------------------------------------------ ID photo */
 
-  app.put('/candidates/:id/id-photo', { ...admin, bodyLimit: ID_PHOTO_MAX_BYTES }, async (req, reply) => {
+  app.put('/candidates/:id/id-photo', { ...admin, bodyLimit: ID_PHOTO_MAX_BYTES }, async (req) => {
     const staff = getStaff(req);
     const id = idParam(req, 'id', 'Candidate', 'candidate_not_found');
     const body = req.body;
@@ -224,18 +225,15 @@ export const candidatesRoutes: FastifyPluginAsync = async (app) => {
     }
 
     if (!result.accepted || !result.analysis.embedding) {
+      // Processed but not suitable: nothing is stored; the response explains why (IdPhotoUploadResponse, accepted=false).
       await audit(ctx.db, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'candidate.id_photo_rejected', targetType: 'candidate', targetId: id, meta: { issues: result.quality.issues }, ip: req.ip, at: now });
-      const candidate = await candidateDTO(ctx.db, staff.orgId, id);
-      const rejected: IdPhotoUploadResponse & { error: string; message: string; details: unknown } = {
-        error: 'id_photo_rejected',
-        message: result.guidance[0] ?? 'The photo is not suitable for identity comparison.',
-        details: { quality: result.quality, guidance: result.guidance },
+      const rejected: IdPhotoUploadResponse = {
         accepted: false,
         quality: result.quality,
-        guidance: result.guidance,
-        candidate,
+        guidance: result.guidance.length ? result.guidance : ['The photo is not suitable for identity comparison. Upload a clear, front-facing photo of the candidate.'],
+        candidate: await candidateDTO(ctx.db, staff.orgId, id),
       };
-      return reply.status(422).send(rejected);
+      return rejected;
     }
 
     const embedding = result.analysis.embedding;

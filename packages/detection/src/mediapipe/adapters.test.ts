@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { poseFromFivePoints } from '@sp/shared';
 import { facesFromMediapipe, fivePointsFromMesh, gazeFromBlendshapes, objectsFromMediapipe, type MpLandmark } from './adapters';
 
 /**
- * Synthetic 478-point mesh: a 3D head model (cm) with the landmarks the adapter uses, projected with a
- * given yaw (subject-left positive → nose toward image +x) and pitch (up positive → nose toward −y),
- * plus an outline ring (forehead/chin/cheeks) so the landmark box is face-sized. Un-mirrored image.
+ * Synthetic 478-point mesh: a 3D head (cm, y down, z toward the camera) with adult proportions —
+ * pupils on y = 0, 6.4 cm apart; pronasale (landmark 4, the most anterior nose point) 4.0 cm below
+ * the pupils and 2 cm forward; landmark 1 0.7 cm below it (as on MediaPipe's canonical mesh); mouth
+ * corners 7.0 cm below the pupils. Projected with a given yaw (subject-left positive → nose toward
+ * image +x) and pitch (up positive → nose toward −y), plus an outline ring so the landmark box is
+ * face-sized. Un-mirrored image.
  */
 const MODEL: Record<number, [number, number, number]> = {
   468: [-3.2, 0, 0], // subject's right iris → image left
@@ -13,9 +17,10 @@ const MODEL: Record<number, [number, number, number]> = {
   133: [-2.0, 0, 0],
   362: [2.0, 0, 0],
   263: [4.4, 0, -0.5],
-  1: [0, 3.5, 2.0],
-  61: [-2.4, 6.5, 1.0],
-  291: [2.4, 6.5, 1.0],
+  4: [0, 4.0, 2.0],
+  1: [0, 4.7, 1.85],
+  61: [-2.4, 7.0, 0.6],
+  291: [2.4, 7.0, 0.6],
 };
 
 function mesh(yawDeg: number, pitchDeg: number, opts: { cx?: number; cy?: number; scale?: number; iris?: boolean } = {}): MpLandmark[] {
@@ -44,13 +49,13 @@ function mesh(yawDeg: number, pitchDeg: number, opts: { cx?: number; cy?: number
 }
 
 describe('fivePointsFromMesh', () => {
-  it('uses iris centres, nose tip and mouth corners', () => {
+  it('uses iris centres, the pronasale (landmark 4, YuNet’s "nose tip") and mouth corners', () => {
     const m = mesh(0, 0);
     const five = fivePointsFromMesh(m);
     expect(five).toHaveLength(5);
     expect(five[0]).toEqual({ x: m[468].x, y: m[468].y });
     expect(five[1]).toEqual({ x: m[473].x, y: m[473].y });
-    expect(five[2]).toEqual({ x: m[1].x, y: m[1].y });
+    expect(five[2]).toEqual({ x: m[4].x, y: m[4].y });
     expect(five[3]).toEqual({ x: m[61].x, y: m[61].y });
     expect(five[4]).toEqual({ x: m[291].x, y: m[291].y });
   });
@@ -64,18 +69,31 @@ describe('fivePointsFromMesh', () => {
 });
 
 describe('facesFromMediapipe', () => {
+  it('a frontal mesh reads ≈ frontal pitch (same points as the server’s YuNet); landmark 1 would bias it ≈ −20°', () => {
+    const m = mesh(0, 0);
+    const [front] = facesFromMediapipe({ faceLandmarks: [m] }, null, { width: 640, height: 480 });
+    expect(Math.abs(front.yaw)).toBeLessThan(2);
+    expect(Math.abs(front.pitch)).toBeLessThan(10);
+    // Regression guard for the real-browser finding: with landmark 1 the shared formula reads ≈ 20° lower.
+    const px = (p: MpLandmark) => ({ x: p.x * 640, y: p.y * 480 });
+    const withLm1 = poseFromFivePoints([px(m[468]), px(m[473]), px(m[1]), px(m[61]), px(m[291])]);
+    expect(front.pitch - withLm1.pitchDeg).toBeGreaterThan(15);
+    expect(front.pitch - withLm1.pitchDeg).toBeLessThan(30);
+    // Same result for any frame aspect / scale the host reports (pitch uses vertical ratios only).
+    const [wide] = facesFromMediapipe({ faceLandmarks: [m] }, null, { width: 1280, height: 720 });
+    expect(Math.abs(wide.pitch - front.pitch)).toBeLessThan(0.5);
+  });
+
   it('pose follows POSE_CONVENTION: turning to the subject’s left → yaw > 0; up → pitch > 0', () => {
     const [front] = facesFromMediapipe({ faceLandmarks: [mesh(0, 0)] }, null, { width: 640, height: 480 });
-    expect(Math.abs(front.yaw)).toBeLessThan(3);
-    expect(Math.abs(front.pitch)).toBeLessThan(4);
     const [left] = facesFromMediapipe({ faceLandmarks: [mesh(30, 0)] }, null, { width: 640, height: 480 });
     expect(left.yaw).toBeGreaterThan(20);
     const [right] = facesFromMediapipe({ faceLandmarks: [mesh(-30, 0)] }, null, { width: 640, height: 480 });
     expect(right.yaw).toBeLessThan(-20);
     const [up] = facesFromMediapipe({ faceLandmarks: [mesh(0, 20)] }, null, { width: 640, height: 480 });
-    expect(up.pitch).toBeGreaterThan(8);
+    expect(up.pitch - front.pitch).toBeGreaterThan(10);
     const [down] = facesFromMediapipe({ faceLandmarks: [mesh(0, -20)] }, null, { width: 640, height: 480 });
-    expect(down.pitch).toBeLessThan(-8);
+    expect(down.pitch - front.pitch).toBeLessThan(-10);
   });
 
   it('box, score, visibility and cut-off', () => {

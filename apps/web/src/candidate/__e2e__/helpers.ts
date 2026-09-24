@@ -30,6 +30,9 @@ export interface CandidatePage {
 
 export async function openCandidate(browser: Browser, link: string): Promise<CandidatePage> {
   const context = await browser.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, permissions: ['camera'] });
+  // Against a Vite dev server, silence the HMR socket so edits elsewhere in the repo cannot reload
+  // the page in the middle of a test (a reload is a new client instance by design).
+  if (env.SP_KEEP_HMR !== '1') await context.routeWebSocket((url) => url.searchParams.has('token') && !url.pathname.startsWith('/api'), () => undefined);
   const page = await context.newPage();
   const logs: string[] = [];
   const httpErrors: string[] = [];

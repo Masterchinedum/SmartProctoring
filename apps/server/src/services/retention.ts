@@ -23,7 +23,7 @@ import type { DbOrTx } from '../db/index.js';
 import { checkFrames, checks, events, evidence, examSessions, exams, identityChecks, organizations } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { purgeSessionEvidence } from './evidence.js';
-import { orgSettings } from './org.js';
+import { DEFAULT_ORG_SETTINGS, orgSettings } from './org.js';
 import { effectivePolicy } from './session-state.js';
 
 export const DAY_MS = 24 * 3600_000;
@@ -88,8 +88,8 @@ const evidenceDaysSql = sql`coalesce(
   ${jsonDays(sql`${exams.policy} -> 'retention' -> 'evidenceDays'`)},
   ${jsonDays(sql`${organizations.settings} -> 'defaultPolicy' -> 'retention' -> 'evidenceDays'`)},
   ${jsonDays(sql`${organizations.settings} -> 'evidenceRetentionDays'`)},
-  30)`;
-const eventDaysSql = sql`coalesce(${jsonDays(sql`${organizations.settings} -> 'eventRetentionDays'`)}, 365)`;
+  ${DEFAULT_ORG_SETTINGS.evidenceRetentionDays}::numeric)`;
+const eventDaysSql = sql`coalesce(${jsonDays(sql`${organizations.settings} -> 'eventRetentionDays'`)}, ${DEFAULT_ORG_SETTINGS.eventRetentionDays}::numeric)`;
 
 /* ================================================================== run */
 

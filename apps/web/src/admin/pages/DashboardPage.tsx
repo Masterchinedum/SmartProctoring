@@ -26,6 +26,8 @@ import { EvidenceImage } from '../components/EvidenceImage';
 import { Clock, Countdown, LiveDuration, RelativeTime, ReportingInterrupted } from '../components/Time';
 
 const FLASH_MS = 10_000;
+/** Cards rendered per board group before "Show all" (keeps large dashboards responsive; use search to find one). */
+const CARD_LIMIT = 60;
 
 export function DashboardPage() {
   const q = useQuery<DashboardState>({
@@ -120,7 +122,7 @@ function NeedsAttention({ pauses, holds }: { pauses: AttentionPause[]; holds: Re
               </div>
               <div className="small">
                 {HOLD_REASON_LABELS[h.hold.reason] ?? h.hold.reason} · since <Clock at={h.hold.since} /> (<RelativeTime at={h.hold.since} />)
-                {h.hold.canReverify ? <span className="muted"> · candidate may re-verify themselves</span> : null}
+                {h.hold.canReverify ? <span className="muted"> · released by staff, waiting for the candidate’s fresh identity check</span> : null}
               </div>
               {h.hold.message ? <div className="muted small">{h.hold.message}</div> : null}
             </div>
@@ -184,6 +186,7 @@ function SessionBoard({ groups, flash }: { groups: Record<BoardGroup, LiveSessio
   const [filter, setFilter] = useState<BoardFilter>('all');
   const [search, setSearch] = useState('');
   const [showCompleted, setShowCompleted] = useState(false);
+  const [expanded, setExpanded] = useState<Set<BoardGroup>>(new Set());
   const visibleGroups = filter === 'all' ? BOARD_GROUPS : [filter];
   const total = BOARD_GROUPS.reduce((n, g) => n + groups[g].length, 0);
   return (
@@ -230,11 +233,27 @@ function SessionBoard({ groups, flash }: { groups: Record<BoardGroup, LiveSessio
             {collapsed ? null : list.length === 0 ? (
               <div className="muted small">No sessions{search ? ' match the search' : ''}.</div>
             ) : (
-              <div className="session-cards">
-                {list.map((s) => (
-                  <SessionCard key={s.id} s={s} flash={flash.has(s.id)} />
-                ))}
-              </div>
+              <>
+                <div className="session-cards">
+                  {(expanded.has(g) ? list : list.slice(0, CARD_LIMIT)).map((s) => (
+                    <SessionCard key={s.id} s={s} flash={flash.has(s.id)} />
+                  ))}
+                </div>
+                {list.length > CARD_LIMIT ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm show-more"
+                    onClick={() => setExpanded((x) => {
+                      const n = new Set(x);
+                      if (n.has(g)) n.delete(g);
+                      else n.add(g);
+                      return n;
+                    })}
+                  >
+                    {expanded.has(g) ? 'Show fewer' : `Show all ${list.length}`}
+                  </button>
+                ) : null}
+              </>
             )}
           </div>
         );
@@ -257,7 +276,13 @@ export function SessionCard({ s, flash }: { s: LiveSession; flash: boolean }) {
         </div>
       </div>
       {s.reportingInterruptedSince ? <ReportingInterrupted since={s.reportingInterruptedSince} /> : null}
-      {s.hold ? <div className="sc-alert danger">On hold: {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason}</div> : null}
+      {s.hold ? (
+        s.hold.canReverify ? (
+          <div className="sc-alert warning">On hold — waiting for the candidate to re-verify</div>
+        ) : (
+          <div className="sc-alert danger">On hold: {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason}</div>
+        )
+      ) : null}
       {s.pendingPauseRequest ? (
         <div className="sc-alert warning">
           Pause requested <RelativeTime at={s.pendingPauseRequest.requestedAt} /> — awaiting decision
@@ -383,7 +408,18 @@ function FlagsFeed({ events, flash }: { events: LiveEventDTO[]; flash: Set<strin
                     {e.candidateName} <span className="muted">· {e.examTitle}</span>
                   </div>
                   <div className="small muted feed-meta">
-                    <Clock at={e.startedAt} /> · {e.endedAt == null ? <span className="ongoing-tag">ongoing <LiveDuration from={e.startedAt} to={null} ongoingLabel={false} /></span> : <LiveDuration from={e.startedAt} to={e.endedAt} />}
+                    <Clock at={e.startedAt} />
+                    {EVENT_CATALOG[e.type]?.span === false ? null : e.endedAt == null ? (
+                      <>
+                        {' '}
+                        · <span className="ongoing-tag">ongoing <LiveDuration from={e.startedAt} to={null} ongoingLabel={false} /></span>
+                      </>
+                    ) : (
+                      <>
+                        {' '}
+                        · <LiveDuration from={e.startedAt} to={e.endedAt} />
+                      </>
+                    )}
                     {e.confidence != null ? <> · {formatPercent(e.confidence)} confidence</> : null}
                     {e.deliveredLate ? <span className="badge badge-technical">Delivered late</span> : null}
                     {e.review.status !== 'unreviewed' ? <ReviewBadge status={e.review.status} /> : null}

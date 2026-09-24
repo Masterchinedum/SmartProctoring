@@ -46,8 +46,8 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
     <div className="actions-bar no-print">
       <div className="row">
         {s.status === 'on_hold' ? (
-          <button type="button" className="btn btn-primary" onClick={() => setDialog('release')}>
-            Release hold…
+          <button type="button" className={s.hold?.canReverify ? 'btn' : 'btn btn-primary'} onClick={() => setDialog('release')}>
+            {s.hold?.canReverify ? 'Change release…' : 'Release hold…'}
           </button>
         ) : null}
         {canHold ? (
