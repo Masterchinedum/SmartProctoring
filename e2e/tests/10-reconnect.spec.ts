@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { CandidatePage, launchCamera, skipUnlessFixtures } from '../lib/candidate';
 import { expect, test } from '../lib/test';
 
@@ -14,13 +15,21 @@ test('reload requires a reconnect check; a second browser supersedes the first',
   const browser1 = await launchCamera('a');
   const browser2 = await launchCamera('a');
   try {
-    const c1 = await CandidatePage.open(browser1, s.link);
+    // ?trace=1 records the monitoring observations for offline accuracy evaluation (downloadable JSONL).
+    const c1 = await CandidatePage.open(browser1, `${s.link}?trace=1`);
     await c1.checkInAndStart();
     await c1.gotoQuestion(0);
     await c1.page.getByRole('radio', { name: 'Mean' }).check();
     await c1.gotoQuestion(2);
     await c1.tid('answer-input').fill('normal');
-    await c1.page.waitForTimeout(2_000);
+    await c1.page.waitForTimeout(3_000);
+    await expect(c1.tid('trace-tools')).toBeVisible();
+    const [download] = await Promise.all([c1.page.waitForEvent('download'), c1.tid('trace-download').click()]);
+    const lines = readFileSync((await download.path())!, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { kind: string; format?: string; obs?: { faces: unknown[] } });
+    expect(lines[0]).toMatchObject({ kind: 'meta', format: 'sp-trace/1' });
+    const obs = lines.filter((l) => l.kind === 'obs');
+    expect(obs.length).toBeGreaterThan(5);
+    expect(obs.some((o) => o.obs?.faces.length === 1)).toBe(true);
 
     /* ---------------- reload = new instance → reconnect check */
     const reloadAt = Date.now();

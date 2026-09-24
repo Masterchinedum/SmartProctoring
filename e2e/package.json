@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "playwright test",
-    "fixtures": "tsx scripts/make-y4m.ts"
+    "fixtures": "tsx scripts/build-fixtures.ts",
+    "typecheck": "tsc --noEmit -p ."
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",

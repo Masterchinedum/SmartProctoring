@@ -36,6 +36,8 @@ async function main(): Promise<number> {
   let values: { 'dry-run'?: boolean; json?: boolean; max?: string; help?: boolean };
   try {
     ({ values } = parseArgs({
+      // `pnpm <script> -- --flag` forwards the separator; drop a leading '--'.
+      args: process.argv.slice(2).filter((a, i) => !(i === 0 && a === '--')),
       options: {
         'dry-run': { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },

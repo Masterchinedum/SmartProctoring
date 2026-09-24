@@ -126,13 +126,15 @@ let scryptActive = 0;
 const scryptWaiting: (() => void)[] = [];
 
 async function withScryptSlot<T>(fn: () => Promise<T>): Promise<T> {
+  // A finishing derivation hands its slot straight to the next waiter (no window for a third one to slip in).
   if (scryptActive >= SCRYPT_CONCURRENCY) await new Promise<void>((resolve) => scryptWaiting.push(resolve));
-  scryptActive++;
+  else scryptActive++;
   try {
     return await fn();
   } finally {
-    scryptActive--;
-    scryptWaiting.shift()?.();
+    const next = scryptWaiting.shift();
+    if (next) next();
+    else scryptActive--;
   }
 }
 

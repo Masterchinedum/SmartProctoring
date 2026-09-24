@@ -34,6 +34,27 @@ export async function launchCamera(fixture: FixtureName): Promise<Browser> {
   });
 }
 
+/**
+ * A persistent browser profile with a given camera: two launches with the same `userDataDir` and different
+ * fixtures model the same computer/browser whose camera view changed (e.g. the candidate moved seats).
+ */
+export async function launchPersistentCamera(fixture: FixtureName, userDataDir: string): Promise<BrowserContext> {
+  return chromium.launchPersistentContext(userDataDir, {
+    headless: !HEADED,
+    baseURL: BASE_URL,
+    viewport: { width: 1280, height: 900 },
+    permissions: ['camera'],
+    args: [
+      '--use-fake-device-for-media-stream',
+      '--use-fake-ui-for-media-stream',
+      `--use-file-for-fake-video-capture=${fixturePath(fixture)}`,
+      '--autoplay-policy=no-user-gesture-required',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
+    ],
+  });
+}
+
 export type CheckOutcome = 'ready' | 'passed' | 'retry' | 'hold' | 'problem' | 'failed';
 
 export class CandidatePage {
@@ -45,9 +66,12 @@ export class CandidatePage {
     readonly page: Page,
   ) {}
 
-  /** New browser context (fresh storage = a new device/browser profile) on `browser`, opened at `link`. */
-  static async open(browser: Browser, link: string, opts: { context?: BrowserContext } = {}): Promise<CandidatePage> {
-    const context = opts.context ?? (await browser.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, permissions: ['camera'] }));
+  /**
+   * New browser context (fresh storage = a new device/browser profile) on `browser`, opened at `link`;
+   * or a new page in `opts.context` (e.g. a persistent profile).
+   */
+  static async open(browser: Browser | null, link: string, opts: { context?: BrowserContext } = {}): Promise<CandidatePage> {
+    const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, permissions: ['camera'] }));
     const page = await context.newPage();
     const c = new CandidatePage(context, page);
     c.attach(page);

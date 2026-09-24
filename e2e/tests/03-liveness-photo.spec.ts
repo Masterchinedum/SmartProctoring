@@ -145,3 +145,80 @@ test('active liveness: a turning head passes at check-in and at resume', async (
     await browser.close();
   }
 });
+
+/**
+ * Scenario 3c — a tampered client (script in the page's origin, same camera) submits the still photo for
+ * EVERY liveness step and claims the requested head pose. The server measures the pose itself (no
+ * nose-vs-eyes parallax in a flat photo) and must reject the attempt: never ready.
+ */
+test('active liveness: a tampered client sending the photo for every step is rejected by the server', async ({ staff }) => {
+  skipUnlessFixtures('a');
+  const s = await staff.createSession({ policy: { identity: { liveness: 'active', livenessSteps: 2, maxVerificationAttempts: 3 } } });
+  const browser = await launchCamera('a');
+  try {
+    const c = await CandidatePage.open(browser, s.link);
+    await c.consent(); // consent is recorded; the tampered script then drives the check API directly
+    const page = await c.context.newPage();
+    await page.goto('/mediapipe/vision_wasm_internal.js'); // any same-origin document (secure context)
+    const result = await page.evaluate(async (tok: string) => {
+      const inst = `tamper-${crypto.randomUUID()}`;
+      const H: Record<string, string> = { Authorization: `Bearer ${tok}`, 'X-Client-Instance': inst };
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+      const v = document.createElement('video');
+      v.muted = true;
+      v.srcObject = stream;
+      await v.play();
+      await new Promise((r) => setTimeout(r, 1000));
+      const cv = document.createElement('canvas');
+      cv.width = 640;
+      cv.height = 480;
+      const g = cv.getContext('2d')!;
+      const snap = () => {
+        g.drawImage(v, 0, 0, 640, 480);
+        return new Promise<Blob>((r) => cv.toBlob((b) => r(b!), 'image/jpeg', 0.85));
+      };
+      const start = await (
+        await fetch('/api/candidate/checks', {
+          method: 'POST',
+          headers: { ...H, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ purpose: 'initial', clientInstanceId: inst, device: { cameraLabel: 'Integrated Camera', cameraIdHash: '', userAgent: navigator.userAgent, screen: {} } }),
+        })
+      ).json();
+      const lie: Record<string, [number, number]> = { center: [0, 0], turn_left: [28, 0], turn_right: [-28, 0], look_up: [0, 18], look_down: [0, -18] };
+      const frames: { step: string; status: number; accepted?: boolean; stepSatisfied?: boolean }[] = [];
+      const send = async (step: number | 'frontal', action: string) => {
+        const [yaw, pitch] = lie[action] ?? [0, 0];
+        const q = new URLSearchParams({ step: String(step), capturedAt: String(Date.now()), nonce: start.liveness?.nonce ?? '', clientYaw: String(yaw), clientPitch: String(pitch) });
+        const res = await fetch(`/api/candidate/checks/${start.checkId}/frames?${q}`, { method: 'POST', headers: { ...H, 'Content-Type': 'image/jpeg' }, body: await snap() });
+        const b = await res.json();
+        frames.push({ step: String(step), status: res.status, accepted: b.accepted, stepSatisfied: b.stepSatisfied });
+        await new Promise((r) => setTimeout(r, 450));
+      };
+      for (let i = 0; i < start.frontalFramesRequired; i++) await send('frontal', 'center');
+      for (const st of start.liveness?.steps ?? []) {
+        await send(st.index, st.action);
+        await send(st.index, st.action);
+      }
+      const done = await (await fetch(`/api/candidate/checks/${start.checkId}/complete`, { method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, body: '{}' })).json();
+      stream.getTracks().forEach((t) => t.stop());
+      return { steps: start.liveness?.steps?.map((x: { action: string }) => x.action), frames, outcome: done.outcome, liveness: done.liveness, status: done.state?.session?.status };
+    }, s.token);
+    console.log(`tampered attempt: ${result.outcome}; liveness reasons: ${JSON.stringify(result.liveness?.reasons)}`);
+    expect(result.frames.filter((f) => f.step === 'frontal').every((f) => f.status === 200)).toBe(true);
+    // The turn steps were not satisfied: the server's own pose measurement shows no head turn.
+    expect(result.frames.filter((f) => f.step !== 'frontal' && f.step !== '0').some((f) => f.stepSatisfied)).toBe(false);
+    expect(result.outcome).toBe('retry');
+    expect(result.liveness?.passed).toBe(false);
+    expect(result.status).toBe('invited');
+
+    const d = await staff.session(s.sessionId);
+    expect(d.summary.status).toBe('invited');
+    expect(d.references).toHaveLength(0);
+    expect(d.identityChecks.filter((ch) => ch.trigger === 'check_in').map((ch) => ch.decision)).toEqual(['unable_to_verify']);
+    // The honest window was superseded by the tampered instance's check (it started a new one).
+    await c.page.reload();
+    await expect(c.tid('readiness-checklist')).toBeVisible({ timeout: 30_000 });
+  } finally {
+    await browser.close();
+  }
+});

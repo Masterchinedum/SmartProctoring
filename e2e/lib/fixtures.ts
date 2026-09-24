@@ -69,6 +69,8 @@ export const FIXTURE_SPECS = {
     { src: 'a-dim.jpg', seconds: 30 },
     { src: 'a.jpg', seconds: 90 },
   ],
+  /** A sitting elsewhere: smaller in the frame and further to the side (another seat / camera position). */
+  aMoved: [{ src: 'a.jpg', seconds: 30, scale: 0.72, shiftX: -90 }],
   /** A, the room is dark from 50 s to 90 s, then the light is back. */
   darkPeriod: [
     { src: 'a.jpg', seconds: 50 },

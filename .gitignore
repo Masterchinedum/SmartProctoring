@@ -14,3 +14,4 @@ playwright-report/
 eval-reports/local/
 *.tsbuildinfo
 .DS_Store
+dump.rdb

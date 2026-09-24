@@ -40,6 +40,12 @@ describe('scrypt parameters', () => {
     expect(passwordNeedsRehash(old)).toBe(true);
   });
 
+  it('runs many derivations through the two-slot limiter without stalling', async () => {
+    const hashes = await Promise.all(Array.from({ length: 7 }, (_, i) => hashPassword(`pw-${i}`, { N: 1 << 10, r: 8, p: 1 })));
+    expect(new Set(hashes).size).toBe(7);
+    expect(await Promise.all(hashes.map((h, i) => verifyPassword(`pw-${i}`, h)))).toEqual(Array(7).fill(true));
+  });
+
   it('refuses malformed or memory-exhausting stored parameters without deriving', async () => {
     const [, , , , salt, hash] = (await hashPassword('x')).split('$');
     for (const bad of [`scrypt$${1 << 21}$8$1$${salt}$${hash}`, `scrypt$${1 << 20}$8$1$${salt}$${hash}`, `scrypt$100000$8$1$${salt}$${hash}`, `scrypt$16384$64$1$${salt}$${hash}`, `scrypt$16384$8$0$${salt}$${hash}`, 'garbage', `bcrypt$1$2$3$${salt}$${hash}`]) {
