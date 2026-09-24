@@ -26,11 +26,19 @@ test('second window takes over; trace download; time expiry submits automaticall
     await expect(first.page.getByTestId('trace-tools')).toBeVisible();
     await first.page.waitForTimeout(4000);
     const [download] = await Promise.all([first.page.waitForEvent('download'), first.page.getByTestId('trace-download').click()]);
-    const lines = (await (await download.createReadStream()).toArray()).join('').trim().split('\n').map((l) => JSON.parse(l) as { kind: string; obs?: { faces: unknown[]; frame: unknown } });
-    expect(lines[0]).toMatchObject({ kind: 'meta', format: 'sp-trace/1' });
-    const obs = lines.filter((l) => l.kind === 'obs');
+    await download.saveAs(test.info().outputPath('trace.jsonl'));
+    const lines = (await (await download.createReadStream()).toArray())
+      .join('')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { $?: string; format?: string; camera?: string; faces?: unknown[]; frame?: unknown });
+    // Same format the detection evaluation harness replays (docs/accuracy/detection.md §7).
+    expect(lines[0]).toMatchObject({ $: 'meta', format: 'sp-trace/1' });
+    expect(lines.some((l) => l.$ === 'baseline')).toBe(true);
+    expect(lines.some((l) => l.$ === 'camera')).toBe(true);
+    const obs = lines.filter((l) => !l.$);
     expect(obs.length).toBeGreaterThan(5);
-    expect(obs.some((o) => (o.obs?.faces.length ?? 0) === 1 && o.obs?.frame)).toBe(true);
+    expect(obs.some((o) => o.camera === 'live' && (o.faces?.length ?? 0) === 1 && o.frame)).toBe(true);
 
     /* ---------------- second window takes over */
     const second = await openCandidate(browser, path);

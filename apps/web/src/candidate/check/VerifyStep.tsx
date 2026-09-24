@@ -465,7 +465,7 @@ export function VerifyStep({
           </div>
           {steps.length > 0 && (
             <ol className="cand-steps">
-              <li className={frontalCount >= (check?.frontalFramesRequired ?? 0) ? 'done' : phase === 'frontal' ? 'current' : ''}>Look straight at the screen</li>
+              <li className={frontalCount >= (check?.frontalFramesRequired ?? 0) ? 'done' : phase === 'frontal' ? 'current' : ''}>Pictures of your face for the identity check</li>
               {steps.map((s) => (
                 <li key={s.index} className={(run.current.perStep.get(s.index) ?? 0) >= FRAMES_PER_STEP ? 'done' : stepView?.index === s.index && phase === 'liveness' ? 'current' : ''}>
                   {s.instruction}

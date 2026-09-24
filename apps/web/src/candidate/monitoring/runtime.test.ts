@@ -53,15 +53,22 @@ describe('TraceRecorder', () => {
     expect(traceEnabled('')).toBe(false);
   });
 
-  it('exports bounded JSONL with a meta header', () => {
-    const t = new TraceRecorder({ instanceId: 'abc' }, 3);
-    for (let i = 0; i < 5; i++) t.observation({ t: i, camera: 'live', frame: null, faces: [], objects: null });
-    t.marker(10, 'monitoring_stop');
-    const lines = t.toJsonl().trim().split('\n').map((l) => JSON.parse(l));
-    expect(lines[0]).toMatchObject({ kind: 'meta', format: 'sp-trace/1', instanceId: 'abc', droppedLines: 3 });
-    expect(lines).toHaveLength(4);
-    expect(lines.slice(1).map((l) => l.kind)).toEqual(['obs', 'obs', 'marker']);
-    expect(t.observationCount).toBe(2);
+  it('exports bounded JSONL in the evaluation harness format', async () => {
+    const t = new TraceRecorder({ instanceId: 'abc' }, 4);
+    t.baseline({ yaw: 0, pitch: -5, cx: 0.5, cy: 0.45, faceWidth: 0.3, luma: 120, dhash: '0123456789abcdef', capturedAt: 1, samples: 12 });
+    t.camera(1, 'Integrated Camera', 'ab12');
+    for (let i = 0; i < 5; i++) t.observation({ t: 10 + i, camera: 'live', frame: null, faces: [], objects: null });
+    t.flush(20, 'pause');
+    const text = t.toJsonl();
+    const lines = text.trim().split('\n').map((l) => JSON.parse(l));
+    expect(lines[0]).toMatchObject({ $: 'meta', format: 'sp-trace/1', instanceId: 'abc', droppedLines: 4 });
+    expect(lines).toHaveLength(5);
+    expect(t.observationCount).toBe(3);
+    // The detection harness parses it unchanged.
+    const { parseTraceJsonl } = await import('../../../../../packages/detection/src/eval/runner');
+    const records = parseTraceJsonl(text);
+    expect(records.filter((r) => !('$' in r))).toHaveLength(3);
+    expect(records.at(-1)).toEqual({ $: 'flush', t: 20, reason: 'pause' });
   });
 });
 

@@ -202,8 +202,11 @@ export class MonitoringRuntime {
     this.running = true;
     const t = this.now();
     // Thresholds are relative to the candidate's normal position measured at this period's check.
-    if (this.deps.baseline) this.engine.setBaseline(this.deps.baseline);
-    this.deps.trace?.marker(t, 'monitoring_start', { baseline: this.deps.baseline ?? null });
+    if (this.deps.baseline) {
+      this.engine.setBaseline(this.deps.baseline);
+      this.deps.trace?.baseline(this.deps.baseline);
+    }
+    this.deps.trace?.marker(t, 'monitoring_start');
 
     // Environment comparison after resume (neutral context — never evidence of a person change).
     if (this.deps.previousBaseline && this.deps.baseline) {
@@ -254,7 +257,7 @@ export class MonitoringRuntime {
       this.metrics.reset();
       this.lastGray = null;
       const t = this.now();
-      this.deps.trace?.marker(t, 'camera', { label: s.info.label, deviceIdHash: s.info.deviceIdHash });
+      this.deps.trace?.camera(t, s.info.label, s.info.deviceIdHash);
       try {
         void this.handleOutput(this.engine.setCameraInfo({ label: s.info.label, deviceIdHash: s.info.deviceIdHash }, t));
       } catch (e) {
@@ -550,6 +553,7 @@ export class MonitoringRuntime {
     if (wasRunning) {
       const t = this.now();
       try {
+        this.deps.trace?.flush(t, toFlushReason(reason));
         const out = this.engine.flush(t, toFlushReason(reason));
         this.pushEpisodes(out.episodes ?? []);
         for (const s of out.signals ?? []) if (s.kind !== 'identity_sample') this.deps.onSignal?.(s);

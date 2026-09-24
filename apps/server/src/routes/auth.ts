@@ -2,7 +2,7 @@ import { loginRequestSchema } from '@sp/shared';
 import { eq, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { endStaffSession, getStaff, loadOrgName, requireStaff, revokeStaffSessions, startStaffSession } from '../auth/staff.js';
+import { endStaffSession, getStaff, loadOrgName, requireSameOrigin, requireStaff, revokeStaffSessions, startStaffSession } from '../auth/staff.js';
 import { staffUsers } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { dummyPasswordHash, hashPassword, verifyPassword } from '../lib/crypto.js';
@@ -44,7 +44,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     return { user: toStaffUserDTO(user), org: { id: user.orgId, name: await loadOrgName(ctx, user.orgId) } };
   });
 
-  app.post('/logout', async (req, reply) => {
+  // Same-origin only: a third-party page must not be able to sign staff out (CSRF).
+  app.post('/logout', { preHandler: requireSameOrigin }, async (req, reply) => {
     await endStaffSession(ctx, req, reply);
     return { ok: true };
   });

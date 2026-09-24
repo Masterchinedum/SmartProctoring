@@ -32,7 +32,7 @@ export function Modal({ title, children, onClose, labelledBy }: { title: string;
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     const el = ref.current;
-    const focusable = el?.querySelector<HTMLElement>('[data-autofocus], button, textarea, input, select, a[href]');
+    const focusable = el?.querySelector<HTMLElement>('[data-autofocus]') ?? el?.querySelector<HTMLElement>('button, textarea, input, select, a[href]');
     focusable?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && onClose) onClose();

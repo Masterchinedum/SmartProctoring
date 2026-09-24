@@ -15,8 +15,8 @@ import {
 } from '@sp/shared';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { candidateAuth, getCandidate, requireInstanceId } from '../../auth/candidate.js';
-import { isJpeg, sha256Hex } from '../../lib/crypto.js';
+import { bearerToken, candidateAuth, getCandidate, requireInstanceId } from '../../auth/candidate.js';
+import { isJpeg, jpegDimensions, sha256Hex } from '../../lib/crypto.js';
 import { HttpError } from '../../lib/errors.js';
 import {
   acceptConsent,
@@ -49,16 +49,30 @@ const evidenceQuerySchema = z.object({
   reason: z.string().max(40).optional(),
 });
 
+/**
+ * Candidate frames are at most 640x480 (web client); anything beyond 4K is refused before it is decoded, so a
+ * small progressive JPEG declaring tens of megapixels cannot tie up the vision pool (decompression bomb).
+ */
+export const CANDIDATE_JPEG_MAX_SIDE = 4096;
+export const CANDIDATE_JPEG_MAX_PIXELS = 3840 * 2160;
+
 function jpegBody(req: FastifyRequest): Buffer {
   const body = req.body;
   if (!Buffer.isBuffer(body) || !isJpeg(body)) throw new HttpError(415, 'invalid_image', 'Expected a JPEG image body (Content-Type: image/jpeg)');
+  const size = jpegDimensions(body);
+  if (size && (size.width > CANDIDATE_JPEG_MAX_SIDE || size.height > CANDIDATE_JPEG_MAX_SIDE || size.width * size.height > CANDIDATE_JPEG_MAX_PIXELS)) {
+    throw new HttpError(413, 'image_too_large', `Images larger than ${CANDIDATE_JPEG_MAX_SIDE} pixels per side are not accepted.`);
+  }
   return body;
 }
 
-/** Rate-limit key: the access token (hashed), falling back to the client IP. */
+/**
+ * Rate-limit key: the access token (normalised, hashed), falling back to the client IP. Keying on the parsed
+ * token rather than the raw header means `Bearer  <token>` / `bearer <token>` variants share one bucket.
+ */
 function tokenKey(req: FastifyRequest): string {
-  const h = req.headers.authorization;
-  return h ? `t:${sha256Hex(h).slice(0, 32)}` : `ip:${req.ip}`;
+  const token = bearerToken(req);
+  return token ? `t:${sha256Hex(token).slice(0, 32)}` : `ip:${req.ip}`;
 }
 
 const limit = (max: number) => ({ rateLimit: { max, timeWindow: '1 minute', keyGenerator: tokenKey } });

@@ -56,9 +56,32 @@ export function toIntegrationCandidateDTO(c: Candidate): IntegrationCandidateDTO
   return { id: c.id, name: c.name, email: c.email ?? null, externalId: c.externalId ?? null, createdAt: c.createdAt.getTime() };
 }
 
+const FACE_SCORE_KEY = /similarity/i;
+const FACE_SCORE_TEXT = / \((?:lowest |highest )?similarity -?\d+(?:\.\d+)?\)/gi;
+
+/**
+ * The integration API never carries face-similarity scores (docs/INTEGRATION_API.md): they are biometric
+ * measurements that stay behind staff sign-in. Every field named like `similarity` (session identity summary,
+ * ID-photo result, event details such as min/maxSimilarity) becomes null, and the "(similarity 0.31)" asides
+ * in report sentences are removed.
+ */
+export function withoutFaceScores<T>(value: T): T {
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') return v.replace(FACE_SCORE_TEXT, '');
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v)) out[k] = FACE_SCORE_KEY.test(k) ? null : walk(x);
+      return out;
+    }
+    return v;
+  };
+  return walk(value) as T;
+}
+
 export function toIntegrationEventDTO(e: EventDTO, publicUrl: string): IntegrationEventDTO {
   const { evidence, ...rest } = e;
-  return { ...rest, evidenceCount: evidence.length, staffUrl: `${sessionStaffUrl(publicUrl, e.sessionId)}?event=${e.id}` };
+  return withoutFaceScores({ ...rest, evidenceCount: evidence.length, staffUrl: `${sessionStaffUrl(publicUrl, e.sessionId)}?event=${e.id}` });
 }
 
 async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSummaryDTO[]): Promise<IntegrationSessionDTO[]> {
@@ -344,7 +367,7 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     const tz = resolveTimeZone((req.query as Record<string, unknown> | undefined)?.tz);
     const report = await buildSessionReport(ctx, id, key.orgId, { timeZone: tz });
     await apiAudit(ctx.db, key, ctx.now(), 'api.session.report_read', 'session', id);
-    return { ...report, notableEvents: report.notableEvents.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)), staffUrl: sessionStaffUrl(ctx.config.publicUrl, id) };
+    return withoutFaceScores({ ...report, notableEvents: report.notableEvents.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)), staffUrl: sessionStaffUrl(ctx.config.publicUrl, id) });
   });
 
   app.get('/sessions/:id/events', auth, async (req) => {

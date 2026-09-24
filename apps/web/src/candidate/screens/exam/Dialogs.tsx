@@ -101,7 +101,7 @@ export function PauseDialog({ state, onClose }: { state: CandidateSessionState; 
         </ul>
         <label>
           Reason {p.requireReason ? '(required)' : '(optional)'}
-          <textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} rows={3} data-testid="pause-reason" />
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} rows={3} data-testid="pause-reason" data-autofocus />
         </label>
         {error && (
           <div className="banner banner-danger" role="alert">
@@ -109,7 +109,7 @@ export function PauseDialog({ state, onClose }: { state: CandidateSessionState; 
           </div>
         )}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
-          <button className="btn" onClick={onClose} disabled={busy} data-autofocus>
+          <button className="btn" onClick={onClose} disabled={busy}>
             Continue exam
           </button>
           <button className="btn btn-primary" onClick={submit} disabled={busy} data-testid="pause-confirm">

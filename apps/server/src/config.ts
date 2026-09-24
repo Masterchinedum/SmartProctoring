@@ -22,6 +22,7 @@ export interface Config {
   /** Secret used to sign staff session cookies. */
   sessionSecret: string;
   cookieSecure: boolean;
+  /** Fastify trustProxy: false, true (every hop — spoofable), or the proxy's addresses / CIDRs. */
   trustProxy: boolean | string;
   storage:
     | { driver: 'fs'; dir: string }
@@ -179,9 +180,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const publicUrl = (env.PUBLIC_URL || (isProduction ? '' : 'http://localhost:5173')).replace(/\/+$/, '');
   if (!publicUrl) throw new Error('PUBLIC_URL is required in production (used to build candidate links).');
 
-  const trustProxyRaw = env.TRUST_PROXY;
+  // TRUST_PROXY: the reverse proxy's addresses / CIDRs / proxy-addr names ("loopback", "uniquelocal",
+  // "10.0.0.2,127.0.0.1"): the client address is the last X-Forwarded-For hop added by a trusted proxy. `true`
+  // trusts every hop, i.e. the LEFT-most entry, which the client writes itself unless the proxy overwrites the
+  // header — clients can then pick their own IP (per-IP login rate limit, audit log). Hop counts are not
+  // supported: Fastify >= 5.12 fails closed on them (nothing is trusted, every client gets the proxy's IP).
+  const trustProxyRaw = env.TRUST_PROXY?.trim();
   const trustProxy: boolean | string =
     trustProxyRaw == null || trustProxyRaw === '' ? false : ['true', '1', 'yes'].includes(trustProxyRaw.toLowerCase()) ? true : ['false', '0', 'no'].includes(trustProxyRaw.toLowerCase()) ? false : trustProxyRaw;
+  if (typeof trustProxy === 'string' && /^\d+$/.test(trustProxy)) {
+    throw new Error(`TRUST_PROXY=${trustProxy}: hop counts are not supported. Set the address(es) of your reverse proxy, e.g. TRUST_PROXY=127.0.0.1 or TRUST_PROXY=loopback,uniquelocal.`);
+  }
+  if (isProduction && trustProxy === true) {
+    warnings.push(
+      'TRUST_PROXY=true trusts every X-Forwarded-For entry, so clients can choose their own IP address (login rate limit, audit log) unless the proxy overwrites the header. Set TRUST_PROXY to the address(es) of your reverse proxy instead (e.g. 127.0.0.1 or loopback,uniquelocal).',
+    );
+  }
 
   const cookieSecure = bool(env.COOKIE_SECURE, isProduction);
   if (isProduction && !cookieSecure) warnings.push('COOKIE_SECURE=false in production: staff cookies will be sent over plain HTTP.');

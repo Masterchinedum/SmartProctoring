@@ -24,10 +24,12 @@ function make2d(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasR
 
 /** Reusable sampler producing a 160×120 grayscale frame from the video. */
 export class GraySampler {
-  private readonly c = make2d(ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
+  private c: ReturnType<typeof make2d> | undefined;
 
   sample(video: HTMLVideoElement): GrayFrame | null {
-    if (!this.c || video.readyState < 2 || !video.videoWidth) return null;
+    if (video.readyState < 2 || !video.videoWidth) return null;
+    if (this.c === undefined) this.c = make2d(ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
+    if (!this.c) return null;
     try {
       this.c.ctx.drawImage(video, 0, 0, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
       const img = this.c.ctx.getImageData(0, 0, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);

@@ -148,3 +148,34 @@ export function dummyPasswordHash(): Promise<string> {
 export function isJpeg(buf: Buffer | null | undefined): buf is Buffer {
   return !!buf && buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
 }
+
+/**
+ * Frame size declared by a JPEG's SOFn header(s), read without decoding (largest if several), or null when
+ * no frame header is found before the first scan. Walks the marker segments the way libjpeg does (garbage
+ * before a marker and 0xFF fill bytes are skipped), so an image the decoder would accept cannot hide its size.
+ * Used to refuse decompression bombs (a small file declaring a huge progressive image) before sharp sees them.
+ */
+export function jpegDimensions(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+  let best: { width: number; height: number } | null = null;
+  let i = 2;
+  while (i < buf.length) {
+    while (i < buf.length && buf[i] !== 0xff) i++;
+    while (i < buf.length && buf[i] === 0xff) i++;
+    if (i >= buf.length) break;
+    const marker = buf[i++];
+    if (marker === 0xd9 || marker === 0xda) break; // EOI / SOS: the frame header must come first
+    if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue; // no length field
+    if (i + 1 >= buf.length) break;
+    const len = (buf[i] << 8) | buf[i + 1];
+    if (len < 2) break;
+    const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isSof && i + 6 < buf.length) {
+      const height = (buf[i + 3] << 8) | buf[i + 4];
+      const width = (buf[i + 5] << 8) | buf[i + 6];
+      if (!best || width * height > best.width * best.height) best = { width, height };
+    }
+    i += len;
+  }
+  return best;
+}

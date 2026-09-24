@@ -78,7 +78,9 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
       currentQuestionIndex: s.currentQuestionIndex,
       pauseCount: s.pauseCount,
       requiredCheck: requiredCheckFor(s, instanceId),
-      verifiedInstanceId: s.verifiedInstanceId ?? null,
+      // Only ever echoed back to the verified instance itself: the id works as the in-control browser's credential
+      // (X-Client-Instance), so disclosing it to another holder of the link would let them skip the reconnect check.
+      verifiedInstanceId: instanceId && s.verifiedInstanceId === instanceId ? s.verifiedInstanceId : null,
       hold: toHoldDTO(s),
       pauseRequest,
     },

@@ -68,6 +68,34 @@ function allowedOrigins(ctx: Ctx, req: FastifyRequest): string[] {
   return out;
 }
 
+/**
+ * Does this cookie-authenticated request come from our own origin, as far as the browser tells? `Origin`
+ * decides when present; without it (older browsers, privacy tools that strip it) Fetch Metadata
+ * (`Sec-Fetch-Site`) and then `Referer` are consulted. A request carrying none of them comes from a
+ * non-browser client, which a third-party site cannot drive with the staff member's cookie.
+ */
+export function isSameOriginRequest(ctx: Ctx, req: FastifyRequest): boolean {
+  const allowed = allowedOrigins(ctx, req);
+  const origin = req.headers.origin;
+  if (origin) return allowed.includes(origin);
+  const site = req.headers['sec-fetch-site'];
+  if (typeof site === 'string' && site !== '' && site !== 'same-origin' && site !== 'none') return false;
+  const referer = req.headers.referer;
+  if (referer) {
+    try {
+      return allowed.includes(new URL(referer).origin);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** preHandler for cookie routes without a role check (e.g. logout): refuse cross-site requests. */
+export async function requireSameOrigin(req: FastifyRequest, _reply: FastifyReply): Promise<void> {
+  if (!isSameOriginRequest(req.server.ctx, req)) throw forbidden('Cross-origin request refused', 'bad_origin');
+}
+
 /** preHandler factory: require a logged-in staff user with at least `min` role. */
 export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHandler {
   return async function (this: unknown, req: FastifyRequest, _reply: FastifyReply) {
@@ -75,8 +103,7 @@ export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHa
     // CSRF / cross-site WebSocket defence in depth (cookie is SameSite=Lax): state-changing requests and
     // WebSocket upgrades must come from our own origin when the browser says where they come from.
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) || req.headers.upgrade?.toLowerCase() === 'websocket') {
-      const origin = req.headers.origin;
-      if (origin && !allowedOrigins(ctx, req).includes(origin)) throw forbidden('Cross-origin request refused', 'bad_origin');
+      if (!isSameOriginRequest(ctx, req)) throw forbidden('Cross-origin request refused', 'bad_origin');
     }
     const principal = req.staff ?? (await authenticateStaffToken(ctx, req.cookies?.[STAFF_COOKIE], (v) => req.unsignCookie(v), req.ip));
     if (!principal) throw unauthorized();

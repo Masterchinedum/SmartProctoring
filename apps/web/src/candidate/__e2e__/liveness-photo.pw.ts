@@ -98,7 +98,15 @@ test('active liveness: a still photo does not pass', async () => {
     const tamperPage = await c.context.newPage();
     await tamperPage.goto('/mediapipe/vision_wasm_internal.js'); // any same-origin document (secure context)
     const first = await tamperedCheck(tamperPage, token);
-    console.log('tampered attempt 1:', JSON.stringify({ outcome: first.outcome, liveness: first.liveness, frames: first.frames }, null, 1));
+    console.log(
+      'tampered attempt 1:',
+      JSON.stringify({
+        outcome: first.outcome,
+        reasons: first.liveness?.reasons,
+        steps: first.liveness?.steps.map((st) => `${st.action}:${st.passed ? 'ok' : 'fail'}(${st.measured ?? '-'})`),
+        stepFrames: first.frames.filter((f) => f.step !== 'frontal').map((f) => `${f.step}:${f.stepSatisfied ? 'ok' : 'no'}`),
+      }),
+    );
     expect(first.frames.filter((f) => f.step === 'frontal').every((f) => f.status === 200)).toBe(true);
     expect(first.outcome).not.toBe('passed');
     expect(first.liveness?.passed).toBe(false);
