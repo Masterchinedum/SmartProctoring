@@ -158,14 +158,19 @@ describe('verifyLiveness', () => {
     expect(r.passed).toBe(true);
   });
 
-  it('still fails with two faces in a frontal frame, and without any usable frontal frame', () => {
+  it('still fails with two faces in a frontal frame, and without any frontal face', () => {
     const two = passingFrames();
     two[1] = frontal(1500, { faces: 2, issues: ['multiple_faces'] });
     expect(verifyLiveness(SPEC, two).reasons).toContain(LIVENESS_REASONS.faceCount);
-    const none = passingFrames().map((fr) => (fr.step === 'frontal' ? frontal(fr.capturedAt - T0, { usable: false, issues: ['too_dark'] }) : fr));
+    const none = passingFrames().map((fr) => (fr.step === 'frontal' ? frontal(fr.capturedAt - T0, { person: null }) : fr));
     const r = verifyLiveness(SPEC, none);
     expect(r.passed).toBe(false);
     expect(r.reasons).toContain(LIVENESS_REASONS.noFrontal);
+  });
+
+  it('with no usable frontal frame at all (a dark room) the single-face ones are used: image quality, not a failed challenge', () => {
+    const dark = passingFrames().map((fr) => (fr.step === 'frontal' ? frontal(fr.capturedAt - T0, { usable: false, issues: ['too_dark'] }) : fr));
+    expect(verifyLiveness(SPEC, dark).passed).toBe(true);
   });
 
   it('a head-turn frame without a face still fails (the steps are verified on their own frames)', () => {

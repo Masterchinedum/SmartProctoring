@@ -413,7 +413,7 @@ describe('backlit / dim checks (image quality, not identity)', () => {
     // Attempt 2 a minute later: three usable frames of its own, each clearly the candidate but together not yet
     // decisive, + the two clear frames from attempt 1 => decided.
     env.clock.advance(60_000);
-    const MEDIUM = { person: 'alice', similarity: 0.44 };
+    const MEDIUM = { person: 'alice', similarity: 0.47 }; // each frame clearly the candidate (relaxed LLR ~ -3.7)
     const a2frames = Array.from({ length: 24 }, (_, i) => (i === 4 || i === 9 || i === 14 ? MEDIUM : REJECTED));
     const a2 = await runCheck(env, c, 'resume', { spec: MEDIUM, frontal: a2frames });
     expect(a2.complete!.outcome, JSON.stringify(a2.complete)).toBe('passed');
@@ -449,7 +449,7 @@ describe('backlit / dim checks (image quality, not identity)', () => {
     expect(photo.complete!.liveness!.passed).toBe(false);
     env.clock.advance(60_000);
     // Attempt 2: the live candidate, frames clear enough to allow pooling — but the photo attempt's frames are not used.
-    const a2 = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.44 } });
+    const a2 = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.47 } }); // passes the pooling gate on its own frames
     expect(a2.complete!.liveness!.passed).toBe(true);
     const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
     expect(row.context).toMatchObject({ evidence: { pooledFrames: 0, usableFrames: expect.any(Number) } });

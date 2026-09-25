@@ -146,7 +146,8 @@ inter-eye distance — a flat photo rotated in front of the camera does **not** 
 requires each step's direction/magnitude relative to the frontal frames, same identity across all
 frames (similarity ≥ match), non-identical frames, and completion inside the expiry window. Never more than one face
 in any frame and exactly one in every head-movement frame; the frontal frames (up to 24 in poor light) are judged on
-the usable ones only, so one dark or empty frontal frame does not fail the challenge.
+the usable ones, so one dark or empty frontal frame does not fail the challenge (with none usable, on the single-face
+ones as before, so a dark room ends on image quality rather than as a failed live-person check).
 
 ID photo (check-in): a score below the ID-photo mismatch threshold on poor-quality frames stays "inconclusive" (poor
 light is not "a different person") but is flagged `needsHumanReview`: an uncertain `identity_unverifiable`

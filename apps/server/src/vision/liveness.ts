@@ -244,18 +244,20 @@ export function verifyLiveness(
   if (frames.some((f) => !inWindow(f))) reasons.add(LIVENESS_REASONS.timeWindow);
 
   // Never more than one face, in any frame. Exactly one in every head-movement step frame. Frontal frames (up to 24
-  // in a dim or backlit room) are judged on the USABLE ones only — one face, quality gate passed, an embedding: a
-  // single dark or empty frontal frame must not fail the whole challenge; the steps are still verified on their own.
+  // in a dim or backlit room) are judged on the USABLE ones — one face, quality gate passed, an embedding: a single
+  // dark, blurred or empty frontal frame must not fail the whole challenge; the steps are still verified on their own.
+  // When no frontal frame is usable at all, the single-face ones are used as before: the attempt then ends on image
+  // quality (identity "unable to verify", lighting guidance), not as a failed live-person check.
   const isFrontalFrame = (f: LivenessFrame) => f.step === 'frontal' || f.action === 'center';
   if (frames.some((f) => severalFaces(f.analysis) || (!isFrontalFrame(f) && !singleFace(f.analysis)))) reasons.add(LIVENESS_REASONS.faceCount);
 
-  // Usable frontal frames define the candidate's own centre pose and identity.
+  // Frontal frames define the candidate's own centre pose and identity.
   const frontalSingle = frames.filter((f) => isFrontalFrame(f) && singleFace(f.analysis));
-  const frontal = frontalSingle.filter((f) => f.analysis.quality.usable && f.analysis.embedding != null);
+  const frontalUsable = frontalSingle.filter((f) => f.analysis.quality.usable && f.analysis.embedding != null);
+  const frontal = frontalUsable.length ? frontalUsable : frontalSingle;
   const frontalPoses = frontal.map((f) => f.analysis.pose!).filter((p) => poseWithinGate(p.yawDeg, p.pitchDeg, o.frontalPoseGate));
   if (frontal.length === 0) {
-    const turned = frontalSingle.length > 0 && !frontalSingle.some((f) => poseWithinGate(f.analysis.pose!.yawDeg, f.analysis.pose!.pitchDeg, o.frontalPoseGate));
-    reasons.add(turned ? LIVENESS_REASONS.frontalNotFrontal : LIVENESS_REASONS.noFrontal);
+    reasons.add(LIVENESS_REASONS.noFrontal);
   } else if (frontalPoses.length === 0) {
     reasons.add(LIVENESS_REASONS.frontalNotFrontal);
   }
