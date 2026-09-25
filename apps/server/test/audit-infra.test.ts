@@ -7,8 +7,8 @@
 import { randomUUID } from 'node:crypto';
 import { Writable } from 'node:stream';
 import type { EventUpsert, LiveMessage, SessionDetailDTO, SessionSummaryDTO } from '@sp/shared';
-import { and, eq } from 'drizzle-orm';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { and, eq, isNull } from 'drizzle-orm';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { events, evidence, identityChecks, sessionPeriods, staffUsers } from '../src/db/schema.js';
 import { appLoggerOptions, redactUrl } from '../src/lib/log-redact.js';
@@ -243,6 +243,15 @@ describe('P2-11: session notes are pushed in real time', () => {
 
 describe('P2-7: per-session storage caps', () => {
   let capEnv: TestEnv;
+  /** A passed check's frame images are purged after its response (afterCommit): wait for that before measuring usage. */
+  const checkImagesPurged = (sessionId: string) =>
+    vi.waitFor(async () => {
+      const left = await capEnv.ctx.db
+        .select({ id: evidence.id })
+        .from(evidence)
+        .where(and(eq(evidence.sessionId, sessionId), eq(evidence.kind, 'liveness_frame'), isNull(evidence.purgedAt)));
+      expect(left).toHaveLength(0);
+    });
   beforeAll(async () => {
     capEnv = await createTestEnv({ env: { SESSION_MAX_EVIDENCE_ITEMS: '20', SESSION_MAX_CHECKS_PER_HOUR: '3' } });
   });
@@ -252,6 +261,7 @@ describe('P2-7: per-session storage caps', () => {
     expect(capEnv.config.sessionLimits).toMatchObject({ maxEvidenceItems: 20, maxEvidenceBytes: 300 * 1024 * 1024, maxChecksPerHour: 3 });
     const s = capEnv.session;
     const c = await startedSession(capEnv, capEnv.candidateClient(s.token));
+    await checkImagesPurged(s.id);
     capEnv.clock.advance(10_000);
     let refused: { statusCode: number; json(): { error: string; message: string } } | null = null;
     for (let i = 0; i < 25 && !refused; i++) {
@@ -293,6 +303,7 @@ describe('P2-7: per-session storage caps', () => {
   it('caps the bytes stored per session', async () => {
     const s = await capEnv.newSession();
     const c = await startedSession(capEnv, capEnv.candidateClient(s.token));
+    await checkImagesPurged(s.id);
     const lim = capEnv.ctx.config.sessionLimits;
     const saved = lim.maxEvidenceBytes;
     try {

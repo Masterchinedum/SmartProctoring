@@ -63,7 +63,7 @@ samples below a fixed threshold. It sampled only every 30 s, and never specifica
 | Area | Change | Where |
 |---|---|---|
 | Capture | 1280×720 camera, native-resolution face crops (no downscaling of the face), bursts of 3 frames per sample | `apps/web/src/candidate/monitoring/{camera,frames,sampler}.ts` |
-| When samples are taken | Immediately at exam start and after every resume / reconnect, then every 6 s for 3 min, then every 15 s. Immediately when the face track breaks (face missing 0.25–3 s, box jump, brief second face) or the face's appearance changes abruptly. Faster when the server's evidence is inconclusive | `runtime.ts`, `packages/detection/src/engine/detectors/continuity.ts`, server `identitySample` requests |
+| When samples are taken | Immediately at exam start and after every resume / reconnect, then every 6 s for 3 min, then every 15 s (per-exam *Balanced* intensity: 2-frame routine samples every 12 s, then every 30 s). Immediately when the face track breaks (face missing 0.25–3 s, box jump, brief second face) or the face's appearance changes abruptly. Faster when the server's evidence is inconclusive | `runtime.ts`, `packages/detection/src/engine/detectors/continuity.ts`, server `identitySample` requests |
 | Quality gate | Refuses only where recognition breaks down; good / fair / poor buckets; low-light second detection pass; confident low-contrast faces usable in backlight | `vision/quality.ts`, `engine.ts` |
 | Recognition | Flip test-time augmentation for good/fair frames, denoised crop for poor frames; template-vs-gallery scoring | `vision/embed-prep.ts`, `identity.ts` |
 | Decision | Calibrated likelihood ratios per quality bucket and per reference quality (a dim-enrolled reference is judged against the candidate's own level in that room); per-session normalisation; sequential test with *suspect* (faster sampling, visible to staff) and *confirmed* (hold) levels; poor light capped below confirm | `vision/calibration.ts`, `services/identity-evidence.ts` |
@@ -160,11 +160,19 @@ shipped.
    - **Levers:**
      - accuracy-neutral: flip the packed detector tensor for the mirrored pass (−2…−6 % per frame);
        `VISION_THREADS=4` on a dedicated host (+23 % in isolation);
-     - policy trade-offs: `burstSize`, `startupIntervalSec`, `periodicCheckIntervalSec`.
-   - **Before sizing:**
-     - re-run `e2e/scripts/load-test.ts` on your hardware;
-     - re-run it again once the pending review fixes land (burst frames keep one image; no re-decryption of check
-       frames). Expect ≤ 10 % from those.
+     - **per exam, the *Balanced* sampling intensity** (Exams → Policy → "Sampling intensity"): 2-frame routine
+       samples every 12 s for 3 min, then every 30 s; trigger samples keep 3 frames.
+       - Capacity, measured (`PERFORMANCE.md` §7.7): plan ≈ 80 candidates per 4-vCPU instance at a synchronised
+         start (≈ 20 per vCPU, vs 45) and ≈ 280 in steady state (vs 110).
+       - Accuracy, e2e (`accuracy/end-to-end.md`): swaps are held as fast (12/12, median 4.9 s, max 10.9 s, vs
+         5.0 / 11.1 s); family members 6/6; no false alarm.
+       - Accuracy, simulator (`accuracy/identity-v2.md` §6.4): a swap with no trigger is confirmed ≈ 8 s later
+         at the median; other-day false alarms rise from 1.4 to 2.5 per 1,000 h.
+       - The default stays *Maximum accuracy*;
+     - other policy trade-offs: `burstSize`, `routineBurstSize`, `startupIntervalSec`, `periodicCheckIntervalSec`.
+   - **Before sizing:** re-run `e2e/scripts/load-test.ts` on your hardware (`PROFILE=balanced` for Balanced
+     exams). The review fixes (burst frames keep one image; no re-decryption of check frames) have landed. A
+     re-run at N=150 showed no measurable change.
 2. **Liveness scope.** The active challenge defeats photos and still images held to the camera and tampered clients that lie about head pose. It does not claim to defeat real-time deepfakes, 3-D masks or a live accomplice video feed; the virtual-camera and replay detectors reduce but do not eliminate substituted feeds.
 3. **Browsers.** Automated tests run on Chromium. Firefox/Safari support MediaPipe WASM but were not tested here.
 4. **Phone detection** is implemented (COCO "cell phone") but not validated with real phone footage (no licensed test media).
@@ -189,6 +197,6 @@ shipped.
 
 ## 5. Defaults decided on your behalf (all configurable)
 
-* Identity: label thresholds match ≥ 0.45, mismatch < 0.30 (ID photo 0.42 / 0.24). Decisions use the calibrated evidence (calibration `webcam-v2.1`, prior 0.1 % different person, suspect at LLR 3, confirmed at 7, cleared at −6, window of 8 samples, poor-light evidence capped at 4). Bursts of 3 frames: at exam start and resume, every 6 s for 3 min, then every 15 s. 5 attempts per check (quality-only failures count half).
+* Identity: label thresholds match ≥ 0.45, mismatch < 0.30 (ID photo 0.42 / 0.24). Decisions use the calibrated evidence (calibration `webcam-v2.1`, prior 0.1 % different person, suspect at LLR 3, confirmed at 7, cleared at −6, window of 8 samples, poor-light evidence capped at 4). Sampling intensity *Maximum accuracy*: bursts of 3 frames at exam start and resume, every 6 s for 3 min, then every 15 s. The per-exam alternative *Balanced* (admin policy editor, "Sampling intensity") takes routine samples of 2 frames every 12 s, then every 30 s; triggered samples keep 3 frames. 5 attempts per check (quality-only failures count half).
 * Policy defaults: liveness on (2 steps), pause allowed with clock stopped, mismatch ⇒ hold for review, fullscreen required, clipboard blocked, evidence retention 30 days, event metadata 365 days, abandoned sessions closed after 30 days.
 * Detection durations: absence 8 s, multiple people 1 s, look-away 5 s (28° yaw / 20° down), repeated look-away 5 in 120 s, obstruction 6 s, objects 2 s, frozen 6 s, covered 4 s, lighting 10 s.

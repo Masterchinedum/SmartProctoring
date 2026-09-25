@@ -62,7 +62,8 @@ export type SamplingProfile = 'maximum' | 'balanced' | 'custom';
  * "Sampling intensity" presets (Exams → Policy). Face analysis on the server scales with frames per second per
  * candidate (docs/PERFORMANCE.md §6–7):
  *  - maximum (default): 3-frame samples every 6 s for 3 min after a (re)start, then every 15 s — 0.5 then 0.2 frames/s;
- *  - balanced: 2-frame routine samples every 12 s, then every 30 s — 0.17 then 0.07 frames/s, about 3x the capacity.
+ *  - balanced: 2-frame routine samples every 12 s, then every 30 s — 0.17 then 0.07 frames/s: measured ~2x the
+ *    candidates per server at a synchronised start (check-ins are unchanged) and ~2.5x in steady state (§7.7).
  *    Swap detection relies more on the samples taken at once when the face changes (track break, face return, ...),
  *    which keep 3 frames, as do server requests and the exam-start sample.
  */

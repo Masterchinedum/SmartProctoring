@@ -52,16 +52,20 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
   - **Limit:** face analysis, which runs in worker threads: ≈ 35 frames/s per 4-vCPU instance, or ≈ 29 with real
     client face crops; each frame costs ≈ 85 ms of CPU.
   - **Demand:** a candidate sends a 3-frame identity burst every 6 s for the first 3 minutes after the exam starts
-    or resumes (0.5 frames/s), then every 15 s (0.2 frames/s).
+    or resumes (0.5 frames/s), then every 15 s (0.2 frames/s). Exams set to the *Balanced* sampling intensity
+    send 2-frame routine bursts every 12 s, then every 30 s (0.17, then 0.067 frames/s).
   - **Plan:**
     - **≈ 11 candidates per vCPU when everyone starts together**, as in a scheduled exam (≈ 45 per 4-vCPU
       instance);
     - ≈ 27 per vCPU in steady state (≈ 110 per instance);
+    - *Balanced* exams: ≈ 20 per vCPU at a synchronised start (≈ 80 per instance), ≈ 70 per vCPU in steady
+      state (≈ 280 per instance) (PERFORMANCE §7.7);
     - identity v1 carried ≈ 250 per vCPU.
   - **Unaffected:** heartbeats, answers and events stay fast even when analysis is saturated (heartbeat p95
     ≤ 28 ms at N=500).
 * **Start-up peak**: the start-up window, not the check-in (≈ 5.5 frames), is the burst. Each started candidate
-  adds 90 frames over its first 3 minutes, so one 4-vCPU instance absorbs only ≈ 14 new candidates per minute.
+  adds 90 frames over its first 3 minutes, so one 4-vCPU instance absorbs only ≈ 14 new candidates per minute
+  (≈ 34 on *Balanced*, 30 frames).
   Stagger start times to cut the peak: with starts spread over S minutes, the peak is ≈ (0.2 + 0.9 ÷ S)
   frames/s per candidate. Beyond capacity, identity bursts wait seconds, then answer 503 (retried by the
   client), and check-ins slow down. Check frames are analysed before routine identity samples.

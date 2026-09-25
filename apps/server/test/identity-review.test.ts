@@ -323,6 +323,11 @@ describe('resource limits', () => {
 
   it('vision priority comes from server state, not from the trigger the client chose', async () => {
     const { c } = await examWithStartSample();
+    // Start-up window, exam-start sample received: routine samples wait behind check-in frames.
+    env.clock.advance(6_000);
+    const k = env.vision.calls.length;
+    await sample(env, c, ALICE, 'periodic');
+    expect(env.vision.calls.slice(k).map((x) => x.opts.priority)).toEqual(['background']);
     env.clock.advance(200_000); // past the start-up window
     await sample(env, c, ALICE, 'periodic');
     env.clock.advance(15_000); // the evidence is consistent, nothing requested, nothing overdue

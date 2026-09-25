@@ -68,7 +68,7 @@ export const POLICY_GROUPS: PolicyGroup[] = [
           { value: 'balanced', label: 'Balanced' },
           { value: 'custom', label: 'Custom' },
         ],
-        help: 'Fills the sampling fields below. Balanced gives about 3× the capacity per server (routine samples half as often, with 2 frames instead of 3). Swap detection then relies more on the samples taken at once when the face changes (face returns, track interrupted, camera reconnects), which keep 3 frames.',
+        help: 'Fills the sampling fields below. Balanced serves about twice as many candidates per server when everyone starts together, and about 2.5× once the exam is under way: routine samples are taken half as often, with 2 frames instead of 3. A swap that happens without the face leaving view or changing abruptly is confirmed about 8 s later. A swap caught when the face returns, the track is interrupted or the camera reconnects is confirmed as fast, because those samples keep 3 frames.',
       },
       {
         path: 'identity.periodicCheckIntervalSec',

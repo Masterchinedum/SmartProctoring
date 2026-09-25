@@ -87,7 +87,8 @@ describe('evidence retention', () => {
   });
 
   it('purges a session after its exam’s evidence period: blobs deleted, tombstones, templates cleared, audited', async () => {
-    const before = await evidenceOf(ids.b);
+    // Images that still exist (a passed check's surplus frame images are purged when it passes, by design).
+    const before = (await evidenceOf(ids.b)).filter((e) => e.purgedAt == null);
     expect(before.length).toBeGreaterThan(2);
     const files = before.map((e) => env.storage.resolveKey(e.storageKey));
     expect(files.every((f) => existsSync(f))).toBe(true);
@@ -99,7 +100,7 @@ describe('evidence retention', () => {
     expect(s.sessions.map((x) => x.sessionId)).toEqual([ids.b]);
 
     expect(files.some((f) => existsSync(f))).toBe(false);
-    const after = await evidenceOf(ids.b);
+    const after = (await evidenceOf(ids.b)).filter((e) => before.some((b) => b.id === e.id));
     expect(after).toHaveLength(before.length); // tombstones remain
     expect(after.every((e) => e.purgedAt?.getTime() === env.clock.t && e.purgeReason === 'retention')).toBe(true);
     const refs = await env.ctx.db.select().from(identityReferences).where(eq(identityReferences.sessionId, ids.b));
@@ -119,7 +120,7 @@ describe('evidence retention', () => {
     expect(audits[0].meta).toMatchObject({ evidence: { itemsPurged: before.length }, eventMetadata: null });
 
     // Other sessions are untouched (default 30 days; active session never ended).
-    for (const id of [ids.a, ids.held, ids.active]) expect((await evidenceOf(id)).every((e) => e.purgedAt == null)).toBe(true);
+    for (const id of [ids.a, ids.held, ids.active]) expect((await evidenceOf(id)).every((e) => e.purgedAt == null || e.purgeReason === 'check_passed')).toBe(true);
 
     // Staff see a 410 for the image and a tombstone in the event; the report says so.
     const reviewer = await staffApi(env, 'reviewer');
@@ -141,11 +142,12 @@ describe('evidence retention', () => {
     const s = await runRetention(env.ctx);
     expect(s.sessions.map((x) => x.sessionId)).toEqual([ids.a]);
     expect(s.skippedLegalHold).toBe(1);
-    expect((await evidenceOf(ids.a)).every((e) => e.purgeReason === 'retention')).toBe(true);
-    const held = await evidenceOf(ids.held);
+    expect((await evidenceOf(ids.a)).every((e) => e.purgeReason === 'retention' || e.purgeReason === 'check_passed')).toBe(true);
+    const held = (await evidenceOf(ids.held)).filter((e) => e.purgeReason !== 'check_passed');
+    expect(held.length).toBeGreaterThan(0);
     expect(held.every((e) => e.purgedAt == null && existsSync(env.storage.resolveKey(e.storageKey)))).toBe(true);
     expect((await sessionRow(ids.held)).evidencePurgedAt).toBeNull();
-    expect((await evidenceOf(ids.active)).every((e) => e.purgedAt == null)).toBe(true);
+    expect((await evidenceOf(ids.active)).every((e) => e.purgedAt == null || e.purgeReason === 'check_passed')).toBe(true);
   });
 });
 

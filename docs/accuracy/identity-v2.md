@@ -365,6 +365,38 @@ session ever confirmed a swap. The data cannot, however, exclude that up to 3 in
 reality (95 % bound). If they did, the rate would be ≤ 4 per 1,000 candidate-hours. Establishing ≤ 1 per 1,000 h
 needs ≥ 3,000 real genuine sessions (§10).
 
+**Sampling intensity (Balanced, 2026-09-25).** The per-exam *Balanced* preset takes routine samples of 2 frames
+every 12 s for 3 min, then every 30 s. Samples at a trigger (exam start, resume, track break, face return, camera
+reconnect) and the server's faster follow-ups while the evidence is not `consistent` keep 3 frames. Simulated with
+the engine itself: `accumulate()`, `nextSampleDelayMs()` and the burst-size rule, one simulated hour per genuine
+run, 2-frame samples scored from the first 2 frames of each burst. Same data and noise model as above; 758
+same-session and 2,146 other-day genuine sessions (10 and 20 runs each); swaps start with an empty evidence window
+10 min into the exam.
+
+| sampling | frames per genuine hour (incl. follow-ups) | FA / 1000 h, same session | FA / 1000 h, other day (bad sessions) | swap without a trigger: confirmed ≤ 30 s (median / p90 of confirmed) | family member, no trigger | swap at a track break |
+|---|--:|--:|--:|---|---|---|
+| **Maximum accuracy** (default; 3 frames, 6 s → 15 s) | 874 | 0 | 1.4 (3 of 2,146) | 58.8 % (10.8 / 17.0 s) | 56.3 % (11.3 / 18.2 s) | median 2.5 s, p90 7.5 s |
+| **Balanced** (routine 2 frames, 12 s → 30 s) | 416 | 0 | 2.5 (5) | 52.4 % (18.6 / 30.9 s) | 49.8 % (19.4 / 31.7 s) | median 2.5 s, p90 7.5 s |
+| 3 frames, 12 s → 30 s | 523 | 0 | 1.4 (3) | 52.4 % (18.5 / 30.9 s) | 49.6 % (19.3 / 31.8 s) | median 2.5 s, p90 7.5 s |
+| 3 frames, 18 s → 45 s (same routine frame budget as Balanced) | 399 | 0 | 1.2 (2) | 35.0 % (26.3 / 44.6 s) | 33.2 % (27.5 / 45.3 s) | median 2.5 s, p90 7.5 s |
+
+- **Detection.** Within 2 minutes every setting confirms the same share: 60 % of all swaps and 58 % of family
+  swaps. The rest are mostly dim or backlit sessions, which stay *suspect* until a clear frame arrives. Balanced
+  only changes how soon a swap *without* a trigger is confirmed: about 8 s later at the median and 14 s later at
+  p90. A swap caught by a trigger is unaffected, because trigger samples keep 3 frames.
+- **False alarms.** Same-session false alarms stay at 0. Other-day false alarms rise from 1.4 to 2.5 per 1,000 h
+  (5 instead of 3 of 2,146 sessions). A 2-frame sample is noisier (poor-bucket sd 0.045 instead of
+  0.039). The earlier probes agree: with every sample at 2 frames, 2.9 vs 1.1 per 1,000 h on the other-day
+  sessions; 3.0 vs 0.75 after a resume with the per-period baseline.
+- **The alternative with the same frame budget,** 3 frames every 18 s → 45 s, has fewer false alarms (1.2) but
+  confirms a swap without a trigger about 8 s later again (median 27 s, p90 45 s). Balanced keeps the 2-frame
+  preset.
+- **Frames per hour.** Nominally, Balanced routine sampling is ⅓ of Maximum: 0.167 and 0.067 frames/s, against
+  0.5 and 0.2. The simulated genuine hour costs ½ (416 vs 874 frames) because of 3-frame follow-ups in
+  `monitoring` (the evidence sum, or one sample's LLR, above 1). The simulator draws its samples across scenes of
+  different light, so it probably overstates follow-ups. Neither the load test's photos (PERFORMANCE §7) nor the six
+  5-minute realistic genuine runs with Balanced (`end-to-end.md`) ever left `consistent`.
+
 ### 6.5 Reference-conditional and same-session evidence (v2.1)
 
 **The failure.** Realistic e2e (real browser and server, simulator video): candidate A enrolled in a dim room at

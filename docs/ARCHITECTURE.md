@@ -136,13 +136,16 @@ disconnect if `disconnectTimerBehavior='continue'`).
    multiple people / obstruction, follow-ups and server requests) takes `burstSize` (`burstSizeFor`). The per-exam
    *sampling intensity* (`samplingProfile`, a label the admin UI fills the numbers from; the numbers are the source of
    truth) is **Maximum accuracy** (default: 3 frames every 6 s for 180 s, then every 15 s — 0.5 then 0.2 frames/s)
-   or **Balanced** (2-frame routine samples every 12 s, then every 30 s — about 3× the capacity; swap detection
-   relies more on the triggered samples). `CandidateSessionState.session.identitySample` / `HeartbeatResponse.identitySample` ask for an
-   `exam_start` burst right after /start and after every passed resume / reconnect / reverify check, and — watchdog —
-   a `server_request` when no sample came for 3 expected intervals of the exam's policy (the client then takes the
-   burst even without a qualifying frame); still none after 6 intervals (≥ 1 min) with the browser connected ⇒ `identity_unverifiable`
-   (details.reason `no_samples`), closed by the next sample. Vision priority for samples comes from server state
-   (a pending request, evidence building up, the start-up window), not from the client's trigger label.
+   or **Balanced** (2-frame routine samples every 12 s, then every 30 s — 0.17 then 0.067 frames/s; measured ≈ 2× the
+   candidates per instance at a synchronised start and ≈ 2.5× in steady state, PERFORMANCE §7.7; a swap without a
+   trigger is confirmed ≈ 8 s later, one at a trigger as fast, accuracy/identity-v2.md §6.4).
+   `CandidateSessionState.session.identitySample` / `HeartbeatResponse.identitySample` ask for an `exam_start` burst
+   right after /start and after every passed resume / reconnect / reverify check, and — watchdog — a `server_request`
+   when no sample came for 3 expected intervals of the exam's policy (the client then takes the burst even without a
+   qualifying frame); still none after 6 intervals (≥ 1 min) with the browser connected ⇒ `identity_unverifiable`
+   (details.reason `no_samples`), closed by the next sample. Vision priority for samples comes from server state (a
+   pending request or follow-up, evidence building up, samples overdue), not from the client's trigger label; routine
+   samples, including those of the start-up window, queue behind check-in frames.
 6. **The reference is immutable.** It is never updated from later samples. Only staff can authorise a
    re-enrolment (`release` with `reEnroll=true`), which creates a new reference version, keeps the old
    one, and is audit-logged.

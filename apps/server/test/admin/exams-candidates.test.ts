@@ -256,7 +256,8 @@ describe('candidates', () => {
     expect((await admin.del(`/candidates/${cand.id}`)).json().error).toBe('candidate_under_legal_hold');
     json(await admin.post(`/sessions/${sid}/legal-hold`, { enabled: false }));
 
-    const ev = await env.ctx.db.select().from(evidence).where(eq(evidence.sessionId, sid));
+    // Images that still exist (a passed check's surplus frame images are purged when it passes, by design).
+    const ev = (await env.ctx.db.select().from(evidence).where(eq(evidence.sessionId, sid))).filter((e) => e.purgedAt == null);
     expect(ev.length).toBeGreaterThan(0);
     const files = ev.map((e) => env.storage.resolveKey(e.storageKey));
     expect(files.every((f) => existsSync(f))).toBe(true);
