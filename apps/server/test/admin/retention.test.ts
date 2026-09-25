@@ -5,7 +5,7 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import { existsSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { auditLog, checkFrames, events, evidence, examSessions, identityChecks, identityReferences, sessionPeriods } from '../../src/db/schema.js';
+import { auditLog, checkFrames, events, evidence, examSessions, identityChecks, identityReferences, identitySampleFrames, sessionPeriods } from '../../src/db/schema.js';
 import { DAY_MS, RETENTION_LOCK_KEY, runRetention, runRetentionExclusive, startRetentionScheduler } from '../../src/services/retention.js';
 import { startedSession } from '../flow.js';
 import { createTestEnv, type TestEnv } from '../helpers.js';
@@ -27,6 +27,38 @@ async function finishedSession(examId: string | undefined, name: string, submit 
   return { id: s.id, shot };
 }
 
+/** A decided identity-sample burst frame with face geometry and an (already cleared on decision in production) embedding. */
+async function addSampleFrame(sessionId: string) {
+  const at = new Date(env.clock.t - 30_000);
+  await env.ctx.db.insert(identitySampleFrames).values({
+    sessionId,
+    sampleId: `s-${sessionId.slice(0, 8)}`,
+    burstId: `b-${sessionId.slice(0, 8)}`,
+    burstIndex: 0,
+    burstSize: 3,
+    trigger: 'periodic',
+    capturedAt: at,
+    receivedAt: at,
+    analysis: {
+      faceCount: 1,
+      quality: { faceCount: 1, detectionScore: 0.9, interEyePx: 60, faceWidthRatio: 0.3, brightness: 120, contrast: 40, sharpness: 300, yawDeg: 0, pitchDeg: 0, cutOff: false, issues: [], usable: true },
+      pose: { yawDeg: 0, pitchDeg: 0, rollDeg: 0 },
+      dhash: '0000000000000000',
+      imageBrightness: 120,
+      width: 640,
+      height: 480,
+      box: { x: 200, y: 120, w: 200, h: 240 },
+      landmarks: [{ x: 250, y: 200 }, { x: 350, y: 200 }, { x: 300, y: 250 }, { x: 260, y: 300 }, { x: 340, y: 300 }],
+      score: 0.9,
+    },
+    similarity: 0.9,
+    decision: 'match',
+    llr: -4,
+    embeddingEnc: Buffer.from([1, 2, 3]),
+  });
+}
+const sampleFramesOf = (sessionId: string) => env.ctx.db.select().from(identitySampleFrames).where(eq(identitySampleFrames.sessionId, sessionId));
+
 const evidenceOf = (sessionId: string) => env.ctx.db.select().from(evidence).where(eq(evidence.sessionId, sessionId));
 const sessionRow = async (id: string) => (await env.ctx.db.select().from(examSessions).where(eq(examSessions.id, id)))[0];
 const purgeAudits = (sessionId: string) => env.ctx.db.select().from(auditLog).where(and(eq(auditLog.action, 'retention.purge'), eq(auditLog.targetId, sessionId)));
@@ -41,6 +73,7 @@ beforeAll(async () => {
   ids.held = (await finishedSession(undefined, 'Hana Hold')).id;
   ids.active = (await finishedSession(undefined, 'Ivan Active', false)).id;
   endedAt = env.clock.t;
+  for (const id of [ids.a, ids.b, ids.held]) await addSampleFrame(id);
   const admin = await staffApi(env, 'admin');
   json(await admin.post(`/sessions/${ids.held}/legal-hold`, { enabled: true }));
 });
@@ -74,6 +107,11 @@ describe('evidence retention', () => {
     const frames = await env.ctx.db.select().from(checkFrames).where(eq(checkFrames.sessionId, ids.b));
     expect(frames.length).toBeGreaterThan(0);
     expect(frames.every((f) => f.embeddingEnc === null && !('landmarks' in f.analysis) && !('box' in f.analysis))).toBe(true);
+    // Identity-sample burst frames lose embeddings and face geometry with the images; their metadata stays until phase 2.
+    const sf = await sampleFramesOf(ids.b);
+    expect(sf).toHaveLength(1);
+    expect(sf.every((f) => f.embeddingEnc === null && !('landmarks' in f.analysis) && !('box' in f.analysis) && f.similarity === 0.9)).toBe(true);
+    expect((await sampleFramesOf(ids.held))[0].analysis.landmarks).not.toBeNull();
     expect((await sessionRow(ids.b)).evidencePurgedAt?.getTime()).toBe(env.clock.t);
     const audits = await purgeAudits(ids.b);
     expect(audits).toHaveLength(1);
@@ -129,6 +167,7 @@ describe('event metadata retention', () => {
       expect(await env.ctx.db.select().from(events).where(eq(events.sessionId, id))).toHaveLength(0);
       expect(await env.ctx.db.select().from(identityChecks).where(eq(identityChecks.sessionId, id))).toHaveLength(0);
       expect(await env.ctx.db.select().from(checkFrames).where(eq(checkFrames.sessionId, id))).toHaveLength(0);
+      expect(await sampleFramesOf(id)).toHaveLength(0);
       expect(await evidenceOf(id)).toHaveLength(0);
       expect((await env.ctx.db.select().from(sessionPeriods).where(eq(sessionPeriods.sessionId, id))).length).toBeGreaterThan(0);
       expect((await sessionRow(id)).status).toBe('submitted');
@@ -138,6 +177,7 @@ describe('event metadata retention', () => {
     }
     // legal hold and the unfinished session keep everything
     expect((await env.ctx.db.select().from(events).where(eq(events.sessionId, ids.held))).length).toBeGreaterThan(0);
+    expect(await sampleFramesOf(ids.held)).toHaveLength(1);
     expect((await env.ctx.db.select().from(events).where(eq(events.sessionId, ids.active))).length).toBeGreaterThan(0);
     // the report still renders from what remains
     const reviewer = await staffApi(env, 'reviewer');

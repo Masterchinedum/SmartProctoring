@@ -4,11 +4,11 @@
  *  1. Evidence: for every ended session whose evidence retention has elapsed
  *     (exam policy `retention.evidenceDays`, else the organisation's `evidenceRetentionDays`) and that is
  *     not under legal hold, delete the evidence blobs (rows stay as tombstones with purgedAt/purgeReason),
- *     clear the encrypted reference embeddings and check-frame embeddings, strip facial landmarks from
- *     check-frame analyses, and set exam_sessions.evidence_purged_at.
+ *     clear the encrypted reference embeddings and check-frame / sample-frame embeddings, strip facial landmarks
+ *     from check-frame and sample-frame analyses, and set exam_sessions.evidence_purged_at.
  *  2. Event metadata: for ended sessions older than the organisation's `eventRetentionDays` (and not under
- *     legal hold, and already evidence-purged), delete events, identity checks, check frames and the
- *     evidence tombstones. The session record, periods, answers, score, notes and the audit log remain.
+ *     legal hold, and already evidence-purged), delete events, identity checks, check frames, identity-sample
+ *     burst frames and the evidence tombstones. The session record, periods, answers, score, notes and the audit log remain.
  *
  * One `retention.purge` audit entry is written per session and run in which something was deleted.
  * The job is idempotent: sessions already purged are skipped, and a failed blob deletion leaves the
@@ -20,7 +20,7 @@
 import { and, asc, eq, exists, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
-import { checkFrames, checks, events, evidence, examSessions, exams, identityChecks, organizations } from '../db/schema.js';
+import { checkFrames, checks, events, evidence, examSessions, exams, identityChecks, identitySampleFrames, organizations } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { purgeSessionEvidence } from './evidence.js';
 import { DEFAULT_ORG_SETTINGS, orgSettings } from './org.js';
@@ -48,7 +48,7 @@ export interface RetentionSessionResult {
   sessionId: string;
   orgId: string;
   evidencePurged: number | null;
-  eventMetadata: { events: number; identityChecks: number; checkFrames: number; evidenceRows: number } | null;
+  eventMetadata: { events: number; identityChecks: number; checkFrames: number; sampleFrames: number; evidenceRows: number } | null;
 }
 
 export interface RetentionSummary {
@@ -276,6 +276,10 @@ async function purgeSessionEvidenceNow(ctx: RetentionCtx, sessionId: string, now
       .update(checkFrames)
       .set({ analysis: sql`${checkFrames.analysis} - 'landmarks' - 'box'` })
       .where(eq(checkFrames.sessionId, sessionId));
+    await tx
+      .update(identitySampleFrames)
+      .set({ analysis: sql`${identitySampleFrames.analysis} - 'landmarks' - 'box'` })
+      .where(eq(identitySampleFrames.sessionId, sessionId));
     const [{ remaining }] = await tx
       .select({ remaining: sql<number>`count(*)::int` })
       .from(evidence)
@@ -286,13 +290,14 @@ async function purgeSessionEvidenceNow(ctx: RetentionCtx, sessionId: string, now
 }
 
 async function countEventMetadata(db: DbOrTx, sessionId: string) {
-  const [[e], [i], [f], [v]] = await Promise.all([
+  const [[e], [i], [f], [sf], [v]] = await Promise.all([
     db.select({ n: sql<number>`count(*)::int` }).from(events).where(eq(events.sessionId, sessionId)),
     db.select({ n: sql<number>`count(*)::int` }).from(identityChecks).where(eq(identityChecks.sessionId, sessionId)),
     db.select({ n: sql<number>`count(*)::int` }).from(checkFrames).where(eq(checkFrames.sessionId, sessionId)),
+    db.select({ n: sql<number>`count(*)::int` }).from(identitySampleFrames).where(eq(identitySampleFrames.sessionId, sessionId)),
     db.select({ n: sql<number>`count(*)::int` }).from(evidence).where(eq(evidence.sessionId, sessionId)),
   ]);
-  return { events: e.n, identityChecks: i.n, checkFrames: f.n, evidenceRows: v.n };
+  return { events: e.n, identityChecks: i.n, checkFrames: f.n, sampleFrames: sf.n, evidenceRows: v.n };
 }
 
 async function purgeEventMetadataNow(ctx: RetentionCtx, sessionId: string, now: number, eventDays: number) {
@@ -309,13 +314,14 @@ async function purgeEventMetadataNow(ctx: RetentionCtx, sessionId: string, now: 
     const ev = await tx.delete(events).where(eq(events.sessionId, sessionId)).returning({ id: events.id });
     const ic = await tx.delete(identityChecks).where(eq(identityChecks.sessionId, sessionId)).returning({ id: identityChecks.id });
     const cf = await tx.delete(checkFrames).where(eq(checkFrames.sessionId, sessionId)).returning({ id: checkFrames.id });
+    const sf = await tx.delete(identitySampleFrames).where(eq(identitySampleFrames.sessionId, sessionId)).returning({ id: identitySampleFrames.id });
     await tx.update(checks).set({ result: null }).where(eq(checks.sessionId, sessionId));
     const er = await tx
       .delete(evidence)
       .where(and(eq(evidence.sessionId, sessionId), isNotNull(evidence.purgedAt)))
       .returning({ id: evidence.id });
-    if (ev.length + ic.length + cf.length + er.length === 0) return null;
-    return { events: ev.length, identityChecks: ic.length, checkFrames: cf.length, evidenceRows: er.length };
+    if (ev.length + ic.length + cf.length + sf.length + er.length === 0) return null;
+    return { events: ev.length, identityChecks: ic.length, checkFrames: cf.length, sampleFrames: sf.length, evidenceRows: er.length };
   });
 }
 

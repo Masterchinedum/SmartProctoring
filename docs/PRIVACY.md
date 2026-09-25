@@ -24,9 +24,10 @@ advice — review it with counsel for your jurisdictions.
 | Candidate name, email, external id | Administrator | Postgres `candidates` | DB-level (use encrypted volumes) | Until the candidate is deleted |
 | Approved ID photo + its face template (optional) | Administrator upload | Evidence store + `candidates.id_photo_embedding` | Yes (AES-256-GCM) | Until removed by an administrator or the candidate is deleted |
 | Consent record (time, notice version) | Candidate | `exam_sessions` | — | With the session record |
-| Identity reference: 3–5 face templates (128 numbers each) + reference images | Check-in | `identity_references` + evidence store | Yes | Evidence retention period after the session ends |
+| Identity reference: up to 8 face templates (128 numbers each), their mean, the candidate's own similarity baseline (a few summary numbers) + reference images | Check-in | `identity_references` + evidence store | Yes | Evidence retention period after the session ends |
 | Liveness / check frames | Check-in, resume, reconnect | Evidence store | Yes | Evidence retention period |
 | Identity-sample probe images (only when not a clean match, unless configured) | During exam | Evidence store | Yes | Evidence retention period |
+| Identity-sample burst frames: per-frame face template while the burst (3 frames within ~1 s) is being decided, then per-frame metadata (similarity, quality measurements, face box / landmarks) | During exam | `identity_sample_frames` | Template: yes, cleared as soon as the burst is decided | Face box / landmarks: evidence retention period; the rest: event retention period |
 | Event screenshots (moment of observation) | During exam | Evidence store | Yes | Evidence retention period |
 | Copy of the approved ID photo attached to an ID-photo identity event (the exact photo compared, for review) | Check-in | Evidence store | Yes | Evidence retention period of that session (also after the photo on file is replaced or removed; kept under legal hold) |
 | Event metadata (type, times, confidence, measurements) | During exam | Postgres `events`, `identity_checks` | — | Event retention period (default 365 days) |
@@ -62,7 +63,9 @@ devices, clipboard contents, keystrokes, location.
   consistent.
 * **Legal hold**: an administrator can place a session under legal hold (e.g. an open appeal); its
   evidence is not purged until the hold is lifted. Holds are audit-logged.
-* **Event metadata** is deleted after `eventRetentionDays` (default 365).
+* **Event metadata** (events, identity checks, check frames, identity-sample burst frames, evidence tombstones) is
+  deleted after `eventRetentionDays` (default 365). Face boxes and landmarks stored with check frames and burst frames
+  are removed earlier, together with the evidence.
 * **Sessions that never end** (not started, paused or on hold and then forgotten) are closed automatically
   after `abandonAfterDays` without activity (default 30; status terminated, no score, answers kept), so the
   retention periods above start running.
