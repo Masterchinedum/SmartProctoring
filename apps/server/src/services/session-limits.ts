@@ -3,10 +3,14 @@
  *  - evidence items / bytes stored for one session (event screenshots, check frames, identity samples);
  *  - checks started per session per rolling hour.
  *
- * Event screenshots may use only EVENT_SCREENSHOT_SHARE of the evidence budget, so a client that floods
- * screenshots can never starve the identity-critical uploads (check frames, identity samples) of space.
- * Mid-exam identity samples are still analysed and decided when the budget is exhausted; only their images
- * are not stored (services/identity-samples.ts) — the identity check itself must never be skippable.
+ * The budget is shared in tiers, so the most important uploads always find room:
+ *  - event screenshots may fill only EVENT_SCREENSHOT_SHARE of it (a client that floods screenshots can never
+ *    starve the identity-critical uploads of space);
+ *  - mid-exam identity-sample images only IDENTITY_SAMPLE_SHARE: they are still analysed and decided when their
+ *    share is used up, only their images are not stored (services/identity-samples.ts);
+ *  - resume / reconnect / reverify check frames the whole budget: the rest (1 - IDENTITY_SAMPLE_SHARE) is always
+ *    headroom for them, so a long session that stored many samples can still complete the check a genuine
+ *    candidate needs to continue.
  */
 import { and, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
@@ -16,6 +20,11 @@ import { HttpError } from '../lib/errors.js';
 
 /** Fraction of the per-session evidence budget available to client event screenshots. */
 export const EVENT_SCREENSHOT_SHARE = 0.8;
+/**
+ * Fraction of the per-session evidence budget available to mid-exam identity-sample images (the remaining 10 % —
+ * 150 items / 30 MB by default, several complete checks — is reserved for check frames).
+ */
+export const IDENTITY_SAMPLE_SHARE = 0.9;
 
 export interface SessionEvidenceUsage {
   items: number;

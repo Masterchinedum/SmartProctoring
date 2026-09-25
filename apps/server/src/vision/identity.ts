@@ -7,7 +7,8 @@
  *   similarity <  mismatch threshold        => mismatch, if the frame is not in the 'poor' quality bucket and the
  *                                              calibrated evidence is strong (sampleLLR >= MISMATCH_MIN_LLR);
  *                                              otherwise inconclusive with lighting guidance (poor light alone is
- *                                              never "a different person", as in the evidence window)
+ *                                              never "a different person", as in the evidence window) — against the
+ *                                              ID photo flagged `needsHumanReview` (it is compared only once)
  *   otherwise                               => inconclusive
  *
  * Confidence (0..1) grows with the distance from the threshold that was crossed, saturating at
@@ -168,7 +169,11 @@ export function decideIdentity(
     // A low score on a poor-quality frame (dim room, backlight, small face) is weak evidence: say "mismatch" only
     // when the calibrated per-sample evidence is strong, otherwise "inconclusive" (with lighting guidance).
     if (bucket === 'poor' || llrOf() < MISMATCH_MIN_LLR) {
-      return { decision: 'inconclusive', similarity: sim, confidence: 0.5, guidance: advisoryGuidance(quality).concat(INCONCLUSIVE_GUIDANCE) };
+      const inconclusive: IdentityComparison = { decision: 'inconclusive', similarity: sim, confidence: 0.5, guidance: advisoryGuidance(quality).concat(INCONCLUSIVE_GUIDANCE) };
+      // The ID photo is compared once, at check-in, with no later samples to settle it: a score below the ID-photo
+      // mismatch threshold stays "inconclusive" (poor light is not "a different person"), but must be seen by a
+      // person — never silently passed (checks.ts applies the ID-photo policy).
+      return against === 'id_photo' ? { ...inconclusive, needsHumanReview: true } : inconclusive;
     }
     return { decision: 'mismatch', similarity: sim, confidence: round4(0.5 + 0.5 * clamp01((t.mismatch - sim) / CONFIDENCE_MARGIN)), guidance: [] };
   }

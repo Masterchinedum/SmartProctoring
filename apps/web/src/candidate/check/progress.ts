@@ -8,6 +8,7 @@
  *    (kept below the server's cap of 10 frontal frames per check);
  *  - no progress at all (no accepted frame, no liveness step advancing / getting closer) for `stallMs`.
  */
+import type { StartCheckResponse } from '@sp/shared';
 
 export interface CheckProgressOptions {
   maxFrontalRejections?: number;
@@ -77,4 +78,19 @@ export class CheckProgress {
   stalled(now: number): boolean {
     return now - this.lastProgressAt >= this.stallMs;
   }
+}
+
+/**
+ * "Attempts remaining after this one": an attempt that fails only because the pictures were unclear (poor light,
+ * blur) counts as half an attempt, so it may leave one more try than an ordinary failure (older server: no split).
+ */
+export function attemptsAfterText(check: Pick<StartCheckResponse, 'attemptsRemaining' | 'attemptsAfter'>): string {
+  const failed = check.attemptsAfter?.failed ?? Math.max(0, check.attemptsRemaining - 1);
+  const unclear = check.attemptsAfter?.unclear ?? failed;
+  if (unclear > failed) {
+    return failed === 0
+      ? 'This is your last attempt — unless the pictures are too unclear to compare (for example too dark); then you can try once more.'
+      : `Attempts remaining after this one: ${failed} (${unclear} if the pictures are only too unclear to compare, for example too dark).`;
+  }
+  return `Attempts remaining after this one: ${failed}`;
 }

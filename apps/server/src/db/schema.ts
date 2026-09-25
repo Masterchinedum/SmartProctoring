@@ -262,10 +262,20 @@ export interface IdentityEngineState {
   secondOpinionPending: { checkId: string; since: number } | null;
   secondOpinionVeto: { checkId: string; until: number } | null;
   /**
-   * Per-session normalisation of mid-exam samples: 'continuous' while the conditions are those of the enrolment;
-   * 'relaxed' after a resume / reconnect / reverify check (another day, room or camera is possible).
+   * Per-session normalisation of mid-exam samples: 'continuous' while the conditions are those of the enrolment, or
+   * of the period's own baseline (`periodBaseline`); 'relaxed' after a resume / reconnect / reverify check that left
+   * too few usable frames to measure one (another day, room or camera is possible).
    */
   normalisation: 'continuous' | 'relaxed';
+  /**
+   * The current active period began with a passed resume / reconnect / reverify check: the genuine similarity of that
+   * check's usable frames to the reference (mean / sd / n; `bucket` = the reference's bucket, as in the enrolment
+   * baseline). Mid-exam samples of the period are normalised 'continuous' against it instead of the enrolment
+   * baseline. null / absent: the enrolment baseline.
+   */
+  periodBaseline?: (SessionBaseline & { checkId?: string; at?: number }) | null;
+  /** Open identity_unverifiable observation (details.reason 'no_samples'): server requests for a sample went unanswered. */
+  openNoSamplesEventId?: string | null;
 }
 
 /** A burst of identity frames being collected (IdentitySampleQuery burstId / burstIndex / burstSize). */

@@ -195,6 +195,11 @@ export interface StartCheckResponse {
   /** null when liveness policy is 'off'. */
   liveness: LivenessChallengeDTO | null;
   attemptsRemaining: number;
+  /**
+   * Attempts left if THIS attempt does not pass: `failed` after an ordinary failure, `unclear` when it fails only
+   * because the pictures were not clear enough to compare (poor light, blur, distance — counted as half an attempt).
+   */
+  attemptsAfter?: { failed: number; unclear: number };
   /** Frames needed for the identity portion (frontal) — the minimum; see CheckFrameResponse.progress. */
   frontalFramesRequired: number;
   /** Upper bound of frontal frames the server accepts for this check (adaptive collection). */
@@ -220,13 +225,16 @@ export interface CheckFrameResponse {
   progress?: CheckProgressDTO;
 }
 
+/**
+ * Candidate-facing: how the collection is going, never the running identity assessment (a live verdict would let a
+ * candidate abandon a check that is going badly, or tune what they show the camera). Staff see the assessment with
+ * the identity check.
+ */
 export interface CheckProgressDTO {
   /** Usable frontal frames received so far. */
   frontalAccepted: number;
   /** More usable frontal frames wanted before the server can decide (0 = enough). */
   frontalNeeded: number;
-  /** Resume / reconnect / reverify: running identity assessment against the protected reference. */
-  identity: 'pending' | 'likely_match' | 'likely_mismatch' | 'uncertain' | null;
   /** Liveness step status (index as in the challenge). */
   steps: { index: number; satisfied: boolean }[];
   /** The client may call /complete now (enough evidence either way, or limits reached). */
@@ -363,21 +371,36 @@ export const identitySampleQuerySchema = z.object({
   burstIndex: z.coerce.number().int().min(0).max(4).optional(),
   burstSize: z.coerce.number().int().min(1).max(5).optional(),
 });
+/**
+ * Candidate-facing answer to an identity sample. It carries no identity verdict, score or evidence state — only
+ * whether the image could be used and guidance about the image — so the candidate cannot watch (or probe) the
+ * comparison. Staff see the decision with the identity check.
+ */
 export interface IdentitySampleResponse {
-  /** Decision for this request: per-frame for intermediate burst frames, aggregated on the burst's last frame. */
-  result: IdentityResultDTO;
-  /** Server wants another sample soon (to confirm a non-match). */
+  /** Receipt for this request (per frame for intermediate burst frames, the burst on its last frame). */
+  result: IdentitySampleReceiptDTO;
+  /** The server wants the next sample sooner than the routine interval (cadence hint; no reason is given). */
   followUpInMs: number | null;
   status: SessionStatus;
   hold: HoldDTO | null;
   /** Burst bookkeeping (present when the request carried burstId). */
   burst?: { id: string; received: number; size: number; complete: boolean };
-  /** Server-driven cadence: when set, send the next routine sample after this many ms (faster while uncertain). */
+  /** Server-driven cadence: when set, send the next routine sample after this many ms. */
   nextSampleInMs?: number | null;
-  /** Accumulated identity-continuity evidence for the session (for the candidate debug overlay / staff). */
-  evidence?: IdentityEvidenceDTO;
 }
 
+export interface IdentitySampleReceiptDTO {
+  /** Identity check id (a decided sample / burst) or burst-frame id (an intermediate frame). */
+  id: string;
+  trigger: IdentityCheckTrigger;
+  at: number;
+  /** The image showed a face clearly enough to compare. Says nothing about whose face it is. */
+  usable: boolean;
+  /** Guidance about the image (framing, lighting) when it could not be used or the light is too poor; else empty. */
+  guidance: string[];
+}
+
+/** Accumulated identity-continuity evidence (staff tooling: the camera self-test page). Never sent to candidates. */
 export interface IdentityEvidenceDTO {
   /** Posterior probability that the person in view is NOT the enrolled candidate, 0..1. */
   swapProbability: number;

@@ -23,7 +23,7 @@ import { badRequest, conflict, invalidState, notFound, validationFailed } from '
 import { assertInControl, buildCandidateState, instanceInControl, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { recordMultipleInstances } from './checks.js';
 import { applyInstanceUsage, evaluateInstanceUsage } from './instance-usage.js';
-import { identitySampleRequest } from './identity-evidence.js';
+import { identitySampleRequest, sampleWatchdog } from './identity-evidence.js';
 import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
 import { assertStatus, finalizeSession, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession } from './session-state.js';
 import { clockExpired } from '@sp/shared';
@@ -201,6 +201,8 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
   if (s.activeInstanceId && s.activeInstanceId !== instanceId) return null; // superseded window
   const inControl = instanceInControl(s, instanceId) && !TERMINAL.includes(s.status);
   if (inControl && (s.reportingEventId || (s.status === 'active' && !s.runningSince))) return null;
+  // Identity samples overdue long enough for an observation: the locked path records it.
+  if (inControl && noSamplesObservationDue(s, (loaded.policy ?? DEFAULT_POLICY).identity, body, now)) return null;
   if ((s.status === 'active' || s.status === 'paused') && clockExpired(sessionClock(s), now)) return null;
   const usage = client ? evaluateInstanceUsage(s, instanceId, { ...client, seq: body.seq, at: now, refresh: true }) : null;
   if (usage?.signal) return null;
@@ -232,8 +234,43 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
     timerRunning: s.runningSince != null,
     requiredCheck: requiredCheckFor(s, instanceId),
     commands: [],
-    identitySample: inControl ? identitySampleRequest(s.status, s.identityState, (loaded.policy ?? DEFAULT_POLICY).identity.burstSize, now) : null,
+    identitySample: inControl ? identitySampleRequest(s.status, s.identityState, (loaded.policy ?? DEFAULT_POLICY).identity.burstSize, now, (loaded.policy ?? DEFAULT_POLICY).identity) : null,
   };
+}
+
+/**
+ * The session is active and connected (this heartbeat), yet no identity sample arrived although the server has been
+ * asking (identity-evidence.ts sampleWatchdog 'unanswered') and nothing explains it (no reporting outage, the outbox
+ * is not holding a backlog), and no such observation is open yet.
+ */
+function noSamplesObservationDue(s: ExamSession, policy: ProctoringPolicy['identity'], body: HeartbeatRequest, now: number): boolean {
+  if (s.status !== 'active' || s.reportingEventId || reportingInterruptedSince(body, s, now)) return false;
+  const st = identityState(s);
+  return !st.openNoSamplesEventId && sampleWatchdog(policy, st, now) === 'unanswered';
+}
+
+/** Open the 'no_samples' observation (uncertain, never evidence of a different person); closed by the next sample. */
+async function recordNoSamples(m: SessionMutation, policy: ProctoringPolicy['identity'], body: HeartbeatRequest): Promise<void> {
+  const st = identityState(m.session);
+  const last = st.evidence.lastSampleAt ?? st.activeSince ?? m.now;
+  const ev = await m.addEvent({
+    type: 'identity_unverifiable',
+    source: 'server_identity',
+    open: true,
+    startedAt: last,
+    confidence: null,
+    observation:
+      'No identity images arrived from the candidate’s browser for a while although the exam was running and the browser was connected; the server’s requests for one went unanswered. The identity could not be checked in this time. This is not evidence of a different person.',
+    details: {
+      reason: 'no_samples',
+      lastSampleAt: st.evidence.lastSampleAt,
+      activeSince: st.activeSince,
+      expectedIntervalSec: policy.periodicCheckIntervalSec,
+      cameraState: body.monitoring?.cameraState ?? null,
+      facesInView: body.monitoring?.faces ?? null,
+    },
+  });
+  m.setIdentityState({ ...identityState(m.session), openNoSamplesEventId: ev.id });
 }
 
 export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string, body: HeartbeatRequest, client?: HeartbeatClient, loaded?: LoadedSession): Promise<HeartbeatResponse> {
@@ -299,6 +336,8 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
     if ((s.status === 'active' || s.status === 'paused') && clockExpired(sessionClock(s), now)) await finalizeSession(m, 'time_expired');
     await deliver(false);
     const inControl = instanceInControl(m.session, instanceId) && !TERMINAL.includes(m.session.status);
+    const policy = await m.policy();
+    if (inControl && noSamplesObservationDue(m.session, policy.identity, body, now)) await recordNoSamples(m, policy.identity, body);
     return {
       serverTime: now,
       status: m.session.status,
@@ -306,7 +345,7 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
       timerRunning: m.session.runningSince != null,
       requiredCheck: requiredCheckFor(m.session, instanceId),
       commands,
-      identitySample: inControl ? identitySampleRequest(m.session.status, m.session.identityState, (await m.policy()).identity.burstSize, now) : null,
+      identitySample: inControl ? identitySampleRequest(m.session.status, m.session.identityState, policy.identity.burstSize, now, policy.identity) : null,
     };
   });
 }

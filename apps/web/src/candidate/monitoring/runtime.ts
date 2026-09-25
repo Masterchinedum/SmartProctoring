@@ -28,7 +28,7 @@ import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
 import { AnalysisFrame, captureFaceCrop, captureJpeg, GraySampler, HeldFrame, sameFrame } from './frames';
-import { BurstSampler, burstEligible, SUSPECT_INTERVAL_MS, type BurstResult } from './sampler';
+import { BurstSampler, burstEligible, type BurstResult } from './sampler';
 import type { TraceRecorder } from './trace';
 import { loadVision, type Vision } from './vision';
 
@@ -422,8 +422,10 @@ export class MonitoringRuntime {
 
   private offerBurstFrame(source: HTMLVideoElement | HTMLCanvasElement, faces: FaceObservation[], t: number): void {
     const one = burstEligible(faces);
-    if (!this.bursts.wantsFrame(!!one && this.deps.camera.isVideoReady())) return;
-    const crop = captureFaceCrop(source, one!.box).then((c) => c?.blob ?? null);
+    const ready = this.deps.camera.isVideoReady();
+    // A server request that found no qualifying frame for a while is taken from whatever the camera shows.
+    if (!this.bursts.wantsFrame(!!one && ready, ready)) return;
+    const crop = captureFaceCrop(source, one?.box ?? null).then((c) => c?.blob ?? null);
     void this.bursts.addFrame(crop, t);
   }
 
@@ -506,16 +508,17 @@ export class MonitoringRuntime {
       return;
     }
     if (!final) return;
+    // The server tells the candidate only whether the image could be used (and guidance about it), never a verdict.
     const r = res.result;
-    if (r?.decision === 'unable_to_verify' && r.guidance?.length) {
-      // Non-blocking guidance: the image was not usable for a dependable comparison.
+    if (r && r.guidance?.length) {
+      // Non-blocking guidance: the image was not usable, or the light is too poor for a dependable comparison.
       this.deps.onSignal?.({
         kind: 'candidate_prompt',
         key: 'identity_guidance',
         severity: 'info',
-        message: `We couldn’t confirm your identity from the camera image. ${r.guidance.join(' ')}`,
+        message: r.usable ? r.guidance.join(' ') : `We couldn’t confirm your identity from the camera image. ${r.guidance.join(' ')}`,
       });
-    } else if (r?.decision === 'match') {
+    } else if (r?.usable) {
       this.deps.onSignal?.({ kind: 'candidate_prompt_clear', key: 'identity_guidance' });
     }
     if (!this.running) return;
@@ -679,18 +682,16 @@ export function stripDescriptors(obs: FrameObservation): FrameObservation {
 
 /**
  * Cadence after the final answer of a burst (identity engine v2): the next routine burst after
- * `nextSampleInMs`, labelled 'server_request' while the server wants a faster look (a follow-up was asked for,
- * or the evidence is 'monitoring' / 'suspect'), else 'periodic'. Without nextSampleInMs: 3 s while suspect, else
- * the policy interval. An older server (no nextSampleInMs field at all) gets its follow-up sample as before.
+ * `nextSampleInMs`, labelled 'server_request' while the server wants a faster look (it sent followUpInMs — the
+ * only hint it gives; the candidate is never told why), else 'periodic'. Without nextSampleInMs: the follow-up
+ * delay, else the policy interval. An older server (no nextSampleInMs field at all) gets its follow-up sample as
+ * before.
  */
 export function routineCadence(res: IdentitySampleResponse): { inMs: number | null; label: 'periodic' | 'server_request'; followUpInMs: number | null } {
-  const state = res.evidence?.state;
-  const v2 = res.nextSampleInMs !== undefined || res.evidence !== undefined || res.burst !== undefined;
-  const label: 'periodic' | 'server_request' = v2 && (res.followUpInMs != null || state === 'suspect' || state === 'monitoring' || state === 'confirmed_mismatch') ? 'server_request' : 'periodic';
-  const suspect = state === 'suspect' || state === 'confirmed_mismatch';
+  const v2 = res.nextSampleInMs !== undefined || res.burst !== undefined;
+  const label: 'periodic' | 'server_request' = v2 && res.followUpInMs != null ? 'server_request' : 'periodic';
   let inMs: number | null = null;
   if (res.nextSampleInMs != null && Number.isFinite(res.nextSampleInMs)) inMs = Math.max(0, res.nextSampleInMs);
   else if (v2 && res.followUpInMs != null) inMs = Math.max(0, res.followUpInMs);
-  else if (suspect) inMs = SUSPECT_INTERVAL_MS;
   return { inMs, label, followUpInMs: !v2 && res.followUpInMs != null ? res.followUpInMs : null };
 }

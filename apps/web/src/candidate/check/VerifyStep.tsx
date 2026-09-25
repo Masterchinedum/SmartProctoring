@@ -7,7 +7,7 @@ import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
 import { captureFaceCrop } from '../monitoring/frames';
 import { AdaptiveCheck } from './adaptive';
 import { PoseSmoother } from './poseFilter';
-import { CheckProgress } from './progress';
+import { attemptsAfterText, CheckProgress } from './progress';
 import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrameAnalysis';
 
 /**
@@ -647,7 +647,7 @@ export function VerifyStep({
           </div>
           {(phase === 'starting' || phase === 'completing' || vs.loading) && <Spinner label={phase === 'completing' ? 'Verifying…' : 'Please wait…'} />}
           {noVision && <p className="muted small">Automatic guidance is unavailable in this browser; follow the instructions and the pictures are checked on the server.</p>}
-          {check && <p className="muted small">Attempts remaining after this one: {Math.max(0, check.attemptsRemaining - 1)}</p>}
+          {check && <p className="muted small">{attemptsAfterText(check)}</p>}
         </div>
       </div>
     </div>

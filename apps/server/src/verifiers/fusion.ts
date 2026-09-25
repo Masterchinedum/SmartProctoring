@@ -29,6 +29,11 @@
  *   * only with resolveInconclusive (default true); otherwise inconclusive (no review flag).
  *   borderline: match with similarity < match + margin; mismatch with similarity ≥ mismatch − margin.
  *   A decision without a similarity counts as clear.
+ *   A decision made on accumulated calibrated evidence (`InternalOpinion.evidence`: the identity engine's SPRT over
+ *   mid-exam samples, or the evidence of a resume check's frames) takes its strength from that evidence instead of the
+ *   raw similarity: evidence that reached its decision threshold is CLEAR (a confirmed_mismatch is never overruled by
+ *   an external "same person"), evidence that did not is borderline. A look-alike scoring 0.35–0.45 is exactly the
+ *   case where the raw similarity looks borderline although the accumulated evidence is decisive.
  */
 import type { IdentityDecision } from '@sp/shared';
 import type { ExternalOpinion } from './types.js';
@@ -67,6 +72,11 @@ export interface InternalOpinion {
   decision: IdentityDecision;
   /** Internal similarity (cosine, max over the reference), null when not computed. */
   similarity: number | null;
+  /**
+   * The accumulated calibrated evidence the decision was made on (log-likelihood ratio, > 0 = a different person) and
+   * whether it reached its decision threshold. When present, it — not the similarity — sets the internal strength.
+   */
+  evidence?: { llr: number; decisive: boolean } | null;
 }
 
 export type InternalStrength = 'clear' | 'borderline' | 'grey' | 'unusable';
@@ -119,6 +129,7 @@ const EPS = 1e-9;
 export function internalStrength(internal: InternalOpinion, policy: FusionPolicy): InternalStrength {
   const s = internal.similarity;
   const m = policy.borderlineMargin;
+  if (internal.evidence && (internal.decision === 'match' || internal.decision === 'mismatch')) return internal.evidence.decisive ? 'clear' : 'borderline';
   switch (internal.decision) {
     case 'match':
       return s != null && s < policy.internal.match + m - EPS ? 'borderline' : 'clear';
@@ -152,8 +163,9 @@ const fmt = (v: number) => v.toFixed(2);
 
 function internalText(internal: InternalOpinion, strength: InternalStrength, policy: FusionPolicy): string {
   const sim = internal.similarity != null ? ` (similarity ${fmt(internal.similarity)}; match ≥ ${fmt(policy.internal.match)}, mismatch < ${fmt(policy.internal.mismatch)})` : '';
-  const border = strength === 'borderline' ? ', close to the threshold' : '';
-  return `SmartProctoring: ${DECISION_TEXT[internal.decision]}${border}${sim}.`;
+  const ev = internal.evidence ? ` on accumulated evidence (log-likelihood ratio ${fmt(internal.evidence.llr)}${internal.evidence.decisive ? ', decisive' : ', not decisive'})` : '';
+  const border = strength === 'borderline' ? (internal.evidence ? ', not yet decisive' : ', close to the threshold') : '';
+  return `SmartProctoring: ${DECISION_TEXT[internal.decision]}${border}${ev}${sim}.`;
 }
 
 function externalText(external: ExternalOpinion | null, band: ExternalBand, policy: FusionPolicy): string {
@@ -240,7 +252,7 @@ export function fuseWithExternal(internal: InternalOpinion, external: ExternalOp
     externalBand: band,
     explanation,
     record: {
-      internal: { decision: internal.decision, similarity: internal.similarity },
+      internal: { decision: internal.decision, similarity: internal.similarity, ...(internal.evidence ? { evidence: internal.evidence } : {}) },
       external: external
         ? external.status === 'ok'
           ? { provider: external.provider, status: 'ok', similarity: external.similarity, faceFound: external.faceFound, faceCount: external.faceCount, error: null, latencyMs: external.latencyMs }

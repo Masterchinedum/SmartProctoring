@@ -4,8 +4,10 @@
  *    (startedAt = last heartbeat) and, if policy.connection.disconnectTimerBehavior = 'stop', the clock stops
  *    at the last heartbeat;
  *  - clock expiry        => auto-submit (session_expired + session_submitted, endReason time_expired);
- *  - stale checks        => expired;
- *  - identity bursts whose remaining frames never arrived => decided on the frames received (identity-samples.ts).
+ *  - stale checks        => judged on the frames they received (a check trending to a different person counts as a
+ *                           failed attempt), otherwise expired;
+ *  - identity bursts whose remaining frames never arrived => decided on the frames received (identity-samples.ts);
+ *    embeddings of burst frames that will never be decided (any session) => erased.
  * Runs via JobRunner (one instance at a time, pg advisory lock); each session change runs under its row lock.
  */
 import { clockExpired } from '@sp/shared';
@@ -14,7 +16,8 @@ import type { Ctx } from '../context.js';
 import type { JobDefinition } from './runner.js';
 import { checks, examSessions } from '../db/schema.js';
 import { sessionClock } from '../services/dto.js';
-import { decideStaleBurstsForAll } from '../services/identity-samples.js';
+import { settleAbandonedChecks } from '../services/checks.js';
+import { decideStaleBurstsForAll, eraseOrphanFrameEmbeddingsForAll } from '../services/identity-samples.js';
 import { finalizeSession, withSession } from '../services/session-state.js';
 
 const MIN_HEARTBEAT_TIMEOUT_MS = 10_000;
@@ -83,17 +86,34 @@ export async function sweepOnce(ctx: Ctx): Promise<{ timedOut: number; expired: 
     }
   }
 
-  // 3. Stale checks.
-  const ex = await ctx.db
-    .update(checks)
-    .set({ status: 'expired', completedAt: new Date(now) })
+  // 3. Stale checks: judged on the frames they received (services/checks.ts settleAbandonedChecks — a check trending
+  // towards a different person counts as a failed attempt), otherwise expired.
+  const staleChecks = await ctx.db
+    .select({ id: checks.id, sessionId: checks.sessionId })
+    .from(checks)
     .where(and(eq(checks.status, 'open'), lt(checks.expiresAt, new Date(now - 10_000))))
-    .returning({ id: checks.id });
+    .limit(BATCH);
+  const bySession = new Map<string, string[]>();
+  for (const c of staleChecks) bySession.set(c.sessionId, [...(bySession.get(c.sessionId) ?? []), c.id]);
+  let checksExpired = 0;
+  for (const [sessionId, ids] of bySession) {
+    try {
+      checksExpired += await settleAbandonedChecks(ctx, sessionId, 'expired', ids);
+    } catch (err) {
+      ctx.log.error({ err, sessionId }, 'sweeper: expiring checks failed');
+    }
+  }
 
-  // 4. Identity bursts whose remaining frames never arrived are decided on the frames received.
+  // 4. Identity bursts whose remaining frames never arrived are decided on the frames received; frame embeddings of
+  // bursts that will never be decided (any session) are erased.
   const burstsDecided = await decideStaleBurstsForAll(ctx);
+  try {
+    await eraseOrphanFrameEmbeddingsForAll(ctx);
+  } catch (err) {
+    ctx.log.error({ err }, 'sweeper: erasing orphan burst-frame embeddings failed');
+  }
 
-  return { timedOut, expired, checksExpired: ex.length, burstsDecided };
+  return { timedOut, expired, checksExpired, burstsDecided };
 }
 
 /** The sweeper as a JobRunner job (registered by app.ts). */

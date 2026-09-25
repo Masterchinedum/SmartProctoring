@@ -1,5 +1,5 @@
 import { plausibleFaces } from '@sp/detection';
-import type { FaceObservation, IdentityCheckTrigger, IdentityEvidenceDTO, IdentitySampleRequestDTO, IdentitySampleResponse, NormBox } from '@sp/shared';
+import type { FaceObservation, IdentityCheckTrigger, IdentitySampleRequestDTO, IdentitySampleResponse, NormBox } from '@sp/shared';
 
 /**
  * Identity-sample bursts (policy.identity.burstSize distinct camera frames ~200 ms apart, decided together by
@@ -12,9 +12,13 @@ import type { FaceObservation, IdentityCheckTrigger, IdentityEvidenceDTO, Identi
  *            frame, crop the face at native resolution ─► burstSize frames (or what was collected within
  *            2.5 s) ─► sent concurrently as separate requests sharing burstId (burstIndex / burstSize).
  *
+ * A request from the SERVER (heartbeat / state identitySample: exam start, a faster look, or its watchdog when
+ * samples stopped arriving) is honoured even when no frame qualifies: after SERVER_REQUEST_FORCE_MS the burst is
+ * taken from whatever the camera shows (no face, several faces, a covered face — the server records what it sees).
+ *
  * Every frame of a burst is a different camera frame (the runtime only analyses new frames). The server's
- * answer to the last frame carries the burst decision, the next routine sample time (nextSampleInMs) and the
- * accumulated evidence; intermediate answers only matter when they put the exam on hold.
+ * answer to the last frame carries the burst's receipt and the next routine sample time (nextSampleInMs);
+ * intermediate answers only matter when they put the exam on hold.
  *
  * A request budget keeps the page under the server's per-link rate limit (identity/sample: 240 per minute):
  * a burst starts only when all its frames fit in the last minute's budget.
@@ -48,12 +52,20 @@ const PERSISTENT: ReadonlySet<IdentityCheckTrigger> = new Set(['follow_up', 'exa
  * expire because the situation they describe has passed.
  */
 export class SampleTriggerQueue {
-  private pending: { trigger: IdentityCheckTrigger; at: number } | null = null;
+  private pending: { trigger: IdentityCheckTrigger; at: number; server: boolean } | null = null;
 
   constructor(private readonly maxAgeMs = 20_000) {}
 
-  push(trigger: IdentityCheckTrigger, now: number): void {
-    if (!this.pending || SAMPLE_PRIORITY[trigger] > SAMPLE_PRIORITY[this.pending.trigger]) this.pending = { trigger, at: now };
+  /** `server`: the server asked for this sample (it is then taken even without a qualifying frame, see wantsFrame). */
+  push(trigger: IdentityCheckTrigger, now: number, server = false): void {
+    if (!this.pending || SAMPLE_PRIORITY[trigger] > SAMPLE_PRIORITY[this.pending.trigger]) this.pending = { trigger, at: now, server };
+    else if (server && !this.pending.server) this.pending = { ...this.pending, server: true, at: Math.min(this.pending.at, now) };
+  }
+
+  /** How long a server-requested sample has been waiting (null: nothing waiting, or not requested by the server). */
+  serverWaitMs(now: number): number | null {
+    const p = this.peek(now) ? this.pending : null;
+    return p?.server ? now - p.at : null;
   }
 
   /** The waiting trigger without removing it (null if none / expired). */
@@ -147,8 +159,11 @@ export interface SamplerDeps {
 export const BURST_MIN_SPACING_MS = 150;
 /** A burst sends what it has after this long (the face may have left); nothing at all → the trigger waits again. */
 export const BURST_TIMEOUT_MS = 2500;
-/** Faster routine sampling while the server's evidence is 'suspect' and it did not say when. */
-export const SUSPECT_INTERVAL_MS = 3000;
+/**
+ * A server-requested sample waits this long for a frame with exactly one usable face; then it is taken from whatever
+ * the camera shows (the server's watchdog asks when samples stopped arriving — e.g. the face is hidden).
+ */
+export const SERVER_REQUEST_FORCE_MS = 3000;
 
 interface ActiveBurst {
   id: string;
@@ -157,6 +172,8 @@ interface ActiveBurst {
   lastFrameAt: number;
   frames: BurstFrame[];
   pendingCaptures: number;
+  /** A server request taken without a qualifying frame: any capturable frame is used. */
+  forced: boolean;
 }
 
 export class BurstSampler {
@@ -168,7 +185,6 @@ export class BurstSampler {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private stopped = false;
   last: BurstResult | null = null;
-  lastEvidence: IdentityEvidenceDTO | null = null;
 
   constructor(
     private readonly deps: SamplerDeps,
@@ -194,7 +210,7 @@ export class BurstSampler {
     if (this.stopped) return;
     if (trigger === 'exam_start' && (this.examStartTaken || this.burst?.trigger === 'exam_start' || this.queue.peek(this.deps.mono()) === 'exam_start')) return;
     this.deps.onTrigger?.({ at: this.deps.now(), trigger, source });
-    this.queue.push(trigger, this.deps.mono());
+    this.queue.push(trigger, this.deps.mono(), source === 'server');
   }
 
   /** A server request (CandidateSessionState.session.identitySample / HeartbeatResponse.identitySample). */
@@ -220,18 +236,22 @@ export class BurstSampler {
   /**
    * Called by the runtime for every analysed frame. Returns true when the runtime should capture this frame
    * for the current burst (call `addFrame`), false otherwise. Starts a burst when a trigger waits and the
-   * budget allows; finishes a burst on size or timeout.
+   * budget allows; finishes a burst on size or timeout. `eligible`: the frame shows exactly one usable face;
+   * `capturable`: the camera can be captured at all (a server request waiting SERVER_REQUEST_FORCE_MS takes such
+   * frames too).
    */
-  wantsFrame(eligible: boolean): boolean {
+  wantsFrame(eligible: boolean, capturable: boolean = eligible): boolean {
     if (this.stopped || this.sending) return false;
     const m = this.deps.mono();
     if (!this.burst) {
-      if (!eligible) return false; // start only on a usable frame (the trigger keeps waiting)
       const trigger = this.queue.peek(m);
       if (!trigger) return false;
+      // Start only on a usable frame (the trigger keeps waiting) — unless the server asked and has waited long enough.
+      const forced = !eligible && capturable && (this.queue.serverWaitMs(m) ?? -1) >= SERVER_REQUEST_FORCE_MS;
+      if (!eligible && !forced) return false;
       if (this.budget.available(m) < this.size) return false;
       this.queue.take(m);
-      this.burst = { id: this.deps.uuid(), trigger, startedAt: m, lastFrameAt: -Infinity, frames: [], pendingCaptures: 0 };
+      this.burst = { id: this.deps.uuid(), trigger, startedAt: m, lastFrameAt: -Infinity, frames: [], pendingCaptures: 0, forced };
       if (trigger === 'exam_start') this.examStartTaken = true;
       this.deps.onBurstStart?.(trigger);
     }
@@ -240,7 +260,7 @@ export class BurstSampler {
       void this.finish();
       return false;
     }
-    if (!eligible || b.frames.length + b.pendingCaptures >= this.size) return false;
+    if (!(eligible || (b.forced && capturable)) || b.frames.length + b.pendingCaptures >= this.size) return false;
     return m - b.lastFrameAt >= BURST_MIN_SPACING_MS;
   }
 
@@ -325,7 +345,6 @@ export class BurstSampler {
     }
     if (held) return;
     const final = last as IdentitySampleResponse | null;
-    if (final?.evidence) this.lastEvidence = final.evidence;
     this.last = { burstId: b.id, trigger: b.trigger, frames: size, response: final, at: this.deps.now() };
     this.deps.onBurstDone?.(this.last);
   }

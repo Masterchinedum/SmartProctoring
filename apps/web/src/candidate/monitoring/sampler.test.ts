@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IdentityCheckTrigger, IdentitySampleResponse } from '@sp/shared';
-import { BURST_TIMEOUT_MS, BurstSampler, burstEligible, RequestBudget, type BurstFrame, type SamplerDeps } from './sampler';
+import { BURST_TIMEOUT_MS, BurstSampler, burstEligible, RequestBudget, SERVER_REQUEST_FORCE_MS, type BurstFrame, type SamplerDeps } from './sampler';
 
 type Q = { trigger: IdentityCheckTrigger; capturedAt?: number; burstId?: string; burstIndex?: number; burstSize?: number };
 
 function response(over: Partial<IdentitySampleResponse> = {}): IdentitySampleResponse {
   return {
-    result: { id: 'r', trigger: 'periodic', decision: 'match', similarity: 0.7, confidence: 0.9, quality: null, guidance: [], at: 1 },
+    result: { id: 'r', trigger: 'periodic', usable: true, guidance: [], at: 1 },
     followUpInMs: null,
     status: 'active',
     hold: null,
@@ -41,10 +41,10 @@ function setup(over: Partial<SamplerDeps> = {}, budget?: RequestBudget) {
   const s = new BurstSampler(deps, budget);
   const blob = () => Promise.resolve(new Blob([new Uint8Array([0xff, 0xd8, n])], { type: 'image/jpeg' }));
   /** One analysed frame at +ms: offer it and add it when wanted. */
-  const frame = async (advanceMs: number, eligible = true) => {
+  const frame = async (advanceMs: number, eligible = true, capturable = eligible) => {
     mono += advanceMs;
     s.tick();
-    if (s.wantsFrame(eligible)) await s.addFrame(blob(), deps.now());
+    if (s.wantsFrame(eligible, capturable)) await s.addFrame(blob(), deps.now());
   };
   return { s, deps, sent, failed, responses, done, frame, advance: (ms: number) => (mono += ms) };
 }
@@ -83,6 +83,31 @@ describe('BurstSampler', () => {
     await t.frame(BURST_TIMEOUT_MS, false);
     expect(t.sent).toHaveLength(1);
     expect(t.sent[0].q).toMatchObject({ burstIndex: 0, burstSize: 1 });
+  });
+
+  it('a SERVER request is honoured without a qualifying frame once it waited SERVER_REQUEST_FORCE_MS', async () => {
+    const t = setup();
+    t.s.serverRequest({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    await t.frame(0, false, true); // no usable face (hidden / several faces): keeps waiting for a while
+    await t.frame(SERVER_REQUEST_FORCE_MS / 2, false, true);
+    expect(t.s.busy).toBe(false);
+    await t.frame(SERVER_REQUEST_FORCE_MS, false, true); // waited long enough: taken from whatever the camera shows
+    await t.frame(200, false, true);
+    await t.frame(200, false, true);
+    expect(t.sent.map((x) => x.q.trigger)).toEqual(['server_request', 'server_request', 'server_request']);
+  });
+
+  it('an engine / routine request still waits for a qualifying frame; nothing is taken from a camera that cannot be captured', async () => {
+    const t = setup();
+    t.s.request('periodic');
+    await t.frame(0, false, true);
+    await t.frame(SERVER_REQUEST_FORCE_MS * 2, false, true);
+    expect(t.s.busy).toBe(false);
+    const t2 = setup();
+    t2.s.serverRequest({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    await t2.frame(SERVER_REQUEST_FORCE_MS * 2, false, false);
+    expect(t2.s.busy).toBe(false);
+    expect(t2.s.pendingTrigger()).toBe('server_request');
   });
 
   it('when no frame could be captured the trigger waits for the next opportunity', async () => {
@@ -186,12 +211,11 @@ describe('BurstSampler', () => {
     const burst = (received: number, complete: boolean) => ({ id: 'id-1', received, size: 3, complete });
     resolvers[2](response({ burst: burst(1, false) }));
     resolvers[0](response({ burst: burst(2, false) }));
-    resolvers[1](response({ burst: burst(3, true), nextSampleInMs: 2500, evidence: { state: 'suspect', swapProbability: 0.7, samples: 3 } }));
+    resolvers[1](response({ burst: burst(3, true), nextSampleInMs: 2500 }));
     await sending;
     expect(t.done).toHaveLength(1);
     expect(t.responses.map((r) => r.final)).toEqual([false, false, true]);
     expect(t.s.last?.response?.nextSampleInMs).toBe(2500);
-    expect(t.s.lastEvidence?.state).toBe('suspect');
   });
 
   it('dropPending forgets a waiting routine sample (the server rescheduled it)', () => {

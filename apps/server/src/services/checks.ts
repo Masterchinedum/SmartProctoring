@@ -27,7 +27,7 @@ import {
   type StartCheckRequest,
   type StartCheckResponse,
 } from '@sp/shared';
-import { and, asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
 import {
@@ -63,6 +63,7 @@ import {
   INCONCLUSIVE_GUIDANCE,
   LIVENESS_DEFAULTS,
   NO_EMBEDDING_GUIDANCE,
+  qualityBucket,
   qualityScore,
   serializeEmbeddings,
   templateFrom,
@@ -72,7 +73,7 @@ import {
   type LivenessChallengeSpec,
   type LivenessFrame,
 } from '../vision/index.js';
-import { assessCheck, CHECK_EVIDENCE, POOR_LIGHT_GUIDANCE, sampleLabel, type CheckAssessment } from './identity-evidence.js';
+import { assessCheck, CHECK_EVIDENCE, CLEAR_MATCH_LLR, periodBaseline, POOR_LIGHT_GUIDANCE, sampleLabel, type CheckAssessment } from './identity-evidence.js';
 import { secondOpinion, secondOpinionDetails, type SecondOpinionRecord } from './identity-external.js';
 import { buildGallery, ENROL_TARGET_FRAMES, identityFrameIndexes, probeEvidence, scoreReference, type GalleryResult, type ProbeEvidence } from './identity-gallery.js';
 import { buildCandidateState, SUPERSEDED_MESSAGE } from './candidate-state.js';
@@ -176,6 +177,9 @@ const remaining = (max: number, used: number) => Math.max(0, Math.ceil(max - use
 
 export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string, body: StartCheckRequest): Promise<StartCheckResponse> {
   if (body.clientInstanceId !== instanceId) throw badRequest('clientInstanceId does not match the X-Client-Instance header', undefined, 'instance_mismatch');
+  // A check still open is superseded by this one: judged on the frames it received (never free when it was going
+  // towards "different person"). Its own transaction: it may put the session on hold.
+  await settleAbandonedChecks(ctx, sessionId, 'superseded');
   return withSession(ctx, sessionId, async (m) => {
     const s = m.session;
     const required = requiredCheckFor(s, instanceId);
@@ -267,6 +271,7 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
         ? { challengeId: spec.challengeId, nonce, steps: spec.steps, expiresAt, targetYawDeg: spec.targetYawDeg, targetPitchDeg: spec.targetPitchDeg }
         : null,
       attemptsRemaining: remaining(max, failed),
+      attemptsAfter: { failed: remaining(max, failed + 1), unclear: remaining(max, failed + QUALITY_RETRY_WEIGHT) },
       frontalFramesRequired: frontalFramesRequired(required, required === 'initial' || reEnrollmentApplies(s, required)),
       maxFrontalFrames: MAX_FRONTAL_FRAMES_EXTENDED,
     };
@@ -323,7 +328,7 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
   const now = ctx.now();
   if (check.status !== 'open') throw conflict('check_closed', 'This check is no longer open. Start a new check.');
   if (now > check.expiresAt.getTime()) {
-    await ctx.db.update(checks).set({ status: 'expired', completedAt: new Date(now) }).where(and(eq(checks.id, check.id), eq(checks.status, 'open')));
+    await settleAbandonedChecks(ctx, sessionId, 'expired', [check.id]);
     throw gone('check_expired', 'The check expired. Please start it again.');
   }
   const spec = check.liveness;
@@ -342,53 +347,66 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
     step = String(idx);
     action = st.action;
   }
-  const counts = await ctx.db
-    .select({ step: checkFrames.step, n: sql<number>`count(*)::int` })
-    .from(checkFrames)
-    .where(eq(checkFrames.checkId, check.id))
-    .groupBy(checkFrames.step);
-  const total = counts.reduce((a, c) => a + c.n, 0);
-  const forStep = counts.find((c) => c.step === step)?.n ?? 0;
-  if (total >= MAX_FRAMES_PER_CHECK) throw new HttpError(429, 'too_many_frames', 'Too many frames for this check. Start a new check.');
-  if (forStep >= (step === 'frontal' ? MAX_FRONTAL_FRAMES_EXTENDED : MAX_FRAMES_PER_STEP)) {
-    throw new HttpError(429, 'too_many_frames', 'Enough frames were received for this step. Continue with the next step or start a new check.');
-  }
+  // Early rejection (before the analysis); enforced again atomically when the frame is stored.
+  assertFrameCaps(
+    await ctx.db
+      .select({ step: checkFrames.step, n: sql<number>`count(*)::int` })
+      .from(checkFrames)
+      .where(eq(checkFrames.checkId, check.id))
+      .groupBy(checkFrames.step),
+    step,
+  );
 
   const capturedAt = q.capturedAt != null && Number.isFinite(q.capturedAt) ? q.capturedAt : now;
   const wantCrop = step === 'frontal' || action === 'center';
   await assertSessionEvidenceCapacity(ctx, ctx.db, sessionId, { items: wantCrop ? 2 : 1, bytes: jpeg.length });
   const analysis = await ctx.vision.analyze(jpeg, { embed: true, faceCrop: wantCrop });
 
+  // Store the frame with the check row locked: the frame caps and the storage budget are checked again inside the
+  // transaction (the checks above only spare the analysis), so concurrent uploads cannot exceed them; frames of one
+  // check are thus inserted one at a time, in `seq` order (checkFramesOf reads them incrementally).
   const frameId = randomUUID();
-  const { row: ev } = await storeEvidence(ctx, ctx.db, {
-    orgId,
-    sessionId,
-    candidateId,
-    kind: 'liveness_frame',
-    reason: `check:${check.purpose}:${step}`,
-    capturedAt,
-    data: jpeg,
-    clientInstanceId: instanceId,
-  });
-  let cropId: string | null = null;
-  if (analysis.faceCropJpeg) {
-    const { row } = await storeEvidence(ctx, ctx.db, { orgId, sessionId, candidateId, kind: 'liveness_frame', reason: 'face_crop', capturedAt, data: analysis.faceCropJpeg });
-    cropId = row.id;
-  }
-  await ctx.db.insert(checkFrames).values({
-    id: frameId,
-    checkId: check.id,
-    sessionId,
-    step,
-    action,
-    capturedAt: new Date(capturedAt),
-    receivedAt: new Date(now),
-    analysis: summarizeAnalysis(analysis),
-    embeddingEnc: analysis.embedding ? ctx.keyring.encrypt(serializeEmbeddings([analysis.embedding]), frameAad(frameId)) : null,
-    evidenceId: ev.id,
-    faceCropEvidenceId: cropId,
-    clientYaw: q.clientYaw ?? null,
-    clientPitch: q.clientPitch ?? null,
+  await ctx.db.transaction(async (tx) => {
+    const [locked] = await tx.select({ status: checks.status }).from(checks).where(eq(checks.id, check.id)).for('update');
+    if (!locked || locked.status !== 'open') throw conflict('check_closed', 'This check is no longer open. Start a new check.');
+    const n = await tx
+      .select({ step: checkFrames.step, n: sql<number>`count(*)::int` })
+      .from(checkFrames)
+      .where(eq(checkFrames.checkId, check.id))
+      .groupBy(checkFrames.step);
+    assertFrameCaps(n, step);
+    const bytes = jpeg.length + (analysis.faceCropJpeg?.length ?? 0);
+    await assertSessionEvidenceCapacity(ctx, tx, sessionId, { items: analysis.faceCropJpeg ? 2 : 1, bytes });
+    const { row: ev } = await storeEvidence(ctx, tx, {
+      orgId,
+      sessionId,
+      candidateId,
+      kind: 'liveness_frame',
+      reason: `check:${check.purpose}:${step}`,
+      capturedAt,
+      data: jpeg,
+      clientInstanceId: instanceId,
+    });
+    let cropId: string | null = null;
+    if (analysis.faceCropJpeg) {
+      const { row } = await storeEvidence(ctx, tx, { orgId, sessionId, candidateId, kind: 'liveness_frame', reason: 'face_crop', capturedAt, data: analysis.faceCropJpeg });
+      cropId = row.id;
+    }
+    await tx.insert(checkFrames).values({
+      id: frameId,
+      checkId: check.id,
+      sessionId,
+      step,
+      action,
+      capturedAt: new Date(capturedAt),
+      receivedAt: new Date(now),
+      analysis: summarizeAnalysis(analysis),
+      embeddingEnc: analysis.embedding ? ctx.keyring.encrypt(serializeEmbeddings([analysis.embedding]), frameAad(frameId)) : null,
+      evidenceId: ev.id,
+      faceCropEvidenceId: cropId,
+      clientYaw: q.clientYaw ?? null,
+      clientPitch: q.clientPitch ?? null,
+    });
   });
 
   const quality = analysis.quality;
@@ -413,6 +431,15 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
   // The step's status as the server will verify it (its best window so far), not just this frame.
   const stepSatisfied = progress.steps.find((x) => x.index === Number(step))?.satisfied ?? fb.satisfied;
   return { accepted, quality, guidance: stepSatisfied ? guidanceFor(issues) : guidance, stepSatisfied, measured: fb.measured ?? undefined, progress };
+}
+
+function assertFrameCaps(counts: readonly { step: string; n: number }[], step: string): void {
+  const total = counts.reduce((a, c) => a + c.n, 0);
+  const forStep = counts.find((c) => c.step === step)?.n ?? 0;
+  if (total >= MAX_FRAMES_PER_CHECK) throw new HttpError(429, 'too_many_frames', 'Too many frames for this check. Start a new check.');
+  if (forStep >= (step === 'frontal' ? MAX_FRONTAL_FRAMES_EXTENDED : MAX_FRAMES_PER_STEP)) {
+    throw new HttpError(429, 'too_many_frames', 'Enough frames were received for this step. Continue with the next step or start a new check.');
+  }
 }
 
 /* =================================================================== adaptive progress */
@@ -474,7 +501,6 @@ export async function checkProgress(ctx: Ctx, check: Check): Promise<CheckProgre
 
   let frontalAccepted = prepared.frontal.filter((f) => f.isFrontal && f.analysis.quality.usable && f.analysis.embedding != null).length;
   let frontalNeeded = 0;
-  let identity: CheckProgressDTO['identity'] = null;
   let extend = false;
   let limit = MAX_FRONTAL_FRAMES;
   if (buildsReference) {
@@ -497,8 +523,8 @@ export async function checkProgress(ctx: Ctx, check: Check): Promise<CheckProgre
       extend = qualityRejecting && agreeing && (provisional.status === 'pending' || provisional.status === 'uncertain');
       limit = extend ? MAX_FRONTAL_FRAMES_EXTENDED : MAX_FRONTAL_FRAMES;
       const atLimitNow = frontalSubmitted >= limit || prepared.frames.length >= MAX_FRAMES_PER_CHECK;
+      // The running assessment only decides how many frames to ask for; it is not disclosed to the candidate.
       const a = assessCheck(all, { atLimit: atLimitNow });
-      identity = a.status;
       frontalNeeded = a.status === 'pending' ? Math.max(1, CHECK_EVIDENCE.minFrames - a.usable) : a.status === 'uncertain' ? 2 : 0;
     }
   }
@@ -512,7 +538,7 @@ export async function checkProgress(ctx: Ctx, check: Check): Promise<CheckProgre
   const steps = (liveness?.steps ?? []).map((x) => ({ index: x.index, satisfied: x.passed }));
   const stepFrames = (i: number) => prepared.frames.filter((f) => f.step === String(i)).length;
   const livenessOpen = !expired && prepared.frames.length < MAX_FRAMES_PER_CHECK && steps.some((x) => !x.satisfied && stepFrames(x.index) < MAX_FRAMES_PER_STEP);
-  return { frontalAccepted, frontalNeeded, identity, steps, canComplete: expired || (frontalNeeded === 0 && !livenessOpen) };
+  return { frontalAccepted, frontalNeeded, steps, canComplete: expired || (frontalNeeded === 0 && !livenessOpen) };
 }
 
 function guidanceFor(issues: readonly (keyof typeof QUALITY_GUIDANCE)[]): string[] {
@@ -524,6 +550,149 @@ function median(v: number[]): number {
   const s = [...v].sort((a, b) => a - b);
   const m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/* =================================================================== abandoned checks */
+
+type AbandonHow = 'expired' | 'superseded';
+
+interface AbandonedMismatch {
+  agg: ContinuationIdentity;
+  prepared: PreparedFrames;
+  active: ActiveReference;
+}
+
+/**
+ * Would /complete have found a different person in the frames this check received? Only resume / reconnect /
+ * reverify checks (an initial check has no reference yet) with at least one usable identity frame.
+ */
+async function abandonedMismatch(ctx: Ctx, check: Check): Promise<AbandonedMismatch | null> {
+  if (check.purpose === 'initial') return null;
+  const active = await loadActiveReference(ctx, ctx.db, check.sessionId);
+  if (!active) return null;
+  const prepared = await prepareFrames(ctx, check.id);
+  if (!prepared.frontal.some((f) => f.analysis.quality.usable && f.analysis.embedding)) return null;
+  const [s] = await ctx.db.select({ orgId: examSessions.orgId }).from(examSessions).where(eq(examSessions.id, check.sessionId));
+  const [org] = s ? await ctx.db.select().from(organizations).where(eq(organizations.id, s.orgId)) : [];
+  const agg = assessContinuation(
+    prepared.frontal.map((f) => f.analysis),
+    active,
+    orgThresholds(org),
+  );
+  return agg.decision === 'mismatch' ? { agg, prepared, active } : null;
+}
+
+/**
+ * Checks that end without /complete — expired, or superseded because the candidate started a new one (a reload,
+ * another browser) — are judged on the identity frames they received, as /complete would judge them, so abandoning
+ * a check that is going badly is never free:
+ *  - the frames point to a different person (assessContinuation => 'mismatch'): a FULL failed attempt (status
+ *    'retry', result._meta.abandoned) with its identity check row (context.abandoned); a session with no attempts
+ *    left is held for review (identity_unverifiable), as after a completed failed attempt;
+ *  - the frames point to the candidate, are too few, or show only image-quality problems: no penalty ('expired').
+ * The (lock-free) assessment runs first; each check is then settled under the session lock if still open.
+ */
+export async function settleAbandonedChecks(ctx: Ctx, sessionId: string, how: AbandonHow, checkIds?: string[]): Promise<number> {
+  const open = await ctx.db
+    .select()
+    .from(checks)
+    .where(and(eq(checks.sessionId, sessionId), eq(checks.status, 'open'), checkIds ? inArray(checks.id, checkIds) : sql`true`));
+  if (!open.length) return 0;
+  const judged = new Map<string, AbandonedMismatch | null>();
+  for (const c of open) {
+    try {
+      judged.set(c.id, await abandonedMismatch(ctx, c));
+    } catch (err) {
+      ctx.log.error({ err, checkId: c.id }, 'assessing an abandoned check failed; it expires without penalty');
+      judged.set(c.id, null);
+    }
+  }
+  return withSession(ctx, sessionId, async (m) => {
+    let n = 0;
+    for (const c of open) {
+      const [cur] = await m.tx.select().from(checks).where(eq(checks.id, c.id)).for('update');
+      if (!cur || cur.status !== 'open') continue;
+      await settleAbandoned(m, cur, how, judged.get(c.id) ?? null);
+      n++;
+    }
+    return n;
+  });
+}
+
+const ABANDONED_MESSAGE = 'The identity check was not finished. Please start it again.';
+
+async function settleAbandoned(m: SessionMutation, check: Check, how: AbandonHow, j: AbandonedMismatch | null): Promise<void> {
+  if (!j) {
+    await m.tx.update(checks).set({ status: 'expired', completedAt: new Date(m.now) }).where(eq(checks.id, check.id));
+    return;
+  }
+  const { agg, prepared, active } = j;
+  const s = m.session;
+  const st = identityState(s);
+  const best = agg.bestProbeIndex != null ? prepared.frontal[agg.bestProbeIndex] : undefined;
+  const open = await m.openPeriodRow();
+  const [row] = await m.tx
+    .insert(identityChecks)
+    .values({
+      sessionId: s.id,
+      checkId: check.id,
+      trigger: TRIGGER_FOR[check.purpose],
+      at: new Date(m.now),
+      receivedAt: new Date(m.now),
+      clientInstanceId: check.clientInstanceId,
+      decision: 'mismatch',
+      similarity: agg.similarity,
+      confidence: agg.confidence,
+      quality: best?.analysis.quality ?? null,
+      guidance: [],
+      referenceId: active.ref.id,
+      // The check's own frames (liveness_frame evidence) show what the camera saw.
+      probeEvidenceId: best ? (best.cropId ?? best.evidenceId) : null,
+      frameEvidenceId: best?.evidenceId ?? null,
+      dhash: best?.analysis.dhash ?? null,
+      context: {
+        precededBy: [],
+        periodKind: open?.kind ?? null,
+        secondsSincePreviousMatch: st.lastMatchAt ? Math.round((m.now - st.lastMatchAt) / 1000) : null,
+        abandoned: how,
+        matchCount: agg.matchCount,
+        mismatchCount: agg.mismatchCount,
+        unableCount: agg.unableCount,
+        evidence: {
+          status: agg.assessment.status,
+          llr: agg.assessment.llr,
+          posterior: agg.assessment.posterior,
+          usableFrames: agg.assessment.usable,
+          calibrationVersion: CALIBRATION.version,
+        },
+      },
+    })
+    .returning();
+  m.publishIdentityCheck(row.id);
+  m.set({ lastIdentityDecision: row.decision, lastIdentityAt: row.at, lastIdentitySimilarity: row.similarity ?? null });
+  const policy = await m.policy();
+  const max = policy.identity.maxVerificationAttempts;
+  const used = (await failedAttempts(m.tx, s, check.purpose, check.id)) + 1;
+  const response = { outcome: 'retry' as const, message: ABANDONED_MESSAGE, guidance: [], liveness: null, identity: null, idPhoto: null, attemptsRemaining: remaining(max, used) };
+  await m.tx
+    .update(checks)
+    .set({ status: 'retry', completedAt: new Date(m.now), result: { ...response, _meta: { qualityOnly: false, abandoned: how } } as unknown as Record<string, unknown> })
+    .where(eq(checks.id, check.id));
+  // Out of attempts: held for review exactly like a completed attempt that failed (retryOrHold).
+  if (used >= max - 1e-9 && ['ready', 'active', 'paused', 'on_hold'].includes(s.status)) {
+    const ev = await m.addEvent({
+      type: 'identity_unverifiable',
+      source: 'server_identity',
+      startedAt: check.issuedAt.getTime(),
+      endedAt: m.now,
+      confidence: agg.confidence,
+      observation: `The identity check was not finished (${how === 'expired' ? 'it expired' : 'a new check was started instead'}), and the images it had received pointed to a different person than the identity reference. With it, no verification attempts remain (${Math.ceil(used)}). Compare the images.`,
+      details: { purpose: check.purpose, attempts: used, lastReason: 'abandoned', abandoned: how, qualityOnly: false, identityCheckIds: [row.id], similarity: agg.similarity, posterior: agg.assessment.posterior },
+      context: { checkId: check.id },
+    });
+    await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, row.id));
+    await holdNow(m, { reason: 'identity_unverifiable', details: { purpose: check.purpose, attempts: used, abandoned: how } });
+  }
 }
 
 /* =================================================================== complete */
@@ -551,10 +720,29 @@ interface PreparedFrames {
   frontal: PreparedFrame[];
 }
 
-async function prepareFrames(ctx: Ctx, checkId: string): Promise<PreparedFrames> {
-  // Server receipt order; the liveness time window and step order use server receipt time, not client clocks.
-  const rows = await ctx.db.select().from(checkFrames).where(eq(checkFrames.checkId, checkId)).orderBy(asc(checkFrames.seq));
-  const frames: PreparedFrame[] = rows.map((f) => ({
+/**
+ * A check's frames, prepared (decrypted, analysed), cached per check: frames are append-only and inserted one at a
+ * time per check (submitCheckFrame locks the check row), so each call reads only the rows added since the last one —
+ * the adaptive progress after every frame no longer re-reads and decrypts all earlier frames (and the pooled attempts'
+ * frames). Entries expire FRAME_CACHE_TTL_MS after they were created (longer than a check plus the pooling window).
+ */
+const FRAME_CACHE_TTL_MS = CHECK_TTL_MS + POOL_WINDOW_MS + 60_000;
+const FRAME_CACHE_MAX = 512;
+const frameCache = new Map<string, { createdAt: number; lastSeq: number; frames: PreparedFrame[] }>();
+
+async function checkFramesOf(ctx: Ctx, checkId: string): Promise<PreparedFrame[]> {
+  const now = ctx.now();
+  let entry = frameCache.get(checkId);
+  if (entry && (now - entry.createdAt > FRAME_CACHE_TTL_MS || now < entry.createdAt)) {
+    frameCache.delete(checkId);
+    entry = undefined;
+  }
+  const rows = await ctx.db
+    .select()
+    .from(checkFrames)
+    .where(entry ? and(eq(checkFrames.checkId, checkId), gt(checkFrames.seq, entry.lastSeq)) : eq(checkFrames.checkId, checkId))
+    .orderBy(asc(checkFrames.seq));
+  const added: PreparedFrame[] = rows.map((f) => ({
     id: f.id,
     step: f.step,
     action: f.action,
@@ -566,38 +754,69 @@ async function prepareFrames(ctx: Ctx, checkId: string): Promise<PreparedFrames>
     clientPitch: f.clientPitch,
     isFrontal: f.step === 'frontal' || f.action === 'center',
   }));
+  const next = { createdAt: entry?.createdAt ?? now, lastSeq: rows.length ? rows[rows.length - 1].seq : (entry?.lastSeq ?? 0), frames: [...(entry?.frames ?? []), ...added] };
+  frameCache.delete(checkId);
+  frameCache.set(checkId, next);
+  while (frameCache.size > FRAME_CACHE_MAX) frameCache.delete(frameCache.keys().next().value!);
+  return [...next.frames];
+}
+
+async function prepareFrames(ctx: Ctx, checkId: string): Promise<PreparedFrames> {
+  // Server receipt order; the liveness time window and step order use server receipt time, not client clocks.
+  const frames = await checkFramesOf(ctx, checkId);
   return { frames, frontal: identityFrameIndexes(frames).map((x) => frames[x.index]) };
 }
 
 /**
  * Usable identity frames of earlier failed attempts of the same resume / reconnect / reverify check (same reference,
- * within POOL_WINDOW_MS), as evidence against the reference — only when the current attempt's own usable frames all
- * agree with the reference (at least one clearly) and the pooled frames show the same face as them. So attempt 2
- * builds on attempt 1 in backlight, but frames of an earlier attempt never vouch for someone else now.
+ * within POOL_WINDOW_MS), as evidence against the reference. Only attempts that passed the live-person check (or had
+ * it switched off) — a failed one may have been a photo — and that were not abandoned; `gatePooled` then decides
+ * whether they may count. So attempt 2 builds on attempt 1 in backlight, but frames of an earlier attempt never vouch
+ * for someone else now.
  */
 async function pooledFrameAnalyses(ctx: Ctx, s: ExamSession, check: Check, active: ActiveReference): Promise<ImageAnalysis[]> {
   if (check.purpose === 'initial') return [];
   const since = Math.max(check.issuedAt.getTime() - POOL_WINDOW_MS, s.checkAttemptsResetAt?.getTime() ?? 0, active.ref.createdAt.getTime());
   const prior = await ctx.db
-    .select({ id: checks.id })
+    .select({ id: checks.id, result: checks.result })
     .from(checks)
     .where(and(eq(checks.sessionId, s.id), eq(checks.purpose, check.purpose), eq(checks.status, 'retry'), gte(checks.issuedAt, new Date(since))))
     .orderBy(desc(checks.issuedAt))
     .limit(3);
   const out: ImageAnalysis[] = [];
   for (const p of prior) {
-    if (p.id === check.id) continue;
-    const frames = await prepareFrames(ctx, p.id);
-    for (const f of [...frames.frontal].reverse()) if (f.analysis.quality.usable && f.analysis.embedding && out.length < POOL_MAX_FRAMES) out.push(f.analysis);
+    if (p.id === check.id || !poolable(p.result)) continue;
+    for (const a of await closedCheckIdentityFrames(ctx, p.id)) if (a.quality.usable && a.embedding && out.length < POOL_MAX_FRAMES) out.push(a);
   }
   return out;
 }
 
+/**
+ * A failed attempt whose frames may be pooled: it passed the live-person check (or liveness is off), or it failed
+ * purely on image quality — never one that failed liveness otherwise (possibly a photo) or was abandoned.
+ */
+export function poolable(result: unknown): boolean {
+  const r = (result ?? {}) as { liveness?: { passed?: boolean } | null; _meta?: { qualityOnly?: boolean; abandoned?: string } };
+  if (r._meta?.abandoned) return false;
+  return r.liveness == null || r.liveness.passed === true || r._meta?.qualityOnly === true;
+}
+
+/**
+ * Pooled frames count only when the current attempt stands on its own: at least CALIBRATION.minFramesForDecision usable
+ * frames of its own with clear evidence of the same person and none pointing elsewhere; each pooled frame must also
+ * show the same face as the current attempt's frames, and at most as many are pooled as the attempt has usable frames.
+ */
 function gatePooled(current: ProbeEvidence[], currentAnalyses: readonly ImageAnalysis[], pooled: ProbeEvidence[], pooledAnalyses: readonly ImageAnalysis[], thresholds: IdentityThresholds): ProbeEvidence[] {
   const cur = current.filter((f) => f.usable && currentAnalyses[f.index].embedding);
-  if (!cur.length || cur.some((f) => f.llr > 0) || !cur.some((f) => f.llr <= -3)) return [];
+  if (cur.some((f) => f.llr > 0) || cur.filter((f) => f.llr <= CLEAR_MATCH_LLR).length < CALIBRATION.minFramesForDecision) return [];
   const t = templateFrom(cur.map((f) => currentAnalyses[f.index].embedding!));
-  return pooled.filter((f) => f.usable && pooledAnalyses[f.index].embedding && f.llr <= 0 && cosineSimilarity(pooledAnalyses[f.index].embedding!, t) >= thresholds.match);
+  return pooled.filter((f) => f.usable && pooledAnalyses[f.index].embedding && f.llr <= 0 && cosineSimilarity(pooledAnalyses[f.index].embedding!, t) >= thresholds.match).slice(0, cur.length);
+}
+
+/** Identity frames of an earlier attempt, newest first (checkFramesOf caches them). */
+async function closedCheckIdentityFrames(ctx: Ctx, checkId: string): Promise<ImageAnalysis[]> {
+  const frames = await prepareFrames(ctx, checkId);
+  return [...frames.frontal].reverse().map((f) => f.analysis);
 }
 
 async function pooledEvidence(ctx: Ctx, s: ExamSession, check: Check, active: ActiveReference, currentAnalyses: readonly ImageAnalysis[], thresholds: IdentityThresholds): Promise<ProbeEvidence[]> {
@@ -738,7 +957,7 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
   }
   const now = ctx.now();
   if (now > check.expiresAt.getTime() + 5_000) {
-    await ctx.db.update(checks).set({ status: 'expired', completedAt: new Date(now) }).where(eq(checks.id, check.id));
+    await settleAbandonedChecks(ctx, sessionId, 'expired', [check.id]);
     return {
       outcome: 'failed',
       message: 'The check took too long and expired. Please start it again.',
@@ -784,16 +1003,16 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
 
   // ID photo comparison (initial only).
   const [cand] = await ctx.db.select().from(candidates).where(eq(candidates.id, s0.candidateId));
-  let idPhoto: { decision: IdentityDecision; similarity: number | null; confidence: number } | null = null;
+  let idPhoto: IdPhotoResult | null = null;
   if (purpose === 'initial' && reference?.ok && policy.identity.idPhotoComparison !== 'off' && cand.idPhotoEmbedding) {
     try {
       const photoEmb = deserializeEmbeddings(ctx.keyring.decrypt(cand.idPhotoEmbedding, idPhotoAad(cand.id)));
       const sim = Math.max(...photoEmb.map((p) => scoreReference(p, reference!.gallery)));
       const d = decideIdentity(sim, reference.quality, thresholds, 'id_photo');
-      idPhoto = { decision: d.decision, similarity: d.similarity, confidence: d.confidence };
+      idPhoto = { decision: d.decision, similarity: d.similarity, confidence: d.confidence, needsHumanReview: d.needsHumanReview === true };
     } catch (err) {
       ctx.log.error({ err, candidateId: cand.id }, 'ID photo comparison failed');
-      idPhoto = { decision: 'unable_to_verify', similarity: null, confidence: 1 };
+      idPhoto = { decision: 'unable_to_verify', similarity: null, confidence: 1, needsHumanReview: false };
     }
   }
 
@@ -818,7 +1037,11 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
           return ref && probe ? { reference: [ref], probe } : null;
         },
       });
-      if (idPhotoSecond?.changed) idPhoto = { ...idPhoto, decision: idPhotoSecond.decision, confidence: idPhotoSecond.decision === 'inconclusive' ? 0.5 : idPhoto.confidence };
+      // A very low score on poor frames (needsHumanReview) is not resolved to "match" by the provider: a person decides.
+      if (idPhotoSecond?.changed && !(idPhoto.needsHumanReview && idPhotoSecond.decision === 'match')) {
+        idPhoto = { ...idPhoto, decision: idPhotoSecond.decision, confidence: idPhotoSecond.decision === 'inconclusive' ? 0.5 : idPhoto.confidence };
+      }
+      if (idPhotoSecond?.needsHumanReview) idPhoto = { ...idPhoto, needsHumanReview: true };
     } else if (livenessOk) {
       // No ID photo: the enrolment's own consistency — the reference frame vs the accepted frame taken last.
       const lastIdx = Math.max(-1, ...reference.accepted.filter((i) => i !== reference!.bestIndex));
@@ -844,7 +1067,13 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
     second = await secondOpinion(ctx, {
       ...opinionBase,
       kind: 'resume',
-      internal: { decision: aggregate.decision, similarity: aggregate.similarity },
+      // Decided on the frames' accumulated calibrated evidence (assessCheck): its strength, not the raw similarity,
+      // decides whether the provider may downgrade it (a likely_match / likely_mismatch is decisive).
+      internal: {
+        decision: aggregate.decision,
+        similarity: aggregate.similarity,
+        evidence: { llr: aggregate.assessment.llr, decisive: aggregate.assessment.status === 'likely_match' || aggregate.assessment.status === 'likely_mismatch' },
+      },
       thresholds,
       images: async () => {
         const probe = probeImages?.full ?? probeImages?.crop ?? null;
@@ -883,6 +1112,15 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
   return { ...outcome, state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
 }
 
+/** The ID-photo comparison at check-in (vision decideIdentity 'id_photo', optionally fused with a second opinion). */
+interface IdPhotoResult {
+  decision: IdentityDecision;
+  similarity: number | null;
+  confidence: number;
+  /** Not a verdict, but a person must look (very low score on poor-quality frames, or the second opinion disagreed). */
+  needsHumanReview: boolean;
+}
+
 interface ApplyCtx {
   m: SessionMutation;
   ctx: Ctx;
@@ -896,7 +1134,7 @@ interface ApplyCtx {
   active: ActiveReference | null;
   refImages: ImagePair | null;
   probeImages: ImagePair | null;
-  idPhoto: { decision: IdentityDecision; similarity: number | null; confidence: number } | null;
+  idPhoto: IdPhotoResult | null;
   prepared: PreparedFrames;
   instanceId: string;
   /** External second opinion on this check's identity decision (null when not asked — the default). */
@@ -1084,7 +1322,7 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
   await m.addEvent({ type: 'reference_created', source: 'server_identity', details: { referenceId: refId, version: maxVersion + 1, embeddingCount: reference.gallery.length, framesAccepted: reference.accepted.length, baseline: reference.baseline } });
   m.set({ verifiedInstanceId: a.instanceId, checkAttemptsResetAt: new Date(m.now) });
   // A new reference: mid-exam samples are compared under the enrolment's own conditions.
-  m.setIdentityState({ ...identityState(m.session), lastMatchAt: m.now, normalisation: 'continuous' });
+  m.setIdentityState({ ...identityState(m.session), lastMatchAt: m.now, normalisation: 'continuous', periodBaseline: null });
 
   let outcome: Outcome = {
     outcome: 'passed',
@@ -1114,8 +1352,39 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     await m.addEvent({
       type: 'id_photo_compared',
       source: 'server_identity',
-      details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity, policy: policy.identity.idPhotoComparison, identityCheckId: photoRow.id, ...secondOpinionDetails(a.idPhotoSecond) },
+      details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity, policy: policy.identity.idPhotoComparison, identityCheckId: photoRow.id, ...(a.idPhoto.needsHumanReview ? { needsHumanReview: true } : {}), ...secondOpinionDetails(a.idPhotoSecond) },
     });
+    const lowOnPoor = a.idPhoto.decision !== 'mismatch' && a.idPhoto.decision !== 'match' && a.idPhoto.needsHumanReview && a.idPhoto.similarity != null && a.idPhoto.similarity < a.thresholds.idPhotoMismatch;
+    if (lowOnPoor) {
+      // Very low similarity to the ID photo on poor-quality frames: not "a different person" (poor light alone can do
+      // this), but never passed unseen — an uncertain observation for review with both images (advisory and
+      // required; 'required' also holds below).
+      const ev = await m.addEvent({
+        type: 'identity_unverifiable',
+        source: 'server_identity',
+        confidence: null,
+        observation:
+          'At check-in the candidate could not be compared dependably with the approved identity photo: the camera images were poor (for example lighting) and the similarity was very low. This is not a finding that a different person is present; compare the images.',
+        details: {
+          against: 'id_photo',
+          reason: 'id_photo_low_similarity_poor_quality',
+          needsHumanReview: true,
+          similarity: a.idPhoto.similarity,
+          thresholds: { match: a.thresholds.idPhotoMatch, mismatch: a.thresholds.idPhotoMismatch },
+          quality: reference.quality ? { bucket: qualityBucket(reference.quality), issues: reference.quality.issues } : null,
+          policy: policy.identity.idPhotoComparison,
+          identityCheckIds: [photoRow.id],
+          ...secondOpinionDetails(a.idPhotoSecond),
+        },
+        context: { precededBy: [], periodKind: 'check_in', trigger: 'id_photo' },
+      });
+      await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, photoRow.id));
+      for (const img of images) await copyEvidence(a.ctx, m.tx, img, { kind: 'identity_probe', eventId: ev.id, identityCheckId: photoRow.id });
+      if (cand.idPhotoEvidenceId) {
+        const [photo] = await m.tx.select().from(evidence).where(eq(evidence.id, cand.idPhotoEvidenceId));
+        if (photo) await copyEvidence(a.ctx, m.tx, photo, { kind: 'id_photo', eventId: ev.id, sessionId: m.session.id });
+      }
+    }
     if (a.idPhoto.decision === 'mismatch') {
       const ev = await m.addEvent({
         type: 'identity_mismatch',
@@ -1136,7 +1405,8 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
     if (policy.identity.idPhotoComparison === 'required' && a.idPhoto.decision !== 'match') {
       // Inconclusive / unable to verify is NOT a mismatch: a distinct reason so staff and candidate are told the truth.
       const reason = a.idPhoto.decision === 'mismatch' ? 'id_photo_mismatch' : 'id_photo_unverifiable';
-      await holdNow(m, { reason, details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity, ...(a.idPhotoSecond ? { needsHumanReview: a.idPhotoSecond.needsHumanReview } : {}) } });
+      const review = a.idPhoto.needsHumanReview || a.idPhotoSecond?.needsHumanReview === true;
+      await holdNow(m, { reason, details: { decision: a.idPhoto.decision, similarity: a.idPhoto.similarity, ...(a.idPhotoSecond || review ? { needsHumanReview: review } : {}), ...(lowOnPoor ? { lowSimilarityPoorQuality: true } : {}) } });
       outcome = { ...outcome, outcome: 'held', message: m.session.holdMessage ?? '' };
     }
   }
@@ -1504,9 +1774,7 @@ async function continueAfterPass(
   const purpose = check.purpose;
   const st = identityState(m.session);
   if (st.openUnverifiableEventId) await m.closeEvent(st.openUnverifiableEventId, m.now, { closedBy: 'identity_match' });
-  // After a resume / reconnect / reverify the conditions may differ from the enrolment (another day, room or camera):
-  // mid-exam samples use the 'relaxed' normalisation from now on — unless a new reference was just enrolled.
-  m.setIdentityState({ ...identityState(m.session), openUnverifiableEventId: null, lastMatchAt: t.flagged ? st.lastMatchAt : m.now, normalisation: t.reEnrolled ? 'continuous' : 'relaxed' });
+  m.setIdentityState({ ...identityState(m.session), openUnverifiableEventId: null, lastMatchAt: t.flagged ? st.lastMatchAt : m.now });
   const base: Outcome = {
     outcome: 'passed',
     message: purpose === 'resume' ? 'Identity confirmed. Welcome back — your exam continues.' : 'Identity confirmed. Your exam continues.',
@@ -1519,7 +1787,9 @@ async function continueAfterPass(
   m.set({ verifiedInstanceId: a.instanceId, checkAttemptsResetAt: new Date(m.now), lastVerifiedHeartbeatAt: new Date(m.now), lastHeartbeatAt: new Date(m.now), lastHeartbeatInstanceId: a.instanceId, connection: 'online' });
 
   if (m.session.status === 'ready') {
-    // Reconnect before the exam started: nothing else changes.
+    // Reconnect before the exam started (e.g. a page reload): nothing else changes — the enrolment's conditions and
+    // its 'continuous' normalisation still apply.
+    if (t.reEnrolled) m.setIdentityState({ ...identityState(m.session), normalisation: 'continuous', periodBaseline: null });
     return base;
   }
 
@@ -1536,6 +1806,18 @@ async function continueAfterPass(
 
   const next = m.session.status === 'on_hold' ? (m.session.holdPrevStatus === 'ready' ? 'ready' : 'active') : 'active';
   m.set({ status: next, ...(m.session.status === 'on_hold' ? clearedHold() : {}) });
+  if (t.reEnrolled) {
+    // A new reference was just enrolled: its own baseline, same session.
+    m.setIdentityState({ ...identityState(m.session), normalisation: 'continuous', periodBaseline: null });
+  } else if (next === 'active') {
+    // The period that begins now may be another day, room or camera than the enrolment. Its own baseline — how this
+    // check's usable frames score against the reference — lets mid-exam samples be normalised 'continuous' again
+    // (the same period, minutes apart); with fewer than 3 usable frames, a level below the calibrated band, or after
+    // a flagged mismatch (the frames may show someone else), 'relaxed' against the enrolment baseline.
+    const own = t.flagged || !a.aggregate ? null : a.aggregate.perFrame.map((f) => ({ usable: f.usable, similarity: f.similarity, bucket: f.bucket }));
+    const pb = own ? periodBaseline(own, a.active?.ref.baseline?.bucket ?? null) : null;
+    m.setIdentityState({ ...identityState(m.session), normalisation: pb ? 'continuous' : 'relaxed', periodBaseline: pb ? { ...pb, checkId: check.id, at: m.now } : null });
+  }
   if (next === 'active') {
     await m.insertPeriod('active', m.now, { reason: purpose });
     m.clockStart();

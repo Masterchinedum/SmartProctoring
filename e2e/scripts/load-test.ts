@@ -27,7 +27,9 @@
  * 503 "server busy" answers are retried after Retry-After (BUSY_RETRIES, default 3), as the web client does.
  * Optional: STAFF_WS=<n> keeps n staff dashboards connected to /api/admin/live during the run (realtime
  * summaries are only built while someone listens); SAMPLE_SEC=<s> changes the routine identity-sample interval
- * (CADENCE=v1 SAMPLE_SEC=1 with enough candidates saturates the vision pool: see "identity samples/s").
+ * (CADENCE=v1 SAMPLE_SEC=1 with enough candidates saturates the vision pool: see "identity samples/s");
+ * STEADY_FROM_SEC=<s> starts the steady phase that long after the first check-in (e.g. after a check-in backlog).
+ * The JSON also holds a per-10 s series per endpoint (count, ok, p50, p95) and the box's 1-min load average.
  * docs/PERFORMANCE.md describes the method and the reference results.
  */
 import { randomUUID } from 'node:crypto';
@@ -63,6 +65,8 @@ const BUSY_RETRIES = Number(process.env.BUSY_RETRIES ?? 3);
 const busyRetries = new Map<string, number>();
 /** The steady phase starts this long after the ramp (v1) / after the last start-up window (v2). */
 const STEADY_AFTER_RAMP_MS = 15_000;
+/** Optional: the steady phase starts this many seconds after the first check-in instead (e.g. after a check-in backlog). */
+const STEADY_FROM_SEC = process.env.STEADY_FROM_SEC ? Number(process.env.STEADY_FROM_SEC) : null;
 
 type Stat = { lat: number[]; at: number[]; okAt: boolean[]; errors: Record<string, number>; ok: number };
 const stats = new Map<string, Stat>();
@@ -429,6 +433,7 @@ async function main() {
     if (endAt - v2Steady >= 30_000) steadyFrom = v2Steady;
     else console.log(`\n(!) DURATION_SEC too short for a steady phase after the start-up windows (needs ≥ ${Math.ceil((v2Steady - t0) / 1000 - RAMP_SEC + 30)} s): steady = from ramp + 15 s`);
   }
+  if (STEADY_FROM_SEC != null) steadyFrom = t0 + STEADY_FROM_SEC * 1000;
   const steadySec = Math.max(1, (endAt - steadyFrom) / 1000);
   const table = (from: number, to: number, secs: number | null) =>
     [...stats.entries()]
@@ -464,6 +469,24 @@ async function main() {
   const steady = table(steadyFrom, endAt, steadySec);
   const startupRows = startup ? table(startup.from, startup.to, (startup.to - startup.from) / 1000) : null;
   const rates = { whole: phaseRates(t0, endAt), startup: startup ? phaseRates(startup.from, startup.to) : null, steady: phaseRates(steadyFrom, endAt) };
+  // Per-10 s time series (JSON only): answers, refusals and latency per endpoint, to see the start-up peak drain.
+  const series: Record<string, { t: number; n: number; ok: number; p50: number; p95: number }[]> = {};
+  for (const [label, s] of stats) {
+    const buckets = new Map<number, { lat: number[]; ok: number }>();
+    s.at.forEach((at, i) => {
+      const b = Math.floor((at - t0) / 10_000) * 10;
+      const x = buckets.get(b) ?? { lat: [], ok: 0 };
+      x.lat.push(s.lat[i]);
+      if (s.okAt[i]) x.ok++;
+      buckets.set(b, x);
+    });
+    series[label] = [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([t, x]) => {
+        const lat = x.lat.sort((a, b) => a - b);
+        return { t, n: lat.length, ok: x.ok, p50: Math.round(pct(lat, 50)), p95: Math.round(pct(lat, 95)) };
+      });
+  }
   const health = await fetch(`${BASE}/api/health`).then((r) => r.json()).catch(() => null);
   console.log('\nwhole run (ramp + steady)');
   console.log('endpoint                 count     ok   p50ms   p95ms   p99ms   maxms  errors');
@@ -533,6 +556,7 @@ async function main() {
         startupRows,
         steady,
         loadSamples,
+        series,
         wsCounts,
         health,
       },

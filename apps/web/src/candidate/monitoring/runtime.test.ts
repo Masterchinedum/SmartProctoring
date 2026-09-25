@@ -120,26 +120,32 @@ describe('MonitoringRuntime.handleSampleResult', () => {
     } as unknown as RuntimeDeps & { onSignal: ReturnType<typeof vi.fn>; onHold: ReturnType<typeof vi.fn> };
     return { rt: new MonitoringRuntime(deps), deps };
   }
-  const result = (decision: 'match' | 'unable_to_verify' | 'mismatch', guidance: string[] = []): IdentitySampleResponse => ({
-    result: { id: 'r', trigger: 'periodic', decision, similarity: null, confidence: 0.5, quality: null, guidance, at: 1 },
+  const result = (usable: boolean, guidance: string[] = []): IdentitySampleResponse => ({
+    result: { id: 'r', trigger: 'periodic', usable, guidance, at: 1 },
     followUpInMs: null,
     status: 'active',
     hold: null,
   });
 
-  it('shows the server guidance when the image could not be verified, and clears it after a match', () => {
+  it('shows the server guidance when the image could not be used, and clears it after a usable image', () => {
     const { rt, deps } = makeRuntime();
-    rt.handleSampleResult(result('unable_to_verify', ['Your face is too dark. Turn on a light.']));
+    rt.handleSampleResult(result(false, ['Your face is too dark. Turn on a light.']));
     expect(deps.onSignal).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'candidate_prompt', key: 'identity_guidance', message: expect.stringContaining('Your face is too dark') }),
     );
-    rt.handleSampleResult(result('match'));
+    rt.handleSampleResult(result(true));
     expect(deps.onSignal).toHaveBeenLastCalledWith({ kind: 'candidate_prompt_clear', key: 'identity_guidance' });
+  });
+
+  it('shows lighting guidance for a usable image when the server sends it (poor light), without a verdict', () => {
+    const { rt, deps } = makeRuntime();
+    rt.handleSampleResult(result(true, ['Add light in front of you.']));
+    expect(deps.onSignal).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'candidate_prompt', key: 'identity_guidance', message: 'Add light in front of you.' }));
   });
 
   it('switches to the hold screen when the server holds the exam', () => {
     const { rt, deps } = makeRuntime();
-    rt.handleSampleResult({ ...result('mismatch'), status: 'on_hold' });
+    rt.handleSampleResult({ ...result(true), status: 'on_hold' });
     expect(deps.onHold).toHaveBeenCalled();
     expect(deps.onSignal).not.toHaveBeenCalled();
   });
@@ -147,25 +153,30 @@ describe('MonitoringRuntime.handleSampleResult', () => {
 
 describe('routineCadence (server-driven sampling)', () => {
   const base: IdentitySampleResponse = {
-    result: { id: 'r', trigger: 'periodic', decision: 'match', similarity: 0.7, confidence: 0.9, quality: null, guidance: [], at: 1 },
+    result: { id: 'r', trigger: 'periodic', usable: true, guidance: [], at: 1 },
     followUpInMs: null,
     status: 'active',
     hold: null,
   };
 
-  it('v2: next routine burst after nextSampleInMs — periodic while the evidence is consistent', () => {
-    expect(routineCadence({ ...base, nextSampleInMs: 6000, evidence: { state: 'consistent', swapProbability: 0.01, samples: 4 } })).toEqual({ inMs: 6000, label: 'periodic', followUpInMs: null });
+  it('v2: next routine burst after nextSampleInMs — periodic unless the server wants a faster look', () => {
+    expect(routineCadence({ ...base, nextSampleInMs: 6000 })).toEqual({ inMs: 6000, label: 'periodic', followUpInMs: null });
   });
 
-  it('v2: labelled server_request while a follow-up is wanted or the evidence is monitoring / suspect', () => {
-    expect(routineCadence({ ...base, nextSampleInMs: 2500, followUpInMs: 2500, evidence: { state: 'consistent', swapProbability: 0.2, samples: 2 } }).label).toBe('server_request');
-    expect(routineCadence({ ...base, nextSampleInMs: 3000, evidence: { state: 'monitoring', swapProbability: 0.3, samples: 3 } }).label).toBe('server_request');
-    expect(routineCadence({ ...base, nextSampleInMs: 2000, evidence: { state: 'suspect', swapProbability: 0.7, samples: 3 } })).toEqual({ inMs: 2000, label: 'server_request', followUpInMs: null });
+  it('v2: labelled server_request while the server wants a faster look (followUpInMs, the only cadence hint)', () => {
+    expect(routineCadence({ ...base, nextSampleInMs: 2500, followUpInMs: 2500 })).toEqual({ inMs: 2500, label: 'server_request', followUpInMs: null });
+    expect(routineCadence({ ...base, nextSampleInMs: 3000 }).label).toBe('periodic');
   });
 
-  it('v2 without a time: 3 s while suspect, else the policy interval', () => {
-    expect(routineCadence({ ...base, nextSampleInMs: null, evidence: { state: 'suspect', swapProbability: 0.7, samples: 3 } }).inMs).toBe(3000);
-    expect(routineCadence({ ...base, nextSampleInMs: null, evidence: { state: 'consistent', swapProbability: 0, samples: 3 } }).inMs).toBeNull();
+  it('v2 without a time: the follow-up delay, else the policy interval', () => {
+    expect(routineCadence({ ...base, nextSampleInMs: null, followUpInMs: 3000 }).inMs).toBe(3000);
+    expect(routineCadence({ ...base, nextSampleInMs: null }).inMs).toBeNull();
+  });
+
+  it('the candidate response carries no verdict or evidence state', () => {
+    const keys = Object.keys(base.result).sort();
+    expect(keys).toEqual(['at', 'guidance', 'id', 'trigger', 'usable']);
+    expect('evidence' in base).toBe(false);
   });
 
   it('an older server (no v2 fields): its follow-up sample as before, routine sampling at the policy interval', () => {

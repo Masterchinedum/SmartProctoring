@@ -369,7 +369,7 @@ describe('CandidateController — reporting interrupted (P2-4)', () => {
     const api = h.api as CandidateApi;
     api.identitySample = async () => {
       if (busy) throw new CandidateApiError(503, 'vision_busy', 'The server is busy analysing images.');
-      return { result: { id: 'r', trigger: 'face_return', decision: 'match', similarity: 0.7, confidence: 0.9, quality: null, guidance: [], at: 1 }, followUpInMs: null, status: 'active', hold: null };
+      return { result: { id: 'r', trigger: 'face_return', usable: true, guidance: [], at: 1 }, followUpInMs: null, status: 'active', hold: null };
     };
     await c.outbox!.putSample({ id: 's1', trigger: 'face_return', capturedAt: Date.now(), jpeg: new Uint8Array([1, 2, 3]) });
     await tick(30_000);

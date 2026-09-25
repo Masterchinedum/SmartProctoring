@@ -84,6 +84,30 @@ export function usableBaseline(b: SessionBaseline | null | undefined): b is Sess
   return !!b && Number.isFinite(b.mean) && Number.isFinite(b.sd) && b.n >= SESSION_NORMALISATION.minBaselineFrames;
 }
 
+/**
+ * Baseline of an active period that began with a passed resume / reconnect / reverify check: how that check's usable
+ * frames score against the reference (the candidate's level under the period's own light, room and camera — possibly
+ * another day), with the reference's bucket as in the enrolment baseline. Mid-exam samples of the period are then
+ * normalised 'continuous' against it (same period, minutes apart) instead of 'relaxed' against the enrolment.
+ * null (=> 'relaxed') with fewer than `minBaselineFrames` usable frames, or when the level is below the band the
+ * continuous normalisation is calibrated for (personal mean below the cross-session genuine mean of the frames' bucket
+ * minus `meanBand.below`): there the band would pull the personal model above what the check measured, and genuine
+ * samples of the period would look like a drop (webcam harness: that is where the false alarms came from).
+ */
+export function periodBaseline(frames: readonly { usable: boolean; similarity: number | null; bucket?: QualityBucket | null }[], referenceBucket: QualityBucket | null | undefined): SessionBaseline | null {
+  const usable = frames.filter((f) => f.usable && f.similarity != null && Number.isFinite(f.similarity));
+  if (usable.length < SESSION_NORMALISATION.minBaselineFrames) return null;
+  const sims = usable.map((f) => f.similarity!);
+  const mean = sims.reduce((a, v) => a + v, 0) / sims.length;
+  const sd = Math.sqrt(sims.reduce((a, v) => a + (v - mean) * (v - mean), 0) / Math.max(1, sims.length - 1));
+  const order: Record<QualityBucket, number> = { good: 0, fair: 1, poor: 2 };
+  const buckets = usable.map((f) => f.bucket ?? 'good').sort((a, b) => order[a] - order[b]);
+  const b = buckets[buckets.length >> 1];
+  const N = SESSION_NORMALISATION;
+  if (mean - N.drift.continuous[b].mean < bucketModel(b, referenceBucket).genuine.mean - N.meanBand.below) return null;
+  return { mean: round4(mean), sd: round4(sd), n: sims.length, calibrationVersion: CALIBRATION.version, ...(referenceBucket ? { bucket: referenceBucket } : {}) };
+}
+
 /** The personal genuine model (similarity of this person's probes to their reference) for a bucket. */
 export function personalGenuine(bucket: QualityBucket, baseline: SessionBaseline, context: ComparisonContext = 'continuous'): { mean: number; sd: number } {
   const g = bucketModel(bucket, baseline.bucket).genuine;
@@ -259,12 +283,21 @@ export interface AccumulateResult {
   posterior: number;
 }
 
-/** Add one sample (a burst aggregate or a single frame) to the session's evidence. Pure. */
+/**
+ * Add one sample (a burst aggregate or a single frame) to the session's evidence. Pure. A sample may arrive out of
+ * order (a queued upload delivered late — identity-samples.ts makes samples far older than their receipt, or from
+ * before the current period, record-only): it takes its place in time, and a discontinuity trigger drops earlier
+ * genuine evidence only when the sample is newer than everything in the window (a late track_break must not erase the
+ * evidence of the samples taken after it).
+ */
 export function accumulate(prev: Readonly<EvidenceAccumulator>, obs: SampleObservation): AccumulateResult {
   const sprt = CALIBRATION.sprt;
   const acc: EvidenceAccumulator = { ...EMPTY_ACCUMULATOR, ...prev, window: [...(prev.window ?? [])] };
-  acc.lastSampleAt = obs.at;
-  acc.window = acc.window.filter((e) => obs.at - e.at <= EVIDENCE.maxAgeMs);
+  const newest = acc.window.reduce((mx, e) => Math.max(mx, e.at), -Infinity);
+  const inOrder = obs.at > newest;
+  const latest = Math.max(obs.at, prev.lastSampleAt ?? -Infinity, newest);
+  acc.lastSampleAt = latest;
+  acc.window = acc.window.filter((e) => latest - e.at <= EVIDENCE.maxAgeMs);
   const prevState = acc.state;
   const done = (transition: EvidenceTransition, contribution: number): AccumulateResult => {
     const sum = windowSum(acc.window);
@@ -276,12 +309,13 @@ export function accumulate(prev: Readonly<EvidenceAccumulator>, obs: SampleObser
     return done('none', 0);
   }
   acc.unusableStreak = 0;
-  acc.lastUsableAt = obs.at;
+  acc.lastUsableAt = Math.max(obs.at, prev.lastUsableAt ?? -Infinity);
 
-  const discontinuity = DISCONTINUITY_TRIGGERS.has(obs.trigger);
+  const discontinuity = DISCONTINUITY_TRIGGERS.has(obs.trigger) && inOrder;
   if (discontinuity) acc.window = acc.window.filter((e) => e.llr > 0);
   const contribution = round4(obs.evidence.llr > 0 && discontinuity ? obs.evidence.llr * EVIDENCE.discontinuityWeight : obs.evidence.llr);
   acc.window.push({ id: obs.id, at: obs.at, llr: contribution, similarity: obs.evidence.similarity, bucket: obs.evidence.bucket, trigger: obs.trigger });
+  if (!inOrder) acc.window.sort((a, b) => a.at - b.at);
   while (acc.window.length > sprt.maxSamples) acc.window.shift();
   const sum = windowSum(acc.window);
 
@@ -415,20 +449,50 @@ export function nextSampleDelayMs(policy: Pick<IdentityPolicy, 'periodicCheckInt
 }
 
 /**
+ * Server-side watchdog for an active, connected session whose identity samples stopped arriving (a client that
+ * stopped sampling, e.g. because no frame qualified while the face was hidden):
+ *  - no sample for `requestAfterIntervals` expected intervals => the heartbeat asks for one (server_request, which the
+ *    client honours even without a qualifying frame);
+ *  - still none after `observeAfterIntervals` intervals (at least `minObserveMs`) => an uncertain observation for staff
+ *    (identity_unverifiable, details.reason 'no_samples'), closed by the next sample.
+ */
+export const SAMPLE_WATCHDOG = Object.freeze({ requestAfterIntervals: 3, observeAfterIntervals: 6, minObserveMs: 60_000 });
+
+export type WatchdogState = { activeSince?: number | null; evidence?: Partial<EvidenceAccumulator> | null };
+
+/** 'request' / 'unanswered' when samples are overdue (see SAMPLE_WATCHDOG); 'ok' otherwise. Pure. */
+export function sampleWatchdog(
+  policy: Pick<IdentityPolicy, 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>,
+  state: WatchdogState,
+  now: number,
+): 'ok' | 'request' | 'unanswered' {
+  const last = Math.max(state.evidence?.lastSampleAt ?? -Infinity, state.activeSince ?? -Infinity);
+  if (!Number.isFinite(last)) return 'ok';
+  const interval = nextSampleDelayMs(policy, { activeSince: state.activeSince ?? null, acc: { state: state.evidence?.state ?? 'consistent', unusableStreak: state.evidence?.unusableStreak ?? 0 } }, now);
+  const quiet = now - last;
+  if (quiet > Math.max(SAMPLE_WATCHDOG.observeAfterIntervals * interval, SAMPLE_WATCHDOG.minObserveMs)) return 'unanswered';
+  if (quiet > SAMPLE_WATCHDOG.requestAfterIntervals * interval) return 'request';
+  return 'ok';
+}
+
+/**
  * The identity sample the server wants right now (HeartbeatResponse / CandidateSessionState.identitySample):
  * {trigger:'exam_start', inMs:0} after a (re)start until a sample arrives; {trigger:'server_request', inMs:0} while
- * the evidence is 'suspect' and the requested faster sample is late. Pure (computed from the session row), so the
- * single-statement heartbeat can answer it too.
+ * the evidence is 'suspect' and the requested faster sample is late, or (with `policy`) when the watchdog finds
+ * samples overdue (`sampleWatchdog`). Pure (computed from the session row), so the single-statement heartbeat can
+ * answer it too.
  */
 export function identitySampleRequest(
   status: SessionStatus,
-  state: { sampleRequest?: { trigger: IdentityCheckTrigger; since: number } | null; evidence?: Partial<EvidenceAccumulator> | null } | null | undefined,
+  state: ({ sampleRequest?: { trigger: IdentityCheckTrigger; since: number } | null } & WatchdogState) | null | undefined,
   burstSize: number,
   now: number,
+  policy?: Pick<IdentityPolicy, 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>,
 ): IdentitySampleRequestDTO | null {
   if (status !== 'active' || !state) return null;
   if (state.sampleRequest) return { trigger: state.sampleRequest.trigger, inMs: 0, burstSize };
   const acc = state.evidence;
   if (acc?.state === 'suspect' && acc.lastSampleAt != null && now - acc.lastSampleAt >= CADENCE.lateAfterMs) return { trigger: 'server_request', inMs: 0, burstSize };
+  if (policy && sampleWatchdog(policy, state, now) !== 'ok') return { trigger: 'server_request', inMs: 0, burstSize };
   return null;
 }

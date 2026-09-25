@@ -77,6 +77,11 @@ export interface IdentityComparison {
   /** 0..1 confidence in the decision. */
   confidence: number;
   guidance: string[];
+  /**
+   * 'inconclusive' that a person must look at (never a verdict either way): the ID-photo comparison scored below its
+   * mismatch threshold on a frame too poor (or evidence too weak) to call it a different person.
+   */
+  needsHumanReview?: boolean;
 }
 
 export interface ReferenceBuildResult {

@@ -22,7 +22,7 @@ function ev(id: string, version: number, extra: Partial<EventUpsert> = {}): Even
 }
 
 const sampleResponse: IdentitySampleResponse = {
-  result: { id: 'r', trigger: 'periodic', decision: 'match', similarity: 0.7, confidence: 0.9, quality: null, guidance: [], at: 1 },
+  result: { id: 'r', trigger: 'periodic', usable: true, guidance: [], at: 1 },
   followUpInMs: null,
   status: 'active',
   hold: null,

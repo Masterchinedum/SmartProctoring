@@ -22,7 +22,7 @@ import {
   type ProctoringPolicy,
   type SessionStatus,
 } from '@sp/shared';
-import { and, desc, eq, getTableColumns, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { Tx } from '../db/index.js';
 import {
@@ -30,6 +30,7 @@ import {
   events,
   examSessions,
   exams,
+  identitySampleFrames,
   organizations,
   pauseRequests,
   sessionCommands,
@@ -127,6 +128,9 @@ export class SessionMutation {
   private readonly identityChecksToPublish: string[] = [];
   private readonly pauseRequestsToPublish: string[] = [];
   private readonly afterCommit: (() => void | Promise<void>)[] = [];
+  /** Bursts dropped undecided (resetIdentityCounters / dropPendingBursts): their frame embeddings are erased at flush. */
+  private readonly droppedBurstIds = new Set<string>();
+  private eraseAllUndecidedFrames = false;
   private cache: { exam?: Exam; org?: Organization | null; candidate?: Candidate; periods?: SessionPeriod[] } = {};
   /** What staff saw of the session before this mutation (dto.ts staffVisibleKey). */
   private readonly visibleBefore: string;
@@ -210,6 +214,23 @@ export class SessionMutation {
 
   /** @internal */
   async flush(): Promise<void> {
+    if (this.droppedBurstIds.size || this.eraseAllUndecidedFrames) {
+      // Frame embeddings of bursts that will never be decided are erased with the change that dropped them
+      // (PRIVACY.md: burst-frame templates are kept only until the burst is decided).
+      await this.tx
+        .update(identitySampleFrames)
+        .set({ embeddingEnc: null })
+        .where(
+          and(
+            eq(identitySampleFrames.sessionId, this.session.id),
+            isNull(identitySampleFrames.identityCheckId),
+            isNotNull(identitySampleFrames.embeddingEnc),
+            this.eraseAllUndecidedFrames ? sql`true` : inArray(identitySampleFrames.burstId, [...this.droppedBurstIds]),
+          ),
+        );
+      this.droppedBurstIds.clear();
+      this.eraseAllUndecidedFrames = false;
+    }
     if (this.dirty) {
       this.patch.updatedAt = new Date(this.now);
       await this.tx.update(examSessions).set(this.patch).where(eq(examSessions.id, this.session.id));
@@ -422,11 +443,12 @@ export class SessionMutation {
    * session is (again) active, the start-up sampling cadence begins and an exam_start sample is requested
    * (CandidateSessionState / HeartbeatResponse.identitySample): a swap is most likely right after a (re)start.
    * Bursts still being collected belong to the previous period; they are dropped (identity-samples.ts decides
-   * frames that still arrive as late frames, without effect).
+   * frames that still arrive as late frames, without effect) and their frame embeddings erased.
    */
   resetIdentityCounters(): void {
     const st = identityState(this.session);
     const active = this.session.status === 'active';
+    for (const b of st.pendingBursts) this.droppedBurstIds.add(b.id);
     this.setIdentityState({
       ...st,
       consecutiveMatch: 0,
@@ -443,6 +465,16 @@ export class SessionMutation {
       activeSince: active ? this.now : null,
       sampleRequest: active ? { trigger: 'exam_start', since: this.now } : null,
     });
+  }
+
+  /**
+   * The session ends: bursts still being collected are never decided — dropped, and every undecided frame's embedding
+   * of the session erased (at flush).
+   */
+  dropPendingBursts(): void {
+    const st = identityState(this.session);
+    if (st.pendingBursts.length) this.setIdentityState({ ...st, pendingBursts: [] });
+    this.eraseAllUndecidedFrames = true;
   }
 
   /* ---------------------------------------------------------------- commands */
@@ -589,6 +621,7 @@ export async function finalizeSession(
     .set({ status: 'cancelled', decidedAt: new Date(at) })
     .where(and(eq(pauseRequests.sessionId, m.session.id), eq(pauseRequests.status, 'pending')));
   const wasStarted = m.session.startedAt != null;
+  m.dropPendingBursts();
   m.set({
     status,
     endReason,
