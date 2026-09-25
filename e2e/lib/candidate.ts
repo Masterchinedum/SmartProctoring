@@ -119,7 +119,7 @@ async function summarizeApiResponse(url: string, status: number, body: unknown):
   if (/\/api\/candidate\/checks\/[^/]+\/frames/.test(path)) {
     const qa = b.quality ?? {};
     const pr = b.progress ?? {};
-    return `frame step=${q.get('step')} ${status} accepted=${b.accepted} usable=${qa.usable} issues=${(qa.issues ?? []).join('+') || '-'} bright=${qa.brightness?.toFixed?.(0)} contrast=${qa.contrast?.toFixed?.(1)} ie=${qa.interEyePx?.toFixed?.(0)} yaw=${qa.yawDeg?.toFixed?.(0)} sat=${b.stepSatisfied ?? '-'} measured=${b.measured ? `${b.measured.yawDeg?.toFixed(0)}/${b.measured.pitchDeg?.toFixed(0)}` : '-'} client=${q.get('clientYaw') ?? '-'} progress=${pr.frontalAccepted ?? '-'}+${pr.frontalNeeded ?? '-'} id=${pr.identity ?? '-'} steps=${(pr.steps ?? []).map((x: any) => (x.satisfied ? 1 : 0)).join('')} canComplete=${pr.canComplete ?? '-'}`;
+    return `frame step=${q.get('step')} ${status} accepted=${b.accepted} usable=${qa.usable} issues=${(qa.issues ?? []).join('+') || '-'} bright=${qa.brightness?.toFixed?.(0)} contrast=${qa.contrast?.toFixed?.(1)} ie=${qa.interEyePx?.toFixed?.(0)} yaw=${qa.yawDeg?.toFixed?.(0)} sat=${b.stepSatisfied ?? '-'} measured=${b.measured ? `${b.measured.yawDeg?.toFixed(0)}/${b.measured.pitchDeg?.toFixed(0)}` : '-'} client=${q.get('clientYaw') ?? '-'} progress=${pr.frontalAccepted ?? '-'}+${pr.frontalNeeded ?? '-'} steps=${(pr.steps ?? []).map((x: any) => (x.satisfied ? 1 : 0)).join('')} canComplete=${pr.canComplete ?? '-'}`;
   }
   if (/\/api\/candidate\/checks\/[^/]+\/complete/.test(path)) {
     return `complete ${status} outcome=${b.outcome} identity=${b.identity?.decision}/${b.identity?.similarity?.toFixed?.(3)} liveness=${b.liveness ? `${b.liveness.passed}:${(b.liveness.reasons ?? []).join('+')}` : '-'} remaining=${b.attemptsRemaining} guidance=${JSON.stringify(b.guidance ?? [])}`;
@@ -129,7 +129,9 @@ async function summarizeApiResponse(url: string, status: number, body: unknown):
   }
   if (/\/api\/candidate\/identity\/sample/.test(path)) {
     const r = b.result ?? {};
-    return `sample trigger=${q.get('trigger')} burst=${q.get('burstIndex') ?? '-'}/${q.get('burstSize') ?? '-'} ${status} decision=${r.decision} sim=${r.similarity?.toFixed?.(3)} issues=${(r.quality?.issues ?? []).join('+') || '-'} complete=${b.burst?.complete ?? '-'} evidence=${b.evidence ? `${b.evidence.state}:${b.evidence.swapProbability?.toFixed?.(3)}:${b.evidence.samples}` : '-'} next=${b.nextSampleInMs ?? '-'} status=${b.status}`;
+    // The candidate is told only whether the image was usable (and guidance) — never a decision, score or evidence
+    // state; `faster=yes` is the server's cadence hint (followUpInMs: it wants the next sample sooner).
+    return `sample trigger=${q.get('trigger')} burst=${q.get('burstIndex') ?? '-'}/${q.get('burstSize') ?? '-'} ${status} usable=${r.usable ?? '-'} guidance=${JSON.stringify(r.guidance ?? [])} complete=${b.burst?.complete ?? '-'} faster=${b.followUpInMs != null ? 'yes' : 'no'} next=${b.nextSampleInMs ?? '-'} status=${b.status}`;
   }
   return null;
 }

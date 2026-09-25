@@ -3,13 +3,15 @@
  * Amazon Rekognition client: check-in (enrolment consistency, ID photo with ID-photo thresholds), resume checks and
  * suspected swaps during the exam. Off => exactly the previous behaviour; the provider agrees; the provider
  * contradicts a borderline decision (inconclusive + human review, never "different person" from it alone); a clear
- * internal decision is kept but flagged; provider errors fail open.
+ * internal decision — including a mismatch the accumulated evidence decided, whatever its raw similarity — is kept
+ * but flagged; provider errors fail open.
  */
 import type { CompleteCheckResponse, IdentitySampleResponse, OrgSettingsDTO } from '@sp/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { events, examSessions, identityChecks } from '../src/db/schema.js';
 import { loadIdentityCheckDTOs } from '../src/services/dto.js';
+import { identityState } from '../src/services/session-state.js';
 import type { SecondOpinionRecord } from '../src/services/identity-external.js';
 import { awsRekognitionProvider, VerifierRegistry } from '../src/verifiers/registry.js';
 import { json, staffApi, type Api } from './admin/fixtures.js';
@@ -120,7 +122,7 @@ describe('external verifier on (check-in, resume, suspected swap)', () => {
     await burst(env, c, [{ person: 'alice' }, { person: 'alice' }, { person: 'alice' }], { trigger: 'exam_start' });
     mock.handler = DIFFERENT;
     const { first, second } = await swapBursts(c, { person: 'mallory' });
-    expect(first.evidence!.state).toBe('suspect');
+    expect(first.status).toBe('active'); // 'suspect' after the first burst (staff side)
     expect(second.status).toBe('on_hold');
     expect(second.hold!.reason).toBe('identity_mismatch');
     expect(mock.inputs.length).toBe(n0 + 3); // one call, at confirmation
@@ -129,48 +131,40 @@ describe('external verifier on (check-in, resume, suspected swap)', () => {
     expect(JSON.stringify(mm.details)).not.toMatch(/SPFAKE|Bytes/);
   });
 
-  it('borderline suspected swap contradicted by a confident "same person": not confirmed, uncertain + human review', async () => {
+  it('a suspected swap the SPRT confirmed is never overruled by a confident "same person" (a look-alike is not "borderline"): confirmed, flagged for review', async () => {
     const { s, c } = await started();
     mock.handler = SAME;
     const n0 = mock.inputs.length;
-    // A look-alike: 0.30 is a strong drop from this person's own level, but only just below the match threshold region.
+    // A look-alike: 0.30 is close to the mismatch threshold by raw similarity, but the accumulated evidence over two
+    // bursts (a strong drop from this person's own level) is decisive.
     const lookAlike = { person: 'alice', similarity: 0.3 };
     const { second } = await swapBursts(c, lookAlike);
     expect(mock.inputs.length).toBe(n0 + 1);
-    expect(second.status).toBe('active');
-    expect(second.evidence!.state).toBe('monitoring');
-    let evs = await eventsOf(s.id);
-    expect(evs.map((e) => e.type)).not.toContain('identity_mismatch');
-    const unv = evs.find((e) => e.type === 'identity_unverifiable')!;
-    expect(unv).toMatchObject({ category: 'uncertain', status: 'open' });
-    expect(unv.details).toMatchObject({ reason: 'second_opinion_disagrees', needsHumanReview: true, secondOpinion: { outcome: 'downgraded_to_inconclusive', decision: 'inconclusive', internalDecision: 'mismatch' } });
-    const confirming = (await checksOf(s.id)).find((r) => opinionOf(r)?.kind === 'suspected_swap')!;
-    expect(opinionOf(confirming)).toMatchObject({ needsHumanReview: true, externalBand: 'same', internalStrength: 'borderline' });
-
-    // More borderline evidence while the external "same" stands: held off without asking again.
-    const again = await swapBursts(c, lookAlike);
-    expect(again.second.status).toBe('active');
-    expect(mock.inputs.length).toBe(n0 + 1);
-    // A clearly different face is not held off (a clear internal decision is never overturned): confirmed + review.
-    env.clock.advance(2_500);
-    const clear = (await burst(env, c, [{ person: 'mallory' }, { person: 'mallory' }, { person: 'mallory' }], { trigger: 'server_request' })).last as IdentitySampleResponse;
-    expect(clear.status).toBe('on_hold');
-    evs = await eventsOf(s.id);
+    expect(second.status).toBe('on_hold');
+    const evs = await eventsOf(s.id);
     const mm = evs.find((e) => e.type === 'identity_mismatch')!;
-    expect(mm.details).toMatchObject({ needsHumanReview: true, secondOpinionVetoOverriddenBy: 'clear_internal_evidence' });
+    expect(mm.details).toMatchObject({
+      needsHumanReview: true,
+      secondOpinion: { outcome: 'disagreement_flagged', decision: 'mismatch', internalStrength: 'clear', record: { internal: { decision: 'mismatch', evidence: { decisive: true } } } },
+    });
+    expect(evs.filter((e) => e.type === 'identity_unverifiable' && (e.details as { reason?: string }).reason === 'second_opinion_disagrees')).toHaveLength(0);
+    const st = identityState(await sessionRow(s.id));
+    expect(st.secondOpinionVeto ?? null).toBeNull();
+    const confirming = (await checksOf(s.id)).find((r) => opinionOf(r)?.kind === 'suspected_swap')!;
+    expect(opinionOf(confirming)).toMatchObject({ needsHumanReview: true, externalBand: 'same', internalStrength: 'clear' });
   });
 
-  it('resume: a borderline mismatch contradicted by the provider => inconclusive + review (retry), never a mismatch', async () => {
+  it('resume: a mismatch the frames decided (likely_mismatch) is kept even when its raw similarity looks borderline — flagged for review', async () => {
     const { s, c } = await started();
     await c.req('POST', '/api/candidate/pause', {});
     mock.handler = SAME;
     const { complete } = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.25 } });
-    expect(complete!.outcome).toBe('retry');
-    expect(complete!.identity!.decision).toBe('inconclusive');
+    expect(complete!.outcome).toBe('held');
+    expect(complete!.identity!.decision).toBe('mismatch');
     const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
-    expect(opinionOf(row)).toMatchObject({ outcome: 'downgraded_to_inconclusive', internalDecision: 'mismatch', needsHumanReview: true });
-    expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('identity_mismatch');
-    expect((await sessionRow(s.id)).status).toBe('paused');
+    expect(opinionOf(row)).toMatchObject({ outcome: 'disagreement_flagged', internalDecision: 'mismatch', decision: 'mismatch', internalStrength: 'clear', needsHumanReview: true });
+    const mm = (await eventsOf(s.id)).find((e) => e.type === 'identity_mismatch')!;
+    expect(mm.details).toMatchObject({ needsHumanReview: true });
   });
 
   it('resume: an internally inconclusive check is resolved by a confident "same person" (passes first time)', async () => {

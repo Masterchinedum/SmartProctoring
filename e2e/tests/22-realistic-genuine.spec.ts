@@ -77,7 +77,7 @@ for (const cs of CASES) {
           heldAfterS: heldAt ? secs(heldAt - t0) : null,
           holdReason: d.summary.hold?.reason ?? null,
           eventTypes: [...new Set(events.map((e) => e.type))],
-          evidenceStates: [...new Set(c.apiLog.map((l) => / evidence=([a-z_]+):/.exec(l)?.[1]).filter(Boolean))],
+          fasterRequested: c.apiLog.filter((l) => / sample /.test(l) && / faster=yes /.test(l)).length,
           about: RW_FIXTURES[cs.fixture].about,
         });
         expect(mismatches, `identity_mismatch for the genuine candidate (decisions ${JSON.stringify(hist)})`).toBe(0);

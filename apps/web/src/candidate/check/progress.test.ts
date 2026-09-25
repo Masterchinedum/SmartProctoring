@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CheckProgress } from './progress';
+import { attemptsAfterText, CheckProgress } from './progress';
 
 describe('CheckProgress', () => {
   it('gives up on frontal frames after the rejection limit (below the server cap of 10)', () => {
@@ -40,5 +40,23 @@ describe('CheckProgress', () => {
     p.captured(2500);
     for (let t = 3000; t <= 40_000; t += 200) p.liveness(1, 0.02 + (t % 400 ? 0.01 : 0), t);
     expect(p.stalled(33_000)).toBe(true);
+  });
+});
+
+describe('attemptsAfterText', () => {
+  it('shows the attempts left after an ordinary failure', () => {
+    expect(attemptsAfterText({ attemptsRemaining: 3, attemptsAfter: { failed: 2, unclear: 2 } })).toBe('Attempts remaining after this one: 2');
+  });
+
+  it('does not say 0 when an unclear-picture failure (half an attempt) would still allow another try', () => {
+    const t = attemptsAfterText({ attemptsRemaining: 1, attemptsAfter: { failed: 0, unclear: 1 } });
+    expect(t).not.toMatch(/: 0/);
+    expect(t).toMatch(/last attempt.*too unclear/);
+    expect(attemptsAfterText({ attemptsRemaining: 2, attemptsAfter: { failed: 1, unclear: 2 } })).toMatch(/: 1 \(2 if the pictures/);
+  });
+
+  it('an older server without the split: attemptsRemaining - 1', () => {
+    expect(attemptsAfterText({ attemptsRemaining: 3 })).toBe('Attempts remaining after this one: 2');
+    expect(attemptsAfterText({ attemptsRemaining: 0 })).toBe('Attempts remaining after this one: 0');
   });
 });

@@ -1,6 +1,8 @@
 /** Candidate-flow helpers for integration tests (drive the real HTTP API with fake camera frames). */
 import { PRIVACY_NOTICE_VERSION, type CheckFrameResponse, type CheckProgressDTO, type CheckPurpose, type CompleteCheckResponse, type StartCheckResponse } from '@sp/shared';
 import { expect } from 'vitest';
+import { eq } from 'drizzle-orm';
+import { identityChecks, identitySampleFrames } from '../src/db/schema.js';
 import type { FakeImageSpec } from '../src/vision/fake.js';
 import type { CandidateClient, TestEnv } from './helpers.js';
 
@@ -137,4 +139,15 @@ export async function burst(
     out.push(r.json());
   }
   return { burstId, responses: out, last: out[out.length - 1] };
+}
+
+/**
+ * The staff-side decision behind a candidate's sample receipt (IdentitySampleResponse.result.id: the identity check,
+ * or the burst frame of an intermediate frame). The candidate is never told it.
+ */
+export async function sampleDecision(env: TestEnv, res: { result: { id: string } }): Promise<string | undefined> {
+  const [row] = await env.ctx.db.select({ decision: identityChecks.decision }).from(identityChecks).where(eq(identityChecks.id, res.result.id));
+  if (row) return row.decision;
+  const [f] = await env.ctx.db.select({ decision: identitySampleFrames.decision }).from(identitySampleFrames).where(eq(identitySampleFrames.id, res.result.id));
+  return f?.decision;
 }

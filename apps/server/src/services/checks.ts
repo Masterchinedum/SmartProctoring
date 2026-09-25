@@ -1793,6 +1793,20 @@ async function continueAfterPass(
     return base;
   }
 
+  if (t.reEnrolled) {
+    // A new reference was just enrolled: its own baseline, same session.
+    m.setIdentityState({ ...identityState(m.session), normalisation: 'continuous', periodBaseline: null });
+  } else if (!(m.session.status === 'on_hold' && m.session.holdPrevStatus === 'ready')) {
+    // The exam continues after this check (now, or after staff reviewed a too-long pause) in a period that may be
+    // another day, room or camera than the enrolment. Its own baseline — how this check's usable frames score against
+    // the reference — lets mid-exam samples be normalised 'continuous' again (the same period, minutes apart); with
+    // fewer than 3 usable frames, a level below the calibrated band, or after a flagged mismatch (the frames may show
+    // someone else), 'relaxed' against the enrolment baseline.
+    const own = t.flagged || !a.aggregate ? null : a.aggregate.perFrame.map((f) => ({ usable: f.usable, similarity: f.similarity, bucket: f.bucket }));
+    const pb = own ? periodBaseline(own, a.active?.ref.baseline?.bucket ?? null) : null;
+    m.setIdentityState({ ...identityState(m.session), normalisation: pb ? 'continuous' : 'relaxed', periodBaseline: pb ? { ...pb, checkId: check.id, at: m.now } : null });
+  }
+
   await closeGapPeriods(a, t);
 
   if (purpose === 'resume' && t.pauseStart != null && policy.pause.maxPauseDurationSec != null && t.checkStart - t.pauseStart > policy.pause.maxPauseDurationSec * 1000) {
@@ -1806,18 +1820,6 @@ async function continueAfterPass(
 
   const next = m.session.status === 'on_hold' ? (m.session.holdPrevStatus === 'ready' ? 'ready' : 'active') : 'active';
   m.set({ status: next, ...(m.session.status === 'on_hold' ? clearedHold() : {}) });
-  if (t.reEnrolled) {
-    // A new reference was just enrolled: its own baseline, same session.
-    m.setIdentityState({ ...identityState(m.session), normalisation: 'continuous', periodBaseline: null });
-  } else if (next === 'active') {
-    // The period that begins now may be another day, room or camera than the enrolment. Its own baseline — how this
-    // check's usable frames score against the reference — lets mid-exam samples be normalised 'continuous' again
-    // (the same period, minutes apart); with fewer than 3 usable frames, a level below the calibrated band, or after
-    // a flagged mismatch (the frames may show someone else), 'relaxed' against the enrolment baseline.
-    const own = t.flagged || !a.aggregate ? null : a.aggregate.perFrame.map((f) => ({ usable: f.usable, similarity: f.similarity, bucket: f.bucket }));
-    const pb = own ? periodBaseline(own, a.active?.ref.baseline?.bucket ?? null) : null;
-    m.setIdentityState({ ...identityState(m.session), normalisation: pb ? 'continuous' : 'relaxed', periodBaseline: pb ? { ...pb, checkId: check.id, at: m.now } : null });
-  }
   if (next === 'active') {
     await m.insertPeriod('active', m.now, { reason: purpose });
     m.clockStart();

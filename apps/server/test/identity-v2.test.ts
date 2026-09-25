@@ -331,22 +331,53 @@ describe('poor light and per-session normalisation', () => {
     expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('identity_mismatch');
   });
 
-  it('after a resume, mid-exam samples use the relaxed normalisation (another room, light or camera is possible)', async () => {
+  it("after a resume the period's own baseline (from the check's frames) makes mid-exam samples 'continuous' again", async () => {
     const a = await examWithStartSample();
     const b = await examWithStartSample();
     await b.c.req('POST', '/api/candidate/pause', {});
-    expect((await runCheck(env, b.c, 'resume')).complete!.outcome).toBe('passed');
+    env.clock.advance(3 * 60 * 60_000); // hours later
+    const resume = await runCheck(env, b.c, 'resume');
+    expect(resume.complete!.outcome).toBe('passed');
     await burst(env, b.c, [ALICE, ALICE, ALICE], { trigger: 'exam_start' });
     expect((await sessionRow(a.s.id)).identityState.normalisation ?? 'continuous').toBe('continuous');
-    expect((await sessionRow(b.s.id)).identityState.normalisation).toBe('relaxed');
+    const st = identityState(await sessionRow(b.s.id));
+    expect(st.normalisation).toBe('continuous');
+    expect(st.periodBaseline).toMatchObject({ n: expect.any(Number), calibrationVersion: CALIBRATION.version, bucket: 'good' });
+    expect(st.periodBaseline!.n).toBeGreaterThanOrEqual(3);
     const llrOf = async (sid: string) => ((await checksOf(sid)).pop()!.context as unknown as { evidence: { llr: number } }).evidence.llr;
     const lowish = { person: 'alice', similarity: 0.4 };
     env.clock.advance(15_000);
     await sample(env, a.c, lowish);
     await sample(env, b.c, lowish);
-    // Same session: 0.40 is a clear drop from the enrolment level; after a resume it is within the cross-day drift.
+    // 0.40 is a clear drop from the candidate's level measured at the resume check, as it is from the enrolment's.
     expect(await llrOf(a.s.id)).toBeGreaterThan(1);
-    expect(await llrOf(b.s.id)).toBeLessThan(0);
+    expect(await llrOf(b.s.id)).toBeGreaterThan(1);
+  });
+
+  it("a resume check whose frames score far below the enrolment (another day) leaves the period 'relaxed'", async () => {
+    const { s, c } = await examWithStartSample();
+    await c.req('POST', '/api/candidate/pause', {});
+    const otherDay = { person: 'alice', similarity: 0.55 }; // passes, but below the band the continuous model covers
+    expect((await runCheck(env, c, 'resume', { spec: otherDay })).complete!.outcome).toBe('passed');
+    const st = identityState(await sessionRow(s.id));
+    expect(st.normalisation).toBe('relaxed');
+    expect(st.periodBaseline ?? null).toBeNull();
+    // ... so the period's genuine samples at that level are not evidence of a different person.
+    await burst(env, c, [otherDay, otherDay, otherDay], { trigger: 'exam_start' });
+    env.clock.advance(15_000);
+    await burst(env, c, [otherDay, otherDay, otherDay]);
+    expect((await evidenceOf(s.id)).state).toBe('consistent');
+  });
+
+  it('a reconnect before the exam started (e.g. a page reload before Start) leaves the normalisation alone', async () => {
+    const { s, c } = await freshSession();
+    await consent(c);
+    expect((await runCheck(env, c, 'initial')).complete!.outcome).toBe('passed');
+    const reloaded = env.candidateClient(s.token); // a new browser instance of the same candidate
+    expect((await runCheck(env, reloaded, 'reconnect')).complete!.outcome).toBe('passed');
+    const st = identityState(await sessionRow(s.id));
+    expect(st.normalisation).toBe('continuous');
+    expect(st.periodBaseline ?? null).toBeNull();
   });
 });
 
@@ -379,12 +410,50 @@ describe('backlit / dim checks (image quality, not identity)', () => {
     expect(a1.complete!.outcome).toBe('retry');
     expect(a1.complete!.guidance.join(' ')).toMatch(/light|contrast/i);
     expect(a1.complete!.attemptsRemaining).toBe(5); // 5 - 0.5, rounded up
-    // Attempt 2 a minute later: one clear usable frame now + the two from attempt 1 => decided.
+    // Attempt 2 a minute later: three usable frames of its own, each clearly the candidate but together not yet
+    // decisive, + the two clear frames from attempt 1 => decided.
     env.clock.advance(60_000);
-    const a2 = await runCheck(env, c, 'resume', { spec: CLEAR, frontal: backlit((i) => i === 4) });
+    const MEDIUM = { person: 'alice', similarity: 0.44 };
+    const a2frames = Array.from({ length: 24 }, (_, i) => (i === 4 || i === 9 || i === 14 ? MEDIUM : REJECTED));
+    const a2 = await runCheck(env, c, 'resume', { spec: MEDIUM, frontal: a2frames });
     expect(a2.complete!.outcome, JSON.stringify(a2.complete)).toBe('passed');
     const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
     expect(row.context).toMatchObject({ evidence: { pooledFrames: 2 } });
+    // The same three frames alone are not enough (no earlier attempt to build on).
+    const alone = await freshSession({ identity: { liveness: 'off' } });
+    await startedSession(env, alone.c);
+    await alone.c.req('POST', '/api/candidate/pause', {});
+    expect((await runCheck(env, alone.c, 'resume', { spec: MEDIUM, frontal: a2frames })).complete!.outcome).not.toBe('passed');
+  });
+
+  it('pooling needs the current attempt to stand on its own: fewer than 3 clear usable frames => nothing is pooled', async () => {
+    const { s, c } = await freshSession({ identity: { liveness: 'off' } });
+    await startedSession(env, c);
+    await c.req('POST', '/api/candidate/pause', {});
+    await runCheck(env, c, 'resume', { spec: CLEAR, frontal: backlit((i) => i === 4 || i === 9) });
+    env.clock.advance(60_000);
+    // One clear frame now (the old rule pooled for a single agreeing frame).
+    const a2 = await runCheck(env, c, 'resume', { spec: CLEAR, frontal: backlit((i) => i === 4) });
+    expect(a2.complete!.outcome).not.toBe('passed');
+    const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
+    expect(row.context).toMatchObject({ evidence: { pooledFrames: 0 } });
+  });
+
+  it("frames of an attempt that failed the live-person check (possibly a photo) are never pooled", async () => {
+    const { s, c } = await freshSession();
+    await startedSession(env, c);
+    await c.req('POST', '/api/candidate/pause', {});
+    // Attempt 1: clear frames of the candidate's face, but no real head turns (a photo held up) => liveness failed.
+    const photo = await runCheck(env, c, 'resume', { spec: CLEAR, wrongTurns: true });
+    expect(photo.complete!.outcome).toBe('retry');
+    expect(photo.complete!.liveness!.passed).toBe(false);
+    env.clock.advance(60_000);
+    // Attempt 2: the live candidate, frames clear enough to allow pooling — but the photo attempt's frames are not used.
+    const a2 = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.44 } });
+    expect(a2.complete!.liveness!.passed).toBe(true);
+    const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
+    expect(row.context).toMatchObject({ evidence: { pooledFrames: 0, usableFrames: expect.any(Number) } });
+    expect((row.context as unknown as { evidence: { usableFrames: number } }).evidence.usableFrames).toBeGreaterThanOrEqual(3);
   });
 
   it('pooled frames never vouch for someone else now', async () => {
@@ -409,9 +478,11 @@ describe('bursts', () => {
     const before = (await checksOf(s.id)).length;
     env.clock.advance(15_000);
     const r = await burst(env, c, [ALICE, ALICE, ALICE]);
-    expect(r.responses[0]).toMatchObject({ burst: { received: 1, size: 3, complete: false }, nextSampleInMs: null, result: { decision: 'match' } });
+    expect(r.responses[0]).toMatchObject({ burst: { received: 1, size: 3, complete: false }, nextSampleInMs: null, result: { usable: true } });
+    expect((await decisionOf(r.responses[0])).decision).toBe('match'); // the frame's own label (staff side)
     expect(r.responses[1].burst).toMatchObject({ received: 2, complete: false });
-    expect(r.last).toMatchObject({ burst: { id: r.burstId, received: 3, size: 3, complete: true }, result: { decision: 'match' } });
+    expect(r.last).toMatchObject({ burst: { id: r.burstId, received: 3, size: 3, complete: true }, result: { usable: true } });
+    expect((await decisionOf(r.last)).decision).toBe('match');
     const rows = await checksOf(s.id);
     expect(rows.length).toBe(before + 1);
     expect(rows[rows.length - 1].context).toMatchObject({ burst: { id: r.burstId, size: 3, received: 3, consistent: true } });
@@ -428,8 +499,8 @@ describe('bursts', () => {
     env.clock.advance(15_000);
     const r = await burst(env, c, [MALLORY, MALLORY, MALLORY], { order: [2, 0, 1], trigger: 'track_break' });
     expect(r.responses.map((x) => x.burst.complete)).toEqual([false, false, true]);
-    expect(r.last.result.decision).toBe('mismatch');
-    expect(r.last.evidence.state).toBe('suspect');
+    expect((await decisionOf(r.last)).decision).toBe('mismatch');
+    expect((await evidenceOf(s.id)).state).toBe('suspect');
     const n = (await checksOf(s.id)).length;
     const [frame] = await env.ctx.db.select().from(identitySampleFrames).where(and(eq(identitySampleFrames.burstId, r.burstId), eq(identitySampleFrames.burstIndex, 0)));
     const replay = await c.jpeg('/api/candidate/identity/sample', MALLORY, { sampleId: frame.sampleId, trigger: 'periodic', capturedAt: env.clock.t, burstId: r.burstId, burstIndex: 0, burstSize: 3 });
@@ -473,14 +544,15 @@ describe('bursts', () => {
       { person: 'alice', similarity: 0.51 },
       { person: 'alice', similarity: 0.4 },
     ]);
-    expect(r.last.result.similarity).toBeCloseTo(0.4, 3);
-    expect(r.last.result.decision).not.toBe('match');
+    const d = await decisionOf(r.last);
+    expect(d.similarity).toBeCloseTo(0.4, 3);
+    expect(d.decision).not.toBe('match');
     const rows = await checksOf(s.id);
     expect(rows[rows.length - 1].context).toMatchObject({ burst: { scoring: 'median', consistent: true } });
     // A tight burst is scored with its template (the calibrated score).
     env.clock.advance(15_000);
     const tight = await burst(env, c, [ALICE, { person: 'alice', similarity: 0.97 }, ALICE]);
-    expect(tight.last.result.decision).toBe('match');
+    expect((await decisionOf(tight.last)).decision).toBe('match');
     expect((await checksOf(s.id)).pop()!.context).toMatchObject({ burst: { scoring: 'template' } });
   });
 
@@ -488,7 +560,7 @@ describe('bursts', () => {
     const { s, c } = await examWithStartSample();
     env.clock.advance(15_000);
     const r = await burst(env, c, [ALICE, MALLORY, MALLORY]);
-    expect(r.last.result.decision).toBe('mismatch');
+    expect((await decisionOf(r.last)).decision).toBe('mismatch');
     const rows = await checksOf(s.id);
     expect(rows[rows.length - 1].context).toMatchObject({ burst: { consistent: false } });
   });
@@ -516,9 +588,9 @@ describe('triggers', () => {
       await sample(env, x.c, { person: 'alice', similarity: 0.55 }); // a mild genuine sample
     }
     env.clock.advance(5_000);
-    const routine = (await sample(env, a.c, MALLORY, 'periodic')).json() as IdentitySampleResponse;
-    const afterBreak = (await sample(env, b.c, MALLORY, 'track_break')).json() as IdentitySampleResponse;
-    expect(afterBreak.evidence!.swapProbability).toBeGreaterThan(routine.evidence!.swapProbability);
+    await sample(env, a.c, MALLORY, 'periodic');
+    await sample(env, b.c, MALLORY, 'track_break');
+    expect((await evidenceOf(b.s.id)).swapProbability).toBeGreaterThan((await evidenceOf(a.s.id)).swapProbability);
   });
 });
 

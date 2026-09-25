@@ -39,6 +39,7 @@ import {
   sampleLabel,
   POOR_LIGHT_GUIDANCE,
   poorLightSuspect,
+  sampleWatchdog,
   toEvidenceDTO,
   usableBaseline,
   windowSum,
@@ -341,17 +342,19 @@ async function processSample(ctx: Ctx, session: ExamSession, instanceId: string,
 
 /**
  * Whether the server is waiting for this sample (vision priority 'interactive'): it asked for one (exam start, a
- * faster look, the watchdog), a follow-up after a non-match is due, the evidence is building up (monitoring /
- * suspect / a flagged mismatch), or the period is in its start-up window (a swap is most likely right after a start).
+ * faster look, or its watchdog because samples are overdue), a follow-up after a non-match is due, the evidence is
+ * building up (monitoring / suspect / a flagged mismatch), or the period is in its start-up window (a swap is most
+ * likely right after a start).
  */
 export function sampleUrgent(
   st: Pick<IdentityEngineState, 'sampleRequest' | 'followUpRequestedAt' | 'evidence' | 'activeSince' | 'openMismatchEventId'>,
-  policy: Pick<ProctoringPolicy['identity'], 'startupWindowSec'>,
+  policy: Pick<ProctoringPolicy['identity'], 'startupWindowSec' | 'startupIntervalSec' | 'periodicCheckIntervalSec'>,
   now: number,
 ): boolean {
   if (st.sampleRequest || st.followUpRequestedAt != null || st.openMismatchEventId) return true;
   if (st.evidence?.state && st.evidence.state !== 'consistent') return true;
-  return st.activeSince != null && now - st.activeSince < policy.startupWindowSec * 1000;
+  if (st.activeSince != null && now - st.activeSince < policy.startupWindowSec * 1000) return true;
+  return sampleWatchdog(policy, st, now) !== 'ok';
 }
 
 /** The session's policy snapshot (taken at exam start; samples are only accepted after it). */

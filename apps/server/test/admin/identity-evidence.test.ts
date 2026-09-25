@@ -8,7 +8,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { auditLog, events, evidence } from '../../src/db/schema.js';
 import { purgeSessionEvidence } from '../../src/services/evidence.js';
-import { consent, DEVICE, runCheck, sample, startedSession } from '../flow.js';
+import { consent, DEVICE, runCheck, sample, startedSession, sampleDecision } from '../flow.js';
 import { createTestEnv, type TestEnv } from '../helpers.js';
 import { json, MIN, otherOrg, staffApi, type Api } from './fixtures.js';
 
@@ -34,7 +34,7 @@ describe('possible person swap after a resume', () => {
     const c = await startedSession(env);
     sessionId = env.session.id;
     env.clock.advance(MIN);
-    expect(json(await sample(env, c, { person: 'alice' })).result.decision).toBe('match');
+    expect(await sampleDecision(env, json(await sample(env, c, { person: 'alice' })))).toBe('match');
     expect(json(await c.req('POST', '/api/candidate/pause', { reason: 'Break' })).outcome).toBe('paused');
     env.clock.advance(20 * MIN);
     // Resumes in a darker room with another camera: context only.
@@ -42,7 +42,7 @@ describe('possible person swap after a resume', () => {
     expect(resumed.complete!.outcome).toBe('passed');
     env.clock.advance(30_000);
     const s1 = json(await sample(env, c, { person: 'bob', brightness: 60 }));
-    expect(s1.result.decision).toBe('mismatch');
+    expect(await sampleDecision(env, s1)).toBe('mismatch');
     env.clock.advance(4_000);
     const s2 = json(await sample(env, c, { person: 'bob', brightness: 60 }, 'follow_up'));
     expect(s2.status).toBe('on_hold');
@@ -147,7 +147,7 @@ describe('identity could not be verified', () => {
     const c = await startedSession(env, env.candidateClient(s.token));
     for (let i = 0; i < 3; i++) {
       env.clock.advance(10_000);
-      expect(json(await sample(env, c, { person: 'alice', usable: false, issues: ['too_dark'], brightness: 25 })).result.decision).toBe('unable_to_verify');
+      expect(await sampleDecision(env, json(await sample(env, c, { person: 'alice', usable: false, issues: ['too_dark'], brightness: 25 })))).toBe('unable_to_verify');
     }
     const ev = await eventOf(s.id, 'identity_unverifiable');
     expect(ev.category).toBe('uncertain');

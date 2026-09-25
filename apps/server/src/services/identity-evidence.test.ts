@@ -16,7 +16,10 @@ import {
   frameEvidence,
   identitySampleRequest,
   nextSampleDelayMs,
+  periodBaseline,
   poorLightSuspect,
+  SAMPLE_WATCHDOG,
+  sampleWatchdog,
   windowSum,
   type EvidenceAccumulator,
   type SessionBaseline,
@@ -217,6 +220,26 @@ describe('evidence accumulator (SPRT)', () => {
     expect(r.states).toEqual(['suspect', 'confirmed_mismatch', 'confirmed_mismatch', 'confirmed_mismatch', 'confirmed_mismatch', 'consistent']);
   });
 
+  it('a late (out-of-order) discontinuity sample takes its place in time and does not drop newer genuine evidence', () => {
+    let acc: EvidenceAccumulator = { ...EMPTY_ACCUMULATOR, window: [] };
+    // Mild genuine samples (the window keeps them: their sum stays above `sprt.clear`).
+    acc = accumulate(acc, { id: 'g1', at: 100_000, trigger: 'periodic', evidence: frameEvidence(GOOD, 0.4, null) }).acc;
+    acc = accumulate(acc, { id: 'g2', at: 115_000, trigger: 'periodic', evidence: frameEvidence(GOOD, 0.41, null) }).acc;
+    expect(acc.window.map((e) => e.id)).toEqual(['g1', 'g2']);
+    expect(windowSum(acc.window)).toBeLessThan(0);
+    // A track_break sample captured BEFORE g2, delivered after it.
+    const late = accumulate(acc, { id: 'tb', at: 110_000, trigger: 'track_break', evidence: frameEvidence(GOOD, 0.1, null) });
+    expect(late.acc.window.map((e) => e.id)).toEqual(['g1', 'tb', 'g2']); // in time order, g1 / g2 kept
+    const raw = frameEvidence(GOOD, 0.1, null).llr;
+    expect(raw).toBeGreaterThan(0);
+    expect(late.acc.window.find((e) => e.id === 'tb')!.llr).toBeCloseTo(raw, 4); // not weighted as a discontinuity
+    expect(late.acc.lastSampleAt).toBe(115_000);
+    // The same sample in order is a discontinuity: earlier genuine evidence is dropped and it counts more.
+    const inOrder = accumulate(acc, { id: 'tb2', at: 120_000, trigger: 'track_break', evidence: frameEvidence(GOOD, 0.1, null) });
+    expect(inOrder.acc.window.map((e) => e.id)).toEqual(['tb2']);
+    expect(inOrder.acc.window[0].llr).toBeGreaterThan(raw);
+  });
+
   it('old samples leave the window', () => {
     let acc: EvidenceAccumulator = { ...EMPTY_ACCUMULATOR, window: [] };
     acc = accumulate(acc, { id: 'a', at: 0, trigger: 'periodic', evidence: frameEvidence(GOOD, 0.1, null) }).acc;
@@ -287,11 +310,54 @@ describe('cadence', () => {
     expect(nextSampleDelayMs(policy, { activeSince: 0, acc: acc('consistent', 1) }, late)).toBe(CADENCE.unusableMs);
   });
 
+  it('watchdog: a server_request when no sample came for 3 intervals; "unanswered" after 6 intervals (at least 1 min)', () => {
+    const late = policy.startupWindowSec * 1000 + 1;
+    const iv = policy.periodicCheckIntervalSec * 1000;
+    const st = (lastSampleAt: number) => ({ activeSince: 0, evidence: { state: 'consistent' as const, lastSampleAt, unusableStreak: 0 } });
+    expect(sampleWatchdog(policy, st(late), late + 3 * iv)).toBe('ok');
+    expect(sampleWatchdog(policy, st(late), late + 3 * iv + 1)).toBe('request');
+    expect(sampleWatchdog(policy, st(late), late + Math.max(SAMPLE_WATCHDOG.observeAfterIntervals * iv, SAMPLE_WATCHDOG.minObserveMs) + 1)).toBe('unanswered');
+    // No sample since the period began: measured from its start (the start-up interval applies).
+    expect(sampleWatchdog(policy, { activeSince: 0, evidence: null }, 3 * policy.startupIntervalSec * 1000 + 1)).toBe('request');
+    expect(sampleWatchdog(policy, { activeSince: 0, evidence: null }, 50_000)).toBe('request');
+    expect(sampleWatchdog(policy, { activeSince: 0, evidence: null }, SAMPLE_WATCHDOG.minObserveMs + 1)).toBe('unanswered');
+    expect(sampleWatchdog(policy, { activeSince: null, evidence: null }, 1e9)).toBe('ok');
+    // identitySampleRequest asks for it (with the policy), for the fast heartbeat too.
+    expect(identitySampleRequest('active', { sampleRequest: null, ...st(late) }, 3, late + 3 * iv + 1)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: null, ...st(late) }, 3, late + 3 * iv + 1, policy)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('paused', { sampleRequest: null, ...st(late) }, 3, late + 10 * iv, policy)).toBeNull();
+  });
+
   it('identitySampleRequest: exam_start until a sample arrives; server_request while suspect and late', () => {
     expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, 3, 10)).toEqual({ trigger: 'exam_start', inMs: 0, burstSize: 3 });
     expect(identitySampleRequest('paused', { sampleRequest: { trigger: 'exam_start', since: 5 } }, 3, 10)).toBeNull();
     expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, 3, 1000)).toBeNull();
     expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, 3, CADENCE.lateAfterMs)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
     expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'consistent', lastSampleAt: 0 } }, 3, 60_000)).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------- period baseline (after a resume) */
+
+describe('period baseline', () => {
+  const f = (similarity: number | null, usable = true, bucket: 'good' | 'fair' | 'poor' = 'good') => ({ usable, similarity, bucket });
+
+  it("is measured from the check's usable frames, with the reference's bucket", () => {
+    const b = periodBaseline([f(0.7), f(0.72), f(null, false), f(0.68)], 'fair')!;
+    expect(b).toMatchObject({ n: 3, bucket: 'fair', calibrationVersion: CALIBRATION.version });
+    expect(b.mean).toBeCloseTo(0.7, 4);
+    expect(b.sd).toBeCloseTo(0.02, 4);
+  });
+
+  it("needs at least 3 usable frames and a level inside the band the continuous model covers (else 'relaxed')", () => {
+    expect(periodBaseline([f(0.7), f(0.72)], 'good')).toBeNull();
+    expect(periodBaseline([f(0.5), f(0.52), f(0.51)], 'good')).toBeNull(); // far below: another day, room or camera
+    expect(periodBaseline([f(0.7), f(0.72), f(0.71)], 'good')).not.toBeNull();
+  });
+
+  it("continuous against the period's own level: a drop from it is evidence, the level itself is not", () => {
+    const pb = periodBaseline([f(0.7), f(0.72), f(0.71), f(0.7)], 'good')!;
+    expect(comparisonLLR(0.7, 'good', pb, 'continuous').llr).toBeLessThan(-2);
+    expect(comparisonLLR(0.4, 'good', pb, 'continuous').llr).toBeGreaterThan(comparisonLLR(0.4, 'good', { ...BASELINE_78, bucket: 'good' }, 'relaxed').llr);
   });
 });

@@ -86,7 +86,9 @@ for (const cs of CASES) {
         const before = d.identityChecks.filter((ch) => ch.at < swapStart && ch.trigger !== 'check_in');
         const after = d.identityChecks.filter((ch) => ch.at >= swapStart);
         const samplesAfter = c.apiLog.filter((l) => / sample /.test(l) && / complete=true /.test(l));
-        const evidenceStates = [...new Set(c.apiLog.map((l) => / evidence=([a-z_]+):/.exec(l)?.[1]).filter(Boolean))];
+        // The candidate never sees the evidence state; the server's cadence hint ("send the next sample sooner") is the
+        // closest candidate-side trace of a suspicion.
+        const fasterRequested = c.apiLog.some((l) => / sample /.test(l) && / faster=yes /.test(l));
         const detected = d.summary.status === 'on_hold' && d.summary.hold?.reason === 'identity_mismatch';
         const staffVisible = after.some((ch) => ch.decision === 'mismatch' || ch.decision === 'inconclusive');
         // The first moment staff could see something: a non-matching identity check or an identity event after the swap.
@@ -115,8 +117,8 @@ for (const cs of CASES) {
           falseAlarmBeforeSwap: falseAlarm,
           checksBeforeSwap: before.map((ch) => `${ch.trigger}:${ch.decision}${ch.similarity == null ? '' : `@${ch.similarity.toFixed(2)}`}`),
           checksAfterSwap: after.map((ch) => `+${secs(ch.at - swapDone)}s ${ch.trigger}:${ch.decision}${ch.similarity == null ? '' : `@${ch.similarity.toFixed(2)}`}`),
-          evidenceStates,
-          suspectSeen: evidenceStates.includes('suspect') || evidenceStates.includes('confirmed_mismatch'),
+          fasterRequested,
+          suspectSeen: fasterRequested,
           staffVisible,
           minimum: cs.minimum,
           staffSignalDelayS: signalAt != null ? secs(signalAt - swapDone) : null,

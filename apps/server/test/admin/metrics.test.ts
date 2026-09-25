@@ -7,7 +7,7 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { evaluationReports, events, examSessions, identityChecks } from '../../src/db/schema.js';
 import { precision } from '../../src/services/metrics.js';
-import { sample, startedSession } from '../flow.js';
+import { sample, startedSession, sampleDecision } from '../flow.js';
 import { createTestEnv, type TestEnv } from '../helpers.js';
 import { clientEvent, json, MIN, otherOrg, staffApi, type Api } from './fixtures.js';
 
@@ -36,7 +36,7 @@ beforeAll(async () => {
   // identity: two routine matches, then a different person (periodic + follow-up) -> identity_mismatch
   for (let i = 0; i < 2; i++) {
     env.clock.advance(30_000);
-    expect(json(await sample(env, c, { person: 'alice' })).result.decision).toBe('match');
+    expect(await sampleDecision(env, json(await sample(env, c, { person: 'alice' })))).toBe('match');
   }
   env.clock.advance(30_000);
   json(await sample(env, c, { person: 'mallory' }));

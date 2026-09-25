@@ -24,6 +24,8 @@ async function freshSession(policy?: Record<string, unknown>, candidateId?: stri
 const sessionRow = async (id: string) => (await env.ctx.db.select().from(examSessions).where(eq(examSessions.id, id)))[0];
 const eventsOf = async (id: string) => env.ctx.db.select().from(events).where(eq(events.sessionId, id)).orderBy(events.startedAt);
 const actor = () => ({ id: env.users.admin.id, orgId: env.org.id });
+/** The staff-side decision behind a candidate's sample receipt (the candidate is never told it). */
+const decisionOf = async (res: { result: { id: string } }) => (await env.ctx.db.select().from(identityChecks).where(eq(identityChecks.id, res.result.id)))[0]?.decision;
 
 describe('initial check', () => {
   it('rejects a failed liveness challenge (no head movement) and asks to retry', async () => {
@@ -190,7 +192,7 @@ describe('resume identity comparison', () => {
     // new reference is used afterwards
     env.clock.advance(30_000);
     const r = (await sample(env, c, { person: 'alice-new-look' })).json();
-    expect(r.result.decision).toBe('match');
+    expect(await decisionOf(r)).toBe('match');
     const types = (await eventsOf(s.id)).map((e) => e.type);
     expect(types).toEqual(expect.arrayContaining(['hold_released', 'reference_created']));
   });
@@ -220,7 +222,8 @@ describe('mid-exam identity samples', () => {
     await startedSession(env, c);
     env.clock.advance(30_000);
     const m1 = (await sample(env, c, { person: 'mallory' }, 'face_return')).json();
-    expect(m1.result.decision).toBe('mismatch');
+    expect(await decisionOf(m1)).toBe('mismatch');
+    expect(m1.result).toEqual({ id: expect.any(String), trigger: 'face_return', at: expect.any(Number), usable: true, guidance: [] }); // no verdict for the candidate
     expect(m1.followUpInMs).toBeGreaterThan(0);
     expect(m1.status).toBe('active');
     expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('identity_mismatch');
@@ -272,12 +275,13 @@ describe('mid-exam identity samples', () => {
     for (let i = 0; i < 3; i++) {
       env.clock.advance(10_000);
       const r = (await sample(env, c, dark)).json();
-      expect(r.result.decision).toBe('unable_to_verify');
+      expect(await decisionOf(r)).toBe('unable_to_verify');
+      expect(r.result.usable).toBe(false);
       expect(r.result.guidance.join(' ')).toMatch(/dark/i);
     }
     // grey zone counts as uncertain too
     env.clock.advance(10_000);
-    expect((await sample(env, c, { person: 'alice', similarity: 0.33 })).json().result.decision).toBe('inconclusive');
+    expect(await decisionOf((await sample(env, c, { person: 'alice', similarity: 0.33 })).json())).toBe('inconclusive');
     let evs = await eventsOf(s.id);
     const unv = evs.find((e) => e.type === 'identity_unverifiable')!;
     expect(unv).toMatchObject({ category: 'uncertain', status: 'open' });

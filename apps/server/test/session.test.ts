@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { events, evidence, examSessions, sessionPeriods } from '../src/db/schema.js';
+import { events, evidence, examSessions, identityChecks, sessionPeriods } from '../src/db/schema.js';
 import { sweepOnce } from '../src/jobs/sweeper.js';
 import { readEvidence } from '../src/services/evidence.js';
 import { decidePauseRequest } from '../src/services/session-actions.js';
@@ -486,7 +486,8 @@ describe('late delivery across a pause', () => {
     expect(tooLate.statusCode).toBe(409);
     const smp = await c.jpeg('/api/candidate/identity/sample', { person: 'alice' }, { sampleId: randomUUID(), trigger: 'periodic', capturedAt: capturedBefore });
     expect(smp.statusCode, smp.body).toBe(200);
-    expect(smp.json()).toMatchObject({ status: 'paused', result: { decision: 'match' } });
+    expect(smp.json()).toMatchObject({ status: 'paused', result: { usable: true } });
+    expect((await env.ctx.db.select().from(identityChecks).where(eq(identityChecks.id, smp.json().result.id)))[0].decision).toBe('match');
     const inside = await c.jpeg('/api/candidate/identity/sample', { person: 'alice' }, { sampleId: randomUUID(), trigger: 'periodic', capturedAt: env.clock.t });
     expect(inside.statusCode).toBe(409);
     void s;

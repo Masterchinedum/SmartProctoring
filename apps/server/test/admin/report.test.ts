@@ -5,7 +5,7 @@
 import type { PeriodDTO, SessionReportDTO } from '@sp/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { periodTotals, unionDurationMs } from '../../src/services/reports.js';
-import { hb, runCheck, sample, startedSession } from '../flow.js';
+import { hb, runCheck, sample, startedSession, sampleDecision } from '../flow.js';
 import { createTestEnv, type TestEnv } from '../helpers.js';
 import { clientEvent, json, MIN, screenshot, staffApi, type Api } from './fixtures.js';
 
@@ -30,7 +30,7 @@ beforeAll(async () => {
   await clientEvent(c, { type: 'tab_hidden', startedAt: env.clock.t - 30_000, endedAt: env.clock.t - 25_000, confidence: 1 });
   await clientEvent(c, { type: 'tab_hidden', startedAt: env.clock.t - 20_000, endedAt: env.clock.t - 5_000, confidence: 1 });
   await clientEvent(c, { type: 'monitoring_degraded', startedAt: env.clock.t - 200_000, endedAt: env.clock.t - 20_000, confidence: 1 });
-  expect(json(await sample(env, c, { person: 'alice' })).result.decision).toBe('match');
+  expect(await sampleDecision(env, json(await sample(env, c, { person: 'alice' })))).toBe('match');
   json(await hb(c));
   // Pause of exactly 7 minutes (the paused period ends when the resume check starts).
   const paused = env.clock.t;
@@ -41,7 +41,7 @@ beforeAll(async () => {
   const resumed = env.clock.t;
   env.clock.advance(15 * MIN);
   for (let i = 0; i < 3; i++) {
-    expect(json(await sample(env, c, { person: 'alice' })).result.decision).toBe('match');
+    expect(await sampleDecision(env, json(await sample(env, c, { person: 'alice' })))).toBe('match');
     env.clock.advance(30_000);
   }
   const ended = env.clock.t;

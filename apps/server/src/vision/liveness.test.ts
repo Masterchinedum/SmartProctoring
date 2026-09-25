@@ -150,6 +150,32 @@ describe('verifyLiveness', () => {
     expect(verifyLiveness(SPEC, frames).reasons).toContain(LIVENESS_REASONS.frontalInconsistent);
   });
 
+  it('judges the frontal frames on the usable ones: a dark or empty frontal frame among many does not fail the challenge', () => {
+    const frames = passingFrames();
+    frames.splice(2, 0, frontal(1700, { usable: false, issues: ['too_dark'] }), frontal(1800, { person: null }));
+    const r = verifyLiveness(SPEC, frames, DEFAULT_IDENTITY_THRESHOLDS);
+    expect(r.reasons).toEqual([]);
+    expect(r.passed).toBe(true);
+  });
+
+  it('still fails with two faces in a frontal frame, and without any usable frontal frame', () => {
+    const two = passingFrames();
+    two[1] = frontal(1500, { faces: 2, issues: ['multiple_faces'] });
+    expect(verifyLiveness(SPEC, two).reasons).toContain(LIVENESS_REASONS.faceCount);
+    const none = passingFrames().map((fr) => (fr.step === 'frontal' ? frontal(fr.capturedAt - T0, { usable: false, issues: ['too_dark'] }) : fr));
+    const r = verifyLiveness(SPEC, none);
+    expect(r.passed).toBe(false);
+    expect(r.reasons).toContain(LIVENESS_REASONS.noFrontal);
+  });
+
+  it('a head-turn frame without a face still fails (the steps are verified on their own frames)', () => {
+    const frames = passingFrames();
+    frames[3] = f(0, 'turn_right', 5000, { person: null });
+    const r = verifyLiveness(SPEC, frames);
+    expect(r.passed).toBe(false);
+    expect(r.reasons).toContain(LIVENESS_REASONS.faceCount);
+  });
+
   it('fails when two faces are visible', () => {
     const frames = passingFrames();
     frames[3] = f(0, 'turn_right', 5000, { yawDeg: -28, faces: 2, issues: ['multiple_faces'] });

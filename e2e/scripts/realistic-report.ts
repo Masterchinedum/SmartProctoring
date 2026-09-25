@@ -231,7 +231,7 @@ for (const s of ['swap', 'family-swap']) {
   }
   out.push(
     table(
-      ['variant', 'camera', 'runs', 'requirement met', 'held (identity_mismatch)', 'delay s: new person in view → hold, med/max', 'delay s: transition start → hold', 'exam start → swap s', 'first staff-visible signal s', 'suspect seen', 'false alarm before swap', 'first identity checks after the swap (s after new person in view)'],
+      ['variant', 'camera', 'runs', 'requirement met', 'held (identity_mismatch)', 'delay s: new person in view → hold, med/max', 'delay s: transition start → hold', 'exam start → swap s', 'first staff-visible signal s', 'faster sampling requested', 'false alarm before swap', 'first identity checks after the swap (s after new person in view)'],
       rows,
     ),
     '',
@@ -256,9 +256,9 @@ if (scen('genuine-long').length) {
     String(r.identityUnverifiable),
     String(r.lightingUnusable ?? 0),
     r.heldAfterS == null ? 'no' : `after ${r.heldAfterS} s (${r.holdReason})`,
-    (r.evidenceStates ?? []).join(', '),
+    r.fasterRequested != null ? String(r.fasterRequested) : (r.evidenceStates ?? []).join(', '),
   ]);
-  out.push(table(['case', 'run', 'camera', 'minutes', 'identity samples', 'decisions', 'min similarity', 'median similarity', 'identity_mismatch', 'identity_unverifiable', 'lighting_unusable', 'held', 'evidence states'], rows), '');
+  out.push(table(['case', 'run', 'camera', 'minutes', 'identity samples', 'decisions', 'min similarity', 'median similarity', 'identity_mismatch', 'identity_unverifiable', 'lighting_unusable', 'held', 'faster samples requested'], rows), '');
 }
 
 /* ------------------------------------------------ liveness */

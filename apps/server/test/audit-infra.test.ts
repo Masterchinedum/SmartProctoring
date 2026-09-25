@@ -248,7 +248,7 @@ describe('P2-7: per-session storage caps', () => {
   });
   afterAll(async () => capEnv?.close());
 
-  it('refuses screenshots beyond their share of the budget (413 storage_limit), keeps deciding identity samples, then refuses check frames', async () => {
+  it('refuses screenshots beyond their share of the budget (413 storage_limit), keeps deciding identity samples within theirs, leaves check frames headroom, then refuses them at the cap', async () => {
     expect(capEnv.config.sessionLimits).toMatchObject({ maxEvidenceItems: 20, maxEvidenceBytes: 300 * 1024 * 1024, maxChecksPerHour: 3 });
     const s = capEnv.session;
     const c = await startedSession(capEnv, capEnv.candidateClient(s.token));
@@ -269,20 +269,25 @@ describe('P2-7: per-session storage caps', () => {
       capEnv.clock.advance(15_000);
       const r = await sample(capEnv, c, { person: 'alice', usable: false, issues: ['blurry'] });
       expect(r.statusCode, r.body).toBe(200);
-      expect(r.json().result.decision).toBe('unable_to_verify');
       const [row] = await capEnv.ctx.db.select().from(identityChecks).where(eq(identityChecks.id, r.json().result.id));
+      expect(row.decision).toBe('unable_to_verify');
       skipped = (row.context as Record<string, unknown>).evidenceSkipped === 'storage_limit';
     }
     expect(skipped).toBe(true);
-    expect((await sessionEvidenceUsage(capEnv.ctx.db, s.id)).items).toBeLessThanOrEqual(20);
+    expect((await sessionEvidenceUsage(capEnv.ctx.db, s.id)).items).toBeLessThanOrEqual(18); // 90 % of 20
 
-    // Check frames at the hard cap: a clear error.
+    // Check frames: the rest of the budget is theirs; at the hard cap a clear error.
     await c.req('POST', '/api/candidate/pause', {});
     const st = await startCheck(c, 'resume');
     expect(st.statusCode).toBe(200);
-    const fr = await c.jpeg(`/api/candidate/checks/${st.json().checkId}/frames`, { person: 'alice' }, { step: 'frontal', capturedAt: capEnv.clock.t, nonce: st.json().liveness?.nonce ?? '' });
-    expect(fr.statusCode).toBe(413);
-    expect(fr.json().error).toBe('storage_limit');
+    const codes: { statusCode: number; error?: string }[] = [];
+    for (let i = 0; i < 3; i++) {
+      const fr = await c.jpeg(`/api/candidate/checks/${st.json().checkId}/frames`, { person: 'alice' }, { step: 'frontal', capturedAt: capEnv.clock.t, nonce: st.json().liveness?.nonce ?? '' });
+      codes.push({ statusCode: fr.statusCode, error: fr.statusCode === 200 ? undefined : fr.json().error });
+    }
+    expect(codes[0].statusCode).toBe(200);
+    expect(codes.at(-1)).toEqual({ statusCode: 413, error: 'storage_limit' });
+    expect((await sessionEvidenceUsage(capEnv.ctx.db, s.id)).items).toBeLessThanOrEqual(20);
   });
 
   it('caps the bytes stored per session', async () => {
