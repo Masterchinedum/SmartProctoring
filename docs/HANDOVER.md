@@ -29,11 +29,22 @@ Requirement-by-requirement mapping: the requirements audit (90 atomic requiremen
 * **End-to-end**: `pnpm test:e2e` — real Chromium with a fake camera (Y4M videos generated from still photos + a synthetic head-turn video, plus webcam-realistic 720p/480p videos rendered by the webcam simulator), real server, real models: 65 tests (33 core + 32 webcam-realistic identity scenarios, `accuracy/end-to-end.md`), all passing, covering all core scenarios — happy path with pause/close/resume, pause rules, liveness (still photo fails, turning head passes, tampered client rejected), person swap mid-exam (held ~12 s after the second person appears, compared, released/terminated), different person on resume (held with before/after evidence), dim room (unable to verify → guidance → pass), multiple people, absence + face-return check, covered lens, browser events, 40 s offline (both sides see the interruption; events delivered late exactly once), reload/second browser, staff UI, time extension/expiry, degraded models, environment change as context only, accessibility walkthroughs, the resume confirmation screen, answers typed right after an approved pause, approved ID-photo comparison (advisory/required), retention purge + legal hold, key rotation with `rekey`, webhooks (signature, retries), email alerts (throttled digests) and the `/api/v1` integration flow.
 * **Requirements audits (two rounds)**: independent read-throughs of the spec against the code with empirical verification against a running server using the real models; every P0/P1/P2 finding of both rounds fixed with regression tests (incl. a stale re-enrolment authorisation, an offline-queue blockage, answers typed in the seconds after an approved pause, false fullscreen/outage flags on the resume confirmation screen, and reports treating an unreturned browser as observed).
 * **Security review** (+ follow-ups): IDOR/role checks on every route, CSRF, rate limits, decompression bombs, crypto, headers, SSRF, token leakage, dependency audit (`pnpm audit --prod`: clean). See `SECURITY.md`.
-* **Load test** (`e2e/scripts/load-test.ts`) and profiling — on a 4-vCPU VM (Postgres and the load generator
-  on the same box): 500 concurrent candidates with heartbeat p95 8 ms, answers/events p95 ≤ 14 ms, identity
-  sample p95 96 ms, check-in frame p95 98 ms, zero errors; one instance sustains ~1,000 candidates
-  (≈ 52 identity samples/s). Plan ≈ 250 candidates per vCPU; scale horizontally with Redis. Details and
-  before/after profiles in `PERFORMANCE.md`.
+* **Load test** (`e2e/scripts/load-test.ts`, now following the identity-v2 client cadence; `CADENCE=v1` for the old
+  one) and profiling — on a 4-vCPU VM (Postgres and the load generator on the same box), re-measured with
+  identity v2 on 2026-09-25 (`PERFORMANCE.md` §7):
+  - **Limit:** face analysis, ≈ 35 frames/s per 4-vCPU instance (≈ 29 with real client face crops).
+  - **Demand per candidate:** a v2 frame costs 1.9× a v1 frame (flip TTA + mirrored detection). A candidate
+    sends 0.5 frames/s in the first 3 minutes after the exam starts or resumes and 0.2 frames/s after that
+    (v1: 0.033 frames/s).
+  - **Start-up (all candidates in the window):** 54 candidates: identity sample p95 132 ms. 91 or more: saturated
+    (p95 2.4 s at 91, 13.8 s at 182).
+  - **Steady state:** 136 candidates: p95 181 ms. 182: p95 0.9 s at 100 % analysis load.
+  - **N=500:** check-ins took minutes (check-frame p95 22 s) and 47 % of identity frames were refused after retries.
+  - **Request path:** stays fast throughout; heartbeat p95 ≤ 28 ms at N=500.
+  - **Sizing:** ≈ 11 candidates per vCPU when everyone starts together, as in a scheduled exam (≈ 45 per 4-vCPU
+    instance). ≈ 27 per vCPU in steady state. The identity-v1 figure was ≈ 250 per vCPU.
+  - **Scale:** by vision workers or instances, with Redis. Details, per-frame profile and the v1 before/after work
+    are in `PERFORMANCE.md`.
 * **Accuracy**: identity harness and behavioural-detector harness with committed baselines — see `accuracy/`.
 
 ## 3a. Round 2 — identity rebuilt after real-webcam testing
@@ -136,10 +147,24 @@ shipped.
 1c. **Look-alike relatives.** Family members are the hardest impostors. v2 confirms most such swaps within 3 samples,
    but it is not perfect (about 1–3 % of family-member checks pass in the simulator). For high-stakes exams, enable the
    external second opinion or require an approved ID photo.
-1d. **Capacity.** v2 analyses more per frame: flip test-time augmentation, a mirrored detection for symmetric pose,
-   the low-light pass on faceless frames, and bursts of 3 frames sampled every 6 s for the first 3 minutes. Re-run
-   `e2e/scripts/load-test.ts` on your hardware before sizing; the 250-candidates-per-vCPU figure in §3 was measured
-   with v1.
+1d. **Capacity — size for about 11 candidates per vCPU, not 250.** Re-measured with identity v2 on a 4-vCPU
+   instance (`PERFORMANCE.md` §6–§7).
+   - **Why:** each face frame costs 1.9× (75.7 vs 39.8 ms: flip TTA +24 ms, mirrored detection +9–14 ms). Each
+     candidate sends 15× more frames in the first 3 minutes after starting or resuming (a 3-frame burst every 6 s)
+     and 6× more afterwards (every 15 s).
+   - **Capacity:** one instance analyses ≈ 35 frames/s (≈ 29 with real client crops). That saturates at
+     ≈ 70 candidates in the start-up window and ≈ 175 in steady state. Scheduled exams start everyone together, so
+     the start-up window is the peak: plan ≈ 45 candidates per 4-vCPU instance, or stagger starts (§6).
+   - **Beyond capacity:** identity bursts wait seconds, then frames are refused (503) and check-ins slow to
+     minutes. Heartbeats, answers and events stay fast.
+   - **Levers:**
+     - accuracy-neutral: flip the packed detector tensor for the mirrored pass (−2…−6 % per frame);
+       `VISION_THREADS=4` on a dedicated host (+23 % in isolation);
+     - policy trade-offs: `burstSize`, `startupIntervalSec`, `periodicCheckIntervalSec`.
+   - **Before sizing:**
+     - re-run `e2e/scripts/load-test.ts` on your hardware;
+     - re-run it again once the pending review fixes land (burst frames keep one image; no re-decryption of check
+       frames). Expect ≤ 10 % from those.
 2. **Liveness scope.** The active challenge defeats photos and still images held to the camera and tampered clients that lie about head pose. It does not claim to defeat real-time deepfakes, 3-D masks or a live accomplice video feed; the virtual-camera and replay detectors reduce but do not eliminate substituted feeds.
 3. **Browsers.** Automated tests run on Chromium. Firefox/Safari support MediaPipe WASM but were not tested here.
 4. **Phone detection** is implemented (COCO "cell phone") but not validated with real phone footage (no licensed test media).

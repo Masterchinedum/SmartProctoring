@@ -48,16 +48,23 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
 * **Browser side**: behavioural analysis runs on the candidate's device (MediaPipe WASM, ~5 fps face
   mesh + ~1 fps object detection). Recommended candidate hardware: any laptop from the last ~6 years,
   Chrome/Edge/Firefox/Safari current versions, 720p webcam.
-* **Server side** (measured, docs/PERFORMANCE.md): a candidate costs ≈ 2.7 ms CPU per second at the default
-  30 s identity interval — ≈ 1.7 ms of face analysis (one detection + one embedding ≈ 50 ms per sample, in
-  worker threads), ≈ 0.7 ms of request handling, ≈ 0.3 ms of Postgres. Plan **≈ 250 concurrent candidates per
-  vCPU**: a 4-vCPU instance carries ≈ 800–1,000 candidates (N=500: heartbeat p95 8 ms, identity sample p95
-  96 ms, check frame p95 98 ms; N=1,000 with check-ins over 2 min: all request p95 < 40 ms). One instance
-  analyses at most ≈ 52 identity samples/s on 4 vCPU and its event loop tops out around 1,200–1,400
-  candidates — beyond that add instances rather than cores.
-* **Check-in bursts**: a check-in is 3 face analyses (≈ 150 ms CPU); a 4-vCPU instance absorbs ≈ 8 check-ins/s
-  on top of running exams. If everyone starts in the same minute, size for `candidates ÷ 60` check-ins/s or open
-  the exam a few minutes early. Check frames are analysed before mid-exam identity samples when busy.
+* **Server side** (measured with identity v2, docs/PERFORMANCE.md §6–§7):
+  - **Limit:** face analysis, which runs in worker threads: ≈ 35 frames/s per 4-vCPU instance, or ≈ 29 with real
+    client face crops; each frame costs ≈ 85 ms of CPU.
+  - **Demand:** a candidate sends a 3-frame identity burst every 6 s for the first 3 minutes after the exam starts
+    or resumes (0.5 frames/s), then every 15 s (0.2 frames/s).
+  - **Plan:**
+    - **≈ 11 candidates per vCPU when everyone starts together**, as in a scheduled exam (≈ 45 per 4-vCPU
+      instance);
+    - ≈ 27 per vCPU in steady state (≈ 110 per instance);
+    - identity v1 carried ≈ 250 per vCPU.
+  - **Unaffected:** heartbeats, answers and events stay fast even when analysis is saturated (heartbeat p95
+    ≤ 28 ms at N=500).
+* **Start-up peak**: the start-up window, not the check-in (≈ 5.5 frames), is the burst. Each started candidate
+  adds 90 frames over its first 3 minutes, so one 4-vCPU instance absorbs only ≈ 14 new candidates per minute.
+  Stagger start times to cut the peak: with starts spread over S minutes, the peak is ≈ (0.2 + 0.9 ÷ S)
+  frames/s per candidate. Beyond capacity, identity bursts wait seconds, then answer 503 (retried by the
+  client), and check-ins slow down. Check frames are analysed before routine identity samples.
 * **Tuning**: `VISION_THREADS` (default CPU count − 1) = CPU threads for face analysis; `PG_POOL_MAX` (default
   20 per instance; instances × `PG_POOL_MAX` < Postgres `max_connections`); `PG_STATEMENT_TIMEOUT_MS`
   (default 60 s). Memory ≈ 400 MB + 100 MB per vision thread. Postgres: ≈ 0.25 vCPU and ≈ 1,500 queries/s per
