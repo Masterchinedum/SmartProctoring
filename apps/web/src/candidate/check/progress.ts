@@ -87,10 +87,7 @@ export class CheckProgress {
 export function attemptsAfterText(check: Pick<StartCheckResponse, 'attemptsRemaining' | 'attemptsAfter'>): string {
   const failed = check.attemptsAfter?.failed ?? Math.max(0, check.attemptsRemaining - 1);
   const unclear = check.attemptsAfter?.unclear ?? failed;
-  if (unclear > failed) {
-    return failed === 0
-      ? 'This is your last attempt — unless the pictures are too unclear to compare (for example too dark); then you can try once more.'
-      : `Attempts remaining after this one: ${failed} (${unclear} if the pictures are only too unclear to compare, for example too dark).`;
-  }
+  // Never "0" while pictures that are merely unclear would still allow another try.
+  if (failed === 0 && unclear > 0) return 'This is your last attempt — unless the pictures are too unclear to compare (for example too dark); then you can try once more.';
   return `Attempts remaining after this one: ${failed}`;
 }

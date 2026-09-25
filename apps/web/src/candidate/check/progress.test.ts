@@ -52,7 +52,8 @@ describe('attemptsAfterText', () => {
     const t = attemptsAfterText({ attemptsRemaining: 1, attemptsAfter: { failed: 0, unclear: 1 } });
     expect(t).not.toMatch(/: 0/);
     expect(t).toMatch(/last attempt.*too unclear/);
-    expect(attemptsAfterText({ attemptsRemaining: 2, attemptsAfter: { failed: 1, unclear: 2 } })).toMatch(/: 1 \(2 if the pictures/);
+    expect(attemptsAfterText({ attemptsRemaining: 2, attemptsAfter: { failed: 1, unclear: 2 } })).toBe('Attempts remaining after this one: 1');
+    expect(attemptsAfterText({ attemptsRemaining: 1, attemptsAfter: { failed: 0, unclear: 0 } })).toBe('Attempts remaining after this one: 0');
   });
 
   it('an older server without the split: attemptsRemaining - 1', () => {
