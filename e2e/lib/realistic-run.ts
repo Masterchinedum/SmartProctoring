@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { cpus, loadavg } from 'node:os';
 import { join } from 'node:path';
 import { expect, test, type Browser, type TestInfo } from '@playwright/test';
-import type { ProctoringPolicyInput } from '../../packages/shared/src/policy';
+import { SAMPLING_PROFILES, type ProctoringPolicyInput, type SamplingProfile } from '../../packages/shared/src/policy';
 import { CandidatePage, launchCameraFile, type CheckOutcome } from './candidate';
 import { ARTIFACTS_DIR } from './config';
 import { rwFixtureAvailable, rwFixturePath, type RwFixtureName } from './realistic';
@@ -34,12 +34,23 @@ export function launchRw(name: RwFixtureName): Promise<Browser> {
 }
 
 /**
+ * Identity sampling profile of the realistic runs: `E2E_SAMPLING=balanced` uses the Balanced preset (2-frame routine
+ * samples every 12 s for 180 s, then every 30 s; triggered samples 3 frames); default the product default
+ * ('maximum'). Recorded with every measurement (`samplingProfile`).
+ */
+export const RW_SAMPLING: Exclude<SamplingProfile, 'custom'> = process.env.E2E_SAMPLING === 'balanced' ? 'balanced' : 'maximum';
+
+/**
  * The PRODUCT DEFAULT policy (identity: 15 s periodic samples, 6 s start-up interval for 180 s, bursts of 3,
- * hold for review on a confirmed mismatch, 5 attempts) — only liveness is chosen per scenario, and fullscreen is
- * off (headless Chromium). The older specs' BASE_POLICY (30 s samples) is deliberately not used.
+ * hold for review on a confirmed mismatch, 5 attempts) — or the Balanced sampling preset (E2E_SAMPLING) — only
+ * liveness is chosen per scenario, and fullscreen is off (headless Chromium). The older specs' BASE_POLICY (30 s
+ * samples) is deliberately not used.
  */
 export function rwPolicy(o: { liveness: 'active' | 'off'; identity?: Record<string, unknown> }): ProctoringPolicyInput {
-  return { identity: { liveness: o.liveness, idPhotoComparison: 'off', ...(o.identity ?? {}) }, browser: { requireFullscreen: false } } as ProctoringPolicyInput;
+  return {
+    identity: { liveness: o.liveness, idPhotoComparison: 'off', ...SAMPLING_PROFILES[RW_SAMPLING], ...(o.identity ?? {}) },
+    browser: { requireFullscreen: false },
+  } as ProctoringPolicyInput;
 }
 
 export async function createRwSession(staff: StaffApi, policy: ProctoringPolicyInput, title: string): Promise<SessionHandle> {
@@ -84,6 +95,7 @@ export function recordMetric(info: TestInfo, rec: MetricRecord): void {
     load5: Math.round(load5! * 10) / 10,
     cpus: cpus().length,
     commit: gitCommit(),
+    samplingProfile: RW_SAMPLING,
     ...rec,
   };
   appendFileSync(METRICS_FILE, `${JSON.stringify(line)}\n`);

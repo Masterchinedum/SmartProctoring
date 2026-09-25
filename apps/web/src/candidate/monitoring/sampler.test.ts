@@ -72,6 +72,25 @@ describe('BurstSampler', () => {
     expect(t.s.busy).toBe(false);
   });
 
+  it('Balanced sampling: routine bursts take routineBurstSize frames, triggered and server-requested ones burstSize', async () => {
+    const t = setup({ routineBurstSize: 2 });
+    t.s.request('periodic', 'host');
+    for (let i = 0; i < 4; i++) await t.frame(200);
+    expect(t.sent.map((x) => x.q)).toEqual([
+      { trigger: 'periodic', capturedAt: expect.any(Number), burstId: 'id-1', burstIndex: 0, burstSize: 2 },
+      { trigger: 'periodic', capturedAt: expect.any(Number), burstId: 'id-1', burstIndex: 1, burstSize: 2 },
+    ]);
+    t.s.request('track_break');
+    for (let i = 0; i < 4; i++) await t.frame(200);
+    t.s.serverRequest({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    for (let i = 0; i < 4; i++) await t.frame(200);
+    expect(t.sent.slice(2).map((x) => `${x.q.trigger}:${x.q.burstSize}`)).toEqual(['track_break:3', 'track_break:3', 'track_break:3', 'server_request:3', 'server_request:3', 'server_request:3']);
+    expect(t.s.sizeFor('periodic')).toBe(2);
+    expect(t.s.sizeFor('face_return')).toBe(3);
+    // Without routineBurstSize every burst has burstSize frames (the previous behaviour).
+    expect(setup().s.sizeFor('periodic')).toBe(3);
+  });
+
   it('only uses frames with exactly one usable face; after the timeout it sends what it has', async () => {
     const t = setup();
     t.s.request('periodic');

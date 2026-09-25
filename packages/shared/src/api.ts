@@ -242,13 +242,16 @@ export interface CheckProgressDTO {
 }
 
 /** POST /api/candidate/checks/:checkId/complete */
+/**
+ * Candidate-facing result of a check: the outcome, guidance and the live-person steps — never the identity decision,
+ * similarity or confidence of the comparison (with the reference or the ID photo): a look-alike could use them to
+ * tune their appearance across attempts. Staff see them with the identity check.
+ */
 export interface CompleteCheckResponse {
   outcome: 'passed' | 'retry' | 'held' | 'failed';
   message: string;
   guidance: string[];
   liveness: LivenessResultDTO | null;
-  identity: IdentityResultDTO | null;
-  idPhoto: { decision: IdentityDecision; similarity: number | null } | null;
   attemptsRemaining: number;
   state: CandidateSessionState;
 }

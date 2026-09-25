@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_POLICY, proctoringPolicySchema } from '@sp/shared';
+import { DEFAULT_POLICY, proctoringPolicySchema, SAMPLING_PROFILES } from '@sp/shared';
 import {
   ALL_POLICY_FIELDS,
+  applyPolicyChange,
   changedFromDefault,
   formatPolicyValue,
   getPath,
@@ -95,5 +96,23 @@ describe('number parsing and display', () => {
     expect(formatPolicyValue(field('identity.onMismatch'), 'flag_only')).toBe('Flag only (exam continues)');
     expect(formatPolicyValue(field('detection.lookAwayYawDeg'), 28)).toBe('28°');
     expect(formatPolicyValue(field('retention.evidenceDays'), 30)).toBe('30 days');
+  });
+});
+
+describe('sampling intensity', () => {
+  it('choosing a preset fills the sampling fields; editing one of them makes it custom (or the matching preset)', () => {
+    const balanced = applyPolicyChange(DEFAULT_POLICY, 'identity.samplingProfile', 'balanced');
+    expect(balanced.identity).toMatchObject({ ...SAMPLING_PROFILES.balanced, samplingProfile: 'balanced' });
+    expect(balanced.identity.onMismatch).toBe(DEFAULT_POLICY.identity.onMismatch);
+    const custom = applyPolicyChange(balanced, 'identity.periodicCheckIntervalSec', 45);
+    expect(custom.identity).toMatchObject({ periodicCheckIntervalSec: 45, samplingProfile: 'custom' });
+    expect(applyPolicyChange(custom, 'identity.periodicCheckIntervalSec', 30).identity.samplingProfile).toBe('balanced');
+    const back = applyPolicyChange(custom, 'identity.samplingProfile', 'maximum');
+    expect(back.identity).toMatchObject({ ...SAMPLING_PROFILES.maximum, samplingProfile: 'maximum' });
+    // 'Custom' keeps the numbers.
+    expect(applyPolicyChange(balanced, 'identity.samplingProfile', 'custom').identity).toMatchObject({ ...SAMPLING_PROFILES.balanced, samplingProfile: 'custom' });
+    // Other fields are untouched by the preset logic.
+    expect(applyPolicyChange(balanced, 'pause.allowed', false).identity.samplingProfile).toBe('balanced');
+    expect(validatePolicy(balanced).ok).toBe(true);
   });
 });

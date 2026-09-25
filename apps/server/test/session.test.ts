@@ -281,9 +281,9 @@ describe('pause and resume', () => {
     const c2 = c.withInstance('resume-instance-0001');
     const st = (await c2.req('GET', '/api/candidate/session')).json();
     expect(st.session).toMatchObject({ status: 'paused', requiredCheck: 'resume', remainingMs: remainingAtPause });
-    const { complete } = await runCheck(env, c2, 'resume', { device: { cameraLabel: 'USB Camera', cameraIdHash: 'cam-hash-b', userAgent: 'other', screen: { width: 1, height: 1, isExtended: false } } });
+    const { complete, identity } = await runCheck(env, c2, 'resume', { device: { cameraLabel: 'USB Camera', cameraIdHash: 'cam-hash-b', userAgent: 'other', screen: { width: 1, height: 1, isExtended: false } } });
     expect(complete!.outcome).toBe('passed');
-    expect(complete!.identity!.decision).toBe('match');
+    expect(identity!.decision).toBe('match');
     expect(complete!.state.session).toMatchObject({ status: 'active', timerRunning: true, requiredCheck: null });
     expect(complete!.state.questions).toHaveLength(5);
     const periods = await periodsOf(s.id);

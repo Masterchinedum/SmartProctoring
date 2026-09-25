@@ -167,6 +167,7 @@ export class MonitoringRuntime {
     this.tracker = createBrowserSignalTracker(p.browser);
     this.bursts = new BurstSampler({
       burstSize: p.identity.burstSize ?? 3,
+      routineBurstSize: p.identity.routineBurstSize ?? p.identity.burstSize ?? 3,
       uuid,
       now: () => this.now(),
       mono: () => performance.now(),

@@ -4,7 +4,7 @@
  * (vision/calibration.ts) is tested by the vision module.
  */
 import type { FaceQuality, IdentityCheckTrigger } from '@sp/shared';
-import { DEFAULT_POLICY } from '@sp/shared';
+import { DEFAULT_POLICY, SAMPLING_PROFILES } from '@sp/shared';
 import { describe, expect, it } from 'vitest';
 import { CALIBRATION } from '../vision/index.js';
 import {
@@ -322,18 +322,33 @@ describe('cadence', () => {
     expect(sampleWatchdog(policy, { activeSince: 0, evidence: null }, 50_000)).toBe('request');
     expect(sampleWatchdog(policy, { activeSince: 0, evidence: null }, SAMPLE_WATCHDOG.minObserveMs + 1)).toBe('unanswered');
     expect(sampleWatchdog(policy, { activeSince: null, evidence: null }, 1e9)).toBe('ok');
-    // identitySampleRequest asks for it (with the policy), for the fast heartbeat too.
-    expect(identitySampleRequest('active', { sampleRequest: null, ...st(late) }, 3, late + 3 * iv + 1)).toBeNull();
-    expect(identitySampleRequest('active', { sampleRequest: null, ...st(late) }, 3, late + 3 * iv + 1, policy)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
-    expect(identitySampleRequest('paused', { sampleRequest: null, ...st(late) }, 3, late + 10 * iv, policy)).toBeNull();
+    // identitySampleRequest asks for it (from the policy's own intervals), for the fast heartbeat too.
+    expect(identitySampleRequest('active', { sampleRequest: null, ...st(late) }, policy, late + 3 * iv)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: null, ...st(late) }, policy, late + 3 * iv + 1)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('paused', { sampleRequest: null, ...st(late) }, policy, late + 10 * iv)).toBeNull();
+  });
+
+  it('honours the Balanced sampling profile: its intervals for the cadence and the watchdog, 3-frame (triggered) requests', () => {
+    const balanced = { ...policy, ...SAMPLING_PROFILES.balanced };
+    const late = balanced.startupWindowSec * 1000 + 1;
+    const iv = balanced.periodicCheckIntervalSec * 1000;
+    expect(nextSampleDelayMs(balanced, { activeSince: 0, acc: acc('consistent') }, 10_000)).toBe(12_000);
+    expect(nextSampleDelayMs(balanced, { activeSince: 0, acc: acc('consistent') }, late)).toBe(30_000);
+    expect(nextSampleDelayMs(balanced, { activeSince: 0, acc: acc('suspect') }, late)).toBe(CADENCE.suspectMs); // a suspicion is as fast as before
+    const st = { activeSince: 0, evidence: { state: 'consistent' as const, lastSampleAt: late, unusableStreak: 0 } };
+    expect(sampleWatchdog(balanced, st, late + 3 * 15_000 + 1)).toBe('ok'); // Maximum would already ask
+    expect(sampleWatchdog(balanced, st, late + 3 * iv + 1)).toBe('request');
+    expect(identitySampleRequest('active', { sampleRequest: null, ...st }, balanced, late + 3 * iv + 1)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, balanced, 10)).toEqual({ trigger: 'exam_start', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, { ...balanced, burstSize: 4 }, 10)!.burstSize).toBe(4);
   });
 
   it('identitySampleRequest: exam_start until a sample arrives; server_request while suspect and late', () => {
-    expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, 3, 10)).toEqual({ trigger: 'exam_start', inMs: 0, burstSize: 3 });
-    expect(identitySampleRequest('paused', { sampleRequest: { trigger: 'exam_start', since: 5 } }, 3, 10)).toBeNull();
-    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, 3, 1000)).toBeNull();
-    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, 3, CADENCE.lateAfterMs)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
-    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'consistent', lastSampleAt: 0 } }, 3, 60_000)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, policy, 10)).toEqual({ trigger: 'exam_start', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('paused', { sampleRequest: { trigger: 'exam_start', since: 5 } }, policy, 10)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, policy, 1000)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, policy, CADENCE.lateAfterMs)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'consistent', lastSampleAt: 0 } }, policy, 30_000)).toBeNull();
   });
 });
 

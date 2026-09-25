@@ -20,7 +20,8 @@ automatically) → optional comparison with the candidate's **approved ID photo*
 **During the exam** (in-browser analysis, no video upload) — candidate missing, more than one person,
 possible person swap (server-side face verification in bursts of 3 frames: immediately when the exam
 starts or resumes, every 6 s for the first 3 minutes, every 15 s after that, and whenever the face track breaks or
-the face's appearance changes, the face returns, the camera reconnects, or another person was in view), sustained or repeated looking away / down,
+the face's appearance changes, the face returns, the camera reconnects, or another person was in view; a per-exam
+*Balanced* sampling intensity takes the routine samples half as often with 2 frames, for about 3× the capacity), sustained or repeated looking away / down,
 repeated attention to one off-screen direction, unusual movement, obstructed/cut-off/unclear face,
 visible phone or other devices/books, covered lens, frozen image, unusable lighting, virtual or
 replayed camera feeds, camera disconnect / permission loss — plus exam-page events (tab hidden,

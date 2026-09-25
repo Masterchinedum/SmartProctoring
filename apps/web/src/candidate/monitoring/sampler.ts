@@ -1,9 +1,10 @@
 import { plausibleFaces } from '@sp/detection';
-import type { FaceObservation, IdentityCheckTrigger, IdentitySampleRequestDTO, IdentitySampleResponse, NormBox } from '@sp/shared';
+import { burstSizeFor, type FaceObservation, type IdentityCheckTrigger, type IdentitySampleRequestDTO, type IdentitySampleResponse, type NormBox } from '@sp/shared';
 
 /**
- * Identity-sample bursts (policy.identity.burstSize distinct camera frames ~200 ms apart, decided together by
- * the server) and the triggers that start them.
+ * Identity-sample bursts (distinct camera frames ~200 ms apart, decided together by the server: policy.identity
+ * routineBurstSize frames for routine samples, burstSize for triggered ones — exam start, face changes, server
+ * requests) and the triggers that start them.
  *
  *   engine signals (track_break, appearance_change, face_return, …, periodic) ─┐
  *   host: exam_start at every (re)start, server requests (state / heartbeat), ─┼─► queue (one pending, highest
@@ -137,8 +138,10 @@ export interface BurstResult {
 }
 
 export interface SamplerDeps {
-  /** Burst size (policy.identity.burstSize, 1–5). */
+  /** Frames of a triggered burst (policy.identity.burstSize, 1–5). */
   burstSize: number;
+  /** Frames of a routine (periodic) burst (policy.identity.routineBurstSize, 1–5); default burstSize. */
+  routineBurstSize?: number;
   uuid: () => string;
   /** Server-corrected clock (capturedAt) and a monotonic clock for spacing / timeouts. */
   now: () => number;
@@ -174,6 +177,8 @@ interface ActiveBurst {
   pendingCaptures: number;
   /** A server request taken without a qualifying frame: any capturable frame is used. */
   forced: boolean;
+  /** Frames this burst takes (burstSizeFor its trigger). */
+  size: number;
 }
 
 export class BurstSampler {
@@ -193,8 +198,15 @@ export class BurstSampler {
     this.budget = budget ?? new RequestBudget();
   }
 
+  /** Frames of a triggered burst. */
   get size(): number {
-    return Math.max(1, Math.min(5, Math.round(this.deps.burstSize) || 1));
+    return this.sizeFor('exam_start');
+  }
+
+  /** Frames of a burst for this trigger: routineBurstSize for routine samples, burstSize for triggered ones. */
+  sizeFor(trigger: IdentityCheckTrigger): number {
+    const n = burstSizeFor(trigger, { burstSize: this.deps.burstSize, routineBurstSize: this.deps.routineBurstSize ?? null });
+    return Math.max(1, Math.min(5, Math.round(n) || 1));
   }
 
   /** A burst is collecting frames or being sent. */
@@ -249,9 +261,10 @@ export class BurstSampler {
       // Start only on a usable frame (the trigger keeps waiting) — unless the server asked and has waited long enough.
       const forced = !eligible && capturable && (this.queue.serverWaitMs(m) ?? -1) >= SERVER_REQUEST_FORCE_MS;
       if (!eligible && !forced) return false;
-      if (this.budget.available(m) < this.size) return false;
+      const size = this.sizeFor(trigger);
+      if (this.budget.available(m) < size) return false;
       this.queue.take(m);
-      this.burst = { id: this.deps.uuid(), trigger, startedAt: m, lastFrameAt: -Infinity, frames: [], pendingCaptures: 0, forced };
+      this.burst = { id: this.deps.uuid(), trigger, startedAt: m, lastFrameAt: -Infinity, frames: [], pendingCaptures: 0, forced, size };
       if (trigger === 'exam_start') this.examStartTaken = true;
       this.deps.onBurstStart?.(trigger);
     }
@@ -260,7 +273,7 @@ export class BurstSampler {
       void this.finish();
       return false;
     }
-    if (!(eligible || (b.forced && capturable)) || b.frames.length + b.pendingCaptures >= this.size) return false;
+    if (!(eligible || (b.forced && capturable)) || b.frames.length + b.pendingCaptures >= b.size) return false;
     return m - b.lastFrameAt >= BURST_MIN_SPACING_MS;
   }
 
@@ -279,7 +292,7 @@ export class BurstSampler {
     b.pendingCaptures--;
     if (this.burst !== b) return;
     if (jpeg) b.frames.push({ sampleId: this.deps.uuid(), capturedAt, jpeg });
-    if (b.frames.length >= this.size) await this.finish();
+    if (b.frames.length >= b.size) await this.finish();
   }
 
   /** Called when the loop runs without a usable frame, so a burst can still time out. */
@@ -316,7 +329,7 @@ export class BurstSampler {
   private async sendBurst(b: ActiveBurst): Promise<void> {
     const frames = [...b.frames].sort((x, y) => x.capturedAt - y.capturedAt);
     const size = frames.length;
-    const multi = this.size > 1;
+    const multi = b.size > 1;
     this.budget.spend(this.deps.mono(), size);
     let last: IdentitySampleResponse | null = null;
     let decided = false;

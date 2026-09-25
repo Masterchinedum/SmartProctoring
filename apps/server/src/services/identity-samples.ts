@@ -2,7 +2,8 @@
  * Mid-exam identity samples (POST /api/candidate/identity/sample), ARCHITECTURE §4.5 (identity v2).
  *
  *  - Idempotent on sampleId (a replay returns the stored result).
- *  - Bursts: the client takes `policy.identity.burstSize` frames within ~0.6 s and sends them as separate requests
+ *  - Bursts: the client takes `policy.identity.burstSize` frames (routine samples: `routineBurstSize`, shared
+ *    burstSizeFor) within ~0.6 s and sends them as separate requests
  *    sharing burstId (burstIndex 0..size-1, any order). Each frame is analysed on arrival and answered per frame;
  *    when all frames arrived (or BURST_TIMEOUT_MS after the first one — the next sample or the sweeper decides it
  *    on the frames received) the burst is decided as ONE sample: identity_checks row, mean embedding of its usable

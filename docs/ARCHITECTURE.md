@@ -112,7 +112,10 @@ disconnect if `disconnectTimerBehavior='continue'`).
    (expired, or superseded by a new check) is judged on the frames it received: trending "different person" ⇒ a full
    failed attempt with its identity check row (`context.abandoned`), held for review when no attempts remain;
    otherwise no penalty. Frame caps and the storage budget are enforced with the check row locked; identity samples
-   may use at most 90 % of a session's evidence budget, so check frames always find room. *During the exam*, samples are
+   may use at most 90 % of a session's evidence budget, so check frames always find room, and a check that passes with
+   nothing to review keeps none of its frame images (the reference images and a probe shown to staff are separate
+   copies). The candidate's check result carries the outcome, guidance and live-person steps — never the identity
+   decision, similarity or confidence (reference or ID photo). *During the exam*, samples are
    bursts (1–5 frames within ~0.6 s, decided as ONE sample — the burst template, or the frames' median when their
    scores spread > 0.15; incomplete bursts after ~3 s on the frames received)
    feeding a per-session SPRT accumulator (`CALIBRATION.sprt`, `windowEvidence`: positive evidence from poor-light
@@ -128,10 +131,16 @@ disconnect if `disconnectTimerBehavior='continue'`).
    the images of its representative frame only. The candidate is told only whether an image was usable (and guidance
    about it), never a decision, score or evidence state. Cadence is server-driven (`nextSampleInMs`: start-up
    interval for `startupWindowSec` after a (re)start, else `periodicCheckIntervalSec`, faster while monitoring /
-   suspect); `CandidateSessionState.session.identitySample` / `HeartbeatResponse.identitySample` ask for an
+   suspect — 5 s / 2.5 s whatever the policy). Routine (periodic) samples take `routineBurstSize` frames; every
+   triggered sample (exam start / resume, track break, appearance change, face return, camera reconnect, after
+   multiple people / obstruction, follow-ups and server requests) takes `burstSize` (`burstSizeFor`). The per-exam
+   *sampling intensity* (`samplingProfile`, a label the admin UI fills the numbers from; the numbers are the source of
+   truth) is **Maximum accuracy** (default: 3 frames every 6 s for 180 s, then every 15 s — 0.5 then 0.2 frames/s)
+   or **Balanced** (2-frame routine samples every 12 s, then every 30 s — about 3× the capacity; swap detection
+   relies more on the triggered samples). `CandidateSessionState.session.identitySample` / `HeartbeatResponse.identitySample` ask for an
    `exam_start` burst right after /start and after every passed resume / reconnect / reverify check, and — watchdog —
-   a `server_request` when no sample came for 3 expected intervals (the client then takes the burst even without a
-   qualifying frame); still none after 6 intervals (≥ 1 min) with the browser connected ⇒ `identity_unverifiable`
+   a `server_request` when no sample came for 3 expected intervals of the exam's policy (the client then takes the
+   burst even without a qualifying frame); still none after 6 intervals (≥ 1 min) with the browser connected ⇒ `identity_unverifiable`
    (details.reason `no_samples`), closed by the next sample. Vision priority for samples comes from server state
    (a pending request, evidence building up, the start-up window), not from the client's trigger label.
 6. **The reference is immutable.** It is never updated from later samples. Only staff can authorise a

@@ -5,9 +5,9 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { HeartbeatResponse, IdentitySampleResponse, StartCheckResponse } from '@sp/shared';
-import { and, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { candidates, checks, events, evidence, examSessions, identityChecks, identitySampleFrames } from '../src/db/schema.js';
+import { candidates, checkFrames, checks, events, evidence, examSessions, identityChecks, identitySampleFrames } from '../src/db/schema.js';
 import { sweepOnce } from '../src/jobs/sweeper.js';
 import { idPhotoAad } from '../src/services/identity-common.js';
 import { LATE_SAMPLE_MS } from '../src/services/identity-samples.js';
@@ -104,6 +104,53 @@ describe('evidence budget', () => {
   });
 });
 
+describe('check-frame images', () => {
+  const frameImages = async (checkId: string) => {
+    const frames = await env.ctx.db.select().from(checkFrames).where(eq(checkFrames.checkId, checkId));
+    const ids = frames.flatMap((f) => [f.evidenceId, f.faceCropEvidenceId]).filter((x): x is string => !!x);
+    return env.ctx.db.select().from(evidence).where(inArray(evidence.id, ids));
+  };
+
+  it('a check that passed with nothing to review keeps none of its frame images; the images kept as evidence stay', async () => {
+    const { s, c } = await freshSession({ evidence: { keepMatchingIdentitySamples: true } });
+    await startedSession(env, c);
+    await c.req('POST', '/api/candidate/pause', {});
+    const r = await runCheck(env, c, 'resume');
+    expect(r.complete!.outcome).toBe('passed');
+    await vi.waitFor(async () => {
+      const imgs = await frameImages(r.start.checkId);
+      expect(imgs.length).toBeGreaterThan(4);
+      expect(imgs.every((e) => e.purgedAt != null && e.purgeReason === 'check_passed')).toBe(true);
+    });
+    // The probe shown to staff (a copy) and the reference images are kept.
+    const probe = await env.ctx.db.select().from(evidence).where(and(eq(evidence.identityCheckId, r.identity!.id), isNull(evidence.purgedAt)));
+    expect(probe.map((e) => e.kind)).toEqual(expect.arrayContaining(['identity_probe']));
+    const refs = await env.ctx.db.select().from(evidence).where(and(eq(evidence.sessionId, s.id), eq(evidence.kind, 'identity_reference'), isNull(evidence.purgedAt)));
+    expect(refs.length).toBeGreaterThan(0);
+    // The initial (enrolment) check passed too: its frames are gone, the reference images are copies.
+    const [initial] = await env.ctx.db.select().from(checks).where(and(eq(checks.sessionId, s.id), eq(checks.purpose, 'initial')));
+    expect((await frameImages(initial.id)).every((e) => e.purgedAt != null)).toBe(true);
+  });
+
+  it('failed and flagged checks keep all their frame images', async () => {
+    const { c } = await freshSession({ identity: { onMismatch: 'flag_only' } });
+    await startedSession(env, c);
+    await c.req('POST', '/api/candidate/pause', {});
+    const dark = { person: 'alice', usable: false, issues: ['too_dark' as const] };
+    const failed = await runCheck(env, c, 'resume', { spec: dark });
+    expect(failed.complete!.outcome).toBe('retry');
+    const flagged = await runCheck(env, c, 'resume', { spec: MALLORY });
+    expect(flagged.complete!.outcome).toBe('passed'); // flag_only: the exam continues, the mismatch is recorded
+    expect(flagged.identity!.decision).toBe('mismatch');
+    await new Promise((r) => setTimeout(r, 50));
+    for (const id of [failed.start.checkId, flagged.start.checkId]) {
+      const imgs = await frameImages(id);
+      expect(imgs.length).toBeGreaterThan(0);
+      expect(imgs.every((e) => e.purgedAt == null)).toBe(true);
+    }
+  });
+});
+
 /* =================================================================== #2 ID photo on poor frames */
 
 describe('ID-photo comparison on poor-quality check-in frames', () => {
@@ -119,7 +166,7 @@ describe('ID-photo comparison on poor-quality check-in frames', () => {
     await consent(a.c);
     const ra = await runCheck(env, a.c, 'initial', { spec: dim });
     expect(ra.complete!.outcome).toBe('passed'); // advisory: the exam may start ...
-    expect(ra.complete!.idPhoto).toMatchObject({ decision: 'inconclusive' }); // ... never "a different person" in poor light
+    expect(ra.idPhoto!).toMatchObject({ decision: 'inconclusive' }); // ... never "a different person" in poor light
     const evA = await eventsOf(a.s.id);
     expect(evA.map((e) => e.type)).not.toContain('identity_mismatch');
     expect(evA.find((e) => e.type === 'id_photo_compared')!.details).toMatchObject({ decision: 'inconclusive', needsHumanReview: true });
@@ -143,7 +190,7 @@ describe('ID-photo comparison on poor-quality check-in frames', () => {
     const g = await freshSession({ identity: { idPhotoComparison: 'advisory' } }, cand.id);
     await consent(g.c);
     const rg = await runCheck(env, g.c, 'initial', { spec: { person: 'dim-candidate' } });
-    expect(rg.complete!.idPhoto).toMatchObject({ decision: 'mismatch' });
+    expect(rg.idPhoto!).toMatchObject({ decision: 'mismatch' });
   });
 });
 

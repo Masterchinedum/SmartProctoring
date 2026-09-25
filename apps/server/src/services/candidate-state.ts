@@ -84,7 +84,7 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
       verifiedInstanceId: instanceId && s.verifiedInstanceId === instanceId ? s.verifiedInstanceId : null,
       hold: toHoldDTO(s),
       pauseRequest,
-      identitySample: instanceInControl(s, instanceId) ? identitySampleRequest(s.status, s.identityState, policy.identity.burstSize, now, policy.identity) : null,
+      identitySample: instanceInControl(s, instanceId) ? identitySampleRequest(s.status, s.identityState, policy.identity, now) : null,
     },
     exam: {
       id: exam.id,

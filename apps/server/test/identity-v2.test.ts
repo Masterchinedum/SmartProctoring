@@ -94,11 +94,11 @@ describe('adaptive checks', () => {
     env.clock.advance(3 * 60 * 60_000); // hours later, another room
     const dim = { person: 'alice', brightness: 45, similarity: 0.55 }; // 'fair' quality, lower score
     const blurry = { person: 'alice', usable: false, issues: ['blurry' as const] };
-    const { complete, start } = await runCheck(env, c, 'resume', { frontal: [blurry, dim, { person: 'alice', similarity: 0.62 }, dim, dim] });
+    const { complete, start, identity } = await runCheck(env, c, 'resume', { frontal: [blurry, dim, { person: 'alice', similarity: 0.62 }, dim, dim] });
     expect(start.frontalFramesRequired).toBe(3);
     expect(complete!.outcome, JSON.stringify(complete)).toBe('passed');
-    expect(complete!.identity!.decision).toBe('match');
-    expect(complete!.identity!.confidence).toBeGreaterThan(0.9);
+    expect(identity!.decision).toBe('match');
+    expect(identity!.confidence).toBeGreaterThan(0.9);
     expect(complete!.state.session.status).toBe('active');
   });
 
@@ -135,9 +135,9 @@ describe('adaptive checks', () => {
     await startedSession(env, c);
     await c.req('POST', '/api/candidate/pause', {});
     const poor = { person: 'mallory', brightness: 33 };
-    const { complete } = await runCheck(env, c, 'resume', { spec: MALLORY, frontal: [poor, MALLORY, poor, MALLORY] });
+    const { complete, identity } = await runCheck(env, c, 'resume', { spec: MALLORY, frontal: [poor, MALLORY, poor, MALLORY] });
     expect(complete!.outcome).toBe('held');
-    expect(complete!.identity!.decision).toBe('mismatch');
+    expect(identity!.decision).toBe('mismatch');
     const mm = (await eventsOf(s.id)).find((e) => e.type === 'identity_mismatch')!;
     expect(mm.details).toMatchObject({ purpose: 'resume', against: 'reference', llrSum: expect.any(Number), posterior: expect.any(Number), calibrationVersion: CALIBRATION.version });
     expect(mm.confidence).toBeCloseTo(mm.details.posterior as number, 4);
@@ -151,10 +151,10 @@ describe('adaptive checks', () => {
     await startedSession(env, c);
     await c.req('POST', '/api/candidate/pause', {});
     const dark = { person: 'mallory', usable: false, issues: ['too_dark' as const] };
-    const { complete, frontalSent } = await runCheck(env, c, 'resume', { spec: dark });
+    const { complete, frontalSent, identity } = await runCheck(env, c, 'resume', { spec: dark });
     expect(frontalSent).toBe(10);
     expect(complete!.outcome).toBe('retry');
-    expect(complete!.identity!.decision).toBe('unable_to_verify');
+    expect(identity!.decision).toBe('unable_to_verify');
     expect(complete!.guidance.join(' ')).toMatch(/dark/i);
     expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('identity_mismatch');
   });
@@ -324,9 +324,9 @@ describe('poor light and per-session normalisation', () => {
     const { s, c } = await freshSession();
     await startedSession(env, c);
     await c.req('POST', '/api/candidate/pause', {});
-    const { complete } = await runCheck(env, c, 'resume', { spec: DARK_MALLORY });
+    const { complete, identity } = await runCheck(env, c, 'resume', { spec: DARK_MALLORY });
     expect(complete!.outcome).toBe('retry');
-    expect(complete!.identity!.decision).toBe('inconclusive');
+    expect(identity!.decision).toBe('inconclusive');
     expect(complete!.guidance.join(' ')).toMatch(/light/i);
     expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('identity_mismatch');
   });

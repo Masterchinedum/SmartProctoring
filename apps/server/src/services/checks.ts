@@ -77,7 +77,7 @@ import { assessCheck, CHECK_EVIDENCE, CLEAR_MATCH_LLR, periodBaseline, POOR_LIGH
 import { secondOpinion, secondOpinionDetails, type SecondOpinionRecord } from './identity-external.js';
 import { buildGallery, ENROL_TARGET_FRAMES, identityFrameIndexes, probeEvidence, scoreReference, type GalleryResult, type ProbeEvidence } from './identity-gallery.js';
 import { buildCandidateState, SUPERSEDED_MESSAGE } from './candidate-state.js';
-import { readEvidence, storeEvidence } from './evidence.js';
+import { purgeEvidenceRows, readEvidence, storeEvidence } from './evidence.js';
 import { copyEvidence, frameAad, frameToAnalysis, idPhotoAad, loadActiveReference, precedingContext, referenceAad, summarizeAnalysis, toIdentityResultDTO, type ActiveReference } from './identity-common.js';
 import { clearedHold } from './session-actions.js';
 import { orgThresholds } from './org.js';
@@ -678,7 +678,7 @@ async function settleAbandoned(m: SessionMutation, check: Check, how: AbandonHow
   const policy = await m.policy();
   const max = policy.identity.maxVerificationAttempts;
   const used = (await failedAttempts(m.tx, s, check.purpose, check.id)) + 1;
-  const response = { outcome: 'retry' as const, message: ABANDONED_MESSAGE, guidance: [], liveness: null, identity: null, idPhoto: null, attemptsRemaining: remaining(max, used) };
+  const response = { outcome: 'retry' as const, message: ABANDONED_MESSAGE, guidance: [], liveness: null, attemptsRemaining: remaining(max, used) };
   await m.tx
     .update(checks)
     .set({ status: 'retry', completedAt: new Date(m.now), result: { ...response, _meta: { qualityOnly: false, abandoned: how } } as unknown as Record<string, unknown> })
@@ -949,6 +949,11 @@ interface Outcome {
   identity: IdentityCheck | null;
   idPhoto: { decision: IdentityDecision; similarity: number | null } | null;
   attemptsRemaining: number;
+  /**
+   * A passed check that still needs a person's look (a flagged mismatch under flag_only, a disagreeing second opinion,
+   * an ID-photo comparison that did not match): its frame images are kept like those of a failed check.
+   */
+  review?: boolean;
   /** A retry caused by image quality alone (counts QUALITY_RETRY_WEIGHT against the attempt budget). */
   qualityOnly?: boolean;
 }
@@ -956,11 +961,10 @@ interface Outcome {
 export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: string, checkId: string): Promise<CompleteCheckResponse> {
   const { check } = await loadCheckFor(ctx, sessionId, checkId, instanceId);
   if (check.status !== 'open') {
-    // Idempotent replay of a completed check.
-    const { _meta: _ignored, ...stored } = (check.result ?? {}) as Partial<CompleteCheckResponse> & { _meta?: unknown };
-    void _ignored;
+    // Idempotent replay of a completed check (the candidate fields only; the stored record also has the decision).
+    const stored = (check.result ?? {}) as Partial<CompleteCheckResponse>;
     if (!stored.outcome) throw conflict('check_closed', 'This check is no longer open. Start a new check.');
-    return { ...(stored as CompleteCheckResponse), state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
+    return { ...candidateCheckResult(stored as Omit<CompleteCheckResponse, 'state'>), state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
   }
   const now = ctx.now();
   if (now > check.expiresAt.getTime() + 5_000) {
@@ -970,8 +974,6 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
       message: 'The check took too long and expired. Please start it again.',
       guidance: [],
       liveness: null,
-      identity: null,
-      idPhoto: null,
       attemptsRemaining: 0,
       state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId),
     };
@@ -1105,15 +1107,16 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
       message: out.message,
       guidance: out.guidance,
       liveness,
-      identity: out.identity ? toIdentityResultDTO(out.identity) : null,
-      idPhoto: out.idPhoto,
       attemptsRemaining: out.attemptsRemaining,
     };
-    // _meta (not part of the response): quality-only retries count less against the attempt budget (failedAttempts).
+    // Stored with the check (not sent): the decision records and _meta — quality-only retries count less against the
+    // attempt budget (failedAttempts).
+    const record = { identity: out.identity ? toIdentityResultDTO(out.identity) : null, idPhoto: out.idPhoto ? { decision: out.idPhoto.decision, similarity: out.idPhoto.similarity } : null };
     await m.tx
       .update(checks)
-      .set({ status, completedAt: new Date(m.now), result: { ...response, _meta: { qualityOnly: out.qualityOnly === true } } as unknown as Record<string, unknown> })
+      .set({ status, completedAt: new Date(m.now), result: { ...response, ...record, _meta: { qualityOnly: out.qualityOnly === true } } as unknown as Record<string, unknown> })
       .where(eq(checks.id, check.id));
+    if (status === 'passed' && !out.review) purgePassedCheckImages(m, prepared);
     return response;
   });
   return { ...outcome, state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
@@ -1126,6 +1129,27 @@ interface IdPhotoResult {
   confidence: number;
   /** Not a verdict, but a person must look (very low score on poor-quality frames, or the second opinion disagreed). */
   needsHumanReview: boolean;
+}
+
+/**
+ * A check that passed with nothing to review keeps no frame images: the images kept as evidence (the reference images
+ * of an enrolment, a probe shown to staff) are separate copies made by applyInitial / applyContinuation. So a long
+ * session with many resumes stays within the check frames' share of the storage budget. Failed, held, abandoned and
+ * flagged checks keep all their frames (evidence retention period). Purged after commit (tombstones remain).
+ */
+function purgePassedCheckImages(m: SessionMutation, prepared: PreparedFrames): void {
+  const ids = [...new Set(prepared.frames.flatMap((f) => [f.evidenceId, f.cropId]).filter((x): x is string => !!x))];
+  if (!ids.length) return;
+  const ctx = m.ctx;
+  m.onCommit(async () => {
+    const rows = await ctx.db.select().from(evidence).where(and(inArray(evidence.id, ids), eq(evidence.kind, 'liveness_frame')));
+    await purgeEvidenceRows(ctx, ctx.db, rows, 'check_passed');
+  });
+}
+
+/** The candidate-facing fields of a (stored) check result: no identity decision, similarity or confidence. */
+function candidateCheckResult(r: Omit<CompleteCheckResponse, 'state'>): Omit<CompleteCheckResponse, 'state'> {
+  return { outcome: r.outcome, message: r.message ?? '', guidance: r.guidance ?? [], liveness: r.liveness ?? null, attemptsRemaining: r.attemptsRemaining ?? 0 };
 }
 
 interface ApplyCtx {
@@ -1417,7 +1441,9 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
       outcome = { ...outcome, outcome: 'held', message: m.session.holdMessage ?? '' };
     }
   }
-  return outcome;
+  // Anything a person should look at keeps the check's frame images (see purgePassedCheckImages).
+  const needsLook = (a.idPhoto != null && (a.idPhoto.decision !== 'match' || a.idPhoto.needsHumanReview)) || a.second?.needsHumanReview === true || a.idPhotoSecond?.needsHumanReview === true;
+  return needsLook ? { ...outcome, review: true } : outcome;
 }
 
 /* ------------------------------------------------------------------ resume / reconnect / reverify */
@@ -1789,6 +1815,8 @@ async function continueAfterPass(
     identity: idRow,
     idPhoto: null,
     attemptsRemaining: policy.identity.maxVerificationAttempts,
+    // A flagged mismatch (flag_only), a disagreeing second opinion or a re-enrolment keeps the check's frame images.
+    review: t.flagged === true || t.reEnrolled === true || a.second?.needsHumanReview === true,
   };
   if (!t.flagged) await m.addEvent({ type: 'identity_verified', source: 'server_identity', confidence: idRow.confidence, details: { purpose, similarity: t.similarity, identityCheckId: idRow.id, ...secondOpinionDetails(a.second) } });
   m.set({ verifiedInstanceId: a.instanceId, checkAttemptsResetAt: new Date(m.now), lastVerifiedHeartbeatAt: new Date(m.now), lastHeartbeatAt: new Date(m.now), lastHeartbeatInstanceId: a.instanceId, connection: 'online' });

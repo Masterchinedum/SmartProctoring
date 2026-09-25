@@ -6,25 +6,86 @@ import { z } from 'zod';
  * (nothing in it is secret) so detectors can use the same thresholds.
  */
 
-export const identityPolicySchema = z.object({
-  /** Active liveness challenge (random head-turn sequence verified server-side) at check-in and resume. */
-  liveness: z.enum(['active', 'off']).default('active'),
-  /** Number of randomized liveness actions. */
-  livenessSteps: z.number().int().min(2).max(4).default(2),
-  /** Compare live candidate to the candidate's approved ID photo (if one exists). */
-  idPhotoComparison: z.enum(['off', 'advisory', 'required']).default('advisory'),
-  /** Seconds between routine identity samples while the exam is active (after the start-up window). */
-  periodicCheckIntervalSec: z.number().int().min(5).max(600).default(15),
-  /** Faster sampling right after the exam starts / resumes (swaps are most likely then). */
-  startupIntervalSec: z.number().int().min(3).max(120).default(6),
-  startupWindowSec: z.number().int().min(0).max(1800).default(180),
-  /** Frames per identity sample (captured within ~0.6 s and decided together). */
-  burstSize: z.number().int().min(1).max(5).default(3),
-  /** What happens when there is strong evidence of a different person. */
-  onMismatch: z.enum(['hold_for_review', 'flag_only']).default('hold_for_review'),
-  /** Failed "unable to verify" attempts during a check before routing to human review. */
-  maxVerificationAttempts: z.number().int().min(1).max(20).default(5),
+export const identityPolicySchema = z
+  .object({
+    /** Active liveness challenge (random head-turn sequence verified server-side) at check-in and resume. */
+    liveness: z.enum(['active', 'off']).default('active'),
+    /** Number of randomized liveness actions. */
+    livenessSteps: z.number().int().min(2).max(4).default(2),
+    /** Compare live candidate to the candidate's approved ID photo (if one exists). */
+    idPhotoComparison: z.enum(['off', 'advisory', 'required']).default('advisory'),
+    /** Seconds between routine identity samples while the exam is active (after the start-up window). */
+    periodicCheckIntervalSec: z.number().int().min(5).max(600).default(15),
+    /** Faster sampling right after the exam starts / resumes (swaps are most likely then). */
+    startupIntervalSec: z.number().int().min(3).max(120).default(6),
+    startupWindowSec: z.number().int().min(0).max(1800).default(180),
+    /**
+     * Frames per TRIGGERED identity sample (captured within ~0.6 s and decided together): exam start / resume, face
+     * track break, appearance change, face return, camera reconnect, after multiple people / obstruction, follow-ups
+     * and every server request (a faster look, the watchdog).
+     */
+    burstSize: z.number().int().min(1).max(5).default(3),
+    /** Frames per ROUTINE (periodic) identity sample. Default: burstSize (3). */
+    routineBurstSize: z.number().int().min(1).max(5).optional(),
+    /**
+     * The "Sampling intensity" preset (SAMPLING_PROFILES) the admin UI fills the sampling fields from. A label only: the
+     * numeric fields remain the source of truth, and the label is re-derived from them when the policy is resolved
+     * ('custom' when they match no preset).
+     */
+    samplingProfile: z.enum(['maximum', 'balanced', 'custom']).default('maximum'),
+    /** What happens when there is strong evidence of a different person. */
+    onMismatch: z.enum(['hold_for_review', 'flag_only']).default('hold_for_review'),
+    /** Failed "unable to verify" attempts during a check before routing to human review. */
+    maxVerificationAttempts: z.number().int().min(1).max(20).default(5),
+  })
+  // routineBurstSize follows burstSize unless set (an older policy with burstSize 1 keeps one-frame routine samples);
+  // the profile label always describes the numbers.
+  .transform((p) => {
+    const routineBurstSize: number = p.routineBurstSize ?? p.burstSize;
+    const samplingProfile: SamplingProfile = samplingProfileOf({ ...p, routineBurstSize });
+    return { ...p, routineBurstSize, samplingProfile };
+  });
+
+/** The identity-sampling fields a sampling preset sets. */
+export interface SamplingValues {
+  burstSize: number;
+  routineBurstSize: number;
+  startupIntervalSec: number;
+  startupWindowSec: number;
+  periodicCheckIntervalSec: number;
+}
+export type SamplingField = keyof SamplingValues;
+export const SAMPLING_FIELDS: readonly SamplingField[] = ['burstSize', 'routineBurstSize', 'startupIntervalSec', 'startupWindowSec', 'periodicCheckIntervalSec'];
+export type SamplingProfile = 'maximum' | 'balanced' | 'custom';
+
+/**
+ * "Sampling intensity" presets (Exams → Policy). Face analysis on the server scales with frames per second per
+ * candidate (docs/PERFORMANCE.md §6–7):
+ *  - maximum (default): 3-frame samples every 6 s for 3 min after a (re)start, then every 15 s — 0.5 then 0.2 frames/s;
+ *  - balanced: 2-frame routine samples every 12 s, then every 30 s — 0.17 then 0.07 frames/s, about 3x the capacity.
+ *    Swap detection relies more on the samples taken at once when the face changes (track break, face return, ...),
+ *    which keep 3 frames, as do server requests and the exam-start sample.
+ */
+export const SAMPLING_PROFILES: Readonly<Record<Exclude<SamplingProfile, 'custom'>, Readonly<SamplingValues>>> = Object.freeze({
+  maximum: Object.freeze({ burstSize: 3, routineBurstSize: 3, startupIntervalSec: 6, startupWindowSec: 180, periodicCheckIntervalSec: 15 }),
+  balanced: Object.freeze({ burstSize: 3, routineBurstSize: 2, startupIntervalSec: 12, startupWindowSec: 180, periodicCheckIntervalSec: 30 }),
 });
+
+/** The preset whose sampling fields these are, else 'custom'. */
+export function samplingProfileOf(identity: Readonly<SamplingValues>): SamplingProfile {
+  for (const [name, preset] of Object.entries(SAMPLING_PROFILES) as [Exclude<SamplingProfile, 'custom'>, SamplingValues][]) {
+    if (SAMPLING_FIELDS.every((f) => identity[f] === preset[f])) return name;
+  }
+  return 'custom';
+}
+
+/** Identity-sample triggers that are ROUTINE (policy.identity.routineBurstSize); every other trigger is triggered (burstSize). */
+export const ROUTINE_SAMPLE_TRIGGERS: readonly string[] = ['periodic'];
+
+/** Frames per identity sample for a trigger: routineBurstSize for routine samples, burstSize for triggered ones. */
+export function burstSizeFor(trigger: string, identity: { burstSize: number; routineBurstSize?: number | null }): number {
+  return ROUTINE_SAMPLE_TRIGGERS.includes(trigger) ? (identity.routineBurstSize ?? identity.burstSize) : identity.burstSize;
+}
 
 export const pausePolicySchema = z.object({
   allowed: z.boolean().default(true),

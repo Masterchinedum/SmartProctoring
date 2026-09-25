@@ -1,4 +1,4 @@
-import { DEFAULT_POLICY, proctoringPolicySchema, type ProctoringPolicy } from '@sp/shared';
+import { DEFAULT_POLICY, proctoringPolicySchema, SAMPLING_FIELDS, SAMPLING_PROFILES, samplingProfileOf, type ProctoringPolicy } from '@sp/shared';
 
 /**
  * Form metadata for every field of proctoringPolicySchema. The editor renders from this table; a unit
@@ -60,6 +60,17 @@ export const POLICY_GROUPS: PolicyGroup[] = [
         help: 'Only applies when the candidate has an approved ID photo.',
       },
       {
+        path: 'identity.samplingProfile',
+        label: 'Sampling intensity',
+        kind: 'enum',
+        options: [
+          { value: 'maximum', label: 'Maximum accuracy (default)' },
+          { value: 'balanced', label: 'Balanced' },
+          { value: 'custom', label: 'Custom' },
+        ],
+        help: 'Fills the sampling fields below. Balanced gives about 3× the capacity per server (routine samples half as often, with 2 frames instead of 3). Swap detection then relies more on the samples taken at once when the face changes (face returns, track interrupted, camera reconnects), which keep 3 frames.',
+      },
+      {
         path: 'identity.periodicCheckIntervalSec',
         label: 'Routine identity sample every',
         kind: 'integer',
@@ -88,11 +99,19 @@ export const POLICY_GROUPS: PolicyGroup[] = [
       },
       {
         path: 'identity.burstSize',
-        label: 'Frames per identity sample',
+        label: 'Frames per triggered identity sample',
         kind: 'integer',
         min: 1,
         max: 5,
-        help: 'Distinct camera frames captured within about half a second and decided together (more frames = steadier decisions).',
+        help: 'Samples taken at once when the exam starts or resumes, the face changes or returns, the camera reconnects, or the server asks for a faster look: distinct camera frames captured within about half a second and decided together (more frames = steadier decisions).',
+      },
+      {
+        path: 'identity.routineBurstSize',
+        label: 'Frames per routine identity sample',
+        kind: 'integer',
+        min: 1,
+        max: 5,
+        help: 'Frames of the routine samples (every start-up / routine interval above). Fewer frames = less server load; triggered samples are unaffected.',
       },
       {
         path: 'identity.onMismatch',
@@ -291,6 +310,22 @@ export function validatePolicy(p: unknown): PolicyValidation {
   const errors: Record<string, string> = {};
   for (const issue of r.error.issues) errors[issue.path.join('.')] = issue.message;
   return { ok: false, errors };
+}
+
+const SAMPLING_PATHS = new Set(SAMPLING_FIELDS.map((f) => `identity.${f}`));
+
+/**
+ * Set a field the way the editor does: choosing a sampling intensity preset fills the sampling fields; editing one of
+ * those fields by hand makes the intensity follow the numbers ('custom' unless they match a preset again).
+ */
+export function applyPolicyChange(p: ProctoringPolicy, path: string, value: unknown): ProctoringPolicy {
+  if (path === 'identity.samplingProfile') {
+    const preset = value === 'maximum' || value === 'balanced' ? SAMPLING_PROFILES[value] : null;
+    return { ...p, identity: { ...p.identity, ...(preset ?? {}), samplingProfile: value as ProctoringPolicy['identity']['samplingProfile'] } };
+  }
+  const next = setPath(p, path, value);
+  if (!SAMPLING_PATHS.has(path) || typeof value !== 'number') return next;
+  return { ...next, identity: { ...next.identity, samplingProfile: samplingProfileOf(next.identity) } };
 }
 
 /** Paths whose value differs from DEFAULT_POLICY. */

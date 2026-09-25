@@ -1,8 +1,8 @@
 /** Candidate-flow helpers for integration tests (drive the real HTTP API with fake camera frames). */
 import { PRIVACY_NOTICE_VERSION, type CheckFrameResponse, type CheckProgressDTO, type CheckPurpose, type CompleteCheckResponse, type StartCheckResponse } from '@sp/shared';
 import { expect } from 'vitest';
-import { eq } from 'drizzle-orm';
-import { identityChecks, identitySampleFrames } from '../src/db/schema.js';
+import { desc, eq } from 'drizzle-orm';
+import { identityChecks, identitySampleFrames, type IdentityCheck } from '../src/db/schema.js';
 import type { FakeImageSpec } from '../src/vision/fake.js';
 import type { CandidateClient, TestEnv } from './helpers.js';
 
@@ -50,7 +50,16 @@ export async function runCheck(
   c: CandidateClient,
   purpose: CheckPurpose,
   o: CheckOptions = {},
-): Promise<{ start: StartCheckResponse; complete: CompleteCheckResponse | null; progress: CheckProgressDTO | null; frontalSent: number }> {
+): Promise<{
+  start: StartCheckResponse;
+  complete: CompleteCheckResponse | null;
+  progress: CheckProgressDTO | null;
+  frontalSent: number;
+  /** Staff side (never sent to the candidate): the check's identity decision against the reference ... */
+  identity: IdentityCheck | null;
+  /** ... and its ID-photo comparison (initial checks). */
+  idPhoto: IdentityCheck | null;
+}> {
   const r = await startCheck(c, purpose, o.device ?? DEVICE);
   expect(r.statusCode, r.body).toBe(200);
   const start = r.json() as StartCheckResponse;
@@ -78,10 +87,15 @@ export async function runCheck(
   const max = start.maxFrontalFrames ?? start.frontalFramesRequired;
   while (!o.ignoreProgress && progress && (progress as CheckProgressDTO).frontalNeeded > 0 && frontalSent < max) await sendFrontal();
   env.clock.advance(Math.max(0, t - env.clock.t) + 100);
-  if (o.noComplete) return { start, complete: null, progress, frontalSent };
+  if (o.noComplete) return { start, complete: null, progress, frontalSent, identity: null, idPhoto: null };
   const cr = await c.req('POST', `/api/candidate/checks/${start.checkId}/complete`);
   expect(cr.statusCode, cr.body).toBe(200);
-  return { start, complete: cr.json() as CompleteCheckResponse, progress, frontalSent };
+  const complete = cr.json() as CompleteCheckResponse;
+  // The candidate is never told the identity decision / similarity; tests read them staff-side.
+  expect(complete).not.toHaveProperty('identity');
+  expect(complete).not.toHaveProperty('idPhoto');
+  const rows = await env.ctx.db.select().from(identityChecks).where(eq(identityChecks.checkId, start.checkId)).orderBy(desc(identityChecks.receivedAt));
+  return { start, complete, progress, frontalSent, identity: rows.find((x) => x.trigger !== 'id_photo') ?? null, idPhoto: rows.find((x) => x.trigger === 'id_photo') ?? null };
 }
 
 /** Invite -> consent -> initial check -> start. Returns the candidate client in control. */

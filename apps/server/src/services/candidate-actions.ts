@@ -162,7 +162,7 @@ export async function cancelPauseRequest(ctx: Ctx, sessionId: string, instanceId
 export interface LoadedSession {
   session: ExamSession;
   sessionVersion: string;
-  /** Effective policy as loaded with the session (candidate auth); used for identitySample.burstSize. */
+  /** Effective policy as loaded with the session (candidate auth); used for identitySample (cadence, burst size). */
   policy?: ProctoringPolicy;
 }
 
@@ -234,7 +234,7 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
     timerRunning: s.runningSince != null,
     requiredCheck: requiredCheckFor(s, instanceId),
     commands: [],
-    identitySample: inControl ? identitySampleRequest(s.status, s.identityState, (loaded.policy ?? DEFAULT_POLICY).identity.burstSize, now, (loaded.policy ?? DEFAULT_POLICY).identity) : null,
+    identitySample: inControl ? identitySampleRequest(s.status, s.identityState, (loaded.policy ?? DEFAULT_POLICY).identity, now) : null,
   };
 }
 
@@ -345,7 +345,7 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
       timerRunning: m.session.runningSince != null,
       requiredCheck: requiredCheckFor(m.session, instanceId),
       commands,
-      identitySample: inControl ? identitySampleRequest(m.session.status, m.session.identityState, policy.identity.burstSize, now, policy.identity) : null,
+      identitySample: inControl ? identitySampleRequest(m.session.status, m.session.identityState, policy.identity, now) : null,
     };
   });
 }

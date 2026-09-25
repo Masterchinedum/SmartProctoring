@@ -80,7 +80,7 @@ describe('initial check', () => {
     await consent(a.c);
     const ra = await runCheck(env, a.c, 'initial', { spec: { person: 'someone-else' } });
     expect(ra.complete!.outcome).toBe('passed');
-    expect(ra.complete!.idPhoto).toMatchObject({ decision: 'mismatch' });
+    expect(ra.idPhoto!).toMatchObject({ decision: 'mismatch' });
     const evA = await eventsOf(a.s.id);
     expect(evA.find((e) => e.type === 'id_photo_compared')!.details).toMatchObject({ decision: 'mismatch' });
     const mm = evA.find((e) => e.type === 'identity_mismatch')!;
@@ -95,7 +95,7 @@ describe('initial check', () => {
     await consent(d.c);
     const rd = await runCheck(env, d.c, 'initial', { spec: { person: 'photo-owner' } });
     expect(rd.complete!.outcome).toBe('passed');
-    expect(rd.complete!.idPhoto!.decision).toBe('match');
+    expect(rd.idPhoto!.decision).toBe('match');
     // release of an id-photo hold (reference exists) without a fresh check -> ready
     await releaseHold(env.ctx, b.s.id, actor(), { requireCheck: false });
     expect((await sessionRow(b.s.id)).status).toBe('ready');
@@ -121,9 +121,9 @@ describe('resume identity comparison', () => {
     env.clock.advance(60_000);
     await c.req('POST', '/api/candidate/pause', { reason: 'break' });
     env.clock.advance(20 * 60_000);
-    const { complete } = await runCheck(env, c, 'resume', { spec: { person: 'mallory' } });
+    const { complete, identity } = await runCheck(env, c, 'resume', { spec: { person: 'mallory' } });
     expect(complete!.outcome).toBe('held');
-    expect(complete!.identity!.decision).toBe('mismatch');
+    expect(identity!.decision).toBe('mismatch');
     expect(complete!.state.session.hold).toMatchObject({ reason: 'identity_mismatch' });
     expect(complete!.state.session.timerRunning).toBe(false);
     expect(complete!.state.questions).toBeNull();
@@ -150,7 +150,7 @@ describe('resume identity comparison', () => {
     for (let i = 0; i < 3; i++) {
       const r1 = await runCheck(env, c, 'resume', { spec: blurry });
       expect(r1.complete!.outcome).toBe('retry');
-      expect(r1.complete!.identity!.decision).toBe('unable_to_verify');
+      expect(r1.identity!.decision).toBe('unable_to_verify');
       expect(r1.complete!.guidance.join(' ')).toMatch(/blurry/i);
     }
     const r2 = await runCheck(env, c, 'resume', { spec: blurry });

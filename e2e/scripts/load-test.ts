@@ -15,11 +15,15 @@
  * (apps/web/src/candidate/monitoring/runtime.ts + sampler.ts, check/adaptive.ts):
  *   v2: check-in sends frontal frames (≥ 300 ms apart) while the server's `progress.frontalNeeded > 0`
  *       (at least frontalFramesRequired, at most maxFrontalFrames) and completes when `progress.canComplete`;
- *       identity samples are bursts of BURST (3) frames sent concurrently (burstId / burstIndex / burstSize):
- *       one at once at exam start (trigger exam_start), then every STARTUP_SEC (6 s) during the first
- *       STARTUP_WINDOW_SEC (180 s), then every SAMPLE_SEC (15 s) — or after the answer's `nextSampleInMs`
- *       when the server sets it (e.g. 2.5 s while the evidence is inconclusive; trigger server_request then).
- *       A heartbeat's `identitySample` request starts a burst at once, like the client.
+ *       identity samples are bursts of frames sent concurrently (burstId / burstIndex / burstSize): one of BURST
+ *       (3) frames at once at exam start (trigger exam_start), then routine bursts of ROUTINE_BURST frames every
+ *       STARTUP_SEC (6 s) during the first STARTUP_WINDOW_SEC (180 s), then every SAMPLE_SEC (15 s) — or after the
+ *       answer's `nextSampleInMs` when the server sets it (e.g. 2.5 s while the evidence is inconclusive; trigger
+ *       server_request then, BURST frames). A heartbeat's `identitySample` request starts a burst at once, like the
+ *       client.
+ *       PROFILE=maximum (default) | balanced sets these five from the exam policy's sampling preset
+ *       (packages/shared SAMPLING_PROFILES: balanced = 2-frame routine bursts every 12 s, then every 30 s); the
+ *       individual variables still override it.
  *   v1: the identity-v1 client: frontalFramesRequired frames at check-in, then one-frame samples every
  *       SAMPLE_SEC (default 30 s), no start-up window, server cadence ignored (to compare per-frame cost).
  * The exam policy is created to match (liveness and ID-photo comparison off in both).
@@ -37,6 +41,7 @@ import { readdirSync, writeFileSync } from 'node:fs';
 import { loadavg } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
+import { burstSizeFor, SAMPLING_PROFILES } from '../../packages/shared/src/policy';
 
 const BASE = process.env.BASE ?? 'http://127.0.0.1:8099';
 const N = Number(process.env.N ?? 100);
@@ -45,12 +50,16 @@ const RAMP_SEC = Number(process.env.RAMP_SEC ?? 45);
 const CADENCE: 'v1' | 'v2' = (process.env.CADENCE ?? 'v2').toLowerCase() === 'v1' ? 'v1' : 'v2';
 const V2 = CADENCE === 'v2';
 const HEARTBEAT_SEC = 5;
+/** v2 identity sampling preset (policy.identity.samplingProfile): the defaults of the five variables below. */
+const PROFILE: keyof typeof SAMPLING_PROFILES = (process.env.PROFILE ?? 'maximum').toLowerCase() === 'balanced' ? 'balanced' : 'maximum';
+const PRESET = SAMPLING_PROFILES[PROFILE];
 /** Routine identity-sample interval (v2: policy.identity.periodicCheckIntervalSec after the start-up window). */
-const SAMPLE_SEC = Number(process.env.SAMPLE_SEC ?? (V2 ? 15 : 30));
-/** v2 start-up cadence (policy.identity.startupIntervalSec / startupWindowSec) and burst size (burstSize). */
-const STARTUP_SEC = Number(process.env.STARTUP_SEC ?? 6);
-const STARTUP_WINDOW_SEC = Number(process.env.STARTUP_WINDOW_SEC ?? 180);
-const BURST = Math.max(1, Math.min(5, Number(process.env.BURST ?? 3)));
+const SAMPLE_SEC = Number(process.env.SAMPLE_SEC ?? (V2 ? PRESET.periodicCheckIntervalSec : 30));
+/** v2 start-up cadence (policy.identity.startupIntervalSec / startupWindowSec) and burst sizes (burstSize, routineBurstSize). */
+const STARTUP_SEC = Number(process.env.STARTUP_SEC ?? PRESET.startupIntervalSec);
+const STARTUP_WINDOW_SEC = Number(process.env.STARTUP_WINDOW_SEC ?? PRESET.startupWindowSec);
+const BURST = Math.max(1, Math.min(5, Number(process.env.BURST ?? PRESET.burstSize)));
+const ROUTINE_BURST = Math.max(1, Math.min(5, Number(process.env.ROUTINE_BURST ?? PRESET.routineBurstSize)));
 /** v2 check-in: frontal frames are captured at least this far apart (VerifyStep MIN_CAPTURE_SPACING_MS). */
 const CHECK_FRAME_SPACING_MS = 300;
 /** v2 burst frames are camera frames this far apart (the runtime analyses ~5 frames/s; sampler.ts). */
@@ -84,7 +93,7 @@ const checkInFailures = new Map<string, number>();
 const failCheckIn = (why: string) => checkInFailures.set(why, (checkInFailures.get(why) ?? 0) + 1);
 const checkInFrames: number[] = [];
 /** v2: the interval to the next routine burst — by the server's nextSampleInMs, or the client's own schedule. */
-const cadence = { server: 0, serverShortened: 0, fallback: 0, heartbeatRequests: 0, holds: 0, intervalsMs: [] as number[] };
+const cadence = { server: 0, serverShortened: 0, fallback: 0, heartbeatRequests: 0, holds: 0, frames: 0, intervalsMs: [] as number[] };
 const pct = (a: number[], p: number) => (a.length ? a[Math.min(a.length - 1, Math.floor((p / 100) * a.length))] : NaN);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -299,26 +308,28 @@ class Candidate {
         cadence.fallback++;
         if (res?.followUpInMs != null) inMs = Math.max(0, res.followUpInMs);
       }
-      const state = res?.evidence?.state;
-      if (res && (res.followUpInMs != null || state === 'suspect' || state === 'monitoring' || state === 'confirmed_mismatch')) label = 'server_request';
+      // runtime.ts routineCadence: 'server_request' while the server wants a faster look (followUpInMs), else periodic.
+      if (res && res.followUpInMs != null) label = 'server_request';
       cadence.intervalsMs.push(inMs);
       trigger = label;
       dueAt = now + inMs;
     }
   }
 
-  /** One burst: BURST camera frames ~200 ms apart, sent concurrently; returns the deciding answer. */
+  /** One burst: camera frames ~200 ms apart (ROUTINE_BURST for routine samples, else BURST), sent concurrently; returns the deciding answer. */
   private async burst(trigger: string): Promise<any> {
     this.bursting = true;
     try {
       const burstId = randomUUID();
       const t = Date.now();
       const t0 = performance.now();
+      const size = burstSizeFor(trigger, { burstSize: BURST, routineBurstSize: ROUTINE_BURST });
+      cadence.frames += size;
       const answers = await Promise.all(
-        Array.from({ length: BURST }, (_, i) =>
+        Array.from({ length: size }, (_, i) =>
           this.call('POST identity sample', 'POST', '/identity/sample', {
             jpeg: this.nextFrame(),
-            query: { sampleId: randomUUID(), trigger, capturedAt: t - (BURST - 1 - i) * BURST_FRAME_SPACING_MS, ...(BURST > 1 ? { burstId, burstIndex: i, burstSize: BURST } : {}) },
+            query: { sampleId: randomUUID(), trigger, capturedAt: t - (size - 1 - i) * BURST_FRAME_SPACING_MS, ...(size > 1 ? { burstId, burstIndex: i, burstSize: size } : {}) },
           }),
         ),
       );
@@ -358,13 +369,13 @@ class Candidate {
 async function main() {
   console.log(
     `load test: N=${N} ramp=${RAMP_SEC}s steady=${DURATION_SEC}s cadence=${CADENCE} ` +
-      (V2 ? `(bursts of ${BURST}, every ${STARTUP_SEC}s for ${STARTUP_WINDOW_SEC}s, then ${SAMPLE_SEC}s)` : `(1 frame every ${SAMPLE_SEC}s)`) +
+      (V2 ? `(profile ${PROFILE}: routine bursts of ${ROUTINE_BURST} (triggered ${BURST}), every ${STARTUP_SEC}s for ${STARTUP_WINDOW_SEC}s, then ${SAMPLE_SEC}s)` : `(1 frame every ${SAMPLE_SEC}s)`) +
       ` base=${BASE}`,
   );
   const faces = await prepareFaces();
   const cookie = await staffLogin();
   const identity = V2
-    ? { liveness: 'off', idPhotoComparison: 'off', periodicCheckIntervalSec: Math.max(5, SAMPLE_SEC), startupIntervalSec: STARTUP_SEC, startupWindowSec: STARTUP_WINDOW_SEC, burstSize: BURST }
+    ? { liveness: 'off', idPhotoComparison: 'off', periodicCheckIntervalSec: Math.max(5, SAMPLE_SEC), startupIntervalSec: STARTUP_SEC, startupWindowSec: STARTUP_WINDOW_SEC, burstSize: BURST, routineBurstSize: ROUTINE_BURST }
     : { liveness: 'off', idPhotoComparison: 'off', periodicCheckIntervalSec: Math.max(10, SAMPLE_SEC), startupWindowSec: 0, burstSize: 1 };
   const exam = await staff<{ id: string }>(cookie, 'POST', '/api/admin/exams', {
     title: `Load test ${new Date().toISOString()}`,
@@ -526,7 +537,7 @@ async function main() {
     const iv = [...cadence.intervalsMs].sort((a, b) => a - b);
     console.log(
       `v2 cadence: ${cadence.server} intervals from nextSampleInMs (${cadence.serverShortened} shorter than the client schedule), ${cadence.fallback} from the client schedule, ` +
-        `interval p5 / p50 / p95 ${pct(iv, 5)} / ${pct(iv, 50)} / ${pct(iv, 95)} ms; ${cadence.heartbeatRequests} heartbeat sample requests; ${cadence.holds} holds`,
+        `interval p5 / p50 / p95 ${pct(iv, 5)} / ${pct(iv, 50)} / ${pct(iv, 95)} ms; ${cadence.heartbeatRequests} heartbeat sample requests; ${cadence.holds} holds; ${cadence.frames} identity frames sent`,
     );
   }
   if (busyRetries.size) console.log(`503 busy responses retried (as the web client does): ${JSON.stringify(Object.fromEntries(busyRetries))}`);
@@ -541,7 +552,7 @@ async function main() {
         DURATION_SEC,
         CADENCE,
         SAMPLE_SEC,
-        ...(V2 ? { STARTUP_SEC, STARTUP_WINDOW_SEC, BURST } : {}),
+        ...(V2 ? { PROFILE, STARTUP_SEC, STARTUP_WINDOW_SEC, BURST, ROUTINE_BURST } : {}),
         STAFF_WS,
         t0,
         phases: { startup, steadyFrom, endAt, firstStart, lastStart },

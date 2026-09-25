@@ -158,9 +158,9 @@ describe('external verifier on (check-in, resume, suspected swap)', () => {
     const { s, c } = await started();
     await c.req('POST', '/api/candidate/pause', {});
     mock.handler = SAME;
-    const { complete } = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.25 } });
+    const { complete, identity } = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.25 } });
     expect(complete!.outcome).toBe('held');
-    expect(complete!.identity!.decision).toBe('mismatch');
+    expect(identity!.decision).toBe('mismatch');
     const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
     expect(opinionOf(row)).toMatchObject({ outcome: 'disagreement_flagged', internalDecision: 'mismatch', decision: 'mismatch', internalStrength: 'clear', needsHumanReview: true });
     const mm = (await eventsOf(s.id)).find((e) => e.type === 'identity_mismatch')!;
@@ -172,9 +172,9 @@ describe('external verifier on (check-in, resume, suspected swap)', () => {
     await c.req('POST', '/api/candidate/pause', {});
     mock.handler = SAME;
     // 0.38 after a pause (relaxed normalisation): neither clearly the same nor clearly different => internally inconclusive.
-    const { complete } = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.38 } });
+    const { complete, identity } = await runCheck(env, c, 'resume', { spec: { person: 'alice', similarity: 0.38 } });
     expect(complete!.outcome, JSON.stringify(complete)).toBe('passed');
-    expect(complete!.identity!.decision).toBe('match');
+    expect(identity!.decision).toBe('match');
     const row = (await checksOf(s.id)).filter((r) => r.trigger === 'resume').pop()!;
     expect(opinionOf(row)).toMatchObject({ outcome: 'resolved_by_external', internalDecision: 'inconclusive', decision: 'match', needsHumanReview: false });
   });
@@ -183,9 +183,9 @@ describe('external verifier on (check-in, resume, suspected swap)', () => {
     const { s, c } = await started();
     await c.req('POST', '/api/candidate/pause', {});
     mock.handler = SAME;
-    const { complete } = await runCheck(env, c, 'resume', { spec: { person: 'mallory' } });
+    const { complete, identity } = await runCheck(env, c, 'resume', { spec: { person: 'mallory' } });
     expect(complete!.outcome).toBe('held');
-    expect(complete!.identity!.decision).toBe('mismatch');
+    expect(identity!.decision).toBe('mismatch');
     const mm = (await eventsOf(s.id)).find((e) => e.type === 'identity_mismatch')!;
     expect(mm.details).toMatchObject({ needsHumanReview: true, secondOpinion: { outcome: 'disagreement_flagged', decision: 'mismatch' } });
   });
@@ -215,9 +215,10 @@ describe('external verifier on (check-in, resume, suspected swap)', () => {
     await consent(c);
     const n0 = mock.inputs.length;
     // 0.36 against the photo is between the ID-photo thresholds (0.24 / 0.42): inconclusive internally.
-    const r = (await runCheck(env, c, 'initial', { spec: { person: 'id-owner', similarity: 0.36 } })).complete as CompleteCheckResponse;
+    const run = await runCheck(env, c, 'initial', { spec: { person: 'id-owner', similarity: 0.36 } });
+    const r = run.complete as CompleteCheckResponse;
     expect(mock.inputs.length).toBe(n0 + 1); // only the ID-photo comparison is sent at check-in
-    expect(r.idPhoto).toMatchObject({ decision: 'match' });
+    expect(run.idPhoto).toMatchObject({ decision: 'match' });
     expect(r.outcome).toBe('passed');
     const photoRow = (await checksOf(s.id)).find((x) => x.trigger === 'id_photo')!;
     expect(opinionOf(photoRow)).toMatchObject({ kind: 'check_in', outcome: 'resolved_by_external', internalDecision: 'inconclusive', decision: 'match' });

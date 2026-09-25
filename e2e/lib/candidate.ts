@@ -122,7 +122,7 @@ async function summarizeApiResponse(url: string, status: number, body: unknown):
     return `frame step=${q.get('step')} ${status} accepted=${b.accepted} usable=${qa.usable} issues=${(qa.issues ?? []).join('+') || '-'} bright=${qa.brightness?.toFixed?.(0)} contrast=${qa.contrast?.toFixed?.(1)} ie=${qa.interEyePx?.toFixed?.(0)} yaw=${qa.yawDeg?.toFixed?.(0)} sat=${b.stepSatisfied ?? '-'} measured=${b.measured ? `${b.measured.yawDeg?.toFixed(0)}/${b.measured.pitchDeg?.toFixed(0)}` : '-'} client=${q.get('clientYaw') ?? '-'} progress=${pr.frontalAccepted ?? '-'}+${pr.frontalNeeded ?? '-'} steps=${(pr.steps ?? []).map((x: any) => (x.satisfied ? 1 : 0)).join('')} canComplete=${pr.canComplete ?? '-'}`;
   }
   if (/\/api\/candidate\/checks\/[^/]+\/complete/.test(path)) {
-    return `complete ${status} outcome=${b.outcome} identity=${b.identity?.decision}/${b.identity?.similarity?.toFixed?.(3)} liveness=${b.liveness ? `${b.liveness.passed}:${(b.liveness.reasons ?? []).join('+')}` : '-'} remaining=${b.attemptsRemaining} guidance=${JSON.stringify(b.guidance ?? [])}`;
+    return `complete ${status} outcome=${b.outcome} liveness=${b.liveness ? `${b.liveness.passed}:${(b.liveness.reasons ?? []).join('+')}` : '-'} remaining=${b.attemptsRemaining} guidance=${JSON.stringify(b.guidance ?? [])}`;
   }
   if (/\/api\/candidate\/checks$/.test(path.split('?')[0]!)) {
     return `check start ${status} purpose=${b.purpose ?? '-'} liveness=${(b.liveness?.steps ?? []).map((x: any) => x.action).join(',') || '-'} frontal=${b.frontalFramesRequired ?? '-'}/${b.maxFrontalFrames ?? '-'}`;

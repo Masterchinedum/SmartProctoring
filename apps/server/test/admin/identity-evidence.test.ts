@@ -178,7 +178,7 @@ describe('ID photo mismatch at check-in', () => {
     await consent(c);
     const chk = await runCheck(env, c, 'initial', { spec: { person: 'someone-else' } });
     expect(chk.complete!.outcome).toBe('passed');
-    expect(chk.complete!.idPhoto).toMatchObject({ decision: 'mismatch' });
+    expect(chk.idPhoto!).toMatchObject({ decision: 'mismatch' });
     const ev = await eventOf(assigned.items[0].sessionId, 'identity_mismatch');
     const cmp = json<IdentityComparisonDTO>(await reviewer.get(`/identity/compare/${ev.id}`));
     expect(cmp.reference.purpose).toBe('approved ID photo');
@@ -203,7 +203,7 @@ describe('ID photo mismatch at check-in', () => {
     const sessionId: string = assigned.items[0].sessionId;
     const c = env.candidateClient(assigned.items[0].accessLink.split('/take/')[1]);
     await consent(c);
-    expect((await runCheck(env, c, 'initial', { spec: { person: 'someone-else-2' } })).complete!.idPhoto).toMatchObject({ decision: 'mismatch' });
+    expect((await runCheck(env, c, 'initial', { spec: { person: 'someone-else-2' } })).idPhoto).toMatchObject({ decision: 'mismatch' });
     const ev = await eventOf(sessionId, 'identity_mismatch');
 
     // Listed with its event (staff event drawer), as this session's evidence.

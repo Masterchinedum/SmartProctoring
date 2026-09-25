@@ -50,10 +50,10 @@ describe('P0-1: a re-enrolment authorisation cannot outlive the hold it was give
     env.clock.advance(MIN);
     expect((await c.req('POST', '/api/candidate/pause', {})).json().outcome).toBe('paused');
     env.clock.advance(10 * MIN);
-    const { start, complete } = await runCheck(env, c, 'resume', { spec: { person: 'impostor-p01' } });
+    const { start, complete, identity } = await runCheck(env, c, 'resume', { spec: { person: 'impostor-p01' } });
     expect(start.frontalFramesRequired).toBe(3); // a comparison (resume), not an enrolment
     expect(complete!.outcome).toBe('held');
-    expect(complete!.identity!.decision).toBe('mismatch');
+    expect(identity!.decision).toBe('mismatch');
     expect(complete!.state.session.hold!.reason).toBe('identity_mismatch');
     expect(await refsOf(s.id)).toHaveLength(1);
     const mm = (await eventsOf(s.id)).filter((e) => e.type === 'identity_mismatch');
@@ -199,7 +199,7 @@ describe('P2-3 / P2-4: check-in outcomes are described accurately', () => {
     await consent(c);
     // Same person, but the comparison lands in the grey zone (e.g. an old photo / poor light).
     const r = await runCheck(env, c, 'initial', { spec: { person: 'photo-p23', similarity: 0.33 } });
-    expect(r.complete!.idPhoto!.decision).toBe('inconclusive');
+    expect(r.idPhoto!.decision).toBe('inconclusive');
     expect(r.complete!.outcome).toBe('held');
     const hold = r.complete!.state.session.hold!;
     expect(hold.reason).toBe('id_photo_unverifiable');

@@ -37,7 +37,7 @@
  *     (a swap can only happen at a break). With the LLR clamp (5) and weight, a single sample can never reach
  *     `sprt.confirm` (7): at least two fair / good samples are always needed.
  */
-import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityEvidenceDTO, IdentityPolicy, IdentitySampleRequestDTO, IdentityThresholds, SessionStatus } from '@sp/shared';
+import { burstSizeFor, type FaceQuality, type IdentityCheckTrigger, type IdentityDecision, type IdentityEvidenceDTO, type IdentityPolicy, type IdentitySampleRequestDTO, type IdentityThresholds, type SessionStatus } from '@sp/shared';
 import { GENUINE_DRIFT, windowEvidence } from '../vision/calibration.js';
 import { bucketModel, CALIBRATION, continuousApplies, decideIdentity, posteriorSwap, qualityBucket, referenceClass, sampleLLR, type EvidenceContext, type QualityBucket } from '../vision/index.js';
 
@@ -479,21 +479,22 @@ export function sampleWatchdog(
 /**
  * The identity sample the server wants right now (HeartbeatResponse / CandidateSessionState.identitySample):
  * {trigger:'exam_start', inMs:0} after a (re)start until a sample arrives; {trigger:'server_request', inMs:0} while
- * the evidence is 'suspect' and the requested faster sample is late, or (with `policy`) when the watchdog finds
- * samples overdue (`sampleWatchdog`). Pure (computed from the session row), so the single-statement heartbeat can
- * answer it too.
+ * the evidence is 'suspect' and the requested faster sample is late, or when the watchdog finds samples overdue
+ * (`sampleWatchdog`, measured against the policy's own intervals). Every request is a triggered sample: its burst size
+ * is `burstSizeFor(trigger)` = policy.burstSize (routine samples use routineBurstSize; the server never requests one).
+ * Pure (computed from the session row), so the single-statement heartbeat can answer it too.
  */
 export function identitySampleRequest(
   status: SessionStatus,
   state: ({ sampleRequest?: { trigger: IdentityCheckTrigger; since: number } | null } & WatchdogState) | null | undefined,
-  burstSize: number,
+  policy: Pick<IdentityPolicy, 'burstSize' | 'routineBurstSize' | 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>,
   now: number,
-  policy?: Pick<IdentityPolicy, 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>,
 ): IdentitySampleRequestDTO | null {
   if (status !== 'active' || !state) return null;
-  if (state.sampleRequest) return { trigger: state.sampleRequest.trigger, inMs: 0, burstSize };
+  const request = (trigger: IdentityCheckTrigger): IdentitySampleRequestDTO => ({ trigger, inMs: 0, burstSize: burstSizeFor(trigger, policy) });
+  if (state.sampleRequest) return request(state.sampleRequest.trigger);
   const acc = state.evidence;
-  if (acc?.state === 'suspect' && acc.lastSampleAt != null && now - acc.lastSampleAt >= CADENCE.lateAfterMs) return { trigger: 'server_request', inMs: 0, burstSize };
-  if (policy && sampleWatchdog(policy, state, now) !== 'ok') return { trigger: 'server_request', inMs: 0, burstSize };
+  if (acc?.state === 'suspect' && acc.lastSampleAt != null && now - acc.lastSampleAt >= CADENCE.lateAfterMs) return request('server_request');
+  if (sampleWatchdog(policy, state, now) !== 'ok') return request('server_request');
   return null;
 }
