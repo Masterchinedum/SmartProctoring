@@ -47,8 +47,9 @@ async function completeSession(browser: Browser, s: SessionHandle): Promise<void
   }
 }
 
+/** Evidence whose image still exists (surplus burst-frame and passed-check images are purged by design). */
 async function evidenceIds(databaseUrl: string, sessionId: string): Promise<{ id: string; kind: string }[]> {
-  return sql<{ id: string; kind: string }>(databaseUrl, 'SELECT id, kind FROM evidence WHERE session_id = $1 ORDER BY created_at', [sessionId]);
+  return sql<{ id: string; kind: string }>(databaseUrl, 'SELECT id, kind FROM evidence WHERE session_id = $1 AND purged_at IS NULL ORDER BY created_at', [sessionId]);
 }
 
 async function statuses(staff: StaffApi, ids: string[]): Promise<number[]> {
