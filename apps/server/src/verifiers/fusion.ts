@@ -29,11 +29,12 @@
  *   * only with resolveInconclusive (default true); otherwise inconclusive (no review flag).
  *   borderline: match with similarity < match + margin; mismatch with similarity ≥ mismatch − margin.
  *   A decision without a similarity counts as clear.
- *   A decision made on accumulated calibrated evidence (`InternalOpinion.evidence`: the identity engine's SPRT over
+ *   A MISMATCH made on accumulated calibrated evidence (`InternalOpinion.evidence`: the identity engine's SPRT over
  *   mid-exam samples, or the evidence of a resume check's frames) takes its strength from that evidence instead of the
  *   raw similarity: evidence that reached its decision threshold is CLEAR (a confirmed_mismatch is never overruled by
  *   an external "same person"), evidence that did not is borderline. A look-alike scoring 0.35–0.45 is exactly the
- *   case where the raw similarity looks borderline although the accumulated evidence is decisive.
+ *   case where the raw similarity looks borderline although the accumulated evidence is decisive. A match keeps the
+ *   similarity rule (a look-alike just above the match threshold can still be downgraded by a provider's "different").
  */
 import type { IdentityDecision } from '@sp/shared';
 import type { ExternalOpinion } from './types.js';
@@ -129,7 +130,9 @@ const EPS = 1e-9;
 export function internalStrength(internal: InternalOpinion, policy: FusionPolicy): InternalStrength {
   const s = internal.similarity;
   const m = policy.borderlineMargin;
-  if (internal.evidence && (internal.decision === 'match' || internal.decision === 'mismatch')) return internal.evidence.decisive ? 'clear' : 'borderline';
+  // Accumulated evidence can only make a MISMATCH harder to overrule; a match keeps the similarity rule, so a
+  // look-alike just above the match threshold can still be challenged by the provider.
+  if (internal.evidence && internal.decision === 'mismatch') return internal.evidence.decisive ? 'clear' : 'borderline';
   switch (internal.decision) {
     case 'match':
       return s != null && s < policy.internal.match + m - EPS ? 'borderline' : 'clear';

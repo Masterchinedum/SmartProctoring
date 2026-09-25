@@ -10,6 +10,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { auditLog, events, evidence, examSessions, identityChecks, identityReferences, identitySampleFrames } from '../src/db/schema.js';
 import { sweepOnce } from '../src/jobs/sweeper.js';
 import { loadEventDTO } from '../src/services/dto.js';
+import { toEvidenceDTO } from '../src/services/identity-evidence.js';
+import { identityState } from '../src/services/session-state.js';
 import { buildIdentityComparison } from '../src/services/reports-identity.js';
 import { SELFTEST_TTL_MS } from '../src/services/identity-selftest.js';
 import { CALIBRATION } from '../src/vision/index.js';
@@ -34,12 +36,25 @@ const checksOf = async (id: string) => env.ctx.db.select().from(identityChecks).
 const ALICE = { person: 'alice' };
 const MALLORY = { person: 'mallory' };
 
+/**
+ * The staff-side decision behind a candidate's sample receipt: the candidate is only told whether the image was
+ * usable, never the decision, the score or the evidence state.
+ */
+async function decisionOf(res: IdentitySampleResponse): Promise<{ decision: string; similarity: number | null }> {
+  const [row] = await env.ctx.db.select().from(identityChecks).where(eq(identityChecks.id, res.result.id));
+  if (row) return row;
+  const [f] = await env.ctx.db.select().from(identitySampleFrames).where(eq(identitySampleFrames.id, res.result.id));
+  return f;
+}
+/** The session's accumulated evidence (staff side). */
+const evidenceOf = async (sessionId: string) => toEvidenceDTO(identityState(await sessionRow(sessionId)).evidence);
+
 /** Started exam whose exam_start sample was taken (the evidence begins with a clean match). */
 async function examWithStartSample(policy?: Record<string, unknown>) {
   const { s, c } = await freshSession(policy);
   await startedSession(env, c);
   const r = await burst(env, c, [ALICE, ALICE, ALICE], { trigger: 'exam_start' });
-  expect(r.last.result.decision).toBe('match');
+  expect((await decisionOf(r.last)).decision).toBe('match');
   return { s, c };
 }
 
@@ -52,7 +67,7 @@ describe('adaptive checks', () => {
     const { start, complete, progress, frontalSent } = await runCheck(env, c, 'initial');
     expect(start).toMatchObject({ frontalFramesRequired: 5, maxFrontalFrames: 24 }); // 10 normally, up to 24 while quality rejects frames
     expect(frontalSent).toBe(5);
-    expect(progress).toMatchObject({ frontalAccepted: 6, frontalNeeded: 0, identity: null, canComplete: true }); // 5 frontal + the 'center' step
+    expect(progress).toMatchObject({ frontalAccepted: 6, frontalNeeded: 0, canComplete: true }); // 5 frontal + the 'center' step
     expect(progress!.steps.every((x) => x.satisfied)).toBe(true);
     expect(complete!.outcome).toBe('passed');
     const [ref] = await env.ctx.db.select().from(identityReferences).where(eq(identityReferences.sessionId, s.id));
@@ -87,25 +102,32 @@ describe('adaptive checks', () => {
     expect(complete!.state.session.status).toBe('active');
   });
 
-  it('resume: progress reports the running identity assessment and keeps asking while uncertain', async () => {
-    const { c } = await freshSession();
-    await startedSession(env, c);
-    await c.req('POST', '/api/candidate/pause', {});
-    const r = await startCheck(c, 'resume');
-    const start = r.json() as StartCheckResponse;
-    const url = `/api/candidate/checks/${start.checkId}/frames`;
-    const nonce = start.liveness!.nonce;
-    const send = async (spec: object) => (await c.jpeg(url, { yawDeg: 0, pitchDeg: 0, ...spec }, { step: 'frontal', capturedAt: env.clock.t, nonce })).json() as CheckFrameResponse;
-    let fr = await send({ person: 'alice', usable: false, issues: ['blurry'] });
-    expect(fr.progress).toMatchObject({ frontalAccepted: 0, identity: 'pending', canComplete: false });
-    expect(fr.progress!.frontalNeeded).toBeGreaterThan(0);
-    fr = await send(ALICE);
-    fr = await send(ALICE);
-    fr = await send(ALICE);
-    expect(fr.progress).toMatchObject({ identity: 'likely_match', frontalNeeded: 0 });
-    // liveness steps still open -> not yet complete
-    expect(fr.progress!.canComplete).toBe(false);
-    expect(fr.progress!.steps.map((x) => x.satisfied)).toEqual(start.liveness!.steps.map(() => false));
+  it('resume: progress keeps asking while the evidence is insufficient and never discloses the running identity assessment', async () => {
+    const progressFor = async (person: string) => {
+      const { c } = await freshSession();
+      await startedSession(env, c);
+      await c.req('POST', '/api/candidate/pause', {});
+      const start = (await startCheck(c, 'resume')).json() as StartCheckResponse;
+      const url = `/api/candidate/checks/${start.checkId}/frames`;
+      const nonce = start.liveness!.nonce;
+      const send = async (spec: object) => (await c.jpeg(url, { yawDeg: 0, pitchDeg: 0, ...spec }, { step: 'frontal', capturedAt: env.clock.t, nonce })).json() as CheckFrameResponse;
+      const out: CheckFrameResponse[] = [await send({ person, usable: false, issues: ['blurry'] })];
+      for (let i = 0; i < 3; i++) out.push(await send({ person }));
+      return { start, out };
+    };
+    const genuine = await progressFor('alice');
+    expect(genuine.out[0].progress).toMatchObject({ frontalAccepted: 0, canComplete: false });
+    expect(genuine.out[0].progress!.frontalNeeded).toBeGreaterThan(0);
+    const last = genuine.out[3].progress!;
+    expect(last).toMatchObject({ frontalNeeded: 0, canComplete: false }); // liveness steps still open
+    expect(last.steps.map((x) => x.satisfied)).toEqual(genuine.start.liveness!.steps.map(() => false));
+    // No verdict in what the candidate sees: the same shape and values for someone else's face.
+    const other = await progressFor('mallory');
+    for (const r of [...genuine.out, ...other.out]) {
+      expect(Object.keys(r.progress!).sort()).toEqual(['canComplete', 'frontalAccepted', 'frontalNeeded', 'steps']);
+      expect(JSON.stringify(r)).not.toMatch(/likely|mismatch|similarity|swap/i);
+    }
+    expect(other.out.map((r) => ({ ...r.progress, steps: undefined }))).toEqual(genuine.out.map((r) => ({ ...r.progress, steps: undefined })));
   });
 
   it('resume: a different person is held for review even when some frames are poor', async () => {
@@ -184,7 +206,7 @@ describe('adaptive checks', () => {
 
 describe('exam start sampling and server-driven cadence', () => {
   it('/start asks for an exam_start burst at once; heartbeats repeat it until a sample arrives', async () => {
-    const { c } = await freshSession();
+    const { s, c } = await freshSession();
     await consent(c);
     await runCheck(env, c, 'initial');
     const st = (await c.req('POST', '/api/candidate/start')).json();
@@ -192,7 +214,9 @@ describe('exam start sampling and server-driven cadence', () => {
     env.clock.advance(2_000);
     expect(((await hb(c)).json() as HeartbeatResponse).identitySample).toEqual({ trigger: 'exam_start', inMs: 0, burstSize: 3 });
     const r = await burst(env, c, [ALICE, ALICE, ALICE], { trigger: 'exam_start' });
-    expect(r.last).toMatchObject({ burst: { complete: true, received: 3, size: 3 }, nextSampleInMs: 6_000, evidence: { state: 'consistent' } });
+    expect(r.last).toMatchObject({ burst: { complete: true, received: 3, size: 3 }, nextSampleInMs: 6_000, result: { usable: true, guidance: [] } });
+    expect(r.last).not.toHaveProperty('evidence');
+    expect((await evidenceOf(s.id)).state).toBe('consistent');
     expect(((await hb(c)).json() as HeartbeatResponse).identitySample).toBeNull();
     // after the start-up window: the periodic interval
     env.clock.advance(181_000);
@@ -215,9 +239,12 @@ describe('exam start sampling and server-driven cadence', () => {
     env.clock.advance(6_000);
     const first = (await burst(env, c, [MALLORY, MALLORY, MALLORY], { trigger: 'track_break' })).last as IdentitySampleResponse;
     expect(first.status).toBe('active');
-    expect(first.evidence!.state).toBe('suspect');
+    expect((await evidenceOf(s.id)).state).toBe('suspect');
     expect(first.nextSampleInMs).toBe(2_500);
     expect(first.followUpInMs).toBe(2_500);
+    // The candidate is told nothing about who is in view.
+    expect(Object.keys(first.result).sort()).toEqual(['at', 'guidance', 'id', 'trigger', 'usable']);
+    expect(JSON.stringify(first)).not.toMatch(/decision|similarity|swapProbability|suspect|mismatch/);
     // The client is late: the heartbeat repeats the request.
     env.clock.advance(7_000);
     expect(((await hb(c)).json() as HeartbeatResponse).identitySample).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
@@ -252,8 +279,8 @@ describe('exam start sampling and server-driven cadence', () => {
       await burst(env, c, i % 2 ? [dim, dark, dim] : [dim, dim, dim]);
     }
     env.clock.advance(15_000);
-    const back = (await burst(env, c, [ALICE, ALICE, ALICE])).last as IdentitySampleResponse;
-    expect(back.evidence!.state).toBe('consistent');
+    await burst(env, c, [ALICE, ALICE, ALICE]);
+    expect((await evidenceOf(s.id)).state).toBe('consistent');
     expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('identity_mismatch');
     expect((await sessionRow(s.id)).status).toBe('active');
   });
@@ -268,15 +295,16 @@ describe('poor light and per-session normalisation', () => {
     const { s, c } = await examWithStartSample();
     env.clock.advance(6_000);
     const first = (await burst(env, c, [DARK_MALLORY, DARK_MALLORY, DARK_MALLORY], { trigger: 'track_break' })).last as IdentitySampleResponse;
-    expect(first.result.decision).toBe('inconclusive'); // poor frames are never labelled "mismatch"
-    expect(first.evidence!.state).toBe('suspect');
+    expect((await decisionOf(first)).decision).toBe('inconclusive'); // poor frames are never labelled "mismatch"
+    expect((await evidenceOf(s.id)).state).toBe('suspect');
     expect(first.nextSampleInMs).toBe(2_500);
+    expect(first.result).toMatchObject({ usable: true }); // lighting guidance for the candidate, no verdict
     expect(first.result.guidance.join(' ')).toMatch(/light/i);
     for (let i = 0; i < 3; i++) {
       env.clock.advance(2_500);
       const more = (await burst(env, c, [DARK_MALLORY, DARK_MALLORY, DARK_MALLORY], { trigger: 'server_request' })).last as IdentitySampleResponse;
       expect(more.status).toBe('active');
-      expect(more.evidence!.state).toBe('suspect');
+      expect((await evidenceOf(s.id)).state).toBe('suspect');
     }
     let evs = await eventsOf(s.id);
     expect(evs.map((e) => e.type)).not.toContain('identity_mismatch');

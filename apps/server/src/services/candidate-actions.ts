@@ -25,7 +25,7 @@ import { recordMultipleInstances } from './checks.js';
 import { applyInstanceUsage, evaluateInstanceUsage } from './instance-usage.js';
 import { identitySampleRequest, sampleWatchdog } from './identity-evidence.js';
 import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
-import { assertStatus, finalizeSession, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession } from './session-state.js';
+import { assertStatus, finalizeSession, identityState, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession, type SessionMutation } from './session-state.js';
 import { clockExpired } from '@sp/shared';
 
 export const OUTBOX_DELAY_MS = 30_000;

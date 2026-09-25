@@ -25,6 +25,24 @@ pnpm --filter @sp/server build
 NODE_ENV=production DATABASE_URL=... EVIDENCE_KEY=... SESSION_SECRET=... node apps/server/dist/main.js
 ```
 
+### Upgrades and rollback
+
+Migrations only add tables / columns, and older builds ignore identity-state fields they do not know, so a
+rollback does not need a schema downgrade. **One exception makes rolling back from identity engine v2 (face
+templates written with embedding model id 2) to a pre-v2 build unsafe:** v2 stores every new face template — identity
+references, check-frame and burst-frame templates, approved ID-photo templates — with model id **2** (SFace with flip
+test-time augmentation; `vision/embeddings.ts`). A pre-v2 build accepts only model id 1 and refuses to read them
+("Embeddings were produced by an unknown model (2)"): for every session enrolled after the upgrade, resume /
+reconnect / reverify checks and mid-exam identity samples fail, and ID-photo comparisons for photos uploaded after
+the upgrade end as "unable to verify". Templates from before the upgrade (id 1) stay readable by both.
+
+* Roll back only when no exam is running, and only to a build that reads model id 2 (v2 or later). If you must go
+  back to a pre-v2 build, first end the running sessions, and re-upload the ID photos approved since the upgrade after
+  the rollback (the template is computed on upload).
+* Keep the database backup taken just before the upgrade: restoring it is the only way to return to templates a
+  pre-v2 build can read (sessions and uploads since then are lost).
+* `rekey` (key rotation) re-encrypts templates without reading their model id, so it is safe on either version.
+
 ## 2. Sizing and scaling
 
 * **Browser side**: behavioural analysis runs on the candidate's device (MediaPipe WASM, ~5 fps face

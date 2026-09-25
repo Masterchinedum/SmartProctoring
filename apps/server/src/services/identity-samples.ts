@@ -684,6 +684,11 @@ async function applyEvidence(
 
   // A sample received after the server asked for one satisfies the request (whatever its trigger).
   if (st.sampleRequest && row.receivedAt.getTime() >= st.sampleRequest.since) st.sampleRequest = null;
+  // Samples arrive again: the watchdog's 'no_samples' observation ends where this sample was taken.
+  if (st.openNoSamplesEventId) {
+    await m.closeEvent(st.openNoSamplesEventId, at, { closedBy: 'sample_received', identityCheckId: row.id });
+    st.openNoSamplesEventId = null;
+  }
 
   // ---- server-side feed integrity: identical frames across samples taken seconds apart
   const identical = safeHamming(st.lastSampleDhash, dhash) === 0;

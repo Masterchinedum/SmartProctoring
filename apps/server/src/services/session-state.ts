@@ -75,6 +75,8 @@ export const EMPTY_IDENTITY_STATE: IdentityEngineState = {
   secondOpinionPending: null,
   secondOpinionVeto: null,
   normalisation: 'continuous',
+  periodBaseline: null,
+  openNoSamplesEventId: null,
 };
 
 export function identityState(s: Pick<ExamSession, 'identityState'>): IdentityEngineState {
@@ -429,6 +431,7 @@ export class SessionMutation {
         openMismatchEventId: st.openMismatchEventId && ids.has(st.openMismatchEventId) ? null : st.openMismatchEventId,
         openUnverifiableEventId: st.openUnverifiableEventId && ids.has(st.openUnverifiableEventId) ? null : st.openUnverifiableEventId,
         openFeedSuspectEventId: st.openFeedSuspectEventId && ids.has(st.openFeedSuspectEventId) ? null : st.openFeedSuspectEventId,
+        openNoSamplesEventId: st.openNoSamplesEventId && ids.has(st.openNoSamplesEventId) ? null : (st.openNoSamplesEventId ?? null),
       });
       if (this.session.reportingEventId && ids.has(this.session.reportingEventId)) this.set({ reportingEventId: null });
     }

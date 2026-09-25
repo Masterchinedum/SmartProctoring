@@ -156,7 +156,14 @@ opinions, and a `record` of both to store with the check.
 
 * a **match** is *borderline* when similarity < match + margin, otherwise *clear*;
 * a **mismatch** is *borderline* when similarity ≥ mismatch − margin, otherwise *clear*;
-* a decision without a similarity counts as clear.
+* a decision without a similarity counts as clear;
+* a **mismatch** made on **accumulated calibrated evidence** (`InternalOpinion.evidence`: the mid-exam SPRT of a
+  suspected swap, or the evidence of a resume / reconnect / reverify check's frames) takes its strength from that
+  evidence, not from the raw similarity: *clear* when the evidence reached its decision threshold (a
+  `confirmed_mismatch`, a `likely_mismatch` check), otherwise *borderline*. A look-alike scoring 0.35–0.45 looks
+  borderline by similarity although several samples decided it; a provider's "same person" then flags the decision
+  for review but never overrules it. A match keeps the similarity rule, so a provider's "different person" can still
+  downgrade a match just above the threshold.
 
 **External band.**
 
@@ -216,11 +223,11 @@ engine behaves exactly as without the feature.
 |---|---|---|---|---|
 | `check_in` | initial check with an approved ID photo (`idPhotoComparison` on) | the ID-photo comparison, **ID-photo thresholds** | approved ID photo → best check-in frame | replaces the ID-photo decision (advisory / required policy as before) |
 | `check_in` | initial check without an ID photo comparison | the enrolment's own consistency (`match`, cosine of the two frames) | best reference frame → the accepted frame taken last | not `match` ⇒ no reference, retry (`second_opinion_inconclusive`) |
-| `resume` | resume / reconnect / reverify check (not an authorised re-enrolment) | the check's decision (accumulated evidence) and its mean-embedding score | reference images (full frame first) → the check's best probe frame | replaces the check decision (inconclusive ⇒ retry with guidance) |
-| `suspected_swap` | the evidence accumulator is about to confirm a possible different person | `mismatch` with the confirming sample's score | reference images → that sample's frame | `mismatch` ⇒ `identity_mismatch` + hold / flag as before; `inconclusive` ⇒ **not confirmed**: `identity_unverifiable` (uncertain, `needsHumanReview`), and borderline confirmations are held off for 5 min without asking again (a clear internal mismatch still confirms, with `needsHumanReview`) |
+| `resume` | resume / reconnect / reverify check (not an authorised re-enrolment) | the check's decision, its accumulated evidence (strength of a mismatch) and mean-embedding score | reference images (full frame first) → the check's best probe frame | replaces the check decision (inconclusive ⇒ retry with guidance); a decisive `likely_mismatch` is kept (held / flagged per policy) with `needsHumanReview` when the provider disagrees |
+| `suspected_swap` | the evidence accumulator is about to confirm a possible different person | `mismatch` with the confirming sample's score and the window's accumulated LLR (decisive at `sprt.confirm`) | reference images → that sample's frame | `identity_mismatch` + hold / flag as before; with `needsHumanReview` when the provider says "same person" (a confirmed SPRT is never overruled). Only evidence that is not decisive could be held off (`identity_unverifiable`, 5 min) — which the engine does not ask about |
 
 Routine samples are never sent. The confirming sample's request waits for the answer (≤ `EXTERNAL_VERIFIER_TIMEOUT_MS`);
-a lost answer is asked again after 15 s. Records: identity check `context.secondOpinion` (outcome, fused and internal
+a lost answer is asked again after the timeout + 10 s (at least 15 s). Records: identity check `context.secondOpinion` (outcome, fused and internal
 decision, bands, explanation, provider similarity — no images), `IdentityCheckDTO.secondOpinion`, and on the events it
 affected (`identity_mismatch`, `identity_verified`, `identity_unverifiable`, `id_photo_compared`, `checkin_completed`)
 `details.secondOpinion` + `details.needsHumanReview` for the staff UI.

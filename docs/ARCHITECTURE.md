@@ -88,21 +88,31 @@ disconnect if `disconnectTimerBehavior='continue'`).
    uses calibrated evidence: `sampleLLR(score, qualityBucket)` (vision/calibration.ts), after a per-session
    normalisation of the score against the baseline (services/identity-evidence.ts) — a drop from the person's own
    level counts even above the global mismatch threshold. The drift is the vision module's measured `GENUINE_DRIFT`:
-   'continuous' (same session) until the first resume / reconnect / reverify, 'relaxed' (another day, room or camera)
-   at those checks and for every sample after them (continuous normalisation across days caused 9–27 false alarms
-   per 1,000 h in the simulation; relaxed: 1.4, same as without normalisation). Poor frames are never labelled
-   mismatch; at checks their positive evidence is capped too (a dim-room check ends uncertain with lighting guidance,
-   never "likely different person"). Unusable frames carry no evidence.
+   'continuous' (same session) against the enrolment baseline until the first resume / reconnect / reverify;
+   'relaxed' (another day, room or camera) at those checks. A passed check starts a new period with **its own
+   baseline** (`periodBaseline`: the check's usable frames scored against the reference, the reference's bucket):
+   the period's samples are normalised 'continuous' against it again; with fewer than 3 usable check frames, a level
+   below the band the continuous model is calibrated for, or after a flagged mismatch, 'relaxed' against the
+   enrolment baseline (continuous normalisation against the ENROLMENT baseline across days caused 9–27 false alarms
+   per 1,000 h). A reconnect while the exam has not started (e.g. a page reload before Start) changes nothing.
+   Poor frames are never labelled mismatch; at checks their positive evidence is capped too (a dim-room check ends
+   uncertain with lighting guidance, never "likely different person"). Unusable frames carry no evidence.
 5. **Decisions.** *Checks* (resume / reconnect / reverify) are adaptive: every frame returns
-   `CheckFrameResponse.progress` (frames wanted, running assessment, liveness step status, canComplete); the
+   `CheckFrameResponse.progress` (frames wanted, liveness step status, canComplete — never the running identity
+   assessment, which only decides how many frames to ask for); the
    decision sums the (correlation-discounted) LLRs of all identity frames: likely same ⇒ pass, likely different ⇒
    `identity_mismatch` + hold / flag (also with some fair / poor frames), otherwise retry with guidance;
    `unable_to_verify` only when no usable frame came after the adaptive collection. Image quality is not identity:
    while frames are being rejected for quality (backlight, a dim room) but the usable ones agree with the reference,
    the attempt is extended (10 → up to 24 frontal frames); usable frames of earlier failed attempts of the same check
-   (same reference, ≤ 5 min) are pooled when the current attempt's own usable frames clearly agree with them; and a
-   retry caused only by image quality counts half against `maxVerificationAttempts` (lighting guidance, more tries,
-   then human review). *During the exam*, samples are
+   (same reference, ≤ 5 min) that passed liveness (or failed purely on image quality) are pooled when the current
+   attempt has ≥ 3 usable frames of its own with clear evidence of the same person and none pointing elsewhere (at
+   most as many pooled frames as its own); and a retry caused only by image quality counts half against
+   `maxVerificationAttempts` (lighting guidance, more tries, then human review). A check that ends without /complete
+   (expired, or superseded by a new check) is judged on the frames it received: trending "different person" ⇒ a full
+   failed attempt with its identity check row (`context.abandoned`), held for review when no attempts remain;
+   otherwise no penalty. Frame caps and the storage budget are enforced with the check row locked; identity samples
+   may use at most 90 % of a session's evidence budget, so check frames always find room. *During the exam*, samples are
    bursts (1–5 frames within ~0.6 s, decided as ONE sample — the burst template, or the frames' median when their
    scores spread > 0.15; incomplete bursts after ~3 s on the frames received)
    feeding a per-session SPRT accumulator (`CALIBRATION.sprt`, `windowEvidence`: positive evidence from poor-light
@@ -112,11 +122,18 @@ disconnect if `disconnectTimerBehavior='continue'`).
    `confirmed_mismatch` ⇒ `identity_mismatch` (integrity, high; confidence = posterior;
    details: per-sample scores / LLRs / triggers, baseline, calibration version) and hold or flag per policy; strong
    genuine evidence clears the window. A track break / face return / camera reconnect / exam start drops earlier
-   genuine evidence from the window. 3 unusable samples in a row ⇒ `identity_unverifiable` (uncertain) and
-   guidance — **never** labelled as a different person. Cadence is server-driven (`nextSampleInMs`: start-up
+   genuine evidence from the window (only when the sample is newer than everything in it; a sample captured before the
+   current period began, or more than 2 min before it arrived, is recorded only). 3 unusable samples in a row ⇒
+   `identity_unverifiable` (uncertain) and guidance — **never** labelled as a different person. A decided burst keeps
+   the images of its representative frame only. The candidate is told only whether an image was usable (and guidance
+   about it), never a decision, score or evidence state. Cadence is server-driven (`nextSampleInMs`: start-up
    interval for `startupWindowSec` after a (re)start, else `periodicCheckIntervalSec`, faster while monitoring /
    suspect); `CandidateSessionState.session.identitySample` / `HeartbeatResponse.identitySample` ask for an
-   `exam_start` burst right after /start and after every passed resume / reconnect / reverify check.
+   `exam_start` burst right after /start and after every passed resume / reconnect / reverify check, and — watchdog —
+   a `server_request` when no sample came for 3 expected intervals (the client then takes the burst even without a
+   qualifying frame); still none after 6 intervals (≥ 1 min) with the browser connected ⇒ `identity_unverifiable`
+   (details.reason `no_samples`), closed by the next sample. Vision priority for samples comes from server state
+   (a pending request, evidence building up, the start-up window), not from the client's trigger label.
 6. **The reference is immutable.** It is never updated from later samples. Only staff can authorise a
    re-enrolment (`release` with `reEnroll=true`), which creates a new reference version, keeps the old
    one, and is audit-logged.
@@ -127,15 +144,24 @@ expiry. Client guides the candidate (live MediaPipe pose) and uploads frames at 
 measures yaw/pitch from YuNet landmarks per frame (nose offset relative to eye midpoint normalised by
 inter-eye distance — a flat photo rotated in front of the camera does **not** produce this parallax),
 requires each step's direction/magnitude relative to the frontal frames, same identity across all
-frames (similarity ≥ match), non-identical frames, and completion inside the expiry window.
+frames (similarity ≥ match), non-identical frames, and completion inside the expiry window. Never more than one face
+in any frame and exactly one in every head-movement frame; the frontal frames (up to 24 in poor light) are judged on
+the usable ones only, so one dark or empty frontal frame does not fail the challenge.
+
+ID photo (check-in): a score below the ID-photo mismatch threshold on poor-quality frames stays "inconclusive" (poor
+light is not "a different person") but is flagged `needsHumanReview`: an uncertain `identity_unverifiable`
+(details.reason `id_photo_low_similarity_poor_quality`, with both images) in advisory mode, and a hold
+(`id_photo_unverifiable`) in required mode — never passed unseen; an external "same person" does not resolve it.
 
 Optional external second opinion (off by default; `docs/EXTERNAL_VERIFIER.md`): at check-in, resume and suspected
 swaps an organisation may also ask a provider (AWS Rekognition CompareFaces, or another `ExternalVerifier`) and
 combine its answer with the internal decision (`verifiers/fusion.ts`: it can settle an inconclusive result or flag a
 disagreement for review, never raise a mismatch alone; failures fall back to the internal decision). Wired in
-`services/identity-external.ts`, outside the session lock: a suspected swap waits for the answer before
-`identity_mismatch` is raised; a confident "same person" against borderline evidence becomes an uncertain
-`identity_unverifiable` with `needsHumanReview` instead (EXTERNAL_VERIFIER.md §6).
+`services/identity-external.ts`, outside the session lock: a suspected swap waits for the answer (at least the
+configured provider timeout + 10 s) before `identity_mismatch` is raised. The internal strength of a mismatch made on
+accumulated evidence (the SPRT, a resume check's frames) comes from that evidence, not the raw similarity: a
+confirmed_mismatch is clear — a provider's "same person" flags it `needsHumanReview` but never overrules it
+(EXTERNAL_VERIFIER.md §5–6).
 
 ## 5. Monitoring engine (browser, `@sp/detection`)
 

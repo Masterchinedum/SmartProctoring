@@ -1067,12 +1067,12 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
     second = await secondOpinion(ctx, {
       ...opinionBase,
       kind: 'resume',
-      // Decided on the frames' accumulated calibrated evidence (assessCheck): its strength, not the raw similarity,
-      // decides whether the provider may downgrade it (a likely_match / likely_mismatch is decisive).
+      // A mismatch decided on the frames' accumulated calibrated evidence (assessCheck likely_mismatch) is decisive: the
+      // provider may flag it for review but not downgrade it (a match keeps the similarity rule — verifiers/fusion.ts).
       internal: {
         decision: aggregate.decision,
         similarity: aggregate.similarity,
-        evidence: { llr: aggregate.assessment.llr, decisive: aggregate.assessment.status === 'likely_match' || aggregate.assessment.status === 'likely_mismatch' },
+        evidence: { llr: aggregate.assessment.llr, decisive: aggregate.assessment.status === 'likely_mismatch' },
       },
       thresholds,
       images: async () => {
