@@ -503,7 +503,7 @@ async function main() {
     const iv = [...cadence.intervalsMs].sort((a, b) => a - b);
     console.log(
       `v2 cadence: ${cadence.server} intervals from nextSampleInMs (${cadence.serverShortened} shorter than the client schedule), ${cadence.fallback} from the client schedule, ` +
-        `interval p50 ${pct(iv, 50)} ms / p5 ${pct(iv, 5)} ms; ${cadence.heartbeatRequests} heartbeat sample requests; ${cadence.holds} holds`,
+        `interval p5 / p50 / p95 ${pct(iv, 5)} / ${pct(iv, 50)} / ${pct(iv, 95)} ms; ${cadence.heartbeatRequests} heartbeat sample requests; ${cadence.holds} holds`,
     );
   }
   if (busyRetries.size) console.log(`503 busy responses retried (as the web client does): ${JSON.stringify(Object.fromEntries(busyRetries))}`);
