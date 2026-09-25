@@ -276,6 +276,8 @@ export interface IdentityEngineState {
   periodBaseline?: (SessionBaseline & { checkId?: string; at?: number }) | null;
   /** Open identity_unverifiable observation (details.reason 'no_samples'): server requests for a sample went unanswered. */
   openNoSamplesEventId?: string | null;
+  /** Server receipt time of the latest identity sample (frame) while active — the watchdog's measure of silence. */
+  lastSampleReceivedAt?: number | null;
 }
 
 /** A burst of identity frames being collected (IdentitySampleQuery burstId / burstIndex / burstSize). */

@@ -235,6 +235,8 @@ async function processSample(ctx: Ctx, session: ExamSession, instanceId: string,
         // or long before it arrived (an outbox delivering a backlog): recorded, but it is not live evidence.
         recordOnly = true;
       }
+      // The client is sending (even a late sample): the watchdog measures silence from here.
+      if (s.status === 'active') m.setIdentityState({ ...identityState(m.session), lastSampleReceivedAt: now });
       const env = await sampleEnv(m, active, jpeg.length, secondOpinionRequests);
 
       // Bursts whose remaining frames never came are decided on what arrived (which may put the exam on hold).

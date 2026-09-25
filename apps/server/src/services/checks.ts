@@ -178,8 +178,10 @@ const remaining = (max: number, used: number) => Math.max(0, Math.ceil(max - use
 export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string, body: StartCheckRequest): Promise<StartCheckResponse> {
   if (body.clientInstanceId !== instanceId) throw badRequest('clientInstanceId does not match the X-Client-Instance header', undefined, 'instance_mismatch');
   // A check still open is superseded by this one: judged on the frames it received (never free when it was going
-  // towards "different person"). Its own transaction: it may put the session on hold.
-  await settleAbandonedChecks(ctx, sessionId, 'superseded');
+  // towards "different person"). Its own transaction (it may put the session on hold); only when this request is
+  // going to start the check the session requires.
+  const [s0] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, sessionId));
+  if (s0 && requiredCheckFor(s0, instanceId) === body.purpose) await settleAbandonedChecks(ctx, sessionId, 'superseded');
   return withSession(ctx, sessionId, async (m) => {
     const s = m.session;
     const required = requiredCheckFor(s, instanceId);
@@ -598,21 +600,28 @@ export async function settleAbandonedChecks(ctx: Ctx, sessionId: string, how: Ab
     .from(checks)
     .where(and(eq(checks.sessionId, sessionId), eq(checks.status, 'open'), checkIds ? inArray(checks.id, checkIds) : sql`true`));
   if (!open.length) return 0;
-  const judged = new Map<string, AbandonedMismatch | null>();
+  const judged = new Map<string, AbandonedMismatch>();
+  let n = 0;
   for (const c of open) {
+    let j: AbandonedMismatch | null = null;
     try {
-      judged.set(c.id, await abandonedMismatch(ctx, c));
+      j = await abandonedMismatch(ctx, c);
     } catch (err) {
       ctx.log.error({ err, checkId: c.id }, 'assessing an abandoned check failed; it expires without penalty');
-      judged.set(c.id, null);
+    }
+    if (j) judged.set(c.id, j);
+    else {
+      // No penalty: simply expired (as before), no session lock needed.
+      const done = await ctx.db.update(checks).set({ status: 'expired', completedAt: new Date(ctx.now()) }).where(and(eq(checks.id, c.id), eq(checks.status, 'open'))).returning({ id: checks.id });
+      n += done.length;
     }
   }
+  if (!judged.size) return n;
   return withSession(ctx, sessionId, async (m) => {
-    let n = 0;
-    for (const c of open) {
-      const [cur] = await m.tx.select().from(checks).where(eq(checks.id, c.id)).for('update');
+    for (const [id, j] of judged) {
+      const [cur] = await m.tx.select().from(checks).where(eq(checks.id, id)).for('update');
       if (!cur || cur.status !== 'open') continue;
-      await settleAbandoned(m, cur, how, judged.get(c.id) ?? null);
+      await settleAbandoned(m, cur, how, j);
       n++;
     }
     return n;
@@ -621,11 +630,7 @@ export async function settleAbandonedChecks(ctx: Ctx, sessionId: string, how: Ab
 
 const ABANDONED_MESSAGE = 'The identity check was not finished. Please start it again.';
 
-async function settleAbandoned(m: SessionMutation, check: Check, how: AbandonHow, j: AbandonedMismatch | null): Promise<void> {
-  if (!j) {
-    await m.tx.update(checks).set({ status: 'expired', completedAt: new Date(m.now) }).where(eq(checks.id, check.id));
-    return;
-  }
+async function settleAbandoned(m: SessionMutation, check: Check, how: AbandonHow, j: AbandonedMismatch): Promise<void> {
   const { agg, prepared, active } = j;
   const s = m.session;
   const st = identityState(s);
@@ -691,6 +696,8 @@ async function settleAbandoned(m: SessionMutation, check: Check, how: AbandonHow
       context: { checkId: check.id },
     });
     await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, row.id));
+    // As in retryOrHold: open episodes of a replaced browser end where its observation ended.
+    if (check.purpose === 'reconnect') await closeReplacedInstanceEvents(m, check.clientInstanceId, reconnectGapStart(s, check));
     await holdNow(m, { reason: 'identity_unverifiable', details: { purpose: check.purpose, attempts: used, abandoned: how } });
   }
 }

@@ -458,7 +458,7 @@ export function nextSampleDelayMs(policy: Pick<IdentityPolicy, 'periodicCheckInt
  */
 export const SAMPLE_WATCHDOG = Object.freeze({ requestAfterIntervals: 3, observeAfterIntervals: 6, minObserveMs: 60_000 });
 
-export type WatchdogState = { activeSince?: number | null; evidence?: Partial<EvidenceAccumulator> | null };
+export type WatchdogState = { activeSince?: number | null; evidence?: Partial<EvidenceAccumulator> | null; lastSampleReceivedAt?: number | null };
 
 /** 'request' / 'unanswered' when samples are overdue (see SAMPLE_WATCHDOG); 'ok' otherwise. Pure. */
 export function sampleWatchdog(
@@ -466,7 +466,8 @@ export function sampleWatchdog(
   state: WatchdogState,
   now: number,
 ): 'ok' | 'request' | 'unanswered' {
-  const last = Math.max(state.evidence?.lastSampleAt ?? -Infinity, state.activeSince ?? -Infinity);
+  // Silence since the latest sample (server receipt time, else its capture time) or the start of the period.
+  const last = Math.max(state.lastSampleReceivedAt ?? -Infinity, state.evidence?.lastSampleAt ?? -Infinity, state.activeSince ?? -Infinity);
   if (!Number.isFinite(last)) return 'ok';
   const interval = nextSampleDelayMs(policy, { activeSince: state.activeSince ?? null, acc: { state: state.evidence?.state ?? 'consistent', unusableStreak: state.evidence?.unusableStreak ?? 0 } }, now);
   const quiet = now - last;
