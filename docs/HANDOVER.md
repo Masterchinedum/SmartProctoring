@@ -25,9 +25,21 @@ Requirement-by-requirement mapping: the requirements audit (90 atomic requiremen
 
 ## 3. Verification performed
 
-* **Unit + integration tests**: `pnpm test` — 1,005 tests across shared (5), detection engine (144), server (555, real Postgres, real ONNX models where relevant) and web (301). All green at handover (final run 2026-09-24 on a quiet machine); `pnpm typecheck` clean.
+* **Unit + integration tests**: `pnpm test` — 1,042 tests across shared (9), detection engine (144), server (579, real Postgres, real ONNX models where relevant; 5 Redis-only tests skip without Redis) and web (310). All green at handover (final run 2026-09-25, after the code-review fixes and the Balanced profile); `pnpm typecheck` clean.
 * **End-to-end**: `pnpm test:e2e` — real Chromium with a fake camera (Y4M videos generated from still photos + a synthetic head-turn video, plus webcam-realistic 720p/480p videos rendered by the webcam simulator), real server, real models: 65 tests (33 core + 32 webcam-realistic identity scenarios, `accuracy/end-to-end.md`), all passing, covering all core scenarios — happy path with pause/close/resume, pause rules, liveness (still photo fails, turning head passes, tampered client rejected), person swap mid-exam (held ~12 s after the second person appears, compared, released/terminated), different person on resume (held with before/after evidence), dim room (unable to verify → guidance → pass), multiple people, absence + face-return check, covered lens, browser events, 40 s offline (both sides see the interruption; events delivered late exactly once), reload/second browser, staff UI, time extension/expiry, degraded models, environment change as context only, accessibility walkthroughs, the resume confirmation screen, answers typed right after an approved pause, approved ID-photo comparison (advisory/required), retention purge + legal hold, key rotation with `rekey`, webhooks (signature, retries), email alerts (throttled digests) and the `/api/v1` integration flow.
 * **Requirements audits (two rounds)**: independent read-throughs of the spec against the code with empirical verification against a running server using the real models; every P0/P1/P2 finding of both rounds fixed with regression tests (incl. a stale re-enrolment authorisation, an offline-queue blockage, answers typed in the seconds after an approved pause, false fullscreen/outage flags on the resume confirmation screen, and reports treating an unreturned browser as observed).
+* **Code review of the identity rework (round 2)** — an independent read of every identity change found 13 issues;
+  all were fixed with regression tests (`apps/server/test/identity-review.test.ts` and others). Main ones:
+  - a long session could use up its evidence-storage budget and then block resume checks;
+  - a very low ID-photo score on dim check-in frames raised nothing in advisory mode;
+  - candidates could see the live identity trend, and abandoning a check cost nothing;
+  - a page reload left the comparison lenient for the rest of the exam; it now re-baselines per period;
+  - a provider "same person" could override a confirmed swap;
+  - pooling across retries was too permissive;
+  - undecided burst templates outlived the privacy promise;
+  - one dark frame failed liveness;
+  - late samples counted as current;
+  - nothing noticed when samples stopped arriving; there is now a watchdog.
 * **Security review** (+ follow-ups): IDOR/role checks on every route, CSRF, rate limits, decompression bombs, crypto, headers, SSRF, token leakage, dependency audit (`pnpm audit --prod`: clean). See `SECURITY.md`.
 * **Load test** (`e2e/scripts/load-test.ts`, now following the identity-v2 client cadence; `CADENCE=v1` for the old
   one) and profiling — on a 4-vCPU VM (Postgres and the load generator on the same box), re-measured with
