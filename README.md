@@ -18,8 +18,9 @@ fails) → a **protected identity reference** (face templates + images, encrypte
 automatically) → optional comparison with the candidate's **approved ID photo**.
 
 **During the exam** (in-browser analysis, no video upload) — candidate missing, more than one person,
-possible person swap (server-side face verification at intervals and whenever the face returns, the
-camera reconnects, or after another person was in view), sustained or repeated looking away / down,
+possible person swap (server-side face verification in bursts of 3 frames: immediately when the exam
+starts or resumes, every 6 s for the first 3 minutes, every 15 s after that, and whenever the face track breaks or
+the face's appearance changes, the face returns, the camera reconnects, or another person was in view), sustained or repeated looking away / down,
 repeated attention to one off-screen direction, unusual movement, obstructed/cut-off/unclear face,
 visible phone or other devices/books, covered lens, frozen image, unusable lighting, virtual or
 replayed camera feeds, camera disconnect / permission loss — plus exam-page events (tab hidden,
@@ -39,13 +40,22 @@ background, angle and brightness changes are recorded as context only.
 fails and delivered later with original timestamps, without duplicates. Both the candidate and the
 administrator see when live reporting is interrupted.
 
+**Identity decisions** — calibrated for real laptop webcams: a quality gate that refuses only frames where
+recognition breaks down, evidence weighted by image quality and by the quality of the candidate's own reference,
+accumulated over samples (*suspect* → *confirmed*). Poor light alone never puts an exam on hold; it shows staff an
+uncertain signal and tells the candidate how to fix the lighting. Measured end to end on webcam-realistic video:
+swaps right after the exam starts are held within about 5 s, and genuine candidates resume on the first attempt
+(details and limits: [docs/accuracy/end-to-end.md](docs/accuracy/end-to-end.md)). An external second opinion
+(AWS Rekognition) can be enabled per organisation ([docs/EXTERNAL_VERIFIER.md](docs/EXTERNAL_VERIFIER.md)).
+
 **Staff** — live dashboard (active, paused, on hold, disconnected, completed; latest monitoring
 status; flags as they arrive; pause approvals), chronological session timeline (periods, pauses,
 resumes, identity checks, camera issues, behaviour), screenshots, side-by-side swap comparison with
 surrounding timeline, filters, notes, mark reviewed / dismiss false positives, holds, releases,
 time extensions, printable final report covering every active period, pause and resume.
 Exams, questions, per-exam proctoring policy, candidates, ID photos, invite links, users & roles,
-retention settings, audit log, detection-quality metrics.
+retention settings, audit log, detection-quality metrics, and a camera & identity self-test page
+(`/admin/tools/camera-test`) to try the real checks on your own webcam.
 
 **Integrations** — organisation API keys and a REST integration API (`/api/v1`) to create candidates,
 issue invite links and pull reports from an LMS/HR system; signed webhooks (HMAC-SHA256, durable
@@ -149,8 +159,11 @@ pnpm test              # unit + integration tests (server tests need Postgres)
 pnpm typecheck
 pnpm --filter @sp/detection eval                          # behavioural detector accuracy
 pnpm --filter @sp/server eval:identity --dataset <dir>    # identity accuracy on your data
-pnpm test:e2e                                              # end-to-end with fake camera (see e2e/README.md;
-                                                           # needs face photos in E2E_FACES_DIR)
+pnpm --filter @sp/server eval:fetch-faces                 # public multi-image face sets into a local cache (never committed)
+pnpm --filter @sp/server eval:identity -- --webcam        # identity v2 on simulated laptop-webcam frames (docs/accuracy/identity-v2.md)
+pnpm test:e2e                                              # end-to-end with fake camera, incl. webcam-realistic identity
+                                                           # scenarios (see e2e/README.md; needs face photos)
+pnpm --filter @sp/e2e rw:report -- --run <id> --write     # regenerate docs/accuracy/end-to-end.md from a run
 ```
 
 ## Documentation
@@ -165,6 +178,7 @@ pnpm test:e2e                                              # end-to-end with fak
 | [docs/PRIVACY.md](docs/PRIVACY.md) | Data inventory, retention, access, candidate rights |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Load-test method, measured capacity, tuning |
 | [docs/accuracy/](docs/accuracy/README.md) | Accuracy methodology, baselines, pre-launch protocol |
+| [docs/EXTERNAL_VERIFIER.md](docs/EXTERNAL_VERIFIER.md) | Optional external identity second opinion (off by default) |
 | [docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md) | Conformance status and accommodations |
 | [docs/INTEGRATION_API.md](docs/INTEGRATION_API.md) | API keys, `/api/v1`, webhooks |
 
