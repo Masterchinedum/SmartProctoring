@@ -73,6 +73,15 @@ export function DebugOverlay() {
                   </td>
                 </tr>
               )}
+              {rt && (
+                <tr>
+                  <th>looking away from</th>
+                  <td data-testid="debug-attention">
+                    {rt.attention.reference} (learned {Math.round(rt.attention.warmth * 100)}%): screen {fmt(rt.attention.offsetFromBaseline.yaw, 0)}° / {fmt(rt.attention.offsetFromBaseline.pitch, 0)}° from calibration · limits ←{fmt(rt.attention.limits.left, 0)} →
+                    {fmt(rt.attention.limits.right, 0)} ↑{fmt(rt.attention.limits.up, 0)} ↓{fmt(rt.attention.limits.down, 0)} · keyboard samples {rt.attention.samples.keyboard}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
 

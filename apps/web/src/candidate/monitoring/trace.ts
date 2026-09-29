@@ -11,8 +11,12 @@ import type { Baseline, EpisodeUpdate, FrameObservation } from '@sp/shared';
  *   {"$":"baseline","baseline":{…}}                      engine.setBaseline()
  *   {"$":"flush","t":…,"reason":"pause"|"submit"|"hold"|"stop"}  engine.flush()
  *   {"$":"meta","kind":"episode","episode":{…}}           what the live engine reported (for comparison; ignored by replay)
- * Observations contain only numbers derived from the camera (face boxes, pose, frame statistics) — no images.
- * The file is kept in memory (bounded) and downloaded by the candidate; nothing is uploaded.
+ * Observations contain only numbers derived from the camera (face boxes, pose, frame statistics) — no images —
+ * plus `activity`: exam-page interaction TIMING (last key / pointer / click / scroll / answer change, epoch ms;
+ * never which key or what text), which the engine uses to learn the candidate's working region.
+ * The file is kept in memory (bounded: 40 000 lines ≈ 2 h at 5 Hz, oldest dropped first) and downloaded by the
+ * candidate / tester ("Download monitoring trace" in the exam footer and on the finished screen); nothing is
+ * uploaded.
  */
 
 export const TRACE_FORMAT = 'sp-trace/1';

@@ -10,6 +10,8 @@
 export { createMonitoringEngine } from './engine/engine';
 export type { EngineOptions, MonitoringEngine } from './engine/engine';
 export { K as ENGINE_CONSTANTS, DEFAULT_BASELINE, attentionAngles, directionOf, isAway, awayThresholds, plausibleFaces, countPersons } from './engine/context';
+export { ATTENTION as ATTENTION_PARAMS, AttentionModel } from './engine/attention';
+export type { AttentionAssessment, AttentionInfo, AttentionLimits, AttentionParams, AttentionReference, AttentionState, GazeMode, KeyboardCone } from './engine/attention';
 export { PROMPTS } from './engine/prompts';
 export type { PromptKey } from './engine/prompts';
 export { REPLAY as REPLAY_PARAMS } from './engine/detectors/feed';

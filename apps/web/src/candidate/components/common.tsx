@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { PrivacyNoticeDTO } from '@sp/shared';
 import { formatClock } from '@sp/shared';
 import { announce, countdownAnnouncement, useDialogFocus, useDocumentTitle, useFocusOnMount } from '../../lib/a11y';
@@ -245,5 +245,31 @@ export function ContactLine() {
     <p className="muted small">
       Questions or problems? Contact <strong>{contact}</strong>.
     </p>
+  );
+}
+
+/**
+ * "Download monitoring trace" — only with `?trace=1` (accuracy evaluation by the exam owner / testers): the
+ * numbers the in-browser monitoring analysed (face positions, head direction, frame statistics, interaction
+ * timing — no images, no typed text), as a JSONL file for `pnpm --filter @sp/detection eval -- --trace <file>`.
+ * The file stays on this computer unless the person sends it.
+ */
+export function TraceDownload({ className }: { className?: string }) {
+  const ctrl = useController();
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!ctrl.trace) return;
+    const id = setInterval(() => force((x) => x + 1), 2000);
+    return () => clearInterval(id);
+  }, [ctrl.trace]);
+  const t = ctrl.trace;
+  if (!t) return null;
+  return (
+    <div className={`cand-trace ${className ?? ''}`} data-testid="trace-tools">
+      <button type="button" className="btn btn-sm" onClick={() => t.download()} data-testid="trace-download">
+        Download monitoring trace
+      </button>
+      <span className="muted small">{t.observationCount} observations recorded (evaluation mode)</span>
+    </div>
   );
 }

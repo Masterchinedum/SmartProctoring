@@ -72,6 +72,27 @@ describe('TraceRecorder', () => {
   });
 });
 
+describe('exam-page activity in traces and the working region across periods', () => {
+  it('traces keep the interaction timing, and the replay harness reads it back', async () => {
+    const t = new TraceRecorder({});
+    const activity = { keyAt: 9, answerKeyAt: 9, pointerAt: 5, clickAt: null, scrollAt: null, answerAt: 9 };
+    t.observation({ t: 10, camera: 'live', frame: null, faces: [], objects: null, activity });
+    const { parseTraceJsonl } = await import('../../../../../packages/detection/src/eval/runner');
+    const [rec] = parseTraceJsonl(t.toJsonl()).filter((r) => !('$' in r));
+    expect(rec).toMatchObject({ t: 10, activity });
+  });
+
+  it('hands the learned working region to the engine and back (kept by the controller between periods)', () => {
+    const state = { v: 1 as const, cameraId: 'cam-a', prior: { yaw: 0, pitch: -5 }, pointer: Array.from({ length: 30 }, (_, i) => [30 + (i % 3), -5, 0, -0.05]).flat(), typed: [], calm: [], keyboard: [] };
+    const rt = new MonitoringRuntime({ api: {}, outbox: {}, camera: {}, clock: { now: () => 1 }, policy: DEFAULT_POLICY, instanceId: 'i-1', baseline: null, attentionState: state } as unknown as RuntimeDeps);
+    const out = rt.attentionState();
+    expect(out.cameraId).toBe('cam-a');
+    expect(out.pointer).toHaveLength(state.pointer.length);
+    const fresh = new MonitoringRuntime({ api: {}, outbox: {}, camera: {}, clock: { now: () => 1 }, policy: DEFAULT_POLICY, instanceId: 'i-1', baseline: null } as unknown as RuntimeDeps);
+    expect(fresh.attentionState().pointer).toHaveLength(0);
+  });
+});
+
 describe('isSoftwareRenderer', () => {
   it('recognises software WebGL renderers', async () => {
     const { isSoftwareRenderer } = await import('./vision');

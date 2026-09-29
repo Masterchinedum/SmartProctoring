@@ -27,3 +27,18 @@ describe('identity sampling profiles', () => {
     expect(() => resolvePolicy({ identity: { routineBurstSize: 6 } })).toThrow();
   });
 });
+
+describe('detection policy: looking away while working', () => {
+  it('stored policies from before the working-region fields stay valid and get the new defaults', () => {
+    const old = resolvePolicy({ detection: { lookAwaySec: 6, lookAwayYawDeg: 30, lookDownPitchDeg: 25, glanceMinSec: 1.5, enabled: { lookingAway: true } } });
+    expect(old.detection).toMatchObject({ lookAwaySec: 6, lookAwayYawDeg: 30, lookDownPitchDeg: 25, glanceMinSec: 1.5, lookUpPitchDeg: 35, lookUpSec: 15, attentionReference: 'learned', typingExcuseSec: 3 });
+    expect(DEFAULT_POLICY.detection).toMatchObject({ lookAwaySec: 5, lookAwayYawDeg: 28, lookDownPitchDeg: 20, lookUpPitchDeg: 35, lookUpSec: 15, attentionReference: 'learned', typingExcuseSec: 3, glanceMinSec: 1.2, repeatedLookAwayCount: 5, sameDirectionCount: 4 });
+  });
+
+  it('validates the new fields', () => {
+    expect(resolvePolicy({ detection: { attentionReference: 'calibration', typingExcuseSec: 0 } }).detection).toMatchObject({ attentionReference: 'calibration', typingExcuseSec: 0 });
+    expect(() => resolvePolicy({ detection: { attentionReference: 'camera' } })).toThrow();
+    expect(() => resolvePolicy({ detection: { typingExcuseSec: 11 } })).toThrow();
+    expect(() => resolvePolicy({ detection: { lookUpPitchDeg: 5 } })).toThrow();
+  });
+});

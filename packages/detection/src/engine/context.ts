@@ -1,4 +1,5 @@
 import type { Baseline, CameraState, DetectionPolicy, EngineSignal, EpisodeUpdate, FaceObservation, FrameMetrics, FrameObservation, GazeDirection, NormBox, ObjectObservation } from '@sp/shared';
+import type { AttentionAssessment, AttentionModel } from './attention';
 import type { EpisodeBook } from './episodes';
 import type { IdentityScheduler } from './identity';
 import type { PromptManager } from './prompts';
@@ -23,12 +24,10 @@ export const K = {
   assessableVisibility: 0.5,
   /** Obstruction: visibility below this. */
   obstructedVisibility: 0.5,
-  /** Gaze (−1..1) → degrees, with a dead zone for normal reading eye movement. */
+  /** Gaze (−1..1) → degrees, with a dead zone for normal reading eye movement (baseline-relative helpers). */
   gazeXDeg: 25,
   gazeYDeg: 20,
   gazeDeadzone: 0.15,
-  /** "Up" threshold = lookDownPitchDeg + this. */
-  upExtraDeg: 5,
   /** Object-detector person results are valid this long (object detector runs at ~1 Hz). */
   personCountFreshMs: 1500,
   personVisibleFreshMs: 1200,
@@ -96,19 +95,27 @@ export interface TickContext {
   personsFresh: number | null;
   /** A 'person' was seen by the object detector within personVisibleFreshMs. */
   personVisible: boolean;
-  /** Effective horizontal / vertical attention angles relative to baseline (deg). */
+  /**
+   * Attention offset from the candidate's screen centre (learned working region, else the baseline), head +
+   * eye contribution (deg; h+ = the candidate's left, v+ = up). See engine/attention.ts.
+   */
   h: number;
   v: number;
+  /** Head pose offset from the calibration BASELINE (identity-sample framing, movement). */
   yawOff: number;
   pitchOff: number;
+  /** Attention counts as away (typing at the keyboard excused). */
   away: boolean | null;
   direction: GazeDirection | null;
+  /** Full attention assessment of the primary face (null without one). */
+  att: AttentionAssessment | null;
   baseline: Baseline;
   fps: number;
 }
 
 export interface DetectorHost {
   policy: DetectionPolicy;
+  attention: AttentionModel;
   book: EpisodeBook;
   prompts: PromptManager;
   identity: IdentityScheduler;
@@ -187,7 +194,10 @@ function deadzone(g: number): number {
   return a > 0 ? Math.sign(g) * a : 0;
 }
 
-/** Effective attention angles: head pose offset from baseline plus eye gaze (dead-zoned). */
+/**
+ * Baseline-relative attention angles: head pose offset from the baseline plus dead-zoned eye gaze. (The engine's
+ * away decision uses the learned working region instead: engine/attention.ts.)
+ */
 export function attentionAngles(face: FaceObservation, baseline: Baseline): { h: number; v: number; yawOff: number; pitchOff: number } {
   const yawOff = face.yaw - baseline.yaw;
   const pitchOff = face.pitch - baseline.pitch;
@@ -201,7 +211,7 @@ export interface AwayThresholds {
 }
 
 export function awayThresholds(p: DetectionPolicy): AwayThresholds {
-  return { yaw: p.lookAwayYawDeg, down: p.lookDownPitchDeg, up: p.lookDownPitchDeg + K.upExtraDeg };
+  return { yaw: p.lookAwayYawDeg, down: p.lookDownPitchDeg, up: p.lookUpPitchDeg };
 }
 
 export function isAway(h: number, v: number, th: AwayThresholds): boolean {

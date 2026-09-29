@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { AnswerValue } from '@sp/shared';
 import { useDialogFocus, useDocumentTitle } from '../../../lib/a11y';
 import { useController, useSnapshot } from '../../context';
-import { CameraPreview, CountdownDisplay, PrivacyNoticeDialog, ReportingBanner, Spinner, Toasts } from '../../components/common';
+import { CameraPreview, CountdownDisplay, PrivacyNoticeDialog, ReportingBanner, Spinner, Toasts, TraceDownload } from '../../components/common';
 import { PauseDialog, pauseAvailability, SubmitDialog } from './Dialogs';
 import { QuestionView } from './QuestionView';
 
@@ -182,9 +182,13 @@ export function ExamScreen() {
           ) : (
             <p>This exam has no questions.</p>
           )}
-          {ctrl.trace && <TraceTools />}
         </main>
       </div>
+      {ctrl.trace && (
+        <footer className="cand-exam-footer">
+          <TraceDownload />
+        </footer>
+      )}
 
       {requireFs && !fullscreen && !dialog && <FullscreenOverlay />}
 
@@ -192,25 +196,6 @@ export function ExamScreen() {
       {dialog === 'submit' && <SubmitDialog total={questions.length} answered={answeredCount} onClose={() => setDialog(null)} />}
       {dialog === 'privacy' && <PrivacyNoticeDialog notice={state.consent.notice} onClose={() => setDialog(null)} />}
       <Toasts />
-    </div>
-  );
-}
-
-function TraceTools() {
-  const ctrl = useController();
-  const [, force] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => force((x) => x + 1), 2000);
-    return () => clearInterval(id);
-  }, []);
-  const t = ctrl.trace;
-  if (!t) return null;
-  return (
-    <div className="card cand-trace" data-testid="trace-tools">
-      <strong>Evaluation trace</strong> <span className="muted small">{t.observationCount} observations recorded</span>{' '}
-      <button type="button" className="btn btn-sm" onClick={() => t.download()} data-testid="trace-download">
-        Download trace (JSONL)
-      </button>
     </div>
   );
 }

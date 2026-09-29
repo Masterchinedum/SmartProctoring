@@ -5,6 +5,8 @@ import {
   createFrameMetricsTracker,
   facesFromMediapipe,
   objectsFromMediapipe,
+  type AttentionInfo,
+  type AttentionState,
   type ContinuityFire,
 } from '@sp/detection';
 import type {
@@ -27,6 +29,7 @@ import { classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api'
 import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
+import { ActivityTracker } from './activity';
 import { AnalysisFrame, captureFaceCrop, captureJpeg, GraySampler, HeldFrame, sameFrame } from './frames';
 import { BurstSampler, burstEligible, type BurstResult } from './sampler';
 import type { TraceRecorder } from './trace';
@@ -40,6 +43,7 @@ export { SAMPLE_PRIORITY, SampleTriggerQueue } from './sampler';
  *   camera ─► 5 Hz loop ─► FrameObservation ─► engine.ingest ─► episodes ─► outbox (events + evidence)
  *                                                       └──► signals ─► identity samples / candidate prompts
  *   DOM (visibility, focus, fullscreen, clipboard, displays) ─► browser signal tracker ─► outbox
+ *   DOM (key / pointer / scroll / answer timing only) ─► FrameObservation.activity (engine only; never uploaded)
  *
  * Nothing here blocks the exam: model or camera failures degrade monitoring and are reported as
  * technical events.
@@ -62,6 +66,11 @@ export interface RuntimeDeps {
   baseline: Baseline | null;
   /** Previous period's baseline to compare the environment with (after resume / reconnect). */
   previousBaseline?: Baseline | null;
+  /**
+   * The candidate's working region learned in a previous period of this session (MonitoringRuntime.attentionState()
+   * of the previous run). The engine keeps it while the camera is unchanged. In memory only.
+   */
+  attentionState?: AttentionState | null;
   trace?: TraceRecorder | null;
   onSignal?: (s: Extract<EngineSignal, { kind: 'candidate_prompt' | 'candidate_prompt_clear' }>) => void;
   onStatus?: (s: MonitoringStatus) => void;
@@ -95,6 +104,8 @@ export interface RuntimeDebug {
   swapTriggers: ContinuityFire[];
   lastBurst: BurstResult | null;
   budgetLeft: number;
+  /** Where looking away is measured from (learned working region / calibration). */
+  attention: AttentionInfo;
 }
 
 export function episodeToUpsert(ep: EpisodeUpdate, instanceId: string): EventUpsert {
@@ -135,6 +146,8 @@ export class MonitoringRuntime {
   private readonly held = new HeldFrame();
   private readonly metrics = createFrameMetricsTracker();
   private readonly bursts: BurstSampler;
+  /** Exam-page interaction timing for the engine (timing only; stays in the browser). */
+  private readonly activity = new ActivityTracker(() => this.now());
   private lastFaces = 0;
   private running = false;
   private stopped = false;
@@ -163,6 +176,7 @@ export class MonitoringRuntime {
       evidence: p.evidence,
       baseline: deps.baseline ?? undefined,
       idFactory: uuid,
+      attentionState: deps.attentionState ?? null,
     });
     this.tracker = createBrowserSignalTracker(p.browser);
     this.bursts = new BurstSampler({
@@ -214,7 +228,13 @@ export class MonitoringRuntime {
       swapTriggers: cont.fired,
       lastBurst: this.bursts.last,
       budgetLeft: this.bursts.budget.available(performance.now()),
+      attention: this.engine.attentionInfo(),
     };
+  }
+
+  /** The learned working region, for the next period of this session (kept in memory by the controller). */
+  attentionState(): AttentionState {
+    return this.engine.attentionState();
   }
 
   get isRunning(): boolean {
@@ -394,6 +414,7 @@ export class MonitoringRuntime {
       this.sampleWithoutVision(video, nowMs);
     }
     if (!obs) return;
+    obs.activity = this.activity.snapshot();
     this.lastIngestAt = nowMs;
     this.deps.trace?.observation(stripDescriptors(obs));
     let out: EngineOutput;
@@ -609,6 +630,8 @@ export class MonitoringRuntime {
       );
     }
     if (block) on(document, 'contextmenu', (e) => e.preventDefault(), { capture: true });
+    // Interaction timing for the engine's working-region model (key / pointer / scroll / answer — timing only).
+    this.removers.push(this.activity.attach(document));
     const scr = window.screen as Screen & { isExtended?: boolean };
     const reportDisplays = () => {
       if (typeof scr.isExtended === 'boolean') this.pushEpisodes(tr.displays(scr.isExtended, this.now()));

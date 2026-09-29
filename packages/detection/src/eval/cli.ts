@@ -5,16 +5,21 @@
  *   pnpm --filter @sp/detection eval -- --write-baseline   # also write docs/accuracy/detection-baseline.json
  *   pnpm --filter @sp/detection eval -- --check            # fail (exit 1) on regression vs the baseline file
  *   pnpm --filter @sp/detection eval -- --trace rec.jsonl --labels rec.labels.json [--trace … --labels …]
+ *   pnpm --filter @sp/detection eval -- --attention         # only the attention scenarios, with the looking-away summary
  *
  * Options: --seeds N, --seed-base N, --scenario name[,name], --policy policy.json, --out report.json,
- *          --json, --markdown, --verbose, --no-synthetic. With --trace, synthetic scenarios run only if --scenario is given.
+ *          --json, --markdown, --verbose, --no-synthetic, --attention, --attention-param key=value (engine attention
+ *          tuning for experiments, e.g. gazeMode=deadzone, boundaryPower=2; JSON values). With --trace, synthetic scenarios run only if
+ *          --scenario is given. A recorded trace without labels lists what the engine flagged (--verbose: every episode).
+ * The looking-away summary (false alerts / h on normal exam-taking; recall and latency of off-screen behaviour) is
+ * printed whenever attention scenarios ran, and stored in the report as `attention`.
  * Relative paths resolve against the directory pnpm was invoked from (INIT_CWD).
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolvePolicy, type DetectionPolicy } from '@sp/shared';
-import { aggregate, parseLabels, parseTraceJsonl, runRecordedTrace, runScenario, type EvalReport, type ScenarioRun } from './runner';
+import { aggregate, attentionSummary, parseLabels, parseTraceJsonl, runRecordedTrace, runScenario, type AttentionSummary, type EvalReport, type ScenarioRun } from './runner';
 import { SCENARIOS } from './scenarios';
 
 interface Args {
@@ -30,10 +35,12 @@ interface Args {
   markdown: boolean;
   verbose: boolean;
   synthetic: boolean;
+  attention: boolean;
+  attentionParams: Record<string, unknown>;
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { seeds: 10, seedBase: 1, scenarios: [], traces: [], policy: null, out: null, writeBaseline: false, check: false, json: false, markdown: false, verbose: false, synthetic: true };
+  const a: Args = { seeds: 10, seedBase: 1, scenarios: [], traces: [], policy: null, out: null, writeBaseline: false, check: false, json: false, markdown: false, verbose: false, synthetic: true, attention: false, attentionParams: {} };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const next = () => {
@@ -86,6 +93,22 @@ function parseArgs(argv: string[]): Args {
       case '--no-synthetic':
         a.synthetic = false;
         break;
+      case '--attention':
+        a.attention = true;
+        break;
+      case '--attention-param': {
+        const [key, ...rest] = next().split('=');
+        const raw = rest.join('=');
+        let value: unknown = raw;
+        try {
+          value = JSON.parse(raw);
+        } catch {
+          /* a plain string */
+        }
+        if (raw === 'Infinity') value = Infinity;
+        a.attentionParams[key] = value;
+        break;
+      }
       case '--help':
       case '-h':
         process.stdout.write(`${readFileSync(fileURLToPath(import.meta.url), 'utf8').split('*/')[0]}*/\n`);
@@ -159,6 +182,33 @@ function markdown(report: EvalReport): string {
   return lines.join('\n');
 }
 
+function attentionTable(a: AttentionSummary): string {
+  const out: string[] = [];
+  const pad = (rows: string[][]) => {
+    const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
+    return rows.map((r) => r.map((c, i) => (i === 0 ? c.padEnd(widths[i]) : c.padStart(widths[i]))).join('  ')).join('\n');
+  };
+  if (a.normal.rows.length) {
+    out.push(`normal exam-taking (${a.normal.hours} h): looking-away-family false alerts`);
+    const rows = [['scenario', 'runs', 'hours', 'looking_away', 'repeated', 'same-direction', 'family / h', 'sessions flagged']];
+    for (const r of a.normal.rows)
+      rows.push([r.scenario, String(r.runs), r.hours.toFixed(1), String(r.fp.looking_away ?? 0), String(r.fp.repeated_looking_away ?? 0), String(r.fp.offscreen_attention_pattern ?? 0), r.perHour.toFixed(2), `${r.flaggedRuns}/${r.runs}`]);
+    const bt = a.normal.byType;
+    const flagged = a.normal.rows.reduce((x, r) => x + r.flaggedRuns, 0);
+    const runs = a.normal.rows.reduce((x, r) => x + r.runs, 0);
+    rows.push(['TOTAL per hour', '', a.normal.hours.toFixed(1), fmt(bt.looking_away?.perHour ?? 0), fmt(bt.repeated_looking_away?.perHour ?? 0), fmt(bt.offscreen_attention_pattern?.perHour ?? 0), fmt(a.normal.familyPerHour), `${flagged}/${runs}`]);
+    out.push(pad(rows));
+  }
+  if (a.offscreen.rows.length) {
+    out.push('', 'off-screen behaviour: recall of the measured detector, and caught by any looking-away-family event');
+    const rows = [['scenario', 'measures', 'recall', 'lat mean s', 'lat p95 s', 'caught (family)', 'family lat s', 'FA elsewhere', 'FA/h']];
+    for (const r of a.offscreen.rows)
+      rows.push([r.scenario, r.measures.join(','), `${r.detected}/${r.required}`, fmt(r.latencyMeanSec, 1), fmt(r.latencyP95Sec, 1), `${r.caught}/${r.required}`, fmt(r.familyLatencyMeanSec, 1), String(r.falseAlerts), fmt(r.falseAlertsPerHour)]);
+    out.push(pad(rows));
+  }
+  return out.join('\n');
+}
+
 function checkRegression(report: EvalReport, baselinePath: string): string[] {
   if (!existsSync(baselinePath)) return [`baseline file not found: ${baselinePath}`];
   const base = JSON.parse(readFileSync(baselinePath, 'utf8')) as EvalReport;
@@ -180,19 +230,23 @@ function main(): void {
   const runs: ScenarioRun[] = [];
   const t0 = Date.now();
 
+  if (args.attention && !args.traces.length) args.synthetic = true;
   if (args.synthetic) {
-    const selected = args.scenarios.length ? SCENARIOS.filter((s) => args.scenarios.some((n) => s.name.includes(n))) : SCENARIOS;
+    const pool = args.attention ? SCENARIOS.filter((s) => s.group) : SCENARIOS;
+    const selected = args.scenarios.length ? pool.filter((s) => args.scenarios.some((n) => s.name.includes(n))) : pool;
     if (!selected.length) throw new Error(`no scenario matches ${args.scenarios.join(', ')}`);
-    for (const sc of selected) for (const seed of seeds) runs.push(runScenario(sc, seed, { policy }));
+    for (const sc of selected) for (const seed of seeds) runs.push(runScenario(sc, seed, { policy, attentionParams: args.attentionParams }));
   }
   for (const tr of args.traces) {
     const records = parseTraceJsonl(readFileSync(abs(tr.trace), 'utf8'));
     const labels = tr.labels ? parseLabels(readFileSync(abs(tr.labels), 'utf8')) : [];
-    runs.push(runRecordedTrace(tr.trace, records, labels, { policy }));
+    runs.push(runRecordedTrace(tr.trace, records, labels, { policy, attentionParams: args.attentionParams }));
   }
   if (!runs.length) throw new Error('nothing to evaluate');
 
-  const report = aggregate(runs, policy, args.synthetic ? seeds : []);
+  const report: EvalReport & { attention?: AttentionSummary } = aggregate(runs, policy, args.synthetic ? seeds : []);
+  const att = attentionSummary(runs, SCENARIOS);
+  if (att.normal.rows.length || att.offscreen.rows.length) report.attention = att;
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
   if (args.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -204,6 +258,17 @@ function main(): void {
       `checks: no duplicate events = ${report.checks.noDuplicateEvents}; one event per ongoing issue = ${report.checks.oneEventPerOngoingIssue}; ` +
         `clean-session false alerts/h = ${fmt(report.checks.cleanSessionFalseAlertsPerHour, 2)}; max engine ms/tick = ${report.checks.maxMsPerTick}\n`,
     );
+    if (report.attention) process.stdout.write(`\n${attentionTable(report.attention)}\n`);
+    // A recorded trace without labels: list what the engine flagged (what the owner wants to review).
+    for (const r of runs.filter((x) => x.seed === 0 && x.labels.length === 0)) {
+      const eps = [...r.result.preds].sort((a, b) => a.startedAt - b.startedAt);
+      process.stdout.write(`\n${r.scenario}: ${(r.result.monitoredMs / 60000).toFixed(1)} min monitored, ${eps.length} episode(s)\n`);
+      for (const p of eps) {
+        const rel = (x: number) => `+${((x - r.result.startT) / 1000).toFixed(1)}s`;
+        const d = p.details as { direction?: string; count?: number };
+        process.stdout.write(`  ${p.type.padEnd(28)} ${rel(p.startedAt)}..${p.endedAt === null ? 'open' : rel(p.endedAt)}  conf=${p.confidence.toFixed(2)}${d.direction ? `  ${d.direction}` : ''}${d.count ? `  ×${d.count}` : ''}\n`);
+      }
+    }
     if (args.verbose) {
       process.stdout.write('\nper scenario:\n');
       for (const s of report.scenarios) {

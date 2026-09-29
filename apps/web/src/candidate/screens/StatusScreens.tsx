@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { formatDuration, type EndReason } from '@sp/shared';
 import { errorMessage, formatDateTime, formatTime, useController, useSnapshot } from '../context';
-import { BrandHeader, CameraPreview, ContactLine, CountdownDisplay, Page, PrivacyNoticeDialog, ReportingBanner, ScreenHeading, Spinner, Toasts } from '../components/common';
+import { BrandHeader, CameraPreview, ContactLine, CountdownDisplay, Page, PrivacyNoticeDialog, ReportingBanner, ScreenHeading, Spinner, Toasts, TraceDownload } from '../components/common';
 import { enterFullscreen } from './exam/ExamScreen';
 
 /* ------------------------------------------------------------------ ready */
@@ -262,6 +262,7 @@ export function EndedScreen() {
             </p>
           )}
           <ContactLine />
+          {ctrl.trace && <TraceDownload />}
         </section>
       </main>
     </Page>

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-24T05:18:44.828Z",
+  "generatedAt": "2026-09-29T11:31:12.572Z",
   "engine": "@sp/detection",
   "policy": {
     "enabled": {
@@ -17,6 +17,10 @@
     "lookAwaySec": 5,
     "lookAwayYawDeg": 28,
     "lookDownPitchDeg": 20,
+    "lookUpPitchDeg": 35,
+    "lookUpSec": 15,
+    "attentionReference": "learned",
+    "typingExcuseSec": 3,
     "glanceMinSec": 1.2,
     "repeatedLookAwayCount": 5,
     "repeatedLookAwayWindowSec": 120,
@@ -46,7 +50,7 @@
     9,
     10
   ],
-  "monitoredHours": 22.097,
+  "monitoredHours": 62.427,
   "byType": [
     {
       "type": "multiple_people",
@@ -59,7 +63,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 21.94,
+      "cleanHours": 62.27,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 1.46,
       "latencyP95Sec": 2.47,
@@ -76,7 +80,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 22.064,
+      "cleanHours": 62.394,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 8.85,
       "latencyP95Sec": 9.29,
@@ -84,19 +88,19 @@
     },
     {
       "type": "looking_away",
-      "gt": 30,
-      "pred": 29,
-      "tp": 28,
+      "gt": 110,
+      "pred": 225,
+      "tp": 107,
       "fp": 1,
-      "fn": 2,
+      "fn": 3,
       "duplicates": 0,
-      "precision": 0.966,
-      "recall": 0.933,
-      "f1": 0.949,
-      "cleanHours": 22.031,
-      "falseAlertsPerHour": 0.045,
+      "precision": 0.991,
+      "recall": 0.973,
+      "f1": 0.982,
+      "cleanHours": 60.393,
+      "falseAlertsPerHour": 0.017,
       "latencyMeanSec": 5.13,
-      "latencyP95Sec": 5.35,
+      "latencyP95Sec": 5.29,
       "oneEventPerIssue": true
     },
     {
@@ -110,7 +114,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 21.881,
+      "cleanHours": 59.33,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 63.07,
       "latencyP95Sec": 71.67,
@@ -118,19 +122,19 @@
     },
     {
       "type": "offscreen_attention_pattern",
-      "gt": 10,
-      "pred": 10,
-      "tp": 10,
+      "gt": 60,
+      "pred": 63,
+      "tp": 60,
       "fp": 0,
       "fn": 0,
       "duplicates": 0,
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 21.873,
+      "cleanHours": 59.322,
       "falseAlertsPerHour": 0,
-      "latencyMeanSec": 60.19,
-      "latencyP95Sec": 63.76,
+      "latencyMeanSec": 61.33,
+      "latencyP95Sec": 77.7,
       "oneEventPerIssue": true
     },
     {
@@ -144,7 +148,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 21.615,
+      "cleanHours": 61.945,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 57.3,
       "latencyP95Sec": 102.81,
@@ -161,7 +165,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 22.083,
+      "cleanHours": 62.413,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 2.53,
       "latencyP95Sec": 2.93,
@@ -178,7 +182,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 22.056,
+      "cleanHours": 62.386,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 2.68,
       "latencyP95Sec": 4.09,
@@ -195,7 +199,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 22.056,
+      "cleanHours": 62.386,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 4.04,
       "latencyP95Sec": 4.19,
@@ -212,7 +216,7 @@
       "precision": 1,
       "recall": 0.9,
       "f1": 0.947,
-      "cleanHours": 21.181,
+      "cleanHours": 61.511,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 14.72,
       "latencyP95Sec": 35.4,
@@ -229,7 +233,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 22.003,
+      "cleanHours": 62.333,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 6.09,
       "latencyP95Sec": 6.19,
@@ -246,7 +250,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 21.986,
+      "cleanHours": 62.316,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 10.09,
       "latencyP95Sec": 10.16,
@@ -263,7 +267,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 22.042,
+      "cleanHours": 62.372,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 2.12,
       "latencyP95Sec": 2.2,
@@ -280,7 +284,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 22.056,
+      "cleanHours": 62.386,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 1.11,
       "latencyP95Sec": 1.19,
@@ -297,7 +301,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 22.042,
+      "cleanHours": 62.372,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 6.11,
       "latencyP95Sec": 6.19,
@@ -314,7 +318,7 @@
       "precision": 1,
       "recall": 1,
       "f1": 1,
-      "cleanHours": 21.986,
+      "cleanHours": 62.316,
       "falseAlertsPerHour": 0,
       "latencyMeanSec": 15.12,
       "latencyP95Sec": 15.19,
@@ -331,7 +335,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.006
+      "msPerTick": 0.011
     },
     {
       "scenario": "noisy_frames",
@@ -342,7 +346,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.01
     },
     {
       "scenario": "brief_glances",
@@ -353,7 +357,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.01
     },
     {
       "scenario": "fidgety_candidate",
@@ -366,7 +370,7 @@
       },
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.006
+      "msPerTick": 0.01
     },
     {
       "scenario": "sub_threshold_look",
@@ -377,7 +381,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.007
     },
     {
       "scenario": "glances_below_min",
@@ -388,7 +392,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.006
     },
     {
       "scenario": "multi_face_0_6s",
@@ -399,7 +403,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.009
     },
     {
       "scenario": "phone_low_score",
@@ -410,7 +414,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.008
     },
     {
       "scenario": "near_threshold_look_6s",
@@ -420,14 +424,14 @@
         "looking_away": 10
       },
       "detected": {
-        "looking_away": 8
+        "looking_away": 7
       },
       "falsePositives": {},
       "missed": {
-        "looking_away": 2
+        "looking_away": 3
       },
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.009
     },
     {
       "scenario": "look_away_8s",
@@ -442,7 +446,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.01
     },
     {
       "scenario": "look_down_10s",
@@ -457,7 +461,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.003
+      "msPerTick": 0.007
     },
     {
       "scenario": "repeated_glances",
@@ -472,7 +476,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.011
     },
     {
       "scenario": "same_direction_glances",
@@ -487,7 +491,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.008
     },
     {
       "scenario": "absence_12s",
@@ -502,7 +506,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.007
     },
     {
       "scenario": "short_exits",
@@ -517,7 +521,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.006
+      "msPerTick": 0.01
     },
     {
       "scenario": "far_from_baseline",
@@ -532,7 +536,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.006
+      "msPerTick": 0.009
     },
     {
       "scenario": "multi_face_1_5s",
@@ -547,7 +551,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.007
     },
     {
       "scenario": "multi_face_30s",
@@ -562,7 +566,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.01
+      "msPerTick": 0.008
     },
     {
       "scenario": "background_person",
@@ -577,7 +581,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.011
     },
     {
       "scenario": "phone_5s",
@@ -592,7 +596,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.007
     },
     {
       "scenario": "book_15s",
@@ -607,7 +611,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.009
     },
     {
       "scenario": "covered_lens",
@@ -622,7 +626,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.007
     },
     {
       "scenario": "frozen_feed",
@@ -637,7 +641,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.009
     },
     {
       "scenario": "dark_room",
@@ -652,7 +656,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.01
     },
     {
       "scenario": "replay_loop",
@@ -669,7 +673,7 @@
         "camera_feed_suspect": 2
       },
       "duplicates": 0,
-      "msPerTick": 0.023
+      "msPerTick": 0.037
     },
     {
       "scenario": "still_person",
@@ -680,7 +684,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.01
     },
     {
       "scenario": "camera_disconnect",
@@ -695,7 +699,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.01
     },
     {
       "scenario": "permission_lost",
@@ -710,7 +714,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.003
+      "msPerTick": 0.009
     },
     {
       "scenario": "face_cut_off",
@@ -725,7 +729,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.011
     },
     {
       "scenario": "face_covered",
@@ -740,7 +744,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.01
     },
     {
       "scenario": "person_without_face",
@@ -755,7 +759,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.011
     },
     {
       "scenario": "virtual_camera",
@@ -770,7 +774,7 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.004
+      "msPerTick": 0.012
     },
     {
       "scenario": "low_fps",
@@ -785,13 +789,432 @@
       "falsePositives": {},
       "missed": {},
       "duplicates": 0,
-      "msPerTick": 0.005
+      "msPerTick": 0.014
+    },
+    {
+      "scenario": "laptop_exam_hunt_typist",
+      "runs": 10,
+      "monitoredMin": 300,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.111
+    },
+    {
+      "scenario": "laptop_exam_touch_typist",
+      "runs": 10,
+      "monitoredMin": 300,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.113
+    },
+    {
+      "scenario": "external_monitor_cal_camera",
+      "runs": 10,
+      "monitoredMin": 300,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.106
+    },
+    {
+      "scenario": "external_monitor_cal_monitor",
+      "runs": 10,
+      "monitoredMin": 300,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.105
+    },
+    {
+      "scenario": "laptop_low",
+      "runs": 10,
+      "monitoredMin": 300,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.113
+    },
+    {
+      "scenario": "laptop_exam_restless",
+      "runs": 10,
+      "monitoredMin": 200,
+      "expected": {},
+      "detected": {},
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.092
+    },
+    {
+      "scenario": "offscreen_side_notes",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "offscreen_attention_pattern": 10
+      },
+      "detected": {
+        "offscreen_attention_pattern": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.075
+    },
+    {
+      "scenario": "offscreen_phone_lap",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "looking_away": 30
+      },
+      "detected": {
+        "looking_away": 30
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.062
+    },
+    {
+      "scenario": "offscreen_phone_glances",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "offscreen_attention_pattern": 10
+      },
+      "detected": {
+        "offscreen_attention_pattern": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.074
+    },
+    {
+      "scenario": "offscreen_second_screen",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "offscreen_attention_pattern": 10
+      },
+      "detected": {
+        "offscreen_attention_pattern": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.067
+    },
+    {
+      "scenario": "offscreen_talk_side",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "looking_away": 20
+      },
+      "detected": {
+        "looking_away": 20
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.079
+    },
+    {
+      "scenario": "offscreen_sustained",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "looking_away": 20
+      },
+      "detected": {
+        "looking_away": 20
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.07
+    },
+    {
+      "scenario": "offscreen_external_monitor_notes",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "offscreen_attention_pattern": 10
+      },
+      "detected": {
+        "offscreen_attention_pattern": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.075
+    },
+    {
+      "scenario": "offscreen_notes_while_typing",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "offscreen_attention_pattern": 10
+      },
+      "detected": {
+        "offscreen_attention_pattern": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.082
+    },
+    {
+      "scenario": "offscreen_early_sustained",
+      "runs": 10,
+      "monitoredMin": 80,
+      "expected": {
+        "looking_away": 10
+      },
+      "detected": {
+        "looking_away": 10
+      },
+      "falsePositives": {},
+      "missed": {},
+      "duplicates": 0,
+      "msPerTick": 0.057
     }
   ],
   "checks": {
     "noDuplicateEvents": true,
     "oneEventPerOngoingIssue": true,
-    "cleanSessionFalseAlertsPerHour": 0.077,
-    "maxMsPerTick": 0.053
+    "cleanSessionFalseAlertsPerHour": 0.024,
+    "maxMsPerTick": 0.129
+  },
+  "attention": {
+    "normal": {
+      "rows": [
+        {
+          "scenario": "laptop_exam_hunt_typist",
+          "runs": 10,
+          "hours": 4.999,
+          "fp": {},
+          "perHour": 0,
+          "flaggedRuns": 0
+        },
+        {
+          "scenario": "laptop_exam_touch_typist",
+          "runs": 10,
+          "hours": 4.999,
+          "fp": {},
+          "perHour": 0,
+          "flaggedRuns": 0
+        },
+        {
+          "scenario": "external_monitor_cal_camera",
+          "runs": 10,
+          "hours": 4.999,
+          "fp": {},
+          "perHour": 0,
+          "flaggedRuns": 0
+        },
+        {
+          "scenario": "external_monitor_cal_monitor",
+          "runs": 10,
+          "hours": 4.999,
+          "fp": {},
+          "perHour": 0,
+          "flaggedRuns": 0
+        },
+        {
+          "scenario": "laptop_low",
+          "runs": 10,
+          "hours": 4.999,
+          "fp": {},
+          "perHour": 0,
+          "flaggedRuns": 0
+        },
+        {
+          "scenario": "laptop_exam_restless",
+          "runs": 10,
+          "hours": 3.333,
+          "fp": {},
+          "perHour": 0,
+          "flaggedRuns": 0
+        }
+      ],
+      "hours": 28.33,
+      "byType": {
+        "looking_away": {
+          "fp": 0,
+          "perHour": 0
+        },
+        "repeated_looking_away": {
+          "fp": 0,
+          "perHour": 0
+        },
+        "offscreen_attention_pattern": {
+          "fp": 0,
+          "perHour": 0
+        }
+      },
+      "familyPerHour": 0
+    },
+    "offscreen": {
+      "rows": [
+        {
+          "scenario": "offscreen_side_notes",
+          "runs": 10,
+          "measures": [
+            "offscreen_attention_pattern"
+          ],
+          "required": 10,
+          "detected": 10,
+          "recall": 1,
+          "latencyMeanSec": 63.3,
+          "latencyP95Sec": 76,
+          "caught": 10,
+          "familyLatencyMeanSec": 15,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        },
+        {
+          "scenario": "offscreen_phone_lap",
+          "runs": 10,
+          "measures": [
+            "looking_away"
+          ],
+          "required": 30,
+          "detected": 30,
+          "recall": 1,
+          "latencyMeanSec": 5.1,
+          "latencyP95Sec": 5.2,
+          "caught": 30,
+          "familyLatencyMeanSec": 5.1,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        },
+        {
+          "scenario": "offscreen_phone_glances",
+          "runs": 10,
+          "measures": [
+            "offscreen_attention_pattern"
+          ],
+          "required": 10,
+          "detected": 10,
+          "recall": 1,
+          "latencyMeanSec": 63,
+          "latencyP95Sec": 81.9,
+          "caught": 10,
+          "familyLatencyMeanSec": 53.5,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        },
+        {
+          "scenario": "offscreen_second_screen",
+          "runs": 10,
+          "measures": [
+            "offscreen_attention_pattern"
+          ],
+          "required": 10,
+          "detected": 10,
+          "recall": 1,
+          "latencyMeanSec": 62.8,
+          "latencyP95Sec": 77.1,
+          "caught": 10,
+          "familyLatencyMeanSec": 34.4,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        },
+        {
+          "scenario": "offscreen_talk_side",
+          "runs": 10,
+          "measures": [
+            "looking_away"
+          ],
+          "required": 20,
+          "detected": 20,
+          "recall": 1,
+          "latencyMeanSec": 5.1,
+          "latencyP95Sec": 5.2,
+          "caught": 20,
+          "familyLatencyMeanSec": 5.1,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        },
+        {
+          "scenario": "offscreen_sustained",
+          "runs": 10,
+          "measures": [
+            "looking_away"
+          ],
+          "required": 20,
+          "detected": 20,
+          "recall": 1,
+          "latencyMeanSec": 5.2,
+          "latencyP95Sec": 5.2,
+          "caught": 20,
+          "familyLatencyMeanSec": 5.2,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        },
+        {
+          "scenario": "offscreen_external_monitor_notes",
+          "runs": 10,
+          "measures": [
+            "offscreen_attention_pattern"
+          ],
+          "required": 10,
+          "detected": 10,
+          "recall": 1,
+          "latencyMeanSec": 60.9,
+          "latencyP95Sec": 77.5,
+          "caught": 10,
+          "familyLatencyMeanSec": 26.3,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        },
+        {
+          "scenario": "offscreen_notes_while_typing",
+          "runs": 10,
+          "measures": [
+            "offscreen_attention_pattern"
+          ],
+          "required": 10,
+          "detected": 10,
+          "recall": 1,
+          "latencyMeanSec": 55.6,
+          "latencyP95Sec": 113.8,
+          "caught": 10,
+          "familyLatencyMeanSec": 16.6,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        },
+        {
+          "scenario": "offscreen_early_sustained",
+          "runs": 10,
+          "measures": [
+            "looking_away"
+          ],
+          "required": 10,
+          "detected": 10,
+          "recall": 1,
+          "latencyMeanSec": 5.1,
+          "latencyP95Sec": 5.2,
+          "caught": 10,
+          "familyLatencyMeanSec": 5.1,
+          "falseAlerts": 0,
+          "falseAlertsPerHour": 0
+        }
+      ]
+    }
   }
 }

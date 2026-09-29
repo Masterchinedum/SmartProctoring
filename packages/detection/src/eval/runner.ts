@@ -1,8 +1,9 @@
-import { DEFAULT_POLICY, EVENT_TYPES, type Baseline, type DetectionPolicy, type EngineSignal, type EpisodeUpdate, type EventType, type FrameObservation } from '@sp/shared';
+import { ACTIVITY_FIELDS, DEFAULT_POLICY, EVENT_TYPES, type ActivityTiming, type Baseline, type DetectionPolicy, type EngineSignal, type EpisodeUpdate, type EventType, type FrameObservation } from '@sp/shared';
 import { createBaselineCalibrator } from '../baseline/calibrator';
+import type { AttentionParams } from '../engine/attention';
 import { createMonitoringEngine } from '../engine/engine';
 import { sequentialIdFactory } from '../util/id';
-import { addCounts, emptyCounts, finalizeMetrics, matchTrace, type Label, type PredEpisode, type TraceTypeCounts, type TypeMetrics } from './metrics';
+import { addCounts, emptyCounts, finalizeMetrics, matchTrace, MATCH_TOLERANCE_MS, type Label, type PredEpisode, type TraceTypeCounts, type TypeMetrics } from './metrics';
 import type { Scenario } from './scenarios';
 import { synthesize } from './synth';
 
@@ -30,6 +31,8 @@ export interface ReplayOptions {
   /** When the trace has no baseline record, calibrate from its first N seconds (like check-in). Default 5. */
   calibrateSec?: number;
   evidence?: { maxScreenshotsPerEvent: number; periodicScreenshotSec: number };
+  /** Attention-model tuning (experiments: `--attention-param key=value`). */
+  attentionParams?: Partial<AttentionParams>;
 }
 
 export interface ReplayResult {
@@ -61,6 +64,7 @@ export function replayTrace(records: readonly TraceRecord[], opts: ReplayOptions
     identityIntervalSec: opts.identityIntervalSec ?? DEFAULT_POLICY.identity.periodicCheckIntervalSec,
     evidence: opts.evidence ?? { maxScreenshotsPerEvent: DEFAULT_POLICY.evidence.maxScreenshotsPerEvent, periodicScreenshotSec: DEFAULT_POLICY.evidence.periodicScreenshotSec },
     idFactory: sequentialIdFactory(),
+    attentionParams: opts.attentionParams,
   });
   const obsList = records.filter((r): r is FrameObservation => !isControl(r));
   const startT = obsList.length ? obsList[0].t : 0;
@@ -317,8 +321,20 @@ export function parseTraceJsonl(text: string): TraceRecord[] {
       faces: Array.isArray(r.faces) ? (r.faces as FrameObservation['faces']) : [],
       objects: Array.isArray(r.objects) ? (r.objects as FrameObservation['objects']) : null,
       ...(typeof r.fps === 'number' ? { fps: r.fps } : {}),
+      ...(r.activity && typeof r.activity === 'object' ? { activity: parseActivity(r.activity as Record<string, unknown>) } : {}),
     });
   });
+  return out;
+}
+
+/** Exam-page activity timing of a recorded observation: known fields, numbers or null only. */
+function parseActivity(a: Record<string, unknown>): ActivityTiming {
+  const out: ActivityTiming = {};
+  for (const k of ACTIVITY_FIELDS) {
+    const v = a[k];
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    else if (v === null) out[k] = null;
+  }
   return out;
 }
 
@@ -333,4 +349,131 @@ export function parseLabels(text: string): Label[] {
     if (typeof l.start !== 'number' || typeof l.end !== 'number' || l.end < l.start) throw new Error(`labels[${i}]: needs numeric start <= end`);
     return { type: l.type as EventType, start: l.start, end: l.end, optional: l.optional === true, note: typeof l.note === 'string' ? l.note : undefined };
   });
+}
+
+/* ------------------------------------------------------------------ attention summary */
+
+/** The looking-away family: what the attention scenarios are about. */
+export const LOOKING_AWAY_FAMILY: EventType[] = ['looking_away', 'repeated_looking_away', 'offscreen_attention_pattern'];
+
+export interface AttentionNormalRow {
+  scenario: string;
+  runs: number;
+  hours: number;
+  /** False alerts by family type. */
+  fp: Partial<Record<EventType, number>>;
+  /** Family false alerts per hour. */
+  perHour: number;
+  /** Runs (sessions) with at least one family false alert. */
+  flaggedRuns: number;
+}
+
+export interface AttentionOffscreenRow {
+  scenario: string;
+  runs: number;
+  /** The detector the scenario measures (its required labels). */
+  measures: EventType[];
+  required: number;
+  detected: number;
+  recall: number | null;
+  latencyMeanSec: number | null;
+  latencyP95Sec: number | null;
+  /** Required labels overlapped by ANY looking-away-family event (±2 s). */
+  caught: number;
+  /** First family event opened, relative to the label start (caught labels). */
+  familyLatencyMeanSec: number | null;
+  /** Family events outside every label of their type (during the normal work around the behaviour). */
+  falseAlerts: number;
+  falseAlertsPerHour: number;
+}
+
+export interface AttentionSummary {
+  normal: { rows: AttentionNormalRow[]; hours: number; byType: Partial<Record<EventType, { fp: number; perHour: number }>>; familyPerHour: number };
+  offscreen: { rows: AttentionOffscreenRow[] };
+}
+
+/** Looking-away family results of the attention scenarios (normal: false alerts; off-screen: recall, latency). */
+export function attentionSummary(runs: ScenarioRun[], scenarios: readonly Scenario[]): AttentionSummary {
+  const group = new Map(scenarios.map((s) => [s.name, s]));
+  const r3 = (v: number) => Math.round(v * 1000) / 1000;
+  const byName = new Map<string, ScenarioRun[]>();
+  for (const r of runs) byName.set(r.scenario, [...(byName.get(r.scenario) ?? []), r]);
+
+  const normalRows: AttentionNormalRow[] = [];
+  const offRows: AttentionOffscreenRow[] = [];
+  const typeFp: Partial<Record<EventType, number>> = {};
+  let normalHours = 0;
+  for (const [name, list] of byName) {
+    const sc = group.get(name);
+    if (!sc?.group) continue;
+    const hours = list.reduce((a, r) => a + r.result.monitoredMs, 0) / 3_600_000;
+    if (sc.group === 'attention_normal') {
+      const fp: Partial<Record<EventType, number>> = {};
+      let total = 0;
+      let flaggedRuns = 0;
+      for (const r of list) {
+        let n = 0;
+        for (const t of LOOKING_AWAY_FAMILY) {
+          const c = r.counts.get(t)?.fp ?? 0;
+          if (c) fp[t] = (fp[t] ?? 0) + c;
+          typeFp[t] = (typeFp[t] ?? 0) + c;
+          n += c;
+        }
+        total += n;
+        if (n > 0) flaggedRuns++;
+      }
+      normalHours += hours;
+      normalRows.push({ scenario: name, runs: list.length, hours: r3(hours), fp, perHour: hours > 0 ? r3(total / hours) : 0, flaggedRuns });
+      continue;
+    }
+    const measures = sc.measures === 'false_alerts' ? [] : sc.measures;
+    let required = 0;
+    let detected = 0;
+    let caught = 0;
+    let falseAlerts = 0;
+    const lat: number[] = [];
+    const famLat: number[] = [];
+    for (const r of list) {
+      for (const t of measures) {
+        const c = r.counts.get(t);
+        if (!c) continue;
+        required += c.gt;
+        detected += c.tp;
+        lat.push(...c.latenciesSec);
+      }
+      for (const t of LOOKING_AWAY_FAMILY) falseAlerts += r.counts.get(t)?.fp ?? 0;
+      const fam = r.result.preds.filter((p) => LOOKING_AWAY_FAMILY.includes(p.type));
+      for (const l of r.labels) {
+        if (l.optional || !measures.includes(l.type)) continue;
+        const hits = fam.filter((p) => Math.min(p.endedAt ?? r.result.endT, l.end + MATCH_TOLERANCE_MS) - Math.max(p.startedAt, l.start - MATCH_TOLERANCE_MS) > 0);
+        if (!hits.length) continue;
+        caught++;
+        famLat.push((Math.min(...hits.map((p) => p.openedAt)) - l.start) / 1000);
+      }
+    }
+    const mean = (xs: number[]) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10) / 10 : null);
+    const p95 = (xs: number[]) => (xs.length ? Math.round([...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.ceil(0.95 * xs.length) - 1)] * 10) / 10 : null);
+    offRows.push({
+      scenario: name,
+      runs: list.length,
+      measures,
+      required,
+      detected,
+      recall: required ? r3(detected / required) : null,
+      latencyMeanSec: mean(lat),
+      latencyP95Sec: p95(lat),
+      caught,
+      familyLatencyMeanSec: mean(famLat),
+      falseAlerts,
+      falseAlertsPerHour: hours > 0 ? r3(falseAlerts / hours) : 0,
+    });
+  }
+  const byType: AttentionSummary['normal']['byType'] = {};
+  let famTotal = 0;
+  for (const t of LOOKING_AWAY_FAMILY) {
+    const fp = typeFp[t] ?? 0;
+    famTotal += fp;
+    byType[t] = { fp, perHour: normalHours > 0 ? r3(fp / normalHours) : 0 };
+  }
+  return { normal: { rows: normalRows, hours: r3(normalHours), byType, familyPerHour: normalHours > 0 ? r3(famTotal / normalHours) : 0 }, offscreen: { rows: offRows } };
 }

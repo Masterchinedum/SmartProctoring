@@ -111,6 +111,53 @@ export interface PersonProfile {
   brightness: number;
 }
 
+/**
+ * Where the candidate looks (attention script, see AttentionScript): the direction of the target relative to
+ * the WORK CENTRE (the middle of the screen they work on), deg; x+ = toward the candidate's left, y+ = up.
+ * The target moves linearly from (x, y) to (x1, y1) over the segment (a line of text being read).
+ */
+export interface AttentionSegment {
+  start: number;
+  end: number;
+  x: number;
+  y: number;
+  x1?: number;
+  y1?: number;
+  /** Fraction of the target offset the head turns (the eyes cover the rest). Default 0.35 (reading). */
+  head?: number;
+  /** Vertical head fraction (default: `head`). > 1 = head beyond the target, eyes counter-rotating (sipping). */
+  headY?: number;
+  /** Head response time constant, s (default 0.3). */
+  lagSec?: number;
+  /** What the candidate is doing (diagnostics only). */
+  tag?: string;
+}
+
+/**
+ * Target-driven head + eyes (replaces the plain pose model when set). The first `calibrateSec` the candidate
+ * looks at the calibration target (the check screen's preview / the camera): head and eyes on the person's
+ * pose. Afterwards the head points at the work centre plus `head` × the segment target and the eyes cover the
+ * rest, compensating `vor` of the head jitter (vestibulo-ocular reflex). The reported gaze is a blendshape
+ * estimate: gain × eye angle / (25° horizontal, 20° vertical) + bias + noise, clamped to ±1.
+ */
+export interface AttentionScript {
+  /** Work centre relative to the calibration pose (deg): e.g. pitch −12 = the screen is 12° below the camera. */
+  work: { yaw: number; pitch: number };
+  calibrateSec: number;
+  /** Sorted by start. Gaps: looking at the work centre. */
+  segments: AttentionSegment[];
+  gazeGain?: { x: number; y: number };
+  gazeBias?: { x: number; y: number };
+  /** Fraction of head jitter compensated by the eyes (default 0.8). */
+  vor?: number;
+}
+
+/** Exam-page interaction (timing only), seconds from the trace start. */
+export interface ActivityEvent {
+  t: number;
+  kind: 'key' | 'answerKey' | 'pointer' | 'click' | 'scroll' | 'answer';
+}
+
 export interface SynthSpec {
   seed: number;
   durationSec: number;
@@ -125,6 +172,13 @@ export interface SynthSpec {
   person?: Partial<PersonProfile>;
   /** Seed of the room/background (default: `seed`). Replay clips are recorded in the same room. */
   sceneSeed?: number;
+  /** Target-driven head + eye model (see AttentionScript). */
+  attention?: AttentionScript;
+  /**
+   * Exam-page activity. When set (even empty), every observation carries `activity` (the host reports
+   * interaction timing); when absent, observations have no `activity` field (an older host).
+   */
+  activity?: ActivityEvent[];
 }
 
 export interface SynthTrace {
@@ -269,6 +323,41 @@ export function synthesize(spec: SynthSpec): SynthTrace {
   let lastLive: FrameObservation | null = null;
   let lastObjects: ObjectObservation[] | null = null;
 
+  // Attention script + activity stream (consumed with moving indices: scripts have thousands of segments).
+  const att = spec.attention ?? null;
+  const attSegs = att ? [...att.segments].sort((a, b) => a.start - b.start) : [];
+  let attIdx = 0;
+  const gazeGain = att?.gazeGain ?? { x: 1, y: 1 };
+  const gazeBias = att?.gazeBias ?? { x: 0, y: -0.08 };
+  const vor = att?.vor ?? 0.8;
+  const acts = spec.activity ? [...spec.activity].sort((a, b) => a.t - b.t) : null;
+  let actIdx = 0;
+  const lastAct: Record<ActivityEvent['kind'], number | null> = { key: null, answerKey: null, pointer: null, click: null, scroll: null, answer: null };
+  const activityNow = (sec: number): FrameObservation['activity'] => {
+    if (!acts) return undefined;
+    while (actIdx < acts.length && acts[actIdx].t <= sec + 1e-9) {
+      lastAct[acts[actIdx].kind] = t0 + Math.round(acts[actIdx].t * 1000);
+      actIdx++;
+    }
+    return { keyAt: lastAct.key, answerKeyAt: lastAct.answerKey, pointerAt: lastAct.pointer, clickAt: lastAct.click, scrollAt: lastAct.scroll, answerAt: lastAct.answer };
+  };
+  /** Current attention target (absolute deg) and head target; null when no script. */
+  const attentionAt = (sec: number): { tx: number; ty: number; hx: number; hy: number; lag: number } | null => {
+    if (!att) return null;
+    if (sec < att.calibrateSec) return { tx: person.yaw, ty: person.pitch, hx: person.yaw, hy: person.pitch, lag: 0.3 };
+    while (attIdx < attSegs.length && attSegs[attIdx].end <= sec) attIdx++;
+    const wx = person.yaw + att.work.yaw;
+    const wy = person.pitch + att.work.pitch;
+    const g = attIdx < attSegs.length && attSegs[attIdx].start <= sec ? attSegs[attIdx] : null;
+    if (!g) return { tx: wx, ty: wy, hx: wx, hy: wy, lag: 0.3 };
+    const f = g.end > g.start ? Math.min(1, Math.max(0, (sec - g.start) / (g.end - g.start))) : 0;
+    const x = g.x + ((g.x1 ?? g.x) - g.x) * f;
+    const y = g.y + ((g.y1 ?? g.y) - g.y) * f;
+    const hf = g.head ?? 0.35;
+    const hfy = g.headY ?? hf;
+    return { tx: wx + x, ty: wy + y, hx: wx + hf * x, hy: wy + hfy * y, lag: g.lagSec ?? 0.3 };
+  };
+
   while (s < spec.durationSec) {
     const lowFps = active(segs, 'lowFps', s)[0];
     const fps = lowFps ? lowFps.fps : baseFps;
@@ -277,9 +366,11 @@ export function synthesize(spec: SynthSpec): SynthTrace {
     const cam = active(segs, 'camera', s)[0];
     const objectTick = s - lastObjS >= objEvery - 1e-6;
     if (objectTick) lastObjS = s;
+    const activity = activityNow(s);
+    const withActivity = (o: FrameObservation): FrameObservation => (activity ? { ...o, activity } : o);
 
     if (cam) {
-      out.push({ t, camera: cam.state, frame: null, faces: [], objects: null, fps });
+      out.push(withActivity({ t, camera: cam.state, frame: null, faces: [], objects: null, fps }));
       prevGrid = null;
       lastLive = null;
       s += dt;
@@ -288,14 +379,16 @@ export function synthesize(spec: SynthSpec): SynthTrace {
 
     // Frozen feed: the same image analysed again (identical results, zero difference).
     if (active(segs, 'frozen', s).length && lastLive && lastLive.frame) {
-      out.push({
-        t,
-        camera: 'live',
-        frame: { ...lastLive.frame, diffFromPrev: 0 },
-        faces: lastLive.faces.map((f) => ({ ...f, box: { ...f.box } })),
-        objects: objectTick ? (lastObjects ?? []).map((o) => ({ ...o, box: { ...o.box } })) : null,
-        fps,
-      });
+      out.push(
+        withActivity({
+          t,
+          camera: 'live',
+          frame: { ...lastLive.frame, diffFromPrev: 0 },
+          faces: lastLive.faces.map((f) => ({ ...f, box: { ...f.box } })),
+          objects: objectTick ? (lastObjects ?? []).map((o) => ({ ...o, box: { ...o.box } })) : null,
+          fps,
+        }),
+      );
       s += dt;
       continue;
     }
@@ -316,7 +409,7 @@ export function synthesize(spec: SynthSpec): SynthTrace {
         while (j >= 0 && clip[j].objects === null) j--;
         objects = (j >= 0 ? clip[j].objects : []) ?? [];
       }
-      const obs: FrameObservation = { t, camera: 'live', frame, faces: src.faces.map((f) => ({ ...f, box: { ...f.box } })), objects, fps };
+      const obs: FrameObservation = withActivity({ t, camera: 'live', frame, faces: src.faces.map((f) => ({ ...f, box: { ...f.box } })), objects, fps });
       out.push(obs);
       lastLive = obs;
       if (objectTick) lastObjects = objects;
@@ -341,15 +434,17 @@ export function synthesize(spec: SynthSpec): SynthTrace {
         ]);
         nuisances.push({ kind: 'glance', start: s, end: s + d, yaw: dir[0] + rng.normal(0, 4), pitch: dir[1] + rng.normal(0, 3) });
       }
-      if (rng.poisson(noise.readingPerMin, dt)) nuisances.push({ kind: 'reading', start: s, end: s + rng.range(2, 6), yaw: rng.normal(0, 3), pitch: rng.range(-12, -6) });
+      // With an attention script, reading is part of the script.
+      if (!att && rng.poisson(noise.readingPerMin, dt)) nuisances.push({ kind: 'reading', start: s, end: s + rng.range(2, 6), yaw: rng.normal(0, 3), pitch: rng.range(-12, -6) });
     }
     while (nuisances.length && nuisances[0].end < s - 1) nuisances.shift();
 
     // Target pose.
-    let tYaw = person.yaw;
-    let tPitch = person.pitch;
+    const aim = attentionAt(s);
+    let tYaw = aim ? aim.hx : person.yaw;
+    let tPitch = aim ? aim.hy : person.pitch;
     let tGx = 0;
-    let tGy = -0.08;
+    let tGy = aim ? 0 : -0.08;
     const looks = active(segs, 'look', s);
     for (const l of looks) {
       tYaw += l.yaw ?? 0;
@@ -369,7 +464,15 @@ export function synthesize(spec: SynthSpec): SynthTrace {
     const tCx = mv?.cx ?? person.cx;
     const tCy = mv?.cy ?? person.cy;
     const tW = mv?.width ?? person.width;
-    sim.step(dt, { yaw: tYaw, pitch: tPitch, gx: tGx, gy: tGy, cx: tCx, cy: tCy, w: tW }, still ? 0.12 : 1, motion);
+    sim.step(dt, { yaw: tYaw, pitch: tPitch, gx: tGx, gy: tGy, cx: tCx, cy: tCy, w: tW }, still ? 0.12 : 1, motion, aim?.lag);
+    if (aim) {
+      // Eyes land on the target from where the head actually points (compensating `vor` of the jitter); the
+      // blendshape estimate adds gain, bias and noise (sim.gazeX/Y hold the noise and any scripted offsets).
+      const eyeX = aim.tx - (sim.sy + vor * sim.yawJit);
+      const eyeY = aim.ty - (sim.sp + vor * sim.pitchJit);
+      sim.gazeX = gazeGain.x * (eyeX / 25) + gazeBias.x + sim.gazeX;
+      sim.gazeY = gazeGain.y * (eyeY / 20) + gazeBias.y + sim.gazeY;
+    }
 
     // Presence.
     const absent = active(segs, 'absent', s).length > 0;
@@ -455,7 +558,7 @@ export function synthesize(spec: SynthSpec): SynthTrace {
       lastObjects = objects;
     }
 
-    const obs: FrameObservation = { t, camera: 'live', frame, faces, objects, fps };
+    const obs: FrameObservation = withActivity({ t, camera: 'live', frame, faces, objects, fps });
     out.push(obs);
     lastLive = obs;
     s += dt;
@@ -483,6 +586,9 @@ class PersonState {
   w: number;
   yawV: number;
   pitchV: number;
+  /** Head jitter (true head motion around the target) this tick. */
+  yawJit = 0;
+  pitchJit = 0;
   gazeX = 0;
   gazeY = -0.08;
   private motionTarget = { yaw: 0, pitch: 0, cx: 0, until: 0 };
@@ -510,7 +616,7 @@ class PersonState {
     this.pitchV = p.pitch;
   }
 
-  step(dt: number, tg: { yaw: number; pitch: number; gx: number; gy: number; cx: number; cy: number; w: number }, jitter: number, motion: boolean): void {
+  step(dt: number, tg: { yaw: number; pitch: number; gx: number; gy: number; cx: number; cy: number; w: number }, jitter: number, motion: boolean, lagSec = 0.15): void {
     const r = this.rng;
     this.tAcc += dt;
     let { yaw, pitch, cx } = tg;
@@ -524,13 +630,17 @@ class PersonState {
       pitch += this.motionTarget.pitch;
       cx += this.motionTarget.cx;
     } else this.hand = null;
-    const a = Math.min(1, dt / 0.15);
+    const a = Math.min(1, dt / Math.max(0.05, lagSec));
+    const ag = Math.min(1, dt / 0.15);
     this.sy += (yaw - this.sy) * a;
     this.sp += (pitch - this.sp) * a;
-    this.sgx += (tg.gx - this.sgx) * a;
-    this.sgy += (tg.gy - this.sgy) * a;
-    this.yawV = this.sy + this.yaw.step(dt, r, 0, jitter) + r.normal(0, 0.8 * jitter);
-    this.pitchV = this.sp + this.pitch.step(dt, r, 0, jitter) + r.normal(0, 0.8 * jitter);
+    this.sgx += (tg.gx - this.sgx) * ag;
+    this.sgy += (tg.gy - this.sgy) * ag;
+    // (Same random-number order as before the attention model, so existing scenarios are unchanged.)
+    this.yawJit = this.yaw.step(dt, r, 0, jitter);
+    this.yawV = this.sy + this.yawJit + r.normal(0, 0.8 * jitter);
+    this.pitchJit = this.pitch.step(dt, r, 0, jitter);
+    this.pitchV = this.sp + this.pitchJit + r.normal(0, 0.8 * jitter);
     this.gazeX = this.sgx + this.gx.step(dt, r, 0, jitter);
     this.gazeY = this.sgy + this.gy.step(dt, r, 0, jitter);
     const ca = Math.min(1, dt / (motion ? 0.25 : 0.6));

@@ -9,6 +9,7 @@ import type {
   PauseResponse,
   SessionStatus,
 } from '@sp/shared';
+import type { AttentionState } from '@sp/detection';
 import {
   CandidateApiError,
   classifyApiError,
@@ -160,6 +161,12 @@ export class CandidateController {
   private baseline: Baseline | null = null;
   /** Baseline of the previous exam period (for environment comparison after resume/reconnect). */
   private previousBaseline: Baseline | null = null;
+  /**
+   * Where this candidate looks while working (the engine's learned working region), carried from one monitoring
+   * period to the next in this page — pause / resume keeps it; the engine resets it when the camera changes.
+   * Memory only: never stored or sent.
+   */
+  private attentionState: AttentionState | null = null;
   private transitioning = false;
   private answersRefusedAfterEnd = 0;
   private answersUnsentAtEnd = 0;
@@ -506,6 +513,7 @@ export class CandidateController {
         instanceId: this.instanceId,
         baseline: this.currentBaseline(),
         previousBaseline: this.previousBaseline,
+        attentionState: this.attentionState,
         trace: this.trace,
         onSignal: (sig) => {
           if (sig.kind === 'candidate_prompt') {
@@ -559,8 +567,14 @@ export class CandidateController {
     const rt = this.runtime;
     this.runtime = null;
     this.pendingServerSample = null;
-    if (rt) await rt.stop(reason, { stopCamera: opts.stopCamera });
-    else if (opts.stopCamera) this.camera.stop();
+    if (rt) {
+      await rt.stop(reason, { stopCamera: opts.stopCamera });
+      try {
+        this.attentionState = rt.attentionState();
+      } catch (e) {
+        console.warn('[controller] could not keep the attention state', e);
+      }
+    } else if (opts.stopCamera) this.camera.stop();
     this.patch({ monitoringActive: false, prompts: [] });
     if (opts.flush && this.outbox) await this.outbox.flushNow(FLUSH_BEFORE_TRANSITION_MS);
   }

@@ -23,7 +23,8 @@ starts or resumes, every 6 s for the first 3 minutes, every 15 s after that, and
 the face's appearance changes, the face returns, the camera reconnects, or another person was in view; a per-exam
 *Balanced* sampling intensity takes the routine samples half as often with 2 frames: about 2× the candidates per server
 at a synchronised start and 2.5× in steady state), sustained or repeated looking away / down,
-repeated attention to one off-screen direction, unusual movement, obstructed/cut-off/unclear face,
+repeated attention to one off-screen spot (measured from where the candidate looks while working, learned during
+the exam from interaction timing, so reading, typing at the keyboard and thinking are not flagged), unusual movement, obstructed/cut-off/unclear face,
 visible phone or other devices/books, covered lens, frozen image, unusable lighting, virtual or
 replayed camera feeds, camera disconnect / permission loss — plus exam-page events (tab hidden,
 window focus lost, fullscreen exited, copy/paste attempts, additional display connected). Each issue

@@ -132,12 +132,33 @@ export const detectionPolicySchema = z.object({
   absenceSec: z.number().min(2).default(8),
   /** Additional face/person must persist this long (brief, but more than a single frame). */
   multiplePeopleSec: z.number().min(0.3).default(1.0),
-  /** Head/gaze away (relative to baseline) for this long => looking_away. */
+  /**
+   * Head/gaze away for this long => looking_away. Angles below are measured from the middle of the candidate's
+   * screen: their learned working region (attentionReference 'learned'), else the calibration baseline.
+   */
   lookAwaySec: z.number().min(1).default(5),
-  /** Yaw offset from baseline (degrees) that counts as "away". */
+  /** Sideways offset (degrees) that counts as "away". */
   lookAwayYawDeg: z.number().min(10).max(80).default(28),
-  /** Downward pitch offset from baseline (degrees) that counts as "looking down". */
+  /** Downward offset (degrees) that counts as "looking down" (the keyboard while typing is excused). */
   lookDownPitchDeg: z.number().min(8).max(60).default(20),
+  /**
+   * Upward offset (degrees) that counts as "looking up". Looking up to think is normal, so this is well above
+   * the down threshold (before 2026-09: always lookDownPitchDeg + 5).
+   */
+  lookUpPitchDeg: z.number().min(10).max(80).default(35),
+  /**
+   * Looking up (only) must last this long to be a sustained look-away: thinking look-ups last 2–8 s, and a stretch
+   * followed by a thinking look-up ~14 s.
+   */
+  lookUpSec: z.number().min(1).default(15),
+  /**
+   * Where "away" is measured from. 'learned' (default): the candidate's own working region, learned during the
+   * exam from where they look while using the mouse / keyboard (the calibration is the starting point).
+   * 'calibration': the calibration baseline only (the behaviour before 2026-09).
+   */
+  attentionReference: z.enum(['learned', 'calibration']).default('learned'),
+  /** Looking down at the keyboard is not "away" while the candidate typed within this long (0 = off). */
+  typingExcuseSec: z.number().min(0).max(10).default(3),
   /** A glance shorter than this is ignored entirely. */
   glanceMinSec: z.number().min(0.3).default(1.2),
   /** Number of qualifying glances within the window => repeated_looking_away. */

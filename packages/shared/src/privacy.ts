@@ -1,6 +1,6 @@
 import type { PrivacyNoticeDTO } from './api';
 
-export const PRIVACY_NOTICE_VERSION = '2026-09-24';
+export const PRIVACY_NOTICE_VERSION = '2026-09-29';
 
 /** Builds the candidate-facing notice of what is monitored and what evidence is kept. */
 export function buildPrivacyNotice(opts: {
@@ -15,6 +15,7 @@ export function buildPrivacyNotice(opts: {
     'Your webcam image is analysed in your browser while the exam is active (face presence, number of people, head direction, visible phones or other devices, camera problems).',
     'Your face is compared with the identity reference taken at the start of the exam, at intervals and whenever you return after a pause, a camera interruption, or leaving the camera view.',
     'Exam-page events: leaving the exam tab, the window losing focus, leaving fullscreen, and copy/paste attempts.',
+    'When you last typed, used the mouse or scrolled on the exam page (timing only — never which keys you press or what you type). Your browser uses this to learn where you look while working, so that reading, looking at your keyboard while typing, or using a monitor beside your camera is not mistaken for looking away. It stays on your device and is not sent anywhere.',
     'Connection status, pause and resume times, and your answers.',
   ];
   if (opts.idPhotoComparison) monitored.push('Your live image is compared with the identity photo approved by the exam administrator.');
@@ -38,6 +39,7 @@ export function buildPrivacyNotice(opts: {
       'No continuous video or audio recording.',
       'No screen recording, and no monitoring of other applications, other monitors or other devices.',
       'No clipboard contents.',
+      'No keystroke logging: which keys you press and where your mouse pointer is are never recorded.',
     ],
     sections: [
       {

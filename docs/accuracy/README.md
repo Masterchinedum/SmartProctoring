@@ -57,7 +57,9 @@ are **not** production error rates and are not demographically representative.
    Report results per demographic group, with confidence intervals (≥ 300 genuine trials per
    group for a ±1 % bound).
 2. **Behaviour** — run pilot sessions with `?trace=1` on the candidate link to record observation
-   traces, label them (`docs/accuracy/detection.md` explains the label format), and run
-   `pnpm --filter @sp/detection eval -- --trace <file> --labels <labels.json>`.
+   traces ("Download monitoring trace" in the exam footer and on the finished screen; step by step in
+   `docs/accuracy/detection.md` §7.1), label them (§7.2 explains the label format), and run
+   `pnpm --filter @sp/detection eval -- --trace <file> --labels <labels.json>`. Without labels the command
+   lists what the engine flagged on the recording.
 3. **Production** — watch the Quality page. A rising dismissal rate for a detector means false
    positives: tune its policy thresholds per exam (Exams → Policy → Detection) rather than globally.

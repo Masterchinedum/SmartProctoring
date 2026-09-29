@@ -16,7 +16,7 @@ import { Outbox } from './outbox';
 
 const h = vi.hoisted(() => ({
   api: null as unknown,
-  runtimes: [] as { started: boolean; stopped: boolean }[],
+  runtimes: [] as { started: boolean; stopped: boolean; deps: { attentionState?: unknown }; learned: unknown }[],
 }));
 
 vi.mock('./api', async (importOriginal) => {
@@ -28,8 +28,13 @@ vi.mock('./monitoring/runtime', () => ({
   MonitoringRuntime: class {
     started = false;
     stopped = false;
-    constructor() {
+    /** What the engine "learned" this period (the working region handed to the next period). */
+    learned: unknown = null;
+    constructor(readonly deps: { attentionState?: unknown }) {
       h.runtimes.push(this);
+    }
+    attentionState() {
+      return this.learned;
     }
     async start() {
       this.started = true;
@@ -421,5 +426,28 @@ describe('CandidateController — camera released on screens without monitoring 
     await c.camera.start();
     c.releaseIdleCamera();
     expect(c.camera.state.wanted).toBe(true);
+  });
+});
+
+describe('CandidateController — the working region across monitoring periods', () => {
+  it('hands the engine state learned in one period to the next (pause / resume in this page)', async () => {
+    const c = newController();
+    await c.load();
+    await tick(10);
+    expect(h.runtimes).toHaveLength(1);
+    expect(h.runtimes[0].deps.attentionState ?? null).toBeNull();
+    const learned = { v: 1, cameraId: 'cam-a', prior: { yaw: 0, pitch: -5 }, pointer: [30, -5, 0, 0], typed: [], calm: [], keyboard: [] };
+    h.runtimes[0].learned = learned;
+
+    server.status = 'paused';
+    await c.applyState(server.state());
+    await tick(10);
+    expect(h.runtimes[0].stopped).toBe(true);
+
+    server.status = 'active';
+    await c.applyState(server.state());
+    await tick(10);
+    expect(h.runtimes).toHaveLength(2);
+    expect(h.runtimes[1].deps.attentionState).toEqual(learned);
   });
 });

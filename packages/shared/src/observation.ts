@@ -63,6 +63,30 @@ export interface FrameMetrics {
   diffFromPrev: number | null;
 }
 
+/**
+ * When the candidate last interacted with the exam page — TIMING ONLY (epoch ms, the same clock as
+ * FrameObservation.t; null = not since monitoring started). Never which key, what text, or where the pointer
+ * is. The monitoring engine uses it to learn where this candidate looks while working (screen, keyboard) so
+ * that reading, typing and using the mouse are not mistaken for looking away. It stays in the browser: it is
+ * not part of any upload (only in a locally downloaded evaluation trace, `?trace=1`).
+ */
+export interface ActivityTiming {
+  /** Last keydown anywhere in the exam page. */
+  keyAt?: number | null;
+  /** Last keydown in an answer field (text input / text area). */
+  answerKeyAt?: number | null;
+  /** Last pointer (mouse / trackpad / touch) movement. */
+  pointerAt?: number | null;
+  /** Last pointer press (click / tap). */
+  clickAt?: number | null;
+  /** Last wheel / scroll. */
+  scrollAt?: number | null;
+  /** Last answer change (option chosen, text edited). */
+  answerAt?: number | null;
+}
+
+export const ACTIVITY_FIELDS = ['keyAt', 'answerKeyAt', 'pointerAt', 'clickAt', 'scrollAt', 'answerAt'] as const satisfies readonly (keyof ActivityTiming)[];
+
 export interface FrameObservation {
   /** Epoch ms (server-corrected clock). */
   t: number;
@@ -75,6 +99,12 @@ export interface FrameObservation {
   objects: ObjectObservation[] | null;
   /** Analysis throughput over the last few seconds (frames per second). */
   fps?: number;
+  /**
+   * Exam-page interaction timing (see ActivityTiming). Absent when the host does not report it (older
+   * clients, recorded traces from before it existed): the engine then keeps attention relative to the
+   * calibration baseline instead of learning the candidate's working region.
+   */
+  activity?: ActivityTiming;
 }
 
 /** Candidate's normal position/appearance measured at the start of each observed period. */
