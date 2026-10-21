@@ -16,7 +16,8 @@ Verification at the time of writing (all green on the pushed branch):
 
 * `pnpm run typecheck` — shared, detection, server, web: pass. `pnpm --filter @sp/e2e typecheck`: pass.
 * `pnpm test` — shared 43, detection 169, server 693, web 359 — 1,264 (with the face images fetched, nothing skipped).
-* Core browser suite `E2E_FACES_DIR=… E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1 pnpm --filter @sp/e2e exec playwright test 'tests/[01]'` (CI's `e2e` job) — the new `11e-privacy-operations` passed locally (2 min); the whole core suite runs in CI on every push.
+* Core browser suite `E2E_FACES_DIR=… E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1 pnpm --filter @sp/e2e exec playwright test 'tests/[01]'` (CI's `e2e` job) — green in CI on the pushed commit. Locally (4 vCPU, 2 workers) 39/40 in 18 min: `14-accessibility`'s
+  keyboard test timed out waiting for "Monitoring active" under load, and passed when re-run alone (3/3, 50 s).
 
 ## 2. What #12 added (for orientation)
 
@@ -102,3 +103,5 @@ candidate-facing wording should be reviewed first, then linked from the privacy 
 * A drizzle `sql` expression with bound values (e.g. `evidenceDaysSql`) used in both SELECT and GROUP BY renders as two
   different parameter sets, and Postgres rejects the query: group / order by position (`sql\`1\``).
 * `pluralize(n, 'day')` in the staff app already includes the number ("3 days").
+* On a 4-vCPU container the full core e2e run (2 workers, dedicated servers starting their own vision workers) can starve
+  a candidate browser's in-page monitoring: re-run a single spec alone before suspecting the change.
