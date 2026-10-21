@@ -1,0 +1,3 @@
+ALTER TABLE "evidence" ADD COLUMN "storage_location" text;--> statement-breakpoint
+CREATE INDEX "evidence_org_location_idx" ON "evidence" USING btree ("org_id","storage_location","id") WHERE "evidence"."purged_at" IS NULL;--> statement-breakpoint
+CREATE INDEX "evidence_location_idx" ON "evidence" USING btree ("storage_location") WHERE "evidence"."storage_location" IS NOT NULL AND "evidence"."purged_at" IS NULL;

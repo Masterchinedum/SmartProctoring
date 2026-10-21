@@ -6,19 +6,23 @@
 import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, findMigrationsDir, migrate, type Database } from '../src/db/index.js';
 import { DEFAULT_IDENTITY_THRESHOLDS } from '@sp/shared';
-import { decisionConfigs, eventReviews, events, examSessions, exams, examVersions, privacyRequests } from '../src/db/schema.js';
+import { decisionConfigs, eventReviews, events, evidence, examSessions, exams, examVersions, organizations, privacyRequests } from '../src/db/schema.js';
 import { calibrationBreakdown } from '../src/services/calibration.js';
 import { ensureDecisionConfigs, listDecisionConfigs } from '../src/services/decision-configs.js';
 import { gradeSession } from '../src/services/grading.js';
 import { loadJobStatus, recordJobFinish, recordJobStart } from '../src/services/job-status.js';
 import { createPrivacyRequest } from '../src/services/privacy-requests.js';
-import { createKeyring } from '../src/lib/crypto.js';
+import { createKeyring, sha256Hex } from '../src/lib/crypto.js';
+import { MemoryStorage } from '../src/lib/storage.js';
+import { readEvidence } from '../src/services/evidence.js';
+import { assertStorageLocationsConfigured, evidenceCountsByLocation, evidenceLocationsInUse } from '../src/services/evidence-storage.js';
+import { orgSettings } from '../src/services/org.js';
 import { sessionExamContent, versionForStart } from '../src/services/exam-versions.js';
 import { dbUrl, TEST_ADMIN_URL } from './global-setup.js';
 
@@ -250,5 +254,48 @@ describe('0012_privacy_operations', () => {
     expect(kept).toMatchObject({ candidateId: null, subject: 'Old Candidate' });
     expect(keyring.decryptString(kept.detailsEnc!, `privacy-request:${req.id}`)).toBe('Delete me.');
     expect(await db.select().from(examSessions).where(eq(examSessions.id, session))).toHaveLength(0);
+  });
+});
+
+describe('0013_data_residency', () => {
+  it('keeps existing evidence and organisations on the default location; their images stay readable', async () => {
+    const database = await databaseAt('0012_privacy_operations');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    const org = (await one(`INSERT INTO organizations (name, settings) VALUES ('Old Org', '{"evidenceRetentionDays": 30}') RETURNING id`)).id;
+    const cand = (await one(`INSERT INTO candidates (org_id, name) VALUES ($1, 'Old Candidate') RETURNING id`, [org])).id;
+    const exam = (await one(`INSERT INTO exams (org_id, title, duration_sec, status, policy) VALUES ($1, 'Old', 600, 'published', '{}') RETURNING id`, [org])).id;
+    const session = (await one(`INSERT INTO exam_sessions (org_id, exam_id, candidate_id, access_token_hash, duration_ms) VALUES ($1, $2, $3, 'h', 600000) RETURNING id`, [org, exam, cand])).id;
+    const keyring = createKeyring(Buffer.alloc(32, 5));
+    const storage = new MemoryStorage();
+    const image = Buffer.from('old jpeg bytes');
+    const ids = [randomUUID(), randomUUID()];
+    for (const [i, id] of ids.entries()) {
+      const key = `o/${org}/s/${session}/${id}.0a0b0c0d.bin`;
+      await storage.put(key, keyring.encrypt(image, `evidence:${id}`));
+      await sql(
+        `INSERT INTO evidence (id, org_id, session_id, candidate_id, kind, captured_at, storage_key, byte_size, sha256, key_id, purged_at) VALUES ($1, $2, $3, $4, 'event_screenshot', now(), $5, $6, $7, $8, $9)`,
+        [id, org, session, cand, key, image.length, sha256Hex(image), keyring.currentKeyId, i === 1 ? new Date() : null],
+      );
+    }
+
+    await migrate(database);
+
+    const db = database.db;
+    const rows = await db.select().from(evidence).where(eq(evidence.orgId, org));
+    expect(rows.map((r) => r.storageLocation)).toEqual([null, null]);
+    const live = rows.find((r) => r.id === ids[0])!;
+    expect((await readEvidence({ storage, keyring }, live))!.equals(image)).toBe(true);
+    const [o] = await db.select().from(organizations).where(eq(organizations.id, org));
+    expect(orgSettings(o).evidenceLocation).toBe('default');
+    expect(await evidenceLocationsInUse(db)).toEqual([]);
+    await expect(assertStorageLocationsConfigured(db, ['default'])).resolves.toBeUndefined();
+    expect(await evidenceCountsByLocation(db, org)).toEqual({ default: 1 });
+    const indexes = (await sql(`SELECT indexname FROM pg_indexes WHERE tablename = 'evidence'`)).rows.map((r) => r.indexname);
+    expect(indexes).toEqual(expect.arrayContaining(['evidence_org_location_idx', 'evidence_location_idx']));
+    // A location in use is found through the new index.
+    await sql(`UPDATE evidence SET storage_location = 'eu' WHERE id = $1`, [ids[0]]);
+    expect(await evidenceLocationsInUse(db)).toEqual(['eu']);
+    await expect(assertStorageLocationsConfigured(db, ['default'])).rejects.toThrow(/evidence images are stored in "eu"/);
   });
 });

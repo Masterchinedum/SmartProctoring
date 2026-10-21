@@ -15,3 +15,4 @@ export * from './incidents';
 export * from './explain';
 export * from './governance';
 export * from './privacy-ops';
+export * from './residency';

@@ -32,7 +32,7 @@ export const RETENTION_LOCK_KEY = 727274010;
 export const RETENTION_PURGE_REASON = 'retention';
 export const DEFAULT_RETENTION_INTERVAL_MS = 3600_000;
 
-export type RetentionCtx = Pick<Ctx, 'db' | 'storage' | 'keyring' | 'now' | 'log'>;
+export type RetentionCtx = Pick<Ctx, 'db' | 'storage' | 'keyring' | 'now' | 'log'> & Partial<Pick<Ctx, 'storageLocations'>>;
 
 export interface RetentionOptions {
   /** Evaluate retention as of this instant (default ctx.now()). */

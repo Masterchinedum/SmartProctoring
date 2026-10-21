@@ -101,6 +101,11 @@ export interface OrgSettings {
    * (identityThresholds) so the decision paths read one row. 1 until a configuration was approved.
    */
   decisionConfigVersion: number;
+  /**
+   * Storage location for new evidence images (data residency; a name from the server's STORAGE_LOCATIONS, `default`
+   * when unset). Owner only. Existing images stay where they are until `storage:move` moves them.
+   */
+  evidenceLocation: string;
 }
 
 export const organizations = pgTable('organizations', {
@@ -879,6 +884,11 @@ export const evidence = pgTable(
     reason: text('reason'),
     capturedAt: ts('captured_at').notNull(),
     storageKey: text('storage_key').notNull(),
+    /**
+     * Storage location holding the blob (config STORAGE_LOCATIONS; null = `default`): where it was written, or moved to
+     * by `storage:move` (services/storage-move.ts). Reads and deletes always go there (lib/storage.ts storageAt).
+     */
+    storageLocation: text('storage_location'),
     byteSize: integer('byte_size').notNull(),
     /** sha256 of the plaintext JPEG. */
     sha256: text('sha256').notNull(),
@@ -894,6 +904,10 @@ export const evidence = pgTable(
     index('evidence_event_idx').on(t.eventId),
     index('evidence_candidate_idx').on(t.candidateId),
     index('evidence_purge_idx').on(t.purgedAt),
+    // An organisation's evidence per location (Settings counts; storage:move walks each source location in id order).
+    index('evidence_org_location_idx').on(t.orgId, t.storageLocation, t.id).where(sql`${t.purgedAt} IS NULL`),
+    // Locations still holding evidence, checked at start-up (all null — the default location — until one is used).
+    index('evidence_location_idx').on(t.storageLocation).where(sql`${t.storageLocation} IS NOT NULL AND ${t.purgedAt} IS NULL`),
   ],
 );
 

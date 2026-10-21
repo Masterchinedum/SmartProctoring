@@ -19,6 +19,7 @@
     "eval:fetch-faces": "tsx src/eval/fetch-facesets-cli.ts",
     "retention:run": "tsx src/scripts/retention-cli.ts",
     "rekey": "tsx src/scripts/rekey-cli.ts",
+    "storage:move": "tsx src/scripts/storage-move-cli.ts",
     "staff-access": "tsx src/scripts/staff-access-cli.ts"
   },
   "dependencies": {

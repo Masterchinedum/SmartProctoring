@@ -11,6 +11,7 @@ import { MFA_REQUIREMENTS, type MfaRequirement } from './mfa';
 import { reviewSlaSchema, type QueueView, type ReviewDecisionDTO, type ReviewResolution, type ReviewSlaSettings, type SessionReviewDTO, type SessionReviewSummaryDTO } from './review';
 import type { EventExplanation } from './explain';
 import type { Incident } from './incidents';
+import { evidenceLocationSchema } from './residency';
 
 /**
  * HTTP API contract. Paths are relative to the server origin.
@@ -931,6 +932,11 @@ export interface OrgSettingsDTO {
   requireMfa: MfaRequirement;
   /** Service-level targets for review work (./review.ts): decide held exams within minutes, flags within hours. */
   reviewSla: ReviewSlaSettings;
+  /**
+   * Storage location for new evidence images (./residency.ts; `default` unless an owner chose another one of the
+   * server's locations, GET /evidence-storage). Only an owner can change it.
+   */
+  evidenceLocation: string;
 }
 
 export interface EmailAlertToggles {
@@ -1056,7 +1062,8 @@ export type { IdentityCheckTrigger };
  *   PUT  /candidates/:id/id-photo  (image/jpeg)    -> IdPhotoUploadResponse                         [admin]
  *   DELETE /candidates/:id/id-photo                -> CandidateDTO                                  [admin]
  *   GET  /settings                                 -> OrgSettingsDTO                                [admin]
- *   PUT  /settings  Partial<OrgSettingsDTO>        -> OrgSettingsDTO                                [admin]
+ *   PUT  /settings  Partial<OrgSettingsDTO>        -> OrgSettingsDTO                                [admin; requireMfa and evidenceLocation: owner]
+ *   GET  /evidence-storage                         -> EvidenceStorageDTO  (storage locations, the choice, images per location; ./residency.ts) [admin]
  *   GET  /users                                    -> { items: StaffUserDTO[] }                     [admin]
  *   POST /users {email,name,role,password}         -> StaffUserDTO                                  [admin; only owner may create owner/admin]
  *   PUT  /users/:id {name?,role?,disabled?,password?} -> StaffUserDTO                               [admin]
@@ -1160,6 +1167,8 @@ export const settingsUpdateSchema = z.object({
   /** Owner only. */
   requireMfa: z.enum(MFA_REQUIREMENTS).optional(),
   reviewSla: reviewSlaSchema.partial().optional(),
+  /** Owner only: one of the server's storage locations (GET /evidence-storage); 400 unknown_storage_location otherwise. */
+  evidenceLocation: evidenceLocationSchema.optional(),
 });
 export const legalHoldSchema = z.object({ enabled: z.boolean() });
 export const staffSubmitSchema = z.object({ note: z.string().max(1000).optional() });

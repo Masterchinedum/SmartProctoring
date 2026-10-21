@@ -82,7 +82,12 @@ export class AppMetrics {
   readonly jobDuration = new Histogram({ name: 'sp_job_duration_seconds', help: 'Background job run time.', labelNames: ['job'] as const, buckets: [0.01, 0.1, 0.5, 1, 5, 10, 60, 300, 1800], registers: [this.registry] });
   readonly jobLastSuccess = new Gauge({ name: 'sp_job_last_success_timestamp_seconds', help: 'When the job last completed without error on this instance (unix seconds).', labelNames: ['job'] as const, registers: [this.registry] });
   readonly retentionFailures = new Counter({ name: 'sp_retention_failures_total', help: 'Sessions whose evidence or event metadata the retention job could not purge (it retries next run).', registers: [this.registry] });
-  readonly storageErrors = new Counter({ name: 'sp_evidence_storage_errors_total', help: 'Evidence store operations that failed (put / get / delete).', labelNames: ['op'] as const, registers: [this.registry] });
+  readonly storageErrors = new Counter({
+    name: 'sp_evidence_storage_errors_total',
+    help: 'Evidence store operations that failed (put / get / delete), per storage location (default or a STORAGE_LOCATIONS name).',
+    labelNames: ['op', 'location'] as const,
+    registers: [this.registry],
+  });
   readonly identitySamplesSpacedOut = new Counter({
     name: 'sp_identity_samples_spaced_out_total',
     help: 'Identity samples answered with a longer routine interval because the face-analysis queue was busy (load-aware sampling).',
@@ -264,11 +269,11 @@ export class AppMetrics {
     if (result === 'ok') this.jobLastSuccess.set({ job }, Math.round(at / 1000));
   }
 
-  /** The same store, with failed operations counted. */
-  instrumentStorage(storage: BlobStorage): BlobStorage {
+  /** The same store, with failed operations counted (per storage location). */
+  instrumentStorage(storage: BlobStorage, location = 'default'): BlobStorage {
     const counted = <T>(op: 'put' | 'get' | 'delete', p: Promise<T>): Promise<T> =>
       p.catch((err: unknown) => {
-        this.storageErrors.inc({ op });
+        this.storageErrors.inc({ op, location });
         throw err;
       });
     return {

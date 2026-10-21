@@ -6,7 +6,7 @@ import type { Keyring } from './lib/crypto.js';
 import type { LoadMonitor } from './lib/load-monitor.js';
 import type { AppMetrics } from './lib/metrics.js';
 import type { Mailer } from './lib/mailer.js';
-import type { BlobStorage } from './lib/storage.js';
+import type { BlobStorage, StorageLocations } from './lib/storage.js';
 import type { RealtimeBus } from './realtime/bus.js';
 import type { LiveNotifier } from './realtime/notifier.js';
 import type { VerifierRegistry } from './verifiers/registry.js';
@@ -21,7 +21,10 @@ export interface Ctx {
   database: Database;
   db: Db;
   vision: VisionService;
+  /** The default evidence store (storage location `default`). Evidence rows are read where they were written: storageAt(). */
   storage: BlobStorage;
+  /** Every configured evidence storage location, `default` (= storage) included (data residency, lib/storage.ts). */
+  storageLocations: StorageLocations;
   keyring: Keyring;
   bus: RealtimeBus;
   /** Clock (epoch ms). Always use this instead of Date.now() so tests can control time. */

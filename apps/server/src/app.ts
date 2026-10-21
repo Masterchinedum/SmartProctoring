@@ -17,7 +17,7 @@ import { appLoggerOptions } from './lib/log-redact.js';
 import { AppMetrics } from './lib/metrics.js';
 import { requestIdFor } from './lib/request-log.js';
 import { connectRateLimitRedis, RATE_LIMIT_NAMESPACE } from './lib/redis.js';
-import { createStorage, type BlobStorage } from './lib/storage.js';
+import { StorageLocations, type BlobStorage } from './lib/storage.js';
 import { createBus, type RealtimeBus } from './realtime/bus.js';
 import { liveRoute } from './realtime/live-route.js';
 import { LiveNotifier } from './realtime/notifier.js';
@@ -27,6 +27,7 @@ import { metricsRoute } from './routes/metrics.js';
 import { candidateRoutes } from './routes/candidate/index.js';
 import { publicRoutes } from './routes/public.js';
 import { bootstrapAdmin } from './services/bootstrap.js';
+import { assertStorageLocationsConfigured } from './services/evidence-storage.js';
 import { JobRunner } from './jobs/runner.js';
 import { registerIntegrationJobs } from './jobs/integrations.js';
 import { createSmtpMailer, type Mailer } from './lib/mailer.js';
@@ -41,7 +42,10 @@ export interface BuildAppOptions {
   /** Existing database (pool + drizzle). Created from config.databaseUrl when omitted (and closed with the app). */
   database?: Database;
   vision?: VisionService;
+  /** Store of the default storage location (created from config.storage when omitted). */
   storage?: BlobStorage;
+  /** Stores of other storage locations by name (tests); the others are created from config.storageLocations. */
+  storageLocations?: Record<string, BlobStorage>;
   bus?: RealtimeBus;
   /** Clock override (tests). */
   now?: () => number;
@@ -103,9 +107,16 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   });
   for (const w of config.warnings) app.log.warn(w);
 
-  const owned: { database?: Database; vision?: VisionService; bus?: RealtimeBus; storage?: BlobStorage; rateLimitRedis?: Redis } = {};
+  const owned: { database?: Database; vision?: VisionService; bus?: RealtimeBus; rateLimitRedis?: Redis } = {};
   const database = opts.database ?? (owned.database = createDatabase(config.databaseUrl, { max: config.db.poolMax, statementTimeoutMs: config.db.statementTimeoutMs }));
-  if (opts.migrate !== false) await migrate(database);
+  try {
+    if (opts.migrate !== false) await migrate(database);
+    // Every storage location an organisation uses, or evidence is stored in, must be configured (data residency).
+    await assertStorageLocationsConfigured(database.db, config.storageLocations.map((l) => l.name));
+  } catch (err) {
+    await owned.database?.close();
+    throw err;
+  }
 
   const metrics = new AppMetrics();
   let vision = opts.vision;
@@ -120,8 +131,12 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       observer: metrics.visionObserver,
     });
   }
-  // Failed evidence-store operations are counted (sp_evidence_storage_errors_total).
-  const storage = metrics.instrumentStorage(opts.storage ?? (owned.storage = createStorage(config.storage)));
+  // Every storage location's store; failed operations are counted per location (sp_evidence_storage_errors_total).
+  const storageLocations = StorageLocations.fromConfig(config.storageLocations, {
+    provided: { ...(opts.storageLocations ?? {}), default: opts.storage },
+    wrap: (s, name) => metrics.instrumentStorage(s, name),
+  });
+  const storage = storageLocations.default;
   const bus = opts.bus ?? (owned.bus = await createBus(config.redisUrl, (err) => app.log.error({ err }, 'redis bus error')));
   const keyring = createKeyring(config.evidenceKey, config.evidenceKeysOld);
   const ownedMailer = opts.mailer === undefined && config.smtp ? createSmtpMailer(config.smtp) : null;
@@ -132,6 +147,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     db: database.db,
     vision,
     storage,
+    storageLocations,
     keyring,
     bus,
     now: opts.now ?? (() => Date.now()),
@@ -280,7 +296,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     await owned.bus?.close();
     await owned.rateLimitRedis?.quit().catch(() => {});
     await owned.vision?.close();
-    await owned.storage?.close?.();
+    await storageLocations.close();
     await ownedMailer?.close?.();
     if (!opts.verifiers) ctx.verifiers.close();
     await owned.database?.close();

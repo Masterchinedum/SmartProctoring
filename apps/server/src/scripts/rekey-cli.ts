@@ -4,7 +4,7 @@
  *   pnpm --filter @sp/server rekey [--dry-run] [--batch-size <n>] [--only <target,...>] [--json]
  *   node apps/server/dist/scripts/rekey.js [--dry-run] ...
  *
- * Uses the same environment as the server (DATABASE_URL, STORAGE_*, EVIDENCE_KEY, EVIDENCE_KEYS_OLD). Rotate first
+ * Uses the same environment as the server (DATABASE_URL, STORAGE_* incl. STORAGE_LOCATIONS, EVIDENCE_KEY, EVIDENCE_KEYS_OLD). Rotate first
  * (new key in EVIDENCE_KEY, previous one(s) in EVIDENCE_KEYS_OLD, servers restarted), then run this. Safe to run
  * while the servers are up, safe to interrupt and re-run (it continues where it stopped). Drop an old key from
  * EVIDENCE_KEYS_OLD only once `rekey --dry-run` reports nothing left under it (docs/OPERATIONS.md §3).
@@ -18,7 +18,7 @@ import { loadConfig } from '../config.js';
 import type { Ctx } from '../context.js';
 import { createDatabase } from '../db/index.js';
 import { createKeyring, keyIdFor } from '../lib/crypto.js';
-import { createStorage } from '../lib/storage.js';
+import { StorageLocations } from '../lib/storage.js';
 import { REKEY_DEFAULT_BATCH, REKEY_TARGETS, rekeyAllExclusive, type RekeySummary } from '../services/rekey.js';
 
 function printSummary(s: RekeySummary, oldKeyIds: string[]): void {
@@ -79,7 +79,8 @@ async function main(): Promise<number> {
   const config = loadConfig();
   const log = pino({ level: process.env.LOG_LEVEL ?? 'warn', base: { app: 'rekey-cli' } });
   const database = createDatabase(config.databaseUrl, { max: 4, applicationName: 'smartproctoring-rekey' });
-  const storage = createStorage(config.storage);
+  // Every storage location: evidence blobs are re-encrypted where they are (data residency).
+  const storageLocations = StorageLocations.fromConfig(config.storageLocations);
   const keyring = createKeyring(config.evidenceKey, config.evidenceKeysOld);
   const oldKeyIds = config.evidenceKeysOld.map(keyIdFor);
   try {
@@ -87,7 +88,7 @@ async function main(): Promise<number> {
       ? undefined
       : (p: { target: string; done: number; total: number }) => process.stderr.write(`  ${p.target}: ${Math.min(p.done, p.total)}/${p.total}\n`);
     const summary = await rekeyAllExclusive(
-      { database, db: database.db, storage, keyring, now: () => Date.now(), log: log as unknown as Ctx['log'] },
+      { database, db: database.db, storage: storageLocations.default, storageLocations, keyring, now: () => Date.now(), log: log as unknown as Ctx['log'] },
       { dryRun: values['dry-run'], batchSize, only, onProgress: progress },
     );
     if (!summary) {
@@ -98,7 +99,7 @@ async function main(): Promise<number> {
     else printSummary(summary, oldKeyIds);
     return summary.failures.length || Object.keys(summary.remaining).length ? 3 : 0;
   } finally {
-    await storage.close?.();
+    await storageLocations.close();
     await database.close();
   }
 }

@@ -21,6 +21,11 @@ async function main() {
   try {
     app = await buildApp({ config });
   } catch (err) {
+    if ((err as Error).name === 'StorageLocationsConfigError') {
+      // A storage location in use is not configured (data residency, docs/OPERATIONS.md §2).
+      console.error(`[storage] ${(err as Error).message}`);
+      process.exit(1);
+    }
     if ((err as Error).name === 'VisionModelsNotFoundError') {
       console.error(`[vision] ${(err as Error).message}\nSet MODELS_DIR to the folder containing face_detection_yunet_2023mar.onnx and face_recognition_sface_2021dec.onnx.`);
       process.exit(1);

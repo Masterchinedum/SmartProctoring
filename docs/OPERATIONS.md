@@ -100,6 +100,97 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
   instance can read evidence. Background jobs (heartbeat timeouts, clock expiry, retention) use
   Postgres row locks and are safe to run on every instance.
 
+### Evidence storage locations (data residency)
+
+Evidence **images** (check-in and identity photos, screenshots, approved ID photos — encrypted blobs) can be kept
+in more than one place, for example one bucket per region, and each organisation chooses where its new images go.
+**Only images move: the database stays where it is** — candidate records, exams, answers, event records, **face
+templates** (the numbers used to compare faces, in Postgres), the audit log and every other table. An organisation
+that needs all of its personal data in one region needs this server's database (and backups, logs, Redis) there too:
+run a separate deployment in that region.
+
+**Configuration** (operator only; staff never see buckets, directories, endpoints or credentials). The existing
+`STORAGE_DRIVER` / `STORAGE_DIR` / `S3_*` settings are the location named `default`, so an existing deployment changes
+nothing. Further locations are listed in `STORAGE_LOCATIONS` and configured with `STORAGE_LOCATION_<NAME>_*` (the name
+upper-cased, hyphens as underscores):
+
+| Variable | Purpose |
+|---|---|
+| `STORAGE_LABEL` | What staff see for `default` (default "Default storage"), e.g. `US (Virginia)` |
+| `STORAGE_LOCATIONS` | Comma-separated names of the other locations: lower case letters, digits and hyphens, e.g. `eu,uk` (`default` is reserved) |
+| `STORAGE_LOCATION_<NAME>_DRIVER` | `fs` or `s3` (required) |
+| `STORAGE_LOCATION_<NAME>_LABEL` | What staff see, e.g. `EU (Frankfurt)` (default: the name) |
+| `STORAGE_LOCATION_<NAME>_DIR` | `fs`: the directory (required) |
+| `STORAGE_LOCATION_<NAME>_S3_BUCKET`, `_S3_REGION` | `s3`: bucket and its region (both required; the region is shown to staff next to the label) |
+| `STORAGE_LOCATION_<NAME>_S3_ENDPOINT`, `_S3_FORCE_PATH_STYLE`, `_S3_PREFIX` | `s3`: S3-compatible endpoint, path-style addressing, key prefix |
+| `STORAGE_LOCATION_<NAME>_S3_ACCESS_KEY_ID`, `_S3_SECRET_ACCESS_KEY` | `s3`: both or neither (neither = the default AWS credential chain: IAM role, `AWS_*` variables) |
+
+```bash
+STORAGE_LABEL="US (Virginia)"
+STORAGE_LOCATIONS=eu
+STORAGE_LOCATION_EU_DRIVER=s3
+STORAGE_LOCATION_EU_LABEL="EU (Frankfurt)"
+STORAGE_LOCATION_EU_S3_BUCKET=sp-evidence-eu
+STORAGE_LOCATION_EU_S3_REGION=eu-central-1
+```
+
+The server **refuses to start** (exit 1, a `[config]` or `[storage]` message naming the variable) when a location is
+inconsistent — unknown driver, missing directory, bucket or region, an access key without its secret, a bad or
+duplicate name, two locations pointing at the same directory or the same bucket with overlapping prefixes — and when
+a location still in use is missing: one an organisation has chosen, or one that still holds images that are not
+deleted. A `STORAGE_LOCATION_*` variable it does not use (a typo, a location not listed) is logged as a warning at
+start-up. Give every instance and every operator command (`retention:run`, `rekey`, `storage:move`) the same storage
+configuration, and add a new location to every instance **before** an owner chooses it. Each S3 location needs the
+same bucket settings as the default one (private, block public access, SSE, a key limited to Get/Put/Delete on its
+bucket/prefix; SECURITY.md §4), and its own backups (§4).
+
+**Choosing.** An owner chooses under **Settings → Where evidence images are stored** (administrators see the choice
+and the image counts; `PUT /api/admin/settings { evidenceLocation }`, audited as `settings.updated`). It applies to
+new images from the moment it is saved, on every instance. Images stored earlier stay where they are, and are read and
+deleted there (every evidence row records its location), until you move them. The page shows how many images each
+location holds.
+
+**Metrics.** `sp_evidence_storage_errors_total{op,location}` counts failed operations per location (§5); the alert
+`SmartProctoringEvidenceStorageErrors` names the location.
+
+#### Runbook: moving an organisation's evidence to another location
+
+1. The organisation's owner switches **Settings → Where evidence images are stored** to the new location (new images
+   go there from now on). Find the organisation's id: the `targetId` of that `settings.updated` audit entry, or
+   `SELECT id, name FROM organizations`.
+2. Count what would move, with the servers' environment (safe while they run):
+   ```bash
+   pnpm --filter @sp/server storage:move -- --org <orgId> --to eu --dry-run
+   # in the Docker image: node dist/scripts/storage-move.js --org <orgId> --to eu --dry-run
+   ```
+3. Move (in batches, `--batch`, default 100; progress on stderr; `--json` for the summary as JSON):
+   ```bash
+   pnpm --filter @sp/server storage:move -- --org <orgId> --to eu
+   ```
+   For every image: copy the encrypted blob to the new location under a new key, **verify** it (read it back, decrypt
+   it, compare its SHA-256 with the one recorded at upload), switch the database row to the new place only if nobody
+   changed it meanwhile, then delete the old copy. A copy that does not verify is deleted and the image stays where it
+   was. Deleted images (tombstones) are skipped; a legal hold does not stop a move (the image is kept, only its place
+   changes). Safe to interrupt and run again: it continues with what is left. The run is audit-logged
+   (`evidence.storage_moved`, in the organisation's audit log). Exit codes: 0 everything of the organisation is in the
+   target location, 3 images remain outside it (see the listed failures: a copy that did not verify, an image missing
+   from its old location, a row changed concurrently — run it again), 4 unknown organisation or location, 2 bad
+   arguments, 75 another move is running.
+4. **Verify**: `storage:move … --dry-run` reports `0` outside the target (exit 0), and the Settings page shows every
+   image in the new location. Old copies the run reported as "left behind" (it could not delete them, e.g. missing
+   delete permission) are listed with their key; delete them by hand. If a run was killed between switching a row and
+   deleting the old copy, one copy may stay behind unlisted: once the dry run reports nothing left in the old location,
+   everything under the organisation's prefix `o/<orgId>/` there is unreferenced and can be deleted (e.g.
+   `aws s3 rm --recursive s3://<old-bucket>/<prefix>/o/<orgId>/`, or `rm -r <dir>/o/<orgId>`).
+5. Backups of the old location still hold the moved images until they expire (§4); align with your privacy notice.
+
+**Rollback** is the same move in the other direction: the owner switches back, then
+`storage:move -- --org <orgId> --to default` (or the previous location).
+
+**Retiring a location**: every organisation using it chooses another one, `storage:move` moves each one's images out,
+`--dry-run` shows nothing left there; only then remove it from `STORAGE_LOCATIONS` (the server refuses to start while
+anything still refers to it).
+
 ## 3. Keys and secrets
 
 * `EVIDENCE_KEY` encrypts all images and face templates (AES-256-GCM). Losing it makes evidence
@@ -114,7 +205,7 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
      pnpm --filter @sp/server rekey --dry-run      # or: node apps/server/dist/scripts/rekey.js --dry-run
      pnpm --filter @sp/server rekey                # re-encrypts in batches (--batch-size, default 200)
      ```
-     It covers every encrypted value: evidence blobs (images), ID-photo, reference and check-frame face
+     It covers every encrypted value: evidence blobs (images, each in its own storage location, §2), ID-photo, reference and check-frame face
      templates, stored access tokens, webhook secrets and external-verifier access keys. Progress goes to stderr; the summary names each
      `EVIDENCE_KEYS_OLD` key id as "still needed" or "no longer needed"; the run is audit-logged
      (`keys.rekeyed`). Exit code 0 = nothing left under an old key, 3 = items remain (or failed — see the
@@ -136,8 +227,8 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
 
 ## 4. Backups
 
-Back up Postgres (e.g. daily `pg_dump`, or managed-service PITR) and the evidence store (volume
-snapshot or S3 versioning with lifecycle aligned to your retention period). Evidence is encrypted, so
+Back up Postgres (e.g. daily `pg_dump`, or managed-service PITR) and the evidence store — every storage location
+(§2) — (volume snapshot or S3 versioning with lifecycle aligned to your retention period). Evidence is encrypted, so
 backups do not expose images without the key — but remember that purged evidence may persist in
 backups until they expire; align backup retention with the privacy notice.
 
@@ -181,7 +272,7 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_staff_websockets` | open staff dashboards |
   | `sp_job_runs_total{job,result}`, `sp_job_duration_seconds`, `sp_job_last_success_timestamp_seconds` `{job}` | background jobs (`retention`, `webhooks`, `email-alerts`, `abandoned-sessions`, `sweeper`): ok / failed / skipped (another instance ran it) |
   | `sp_retention_failures_total` | sessions retention could not purge (retried next hour) |
-  | `sp_evidence_storage_errors_total{op}` | evidence store put / get / delete failures (disk, S3) |
+  | `sp_evidence_storage_errors_total{op,location}` | evidence store put / get / delete failures (disk, S3), per storage location (§2) |
   | `sp_cluster_sessions{status}`, `sp_cluster_sessions_reporting_interrupted` | sessions in progress; how many browsers stopped reporting |
   | `sp_cluster_webhook_deliveries_pending`, `sp_cluster_webhook_oldest_pending_seconds`, `sp_cluster_webhook_deliveries_failed_24h`, `sp_cluster_webhooks_disabled` | webhook backlog, retry age, dead letters, disabled endpoints |
   | `sp_cluster_email_alerts_pending`, `sp_cluster_email_alert_oldest_pending_seconds` | alert-email backlog |

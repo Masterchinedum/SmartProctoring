@@ -33,6 +33,7 @@ const COMMON_ACTIONS = [
   'candidate.updated',
   'event.review',
   'evidence.purged',
+  'evidence.storage_moved',
   'evidence.view',
   'exam.archived',
   'exam.assigned',

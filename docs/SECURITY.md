@@ -161,6 +161,12 @@ server-side identity match, read other sessions, or change category/severity (th
   (`docs/OPERATIONS.md` §3).
 * Constant-time comparison for liveness nonces; tokens/keys are looked up by hash.
 * Webhooks: `HMAC-SHA256(secret, t.body)` with timestamp; secrets shown once, stored encrypted.
+* Evidence storage locations (data residency, `docs/OPERATIONS.md` §2): buckets, directories, endpoints and
+  credentials come from the environment only and are never sent to the staff app (it gets names, labels and regions).
+  `storage:move` copies the ciphertext as stored (it never writes plaintext), verifies each copy by decrypting it with
+  the image's AAD and comparing the SHA-256 recorded at upload, switches the row with compare-and-set, and only then
+  deletes the old copy; new keys differ from the old ones, so a misconfiguration cannot make the deletion hit the copy.
+  Choosing a location is owner-only and audited; each move is audited (`evidence.storage_moved`).
 * External verifier AWS keys: write-only (responses show `accessKeyIdSet` + the last 4 characters of the key id),
   encrypted in the organisation settings (AAD binds them to the organisation), never logged or audited, deleted when
   the provider is switched off or server credentials are chosen; covered by `rekey`.
@@ -265,7 +271,8 @@ fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, 
       start-up), strong password, `sslmode=require` for remote databases; no public exposure of 5432.
 - [ ] Encrypted volumes for Postgres (candidate names/emails are not application-encrypted) and the evidence
       store; for S3 use a private bucket, block public access, SSE, and a least-privilege key limited to the
-      bucket/prefix (Get/Put/Delete).
+      bucket/prefix (Get/Put/Delete) — the same for every storage location in `STORAGE_LOCATIONS`, each with its own
+      key where possible.
 - [ ] Backups: Postgres PITR/dumps and evidence snapshots with retention aligned to `evidenceRetentionDays`
       (purged evidence survives in backups until they expire); test restores; keep backups encrypted.
 

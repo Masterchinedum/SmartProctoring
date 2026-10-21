@@ -263,6 +263,19 @@ lost). Tuning evidence: packages/detection/src/engine/detectors/continuity.ts.
   `version > stored version`. Category/severity/title come from `EVENT_CATALOG`, not the client.
 * Evidence: `PUT /api/candidate/evidence/:uuid` (JPEG, idempotent). Stored encrypted
   (AES-256-GCM, per-blob IV, key from `EVIDENCE_KEY`), metadata in `evidence` table.
+* Data residency (`lib/storage.ts` `StorageLocations` / `storageAt`, `services/evidence.ts`,
+  `services/evidence-storage.ts`, `services/storage-move.ts`): the operator configures storage locations (`default` =
+  `STORAGE_*`, others from `STORAGE_LOCATIONS`; `ctx.storageLocations`, `ctx.storage` = default); an owner picks one
+  for new images (`settings.evidenceLocation`). `storeEvidence` writes to the organisation's location (looked up only
+  when more than one is configured) and records it in `evidence.storage_location` (null = default); every read and
+  delete — staff route, ID-photo copies, purges, retention, `rekey`, export — goes through `storageFor(row)`.
+  `readEvidence` follows a row moved after it was read; `purgeEvidenceRows` deletes at the place `RETURNING` reports
+  after the tombstone; `rekey`'s compare-and-set includes the location. Start-up refuses locations in use but not
+  configured (`assertStorageLocationsConfigured`: organisation settings + a loose index scan of
+  `evidence_location_idx`). `storage:move` (advisory lock 727274012) walks an organisation's rows per source location in
+  id order (`evidence_org_location_idx`): copy under a derived key (`.m<hash>.bin`, so a re-run overwrites a stray copy),
+  verify (decrypt with the AAD, SHA-256), compare-and-set (key, location, not purged), delete the old copy. Only blobs
+  move; the database, with face templates, stays where it is.
 * Offline: the client keeps an IndexedDB **outbox** (events latest-version-wins, evidence blobs,
   answers, identity samples) and flushes with backoff. Original timestamps are preserved; server sets
   `deliveredLate` when received > 30 s after the event's last change. Heartbeat every 5 s; server
@@ -384,7 +397,8 @@ What decides, and who may change it:
 ## 10. Configuration (env)
 
 `DATABASE_URL`, `PORT` (8080), `PUBLIC_URL`, `EVIDENCE_KEY` (base64 32 bytes), `SESSION_SECRET`,
-`STORAGE_DRIVER` (`fs`|`s3`), `STORAGE_DIR`, `S3_*`, `REDIS_URL` (optional), `BOOTSTRAP_ADMIN_EMAIL` /
+`STORAGE_DRIVER` (`fs`|`s3`), `STORAGE_DIR`, `S3_*`, `STORAGE_LABEL`, `STORAGE_LOCATIONS` + `STORAGE_LOCATION_<NAME>_*`
+(further evidence storage locations; OPERATIONS §2), `REDIS_URL` (optional), `BOOTSTRAP_ADMIN_EMAIL` /
 `BOOTSTRAP_ADMIN_PASSWORD`, `WEB_DIST_DIR`. Capacity (docs/PERFORMANCE.md): `VISION_THREADS` (CPU threads
 for face analysis, default CPU count − 1), `VISION_WORKERS`, `VISION_NICE`, `PG_POOL_MAX` (20),
 `PG_STATEMENT_TIMEOUT_MS` (60 000), `CAPACITY_MAX_VISION_WAIT_MS` / `CAPACITY_MAX_EVENT_LOOP_MS` / `CAPACITY_MAX_DB_WAITING`

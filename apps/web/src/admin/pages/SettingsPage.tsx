@@ -8,6 +8,7 @@ import { qk } from '../api/queries';
 import { normalizePolicy, validatePolicy } from '../lib/policyForm';
 import { ErrorState, Loading, PageHeader } from '../components/Common';
 import { PolicyEditor } from '../components/PolicyEditor';
+import { EvidenceStorageSection } from './EvidenceStorageSection';
 
 export function SettingsPage() {
   const q = useQuery({ queryKey: qk.settings, queryFn: api.settings, retry: shouldRetry });
@@ -18,6 +19,7 @@ export function SettingsPage() {
       <SettingsForm key={JSON.stringify(q.data)} initial={q.data} />
       <ReviewTargetsSection key={`sla-${JSON.stringify(q.data.reviewSla)}`} settings={q.data} />
       <SecuritySection settings={q.data} />
+      <EvidenceStorageSection />
     </div>
   );
 }

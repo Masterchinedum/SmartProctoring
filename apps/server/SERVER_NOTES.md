@@ -6,13 +6,14 @@ Fastify 5 + drizzle (Postgres) + FakeVision-testable services. Contract: `packag
 ```
 src/
   config.ts            env -> Config (safe dev defaults; production refuses to start without secrets)
-  context.ts           Ctx: { config, database, db, vision, storage, keyring, bus, now(), log, live }
+  context.ts           Ctx: { config, database, db, vision, storage, storageLocations, keyring, bus, now(), log, live }
   app.ts               buildApp(opts) -> Fastify instance (deps injectable: database, vision, storage, bus, now)
   main.ts              process entry (listen, graceful shutdown)
   db/schema.ts         drizzle schema (all tables)      db/index.ts  createDatabase(), migrate(), Db/Tx types
   drizzle/ (../)       generated SQL migrations — after editing schema.ts: pnpm --filter @sp/server db:generate
   lib/crypto.ts        AES-256-GCM keyring (encrypt/decrypt with AAD), tokens, sha256, scrypt passwords, isJpeg
-  lib/storage.ts       BlobStorage (FsStorage | S3Storage | MemoryStorage)
+  lib/storage.ts       BlobStorage (FsStorage | S3Storage | MemoryStorage); StorageLocations (every configured evidence
+                       storage location, `default` = ctx.storage) and storageAt(ctx, location) — data residency
   lib/audit.ts         audit(db, {...}) -> audit_log row
   lib/errors.ts        HttpError + helpers (badRequest, notFound, conflict, invalidState, forbidden, ...)
   auth/staff.ts        cookie sessions, requireStaff(role), getStaff(req), roleAtLeast
@@ -21,7 +22,10 @@ src/
   realtime/live-route.ts  WS GET /api/admin/live
   services/dto.ts      row->DTO mappers + batched loaders (EventDTO, SessionSummaryDTO, PeriodDTO, IdentityCheckDTO,
                        PauseRequestDTO, HoldDTO, EvidenceRefDTO, IdentityReferenceDTO, NoteDTO, DeviceRecordDTO)
-  services/evidence.ts storeEvidence / readEvidence / readEvidenceForStaff (audited) / purge*
+  services/evidence.ts storeEvidence (to the organisation's storage location) / readEvidence / readEvidenceForStaff
+                       (audited) / purge* — every read and delete via storageFor(row) (evidence.storage_location)
+  services/evidence-storage.ts  start-up check of the locations in use; GET /evidence-storage summary
+  services/storage-move.ts      storage:move — copy, verify, compare-and-set, delete (an organisation's images)
   services/session-state.ts   withSession(ctx, id, m => ...) row-locked mutations, periods, clock, server events,
                               holdNow/pauseNow/finalizeSession/startExam, requiredCheckFor, effectivePolicy
   services/session-actions.ts STAFF ACTIONS: decidePauseRequest, holdSession, releaseHold, terminateSession,

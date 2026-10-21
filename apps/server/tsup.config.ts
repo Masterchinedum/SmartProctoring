@@ -14,6 +14,7 @@ const candidates: Record<string, string> = {
   'scripts/migrate': 'src/db/migrate-cli.ts',
   'scripts/retention': 'src/scripts/retention-cli.ts',
   'scripts/rekey': 'src/scripts/rekey-cli.ts',
+  'scripts/storage-move': 'src/scripts/storage-move-cli.ts',
   'scripts/staff-access': 'src/scripts/staff-access-cli.ts',
   'scripts/identity-eval': 'src/eval/identity-eval-cli.ts',
 };

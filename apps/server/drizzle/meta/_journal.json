@@ -92,6 +92,13 @@
       "when": 1792605015078,
       "tag": "0012_privacy_operations",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1792612908999,
+      "tag": "0013_data_residency",
+      "breakpoints": true
     }
   ]
 }

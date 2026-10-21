@@ -19,6 +19,7 @@ import type {
   DriftDTO,
   EventDetailDTO,
   EventDTO,
+  EvidenceStorageDTO,
   ExamDTO,
   ExamExport,
   ExamVersionDTO,
@@ -292,6 +293,8 @@ export const api = {
       externalVerifier?: ExternalVerifierUpdate;
     },
   ) => request<OrgSettingsDTO>('PUT', `${A}/settings`, { body: patch }),
+  /** Storage locations, the organisation's choice for new images and its images per location (owner changes it via updateSettings). */
+  evidenceStorage: () => request<EvidenceStorageDTO>('GET', `${A}/evidence-storage`),
   users: () => request<{ items: StaffUserDTO[] }>('GET', `${A}/users`),
   createUser: (input: { email: string; name: string; role: StaffRole; password: string }) => request<StaffUserDTO>('POST', `${A}/users`, { body: input }),
   updateUser: (id: string, patch: { name?: string; role?: StaffRole; disabled?: boolean; password?: string }) =>

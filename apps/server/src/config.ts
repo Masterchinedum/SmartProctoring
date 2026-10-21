@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -24,18 +24,13 @@ export interface Config {
   cookieSecure: boolean;
   /** Fastify trustProxy: false, true (every hop — spoofable), or the proxy's addresses / CIDRs. */
   trustProxy: boolean | string;
-  storage:
-    | { driver: 'fs'; dir: string }
-    | {
-        driver: 's3';
-        bucket: string;
-        region: string;
-        endpoint: string | null;
-        accessKeyId: string | null;
-        secretAccessKey: string | null;
-        forcePathStyle: boolean;
-        prefix: string;
-      };
+  /** The default evidence store (STORAGE_DRIVER, STORAGE_DIR, S3_*): storage location `default`. */
+  storage: StorageBackendConfig;
+  /**
+   * Every evidence storage location, `default` (= `storage`) first, then those listed in STORAGE_LOCATIONS
+   * (data residency: an organisation chooses where its new evidence images are stored; docs/OPERATIONS.md §2).
+   */
+  storageLocations: StorageLocationConfig[];
   redisUrl: string | null;
   /** Postgres pool per process (PG_POOL_MAX, default 20) and per-statement timeout (PG_STATEMENT_TIMEOUT_MS, default 60 s; 0 = off). */
   db: { poolMax: number; statementTimeoutMs: number };
@@ -93,6 +88,33 @@ export interface Config {
   /** Warnings produced while loading (printed at startup). */
   warnings: string[];
 }
+
+export type StorageBackendConfig =
+  | { driver: 'fs'; dir: string }
+  | {
+      driver: 's3';
+      bucket: string;
+      region: string;
+      endpoint: string | null;
+      accessKeyId: string | null;
+      secretAccessKey: string | null;
+      forcePathStyle: boolean;
+      prefix: string;
+    };
+
+/** One place where evidence blobs can be stored (operator configuration; staff only choose among these). */
+export interface StorageLocationConfig {
+  /** `default`, or a name from STORAGE_LOCATIONS (lower case letters, digits and hyphens). */
+  name: string;
+  /** Shown to staff, e.g. "EU (Frankfurt)". STORAGE_LABEL / STORAGE_LOCATION_<NAME>_LABEL. */
+  label: string;
+  storage: StorageBackendConfig;
+}
+
+export const DEFAULT_STORAGE_LOCATION = 'default';
+/** Location names: lower case, start with a letter, hyphen-separated words, at most 32 characters. */
+export const STORAGE_LOCATION_NAME_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+const STORAGE_LOCATION_FIELDS = ['DRIVER', 'LABEL', 'DIR', 'S3_BUCKET', 'S3_REGION', 'S3_ENDPOINT', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY', 'S3_FORCE_PATH_STYLE', 'S3_PREFIX'] as const;
 
 export interface SmtpConfig {
   host: string;
@@ -184,6 +206,138 @@ function resolvePath(p: string, base: string): string {
   return isAbsolute(p) ? p : resolve(base, p);
 }
 
+/** `eu-central` -> `EU_CENTRAL` (the <NAME> part of STORAGE_LOCATION_<NAME>_*). */
+export function storageLocationEnvName(name: string): string {
+  return name.toUpperCase().replace(/-/g, '_');
+}
+
+function storageLabel(value: string | undefined, fallback: string, variable: string): string {
+  const label = (value ?? '').trim() || fallback;
+  if (label.length > 80 || /[\u0000-\u001f\u007f]/.test(label)) throw new Error(`${variable} must be a single line of at most 80 characters (e.g. "EU (Frankfurt)").`);
+  return label;
+}
+
+/** Human-readable place of a backend for error messages (no credentials). */
+function storagePlace(s: StorageBackendConfig): string {
+  return s.driver === 'fs' ? `directory ${s.dir}` : `bucket ${s.bucket}${s.prefix ? `/${s.prefix}` : ''}${s.endpoint ? ` at ${s.endpoint}` : ''}`;
+}
+
+/** Two backends whose blobs could mix: the same or nested directories, the same bucket with overlapping prefixes. */
+function storageOverlaps(a: StorageBackendConfig, b: StorageBackendConfig): boolean {
+  if (a.driver === 'fs' && b.driver === 'fs') return a.dir === b.dir || a.dir.startsWith(b.dir + sep) || b.dir.startsWith(a.dir + sep);
+  if (a.driver === 's3' && b.driver === 's3') {
+    if (a.bucket !== b.bucket || (a.endpoint ?? '') !== (b.endpoint ?? '')) return false;
+    const [pa, pb] = [a.prefix, b.prefix];
+    return pa === pb || pa === '' || pb === '' || pa.startsWith(pb + '/') || pb.startsWith(pa + '/');
+  }
+  return false;
+}
+
+/**
+ * Evidence storage locations. `default` comes from STORAGE_DRIVER / STORAGE_DIR / S3_* (unchanged, so existing
+ * deployments need nothing new; optional STORAGE_LABEL). Others are listed in STORAGE_LOCATIONS (comma-separated
+ * names) and configured with STORAGE_LOCATION_<NAME>_* (NAME upper-cased, hyphens as underscores):
+ * DRIVER (fs | s3, required), LABEL, DIR (fs, required), S3_BUCKET + S3_REGION (s3, required), S3_ENDPOINT,
+ * S3_ACCESS_KEY_ID + S3_SECRET_ACCESS_KEY (both or neither: neither = the default AWS credential chain),
+ * S3_FORCE_PATH_STYLE, S3_PREFIX. Anything inconsistent refuses start-up with a message naming the variable.
+ */
+function parseStorageLocations(env: NodeJS.ProcessEnv, root: string, warnings: string[]): StorageLocationConfig[] {
+  const driver = (env.STORAGE_DRIVER ?? 'fs').toLowerCase();
+  let storage: StorageBackendConfig;
+  if (driver === 's3') {
+    if (!env.S3_BUCKET) throw new Error('STORAGE_DRIVER=s3 requires S3_BUCKET');
+    storage = {
+      driver: 's3',
+      bucket: env.S3_BUCKET,
+      region: env.S3_REGION || 'us-east-1',
+      endpoint: env.S3_ENDPOINT || null,
+      accessKeyId: env.S3_ACCESS_KEY_ID || null,
+      secretAccessKey: env.S3_SECRET_ACCESS_KEY || null,
+      forcePathStyle: bool(env.S3_FORCE_PATH_STYLE, false),
+      prefix: (env.S3_PREFIX ?? '').replace(/^\/+|\/+$/g, ''),
+    };
+  } else if (driver === 'fs') {
+    storage = { driver: 'fs', dir: resolvePath(env.STORAGE_DIR || 'storage', root) };
+  } else {
+    throw new Error(`Unknown STORAGE_DRIVER: ${driver} (expected fs or s3)`);
+  }
+  const locations: StorageLocationConfig[] = [{ name: DEFAULT_STORAGE_LOCATION, label: storageLabel(env.STORAGE_LABEL, 'Default storage', 'STORAGE_LABEL'), storage }];
+
+  const listed = (env.STORAGE_LOCATIONS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const name of listed) {
+    if (name.toLowerCase() === DEFAULT_STORAGE_LOCATION) {
+      throw new Error('STORAGE_LOCATIONS: "default" is the location configured by STORAGE_DRIVER / STORAGE_DIR / S3_*; list only the other locations.');
+    }
+    if (!STORAGE_LOCATION_NAME_RE.test(name) || name.length > 32) {
+      throw new Error(`STORAGE_LOCATIONS: invalid location name "${name}" (lower case letters, digits and hyphens, starting with a letter, at most 32 characters; e.g. eu or eu-central).`);
+    }
+    if (locations.some((l) => l.name === name)) throw new Error(`STORAGE_LOCATIONS lists "${name}" twice.`);
+    const p = `STORAGE_LOCATION_${storageLocationEnvName(name)}_`;
+    const v = (field: (typeof STORAGE_LOCATION_FIELDS)[number]): string | undefined => {
+      const x = env[p + field]?.trim();
+      return x ? x : undefined;
+    };
+    const d = v('DRIVER')?.toLowerCase();
+    let s: StorageBackendConfig;
+    if (!d) {
+      throw new Error(`Storage location "${name}": ${p}DRIVER is required (fs or s3).`);
+    } else if (d === 'fs') {
+      const dir = v('DIR');
+      if (!dir) throw new Error(`Storage location "${name}": ${p}DIR is required with ${p}DRIVER=fs.`);
+      s = { driver: 'fs', dir: resolvePath(dir, root) };
+    } else if (d === 's3') {
+      const bucket = v('S3_BUCKET');
+      if (!bucket) throw new Error(`Storage location "${name}": ${p}S3_BUCKET is required with ${p}DRIVER=s3.`);
+      const region = v('S3_REGION');
+      if (!region) throw new Error(`Storage location "${name}": ${p}S3_REGION is required with ${p}DRIVER=s3 (the bucket's region, e.g. eu-central-1).`);
+      const accessKeyId = v('S3_ACCESS_KEY_ID') ?? null;
+      const secretAccessKey = v('S3_SECRET_ACCESS_KEY') ?? null;
+      if (!accessKeyId !== !secretAccessKey) {
+        throw new Error(`Storage location "${name}": set both ${p}S3_ACCESS_KEY_ID and ${p}S3_SECRET_ACCESS_KEY, or neither (the default AWS credential chain — IAM role, AWS_* variables — is then used).`);
+      }
+      s = {
+        driver: 's3',
+        bucket,
+        region,
+        endpoint: v('S3_ENDPOINT') ?? null,
+        accessKeyId,
+        secretAccessKey,
+        forcePathStyle: bool(v('S3_FORCE_PATH_STYLE'), false),
+        prefix: (v('S3_PREFIX') ?? '').replace(/^\/+|\/+$/g, ''),
+      };
+    } else {
+      throw new Error(`Storage location "${name}": unknown ${p}DRIVER "${d}" (expected fs or s3).`);
+    }
+    locations.push({ name, label: storageLabel(v('LABEL'), name, `${p}LABEL`), storage: s });
+  }
+
+  // A mistyped variable would otherwise be silently ignored (e.g. STORAGE_LOCATION_EU_BUCKET for ..._S3_BUCKET).
+  const prefixes = listed.map((n) => `STORAGE_LOCATION_${storageLocationEnvName(n)}_`);
+  for (const key of Object.keys(env).sort()) {
+    if (!key.startsWith('STORAGE_LOCATION_') || !env[key]?.trim()) continue;
+    const ofListed = prefixes.filter((p) => key.startsWith(p));
+    if (ofListed.some((p) => (STORAGE_LOCATION_FIELDS as readonly string[]).includes(key.slice(p.length)))) continue;
+    warnings.push(
+      ofListed.length
+        ? `${key} is ignored: not a storage location setting (known: ${STORAGE_LOCATION_FIELDS.join(', ')}).`
+        : `${key} is ignored: its location is not listed in STORAGE_LOCATIONS.`,
+    );
+  }
+
+  for (let i = 0; i < locations.length; i++) {
+    for (let j = i + 1; j < locations.length; j++) {
+      const [a, b] = [locations[i], locations[j]];
+      if (storageOverlaps(a.storage, b.storage)) {
+        throw new Error(`Storage locations "${a.name}" and "${b.name}" point to the same place (${storagePlace(a.storage)} / ${storagePlace(b.storage)}): each location needs its own directory, or its own bucket or prefix.`);
+      }
+    }
+  }
+  return locations;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const nodeEnv = env.NODE_ENV === 'production' ? 'production' : env.NODE_ENV === 'test' ? 'test' : 'development';
   const isProduction = nodeEnv === 'production';
@@ -215,25 +369,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     warnings.push('SESSION_SECRET is shorter than 32 characters.');
   }
 
-  const driver = (env.STORAGE_DRIVER ?? 'fs').toLowerCase();
-  let storage: Config['storage'];
-  if (driver === 's3') {
-    if (!env.S3_BUCKET) throw new Error('STORAGE_DRIVER=s3 requires S3_BUCKET');
-    storage = {
-      driver: 's3',
-      bucket: env.S3_BUCKET,
-      region: env.S3_REGION || 'us-east-1',
-      endpoint: env.S3_ENDPOINT || null,
-      accessKeyId: env.S3_ACCESS_KEY_ID || null,
-      secretAccessKey: env.S3_SECRET_ACCESS_KEY || null,
-      forcePathStyle: bool(env.S3_FORCE_PATH_STYLE, false),
-      prefix: (env.S3_PREFIX ?? '').replace(/^\/+|\/+$/g, ''),
-    };
-  } else if (driver === 'fs') {
-    storage = { driver: 'fs', dir: resolvePath(env.STORAGE_DIR || 'storage', root) };
-  } else {
-    throw new Error(`Unknown STORAGE_DRIVER: ${driver} (expected fs or s3)`);
-  }
+  const storageLocations = parseStorageLocations(env, root, warnings);
+  const storage = storageLocations[0].storage;
 
   const port = int(env.PORT, 8080);
   const publicUrl = (env.PUBLIC_URL || (isProduction ? '' : 'http://localhost:5173')).replace(/\/+$/, '');
@@ -301,6 +438,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cookieSecure,
     trustProxy,
     storage,
+    storageLocations,
     redisUrl: env.REDIS_URL || null,
     db: {
       poolMax: Math.max(2, int(env.PG_POOL_MAX, 20)),

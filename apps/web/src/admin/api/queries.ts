@@ -36,6 +36,7 @@ export const qk = {
   candidate: (id: string) => ['candidate', id] as const,
   accommodations: (candidateId: string) => ['candidate', candidateId, 'accommodations'] as const,
   settings: ['settings'] as const,
+  evidenceStorage: ['settings', 'evidence-storage'] as const,
   users: ['users'] as const,
   audit: (p: object) => ['audit', p] as const,
   quality: (p: object) => ['quality', p] as const,

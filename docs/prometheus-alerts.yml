@@ -101,12 +101,12 @@ groups:
           summary: Retention could not purge some sessions (retried every hour)
 
       - alert: SmartProctoringEvidenceStorageErrors
-        expr: sum(increase(sp_evidence_storage_errors_total[10m])) > 0
+        expr: sum by (location) (increase(sp_evidence_storage_errors_total[10m])) > 0
         for: 0m
         labels: { severity: critical }
         annotations:
-          summary: The evidence store is failing (disk or S3)
-          description: Screenshots and identity images cannot be stored or read; check disk space, the volume or S3 credentials.
+          summary: 'The evidence store is failing (storage location {{ $labels.location }}: disk or S3)'
+          description: Screenshots and identity images of the organisations using this storage location cannot be stored or read; check disk space, the volume or the bucket's credentials (STORAGE_* for "default", STORAGE_LOCATION_<NAME>_* for the others).
 
       - alert: SmartProctoringBackgroundJobFailing
         expr: sum by (job) (increase(sp_job_runs_total{result="failed"}[30m])) > 0

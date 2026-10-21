@@ -51,6 +51,17 @@ Not collected: continuous video/audio, screen contents, other applications, othe
 devices, clipboard contents, keystrokes (which keys; only the time of the last key press is used, in the
 browser — see the interaction-timing row above), pointer positions, location.
 
+**Where it is stored (data residency).** "Evidence store" above means the storage location the organisation
+chose under *Settings → Where evidence images are stored*, among the locations the server operator configured (for
+example one bucket per region; `docs/OPERATIONS.md` §2). **Only the images** live there: event screenshots,
+identity reference images, check frames, probe images and approved ID photos (and their event-linked copies),
+encrypted. **Everything else stays where the server's database is** — candidate names, emails and external ids,
+exams and answers, event records, **face templates** (identity references, ID-photo and check-frame templates are
+database columns), consent records, the audit log, privacy requests — and so do database backups, logs and Redis.
+Images stored before the choice changed stay in their previous location until the operator moves them
+(`storage:move`, audit-logged as `evidence.storage_moved`); each image row records its location, so it is always read
+and deleted there. Data that must stay in one region in full needs the database there too (a separate deployment).
+
 ## 3. Access control
 
 * Candidates authenticate with a single-use-per-session access link; they cannot see evidence,
@@ -139,7 +150,11 @@ launch.
 ## 7. Sub-processors
 
 None by default: all analysis runs in the candidate's browser and on your own server. If you enable
-S3-compatible storage or managed Postgres/Redis, list those providers as sub-processors.
+S3-compatible storage or managed Postgres/Redis, list those providers as sub-processors. **Per region:** each evidence
+storage location (Settings → Where evidence images are stored) is a sub-processor of the images stored there, in that
+location's region — list, for each organisation, the provider and region of its chosen location (and of any location
+still holding its earlier images until they are moved), next to the provider and region of the database, which holds
+the face templates and all other records whatever location is chosen.
 
 **External face verifier (optional, off by default).** If an administrator enables a second-opinion provider
 (Settings → Integrations; `docs/EXTERNAL_VERIFIER.md`), that provider — for Amazon Rekognition, Amazon Web

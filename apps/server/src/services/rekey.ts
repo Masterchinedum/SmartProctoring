@@ -13,7 +13,8 @@
  *     staff_users.totp_secret_enc           totp:<staffUserId>
  *     staff_users.totp_pending_enc          totp-pending:<staffUserId>
  *     privacy_requests.details_enc          privacy-request:<requestId>
- *   evidence blobs (storage; evidence.key_id)  evidence:<evidenceId>   (purged rows have no blob)
+ *   evidence blobs (storage; evidence.key_id)  evidence:<evidenceId>   (purged rows have no blob; each in its own
+ *                                               storage location, evidence.storage_location)
  *   organizations.settings.externalVerifier.credentialsEnc (base64 in JSON)  external-verifier:<orgId>
  *
  * Batches in primary-key order, each row on its own: a row is only rewritten if it still holds the ciphertext that
@@ -30,8 +31,10 @@ import type { Ctx } from '../context.js';
 import type { Database, Db } from '../db/index.js';
 import { accommodations, candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, privacyRequests, staffUsers, webhooks } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
+import { storageAt } from '../lib/storage.js';
 import { verifierCredentialsAad } from '../verifiers/settings.js';
 import { accommodationNoteAad } from './accommodations.js';
+import { evidenceAtLocation } from './evidence.js';
 import { totpAad, totpPendingAad } from './mfa.js';
 import { privacyRequestDetailsAad } from './privacy-requests.js';
 import { frameAad, idPhotoAad, referenceAad, sampleFrameAad } from './identity-common.js';
@@ -45,7 +48,7 @@ import { frameAad, idPhotoAad, referenceAad, sampleFrameAad } from './identity-c
 export const REKEY_LOCK_KEY = 727_274_011;
 export const REKEY_DEFAULT_BATCH = 200;
 
-export type RekeyCtx = Pick<Ctx, 'db' | 'storage' | 'keyring' | 'now' | 'log'> & { database: Database };
+export type RekeyCtx = Pick<Ctx, 'db' | 'storage' | 'keyring' | 'now' | 'log'> & Partial<Pick<Ctx, 'storageLocations'>> & { database: Database };
 
 interface ColumnTarget {
   name: string;
@@ -216,7 +219,7 @@ async function rekeyEvidence(ctx: RekeyCtx, sum: RekeyTargetSummary, failures: R
   let done = 0;
   for (;;) {
     const rows = await ctx.db
-      .select({ id: evidence.id, storageKey: evidence.storageKey, keyId: evidence.keyId })
+      .select({ id: evidence.id, storageKey: evidence.storageKey, storageLocation: evidence.storageLocation, keyId: evidence.keyId })
       .from(evidence)
       .where(and(isNull(evidence.purgedAt), ne(evidence.keyId, current), lastId ? gt(evidence.id, lastId) : undefined))
       .orderBy(asc(evidence.id))
@@ -226,7 +229,9 @@ async function rekeyEvidence(ctx: RekeyCtx, sum: RekeyTargetSummary, failures: R
       lastId = r.id;
       const aad = `evidence:${r.id}`;
       try {
-        const blob = await ctx.storage.get(r.storageKey);
+        // The row's own storage location (data residency): the blob is re-encrypted where it is.
+        const store = storageAt(ctx, r.storageLocation);
+        const blob = await store.get(r.storageKey);
         if (!blob) {
           sum.missing++;
           continue;
@@ -234,19 +239,20 @@ async function rekeyEvidence(ctx: RekeyCtx, sum: RekeyTargetSummary, failures: R
         // The blob header is authoritative (a previous run may have stopped after writing the blob).
         if (ctx.keyring.keyIdOf(blob) !== current) {
           const next = ctx.keyring.encrypt(ctx.keyring.decrypt(blob, aad), aad);
-          await ctx.storage.put(r.storageKey, next);
+          await store.put(r.storageKey, next);
         }
         const updated = await ctx.db
           .update(evidence)
           .set({ keyId: current })
-          .where(and(eq(evidence.id, r.id), eq(evidence.storageKey, r.storageKey), isNull(evidence.purgedAt)))
+          .where(and(eq(evidence.id, r.id), eq(evidence.storageKey, r.storageKey), evidenceAtLocation(r.storageLocation), isNull(evidence.purgedAt)))
           .returning({ id: evidence.id });
         if (updated.length) {
           sum.rekeyed++;
         } else {
-          // Purged (or moved) while we were writing: make sure the blob we wrote does not outlive the purge.
-          const [now] = await ctx.db.select({ purgedAt: evidence.purgedAt, storageKey: evidence.storageKey }).from(evidence).where(eq(evidence.id, r.id));
-          if (!now || now.purgedAt || now.storageKey !== r.storageKey) await ctx.storage.delete(r.storageKey);
+          // Purged (or moved by storage:move) while we were writing: make sure the blob we wrote does not outlive
+          // the purge or stay behind in the old location.
+          const [now] = await ctx.db.select({ purgedAt: evidence.purgedAt, storageKey: evidence.storageKey, storageLocation: evidence.storageLocation }).from(evidence).where(eq(evidence.id, r.id));
+          if (!now || now.purgedAt || now.storageKey !== r.storageKey || now.storageLocation !== r.storageLocation) await store.delete(r.storageKey);
           sum.skipped++;
         }
       } catch (err) {

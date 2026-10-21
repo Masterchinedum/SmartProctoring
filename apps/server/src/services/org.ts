@@ -25,6 +25,7 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   requireMfa: 'off',
   reviewSla: { ...DEFAULT_REVIEW_SLA },
   decisionConfigVersion: 1,
+  evidenceLocation: 'default',
 };
 
 /** Organisation settings with every field filled from defaults. */
@@ -43,6 +44,7 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
     requireMfa: s.requireMfa === 'admins' || s.requireMfa === 'everyone' ? s.requireMfa : 'off',
     reviewSla: reviewSlaSchema.safeParse({ ...DEFAULT_REVIEW_SLA, ...(s.reviewSla ?? {}) }).data ?? { ...DEFAULT_REVIEW_SLA },
     decisionConfigVersion: Number.isInteger(s.decisionConfigVersion) && s.decisionConfigVersion! >= 1 ? s.decisionConfigVersion! : 1,
+    evidenceLocation: typeof s.evidenceLocation === 'string' && s.evidenceLocation ? s.evidenceLocation : DEFAULT_ORG_SETTINGS.evidenceLocation,
   };
 }
 

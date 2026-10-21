@@ -106,7 +106,7 @@ describe('/metrics', () => {
     expect(value(text, 'sp_job_last_success_timestamp_seconds{job="retention"}')).toBe(Math.round(env.clock.t / 1000));
   });
 
-  it('counts failed evidence-store operations without changing what the caller sees', async () => {
+  it('counts failed evidence-store operations per storage location without changing what the caller sees', async () => {
     const m = new AppMetrics();
     const broken = new MemoryStorage();
     broken.put = async () => {
@@ -115,7 +115,12 @@ describe('/metrics', () => {
     const s = m.instrumentStorage(broken);
     await expect(s.put('a/b', Buffer.from('x'))).rejects.toThrow('disk full');
     expect(await s.get('a/b')).toBeNull();
-    expect(value(await m.registry.metrics(), 'sp_evidence_storage_errors_total{op="put"}')).toBe(1);
+    const eu = m.instrumentStorage(broken, 'eu');
+    await expect(eu.put('a/b', Buffer.from('x'))).rejects.toThrow('disk full');
+    await expect(eu.put('a/c', Buffer.from('x'))).rejects.toThrow('disk full');
+    const text = await m.registry.metrics();
+    expect(value(text, 'sp_evidence_storage_errors_total{op="put",location="default"}')).toBe(1);
+    expect(value(text, 'sp_evidence_storage_errors_total{op="put",location="eu"}')).toBe(2);
   });
 
   it('records face-analysis queue waits, analysis times and refusals from the worker pool', async () => {

@@ -174,7 +174,7 @@ export interface CliResult {
  * Run one of the server's operator CLIs exactly as documented (`pnpm --filter @sp/server <script> [args]`,
  * docs/OPERATIONS.md) with the given server environment.
  */
-export function runServerCli(script: 'retention:run' | 'rekey', args: string[], env: NodeJS.ProcessEnv, timeoutMs = 120_000): Promise<CliResult> {
+export function runServerCli(script: 'retention:run' | 'rekey' | 'storage:move', args: string[], env: NodeJS.ProcessEnv, timeoutMs = 120_000): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const p = spawn('pnpm', ['--filter', '@sp/server', script, ...args], { cwd: REPO_DIR, env: { ...env, LOG_LEVEL: 'warn' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';

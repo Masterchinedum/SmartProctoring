@@ -3,7 +3,9 @@
  *
  *   GET  /settings                                  -> OrgSettingsDTO               [admin]
  *   PUT  /settings  Partial<OrgSettingsDTO>         -> OrgSettingsDTO               [admin]
- *        (externalVerifier takes ExternalVerifierUpdate: write-only key pair, see src/verifiers/settings.ts)
+ *        (externalVerifier takes ExternalVerifierUpdate: write-only key pair, see src/verifiers/settings.ts;
+ *         requireMfa and evidenceLocation: owner only)
+ *   GET  /evidence-storage                          -> EvidenceStorageDTO           [admin]
  *   GET  /users                                     -> { items: StaffUserDTO[] }    [admin]
  *   POST /users {email,name,role,password}          -> StaffUserDTO                 [admin; only an owner may create owners/admins]
  *   PUT  /users/:id {name?,role?,disabled?,password?} -> StaffUserDTO               [admin]
@@ -16,10 +18,12 @@
  *   - disabling a user or resetting a password signs that user out everywhere.
  */
 import {
+  DEFAULT_EVIDENCE_LOCATION,
   settingsUpdateSchema,
   userCreateSchema,
   userUpdateSchema,
   type AuditLogEntryDTO,
+  type EvidenceStorageDTO,
   type OrgSettingsDTO,
   type Paged,
   type StaffRole,
@@ -34,6 +38,7 @@ import { audit } from '../../lib/audit.js';
 import { hashPassword } from '../../lib/crypto.js';
 import { badRequest, conflict, forbidden, notFound, validationFailed } from '../../lib/errors.js';
 import { toStaffUserDTO } from '../../services/dto.js';
+import { evidenceStorageSummary } from '../../services/evidence-storage.js';
 import { mergePolicy, orgSettings } from '../../services/org.js';
 import { clearLoginFailures } from '../../services/login-throttle.js';
 import { disableMfa } from '../../services/mfa.js';
@@ -72,6 +77,7 @@ export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
     requireMfa: s.requireMfa,
     reviewSla: { ...s.reviewSla },
     decisionConfigVersion: s.decisionConfigVersion,
+    evidenceLocation: s.evidenceLocation,
   };
 }
 
@@ -138,6 +144,15 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         const provided = Object.fromEntries(Object.entries(body.reviewSla).filter(([, v]) => v !== undefined));
         stored.reviewSla = { ...cur.reviewSla, ...provided };
       }
+      // Where new evidence images are stored (data residency): an owner's decision, among the server's locations.
+      if (body.evidenceLocation !== undefined && body.evidenceLocation !== cur.evidenceLocation) {
+        if (staff.role !== 'owner') throw forbidden('Only an owner can change where evidence images are stored', 'owner_required');
+        if (!ctx.storageLocations.has(body.evidenceLocation)) {
+          throw badRequest('This server has no storage location with that name.', [{ path: 'evidenceLocation', message: 'Unknown storage location' }], 'unknown_storage_location');
+        }
+        if (body.evidenceLocation === DEFAULT_EVIDENCE_LOCATION) delete stored.evidenceLocation;
+        else stored.evidenceLocation = body.evidenceLocation;
+      }
       // External second-opinion verifier: the key pair is encrypted here and never returned (verifiers/settings.ts).
       const verifier = body.externalVerifier !== undefined ? applyExternalVerifierUpdate({ keyring: ctx.keyring, config: ctx.config.externalVerifiers, orgId: staff.orgId, now }, cur.externalVerifier, body.externalVerifier) : null;
       if (verifier) stored.externalVerifier = verifier.next;
@@ -175,6 +190,7 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
           ...(changed.includes('emailAlerts') ? { emailAlerts: next.emailAlerts } : {}),
           ...(changed.includes('requireMfa') ? { requireMfa: { from: cur.requireMfa, to: next.requireMfa } } : {}),
           ...(changed.includes('reviewSla') ? { reviewSla: { from: cur.reviewSla, to: next.reviewSla } } : {}),
+          ...(changed.includes('evidenceLocation') ? { evidenceLocation: { from: cur.evidenceLocation, to: next.evidenceLocation } } : {}),
           ...(changed.includes('externalVerifier') && verifier ? { externalVerifier: externalVerifierAuditMeta(cur.externalVerifier, next.externalVerifier, verifier.credentials) } : {}),
         },
         ip: req.ip,
@@ -183,6 +199,12 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       return row;
     });
     return toOrgSettingsDTO(updated);
+  });
+
+  /** The server's storage locations, the organisation's choice and its images per location (data residency). */
+  app.get('/evidence-storage', admin, async (req): Promise<EvidenceStorageDTO> => {
+    const staff = getStaff(req);
+    return evidenceStorageSummary(ctx, staff.orgId);
   });
 
   /* ------------------------------------------------------------------ users */
