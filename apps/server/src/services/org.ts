@@ -1,4 +1,4 @@
-import { DEFAULT_IDENTITY_THRESHOLDS, identityThresholdsSchema, resolvePolicy, type IdentityThresholds, type ProctoringPolicy } from '@sp/shared';
+import { DEFAULT_IDENTITY_THRESHOLDS, DEFAULT_REVIEW_SLA, identityThresholdsSchema, resolvePolicy, reviewSlaSchema, type IdentityThresholds, type ProctoringPolicy } from '@sp/shared';
 import { eq } from 'drizzle-orm';
 import type { DbOrTx } from '../db/index.js';
 import { organizations, type Organization, type OrgSettings } from '../db/schema.js';
@@ -21,6 +21,7 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   emailAlerts: { holds: true, pauseRequests: true, highSeverity: true },
   externalVerifier: DEFAULT_EXTERNAL_VERIFIER_SETTINGS,
   requireMfa: 'off',
+  reviewSla: { ...DEFAULT_REVIEW_SLA },
 };
 
 /** Organisation settings with every field filled from defaults. */
@@ -37,6 +38,7 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
     emailAlerts: { ...DEFAULT_ORG_SETTINGS.emailAlerts, ...(s.emailAlerts ?? {}) },
     externalVerifier: normalizeExternalVerifierSettings(s.externalVerifier),
     requireMfa: s.requireMfa === 'admins' || s.requireMfa === 'everyone' ? s.requireMfa : 'off',
+    reviewSla: reviewSlaSchema.safeParse({ ...DEFAULT_REVIEW_SLA, ...(s.reviewSla ?? {}) }).data ?? { ...DEFAULT_REVIEW_SLA },
   };
 }
 

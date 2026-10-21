@@ -154,7 +154,7 @@ describe('policy exceptions', () => {
       ['browser.blockClipboard', 'browser.flagWindowBlur', 'browser.requireFullscreen', 'detection.enabled.lookingAway', 'detection.enabled.movement', 'identity.liveness', 'pause.maxPauses', 'pause.requireApproval'].sort(),
     );
     const [ev] = await env.ctx.db.select().from(events).where(and(eq(events.sessionId, sessionId), eq(events.type, 'accommodations_applied')));
-    expect(ev).toMatchObject({ category: 'neutral' });
+    expect(ev).toMatchObject({ category: 'exception' });
     expect(ev.observation).toBe('Approved accommodations were applied: Rest breaks, up to 4; Assistive technology; Not observed: looking away, unusual movement; No head-turn challenge.');
 
     // Rest breaks: a pause needs no approval.

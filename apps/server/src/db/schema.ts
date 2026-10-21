@@ -47,8 +47,12 @@ import type {
   PolicyExceptionDTO,
   ProctoringPolicyInput,
   QuestionType,
+  ReviewResolution,
+  ReviewSlaSettings,
   ReviewStatus,
   SessionEndReason,
+  SessionReviewOutcome,
+  SessionReviewState,
   SessionStatus,
   Severity,
   StaffRole,
@@ -85,6 +89,8 @@ export interface OrgSettings {
   externalVerifier: ExternalVerifierStoredSettings;
   /** Who must use two-step sign-in (services/mfa.ts). */
   requireMfa: MfaRequirement;
+  /** Service-level targets for review work (review queue, overdue holds). */
+  reviewSla: ReviewSlaSettings;
 }
 
 export const organizations = pgTable('organizations', {
@@ -815,6 +821,8 @@ export const events = pgTable(
     reviewedBy: uuid('reviewed_by'),
     reviewedAt: ts('reviewed_at'),
     reviewNote: text('review_note'),
+    /** What the reviewer concluded (services/review.ts); null for undecided events and older plain-status decisions. */
+    resolution: text('resolution').$type<ReviewResolution>(),
   },
   (t) => [
     index('events_session_started_idx').on(t.sessionId, t.startedAt),
@@ -822,6 +830,10 @@ export const events = pgTable(
     index('events_review_idx').on(t.reviewStatus),
     index('events_org_received_idx').on(t.orgId, t.receivedAt),
     index('events_type_idx').on(t.type),
+    // Undecided flags (review queue, review-backlog metrics): small even when the events table is large.
+    index('events_undecided_flags_idx')
+      .on(t.orgId, t.sessionId, t.firstReceivedAt)
+      .where(sql`${t.reviewStatus} = 'unreviewed' and ${t.category} in ('integrity', 'uncertain', 'technical')`),
   ],
 );
 
@@ -891,6 +903,68 @@ export const notes = pgTable(
   },
   (t) => [index('notes_session_idx').on(t.sessionId, t.createdAt), index('notes_event_idx').on(t.eventId)],
 );
+
+/**
+ * Every review decision on an event, oldest first (who, what, why; whether it changed another reviewer's decision).
+ * The event row holds the current decision; this is its history — reviewer disagreement and an exportable trail.
+ */
+export const eventReviews = pgTable(
+  'event_reviews',
+  {
+    id: id(),
+    /** Insertion order (decisions in the same millisecond keep their order). */
+    seq: bigserial('seq', { mode: 'number' }).notNull(),
+    orgId: uuid('org_id').notNull(),
+    eventId: uuid('event_id')
+      .notNull()
+      .references(() => events.id, { onDelete: 'cascade' }),
+    sessionId: uuid('session_id')
+      .notNull()
+      .references(() => examSessions.id, { onDelete: 'cascade' }),
+    reviewerId: uuid('reviewer_id').references(() => staffUsers.id, { onDelete: 'set null' }),
+    status: text('status').$type<ReviewStatus>().notNull(),
+    resolution: text('resolution').$type<ReviewResolution>(),
+    note: text('note'),
+    previousStatus: text('previous_status').$type<ReviewStatus>().notNull(),
+    previousResolution: text('previous_resolution').$type<ReviewResolution>(),
+    previousReviewerId: uuid('previous_reviewer_id'),
+    /** Changed a decision another reviewer had made (a disagreement). */
+    overrides: boolean('overrides').notNull().default(false),
+    /** Part of a bulk or incident decision. */
+    bulk: boolean('bulk').notNull().default(false),
+    at: ts('at').notNull(),
+  },
+  (t) => [index('event_reviews_event_idx').on(t.eventId, t.at), index('event_reviews_org_at_idx').on(t.orgId, t.at), index('event_reviews_session_idx').on(t.sessionId)],
+);
+export type EventReview = typeof eventReviews.$inferSelect;
+
+/**
+ * The review of a session as a whole (review queue): who is on it, escalation, and the final outcome. A row exists
+ * once someone assigned, escalated or resolved it; sessions with undecided flags or on hold need review without one.
+ */
+export const sessionReviews = pgTable(
+  'session_reviews',
+  {
+    sessionId: uuid('session_id')
+      .primaryKey()
+      .references(() => examSessions.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id').notNull(),
+    state: text('state').$type<SessionReviewState>().notNull().default('open'),
+    assigneeId: uuid('assignee_id').references(() => staffUsers.id, { onDelete: 'set null' }),
+    assignedAt: ts('assigned_at'),
+    assignedBy: uuid('assigned_by'),
+    escalatedAt: ts('escalated_at'),
+    escalatedBy: uuid('escalated_by'),
+    escalationNote: text('escalation_note'),
+    outcome: text('outcome').$type<SessionReviewOutcome>(),
+    outcomeNote: text('outcome_note'),
+    resolvedAt: ts('resolved_at'),
+    resolvedBy: uuid('resolved_by'),
+    updatedAt: ts('updated_at').notNull(),
+  },
+  (t) => [index('session_reviews_org_state_idx').on(t.orgId, t.state), index('session_reviews_assignee_idx').on(t.assigneeId)],
+);
+export type SessionReview = typeof sessionReviews.$inferSelect;
 
 export const auditLog = pgTable(
   'audit_log',

@@ -282,6 +282,26 @@ Review language is observational. Reports list every active period, pause, resum
 hold, identity-check outcomes, event counts per category, notable events, reviewer notes and the
 system's limitations.
 
+### Reviewer workflow (`packages/shared/src/{review,incidents,explain}.ts`, `services/review.ts`, `routes/admin/review.ts`)
+
+Five event categories keep the distinction reviewers need: potential integrity issue, uncertain observation,
+technical problem, session change, and policy exception (an approved accommodation — context, never a flag).
+Reviewers decide each flag with a structured resolution that answers two separate questions — was the detection
+right (precision), and is there an integrity concern — and implies the stored status, so older readers keep
+working. Every decision is kept in `event_reviews` (who, what, why; `overrides` when it changed another reviewer's
+decision, which requires a reason). Flags close in time form **incidents** (`groupIncidents`: within 30 s, a
+long-running condition extends its incident by at most 60 s); an incident's events can be decided together, and
+technical / low-severity flags in bulk — the server recomputes incidents and enforces eligibility. **Explanations**
+(`explainEvent`) say which rule recorded an event with the session's frozen settings, what was measured, and what
+weakens or explains it (coinciding poor light or degraded monitoring, a second opinion, an accommodation); built
+from the event, its session's rules and other events, so the drawer and the report agree.
+`session_reviews` holds a session's review: assignee, escalation (resolved by an administrator) and the outcome
+(`no_concerns | concerns | inconclusive | technical_issues`), which needs the exam to have ended and every flag
+decided; resolving adds a neutral `review_completed` timeline event (→ `session.reviewed` webhook, outcome only).
+Service-level targets (`settings.reviewSla`: held exams in minutes, flags in hours) give each session a due time
+(summary `review.due`) that orders the review queue, marks overdue holds on the dashboard and feeds the
+`sp_cluster_review_*` gauges. The audit log can be exported as CSV.
+
 ## 8. Privacy & retention
 
 Consent recorded before any camera analysis. Identity references and screenshots encrypted at rest,

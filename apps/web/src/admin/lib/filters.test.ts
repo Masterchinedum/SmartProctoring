@@ -3,7 +3,7 @@ import type { TimelineItemDTO } from '@sp/shared';
 import { makeCheck, makeEvent, makePeriod } from '../test/fixtures';
 import { checkMatches, DEFAULT_FILTERS, eventMatches, filtersActive, filterTimeline, presentTypes, sortEvents, toggleCategory } from './filters';
 
-const reviewed = { status: 'reviewed' as const, by: 'u', byName: 'R', at: 1, note: null };
+const reviewed = { status: 'reviewed' as const, by: 'u', byName: 'R', at: 1, note: null, resolution: null };
 
 describe('eventMatches', () => {
   const phone = makeEvent('phone_detected', 10);

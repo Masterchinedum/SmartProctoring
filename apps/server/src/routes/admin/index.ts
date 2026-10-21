@@ -7,6 +7,7 @@ import { examRoutes } from './exams.js';
 import { integrationRoutes } from './integrations.js';
 import { metricsRoutes } from './metrics.js';
 import { orgRoutes } from './org.js';
+import { reviewRoutes } from './review.js';
 import { sessionRoutes } from './sessions.js';
 import { toolRoutes } from './tools.js';
 import { verifierRoutes } from './verifiers.js';
@@ -35,6 +36,7 @@ import { verifierRoutes } from './verifiers.js';
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(sessionRoutes);
   await app.register(eventRoutes);
+  await app.register(reviewRoutes);
   await app.register(evidenceRoutes);
   await app.register(examRoutes);
   await app.register(candidatesRoutes);

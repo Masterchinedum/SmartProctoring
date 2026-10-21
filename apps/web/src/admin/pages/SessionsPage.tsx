@@ -9,6 +9,7 @@ import { STATUS_LABELS } from '../lib/labels';
 import { kindsSummary } from '../lib/accommodations';
 import { CategoryCounts, ConnectionBadge, DecisionBadge, StatusBadge } from '../components/Badges';
 import { EmptyState, ErrorState, Loading, PageHeader, Pager } from '../components/Common';
+import { ReviewSummaryCell } from '../components/ReviewBits';
 import { Countdown, RelativeTime, TimeOfDay } from '../components/Time';
 
 const LIMIT = 50;
@@ -98,7 +99,7 @@ export function SessionsPage() {
                   <th>Remaining</th>
                   <th>Pauses</th>
                   <th>Flags</th>
-                  <th>Unreviewed</th>
+                  <th>Review</th>
                   <th>Last identity check</th>
                 </tr>
               </thead>
@@ -142,7 +143,9 @@ export function SessionsPage() {
                     <td>
                       <CategoryCounts counts={s.counts} compact />
                     </td>
-                    <td>{s.counts.unreviewed > 0 ? <span className="badge badge-warning">{s.counts.unreviewed}</span> : <span className="muted">0</span>}</td>
+                    <td>
+                      <ReviewSummaryCell review={s.review} />
+                    </td>
                     <td>
                       {s.identity.lastDecision ? (
                         <>

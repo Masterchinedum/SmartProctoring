@@ -14,6 +14,7 @@ import { candidateInputSchema } from './api';
 import { SEVERITIES, type EventCategory, type EventType, type Severity } from './events';
 import type { SessionEndReason, SessionStatus } from './session';
 import type { AccommodationKind } from './accommodations';
+import type { SessionReviewOutcome, SessionReviewState } from './review';
 
 /* =================================================================== API keys */
 
@@ -53,6 +54,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'session.regraded', // the score changed after an administrator corrected answer keys (exam versions) — includes the new score
   'session.terminated', // ended without submission (staff, or closed automatically after inactivity)
   'identity.mismatch', // convenience: a possible different person was observed (sent regardless of minSeverity)
+  'session.reviewed', // staff completed the review of the exam — includes the outcome (never the staff note)
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 /** Sent only by POST /api/admin/webhooks/:id/test. */
@@ -68,6 +70,7 @@ export const WEBHOOK_EVENT_LABELS: Record<WebhookEventType, string> = {
   'session.regraded': 'Score regraded',
   'session.terminated': 'Exam ended without submission',
   'identity.mismatch': 'Possible different person',
+  'session.reviewed': 'Review completed (with the outcome)',
 };
 
 export const WEBHOOK_SIGNATURE_HEADER = 'X-SmartProctoring-Signature';
@@ -265,11 +268,19 @@ export interface IntegrationSessionDTO {
   hold: HoldDTO | null;
   /** The candidate's access link — GET /sessions/:id only (null in lists and once unavailable). */
   accessLink: string | null;
+  /**
+   * Staff review of the attempt: 'none' (not picked up), 'open', 'escalated' or 'resolved' with the outcome
+   * (no_concerns | concerns | inconclusive | technical_issues; also sent as the session.reviewed webhook).
+   */
+  review: { state: SessionReviewState | 'none'; outcome: SessionReviewOutcome | null };
   staffUrl: string;
 }
 
 /** EventDTO without evidence references (evidence images are staff-only); `evidenceCount` says how many exist. */
 export type IntegrationEventDTO = Omit<EventDTO, 'evidence'> & { evidenceCount: number; staffUrl: string };
 
-/** The staff session report with evidence references replaced by counts and staff links. */
-export type IntegrationSessionReportDTO = Omit<SessionReportDTO, 'notableEvents'> & { notableEvents: IntegrationEventDTO[]; staffUrl: string };
+/**
+ * The staff session report with evidence references replaced by counts and staff links. The reviewer-facing
+ * explanations are not included (they quote detector and identity measurements).
+ */
+export type IntegrationSessionReportDTO = Omit<SessionReportDTO, 'notableEvents' | 'explanations'> & { notableEvents: IntegrationEventDTO[]; staffUrl: string };

@@ -136,17 +136,28 @@ A *session* is one candidate's attempt at one exam.
   answer keys of the attempt's own exam version (`examVersion`; null until the attempt starts). `regraded` counts
   administrator regrades (a corrected answer key applied to finished attempts — see `session.regraded` below); the
   report's `score.regrades` lists each one with the score before it and the reason.
+* `review { state, outcome }`: the staff review of the attempt — `state` `none` (not picked up yet), `open`,
+  `escalated` or `resolved`; `outcome` once resolved: `no_concerns`, `concerns` (refer under your
+  integrity process), `inconclusive` or `technical_issues` (problems outside the candidate's control may have
+  affected the attempt). The outcome is a staff decision, never automated; it is also sent as `session.reviewed`.
 
 `GET /api/v1/sessions/:id/report?tz=Europe/Berlin` → the same final report the staff app shows (periods,
 totals of observed / unobserved time, identity-check summary, event counts per category and type, notable
-events, factual observations, reviewer notes, limitations). The only difference: evidence references are
-replaced by `evidenceCount` and a `staffUrl` per event, plus a `staffUrl` for the session. `tz` sets the time
-zone for times written in sentences (default UTC).
+events, factual observations, reviewer notes, limitations, the review with its outcome and note, and the incidents
+— flags close in time, grouped). The differences: evidence references are replaced by `evidenceCount` and a
+`staffUrl` per event, plus a `staffUrl` for the session, and the reviewer-facing explanations of events are left
+out (they quote detector and identity measurements). `tz` sets the time zone for times written in sentences
+(default UTC).
 
 `GET /api/v1/sessions/:id/events?category=&type=&severity=&since=` → `{ items: Event[] }`, chronological.
-Each event: `id, sessionId, type, category (integrity | uncertain | neutral | technical), severity (info | low
-| medium | high), source, status (open | closed), title, observation, startedAt, endedAt, durationMs,
-confidence, details, context, review { status, by, byName, at, note }, notesCount, receivedAt, deliveredLate,
+Categories: `integrity` (a potential integrity issue), `uncertain` (an observation that could not be assessed
+reliably), `technical` (a technical problem), `neutral` (a session change) and `exception` (the attempt ran under
+an approved accommodation / policy exception — context, never a flag). `review.resolution` is the reviewer's
+structured conclusion: `concern`, `no_concern`, `accommodation`, `technical`, `inconclusive` or `false_detection`
+(null for older plain decisions and for undecided events).
+Each event: `id, sessionId, type, category (integrity | uncertain | technical | neutral | exception), severity
+(info | low | medium | high), source, status (open | closed), title, observation, startedAt, endedAt, durationMs,
+confidence, details, context, review { status, resolution, by, byName, at, note }, notesCount, receivedAt, deliveredLate,
 evidenceCount, staffUrl`. `since` filters by the time the server received the latest version (use it for
 incremental polling).
 
@@ -178,6 +189,7 @@ delivers a `ping` immediately.
 | `session.submitted` | Submitted by the candidate, on time expiry or by staff | session fields, `endReason`, `score` |
 | `session.terminated` | Ended by staff, or closed automatically after inactivity | session fields, `endReason`, `reason` (`abandoned_after_inactivity` or null) |
 | `session.regraded` | An administrator regraded the finished attempt with corrected answer keys / points (sent only when its score or a question's result changed) | session fields, `score` (the new one), `reason` (the administrator's) |
+| `session.reviewed` | Staff completed the review of the attempt (sent again if a reopened review is completed again) | session fields, `outcome` (`no_concerns` \| `concerns` \| `inconclusive` \| `technical_issues`; never the reviewer's note) |
 | `ping` | “Send test” in the staff app | `{ webhookId, message, sentBy }` |
 
 Event fields: `id, sessionId, type, category, severity, title, observation, status, startedAt, endedAt,

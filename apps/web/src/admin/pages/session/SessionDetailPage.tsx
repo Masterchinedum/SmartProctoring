@@ -21,11 +21,13 @@ import { TimelineTab } from './TimelineTab';
 import { EventsTab } from './EventsTab';
 import { IdentityTab } from './IdentityTab';
 import { DevicesTab, NotesTab, PeriodsTab } from './MiscTabs';
+import { ReviewTab } from './ReviewTab';
 
 const TABS = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'events', label: 'Events' },
   { id: 'identity', label: 'Identity' },
+  { id: 'review', label: 'Review' },
   { id: 'periods', label: 'Periods' },
   { id: 'devices', label: 'Devices' },
   { id: 'notes', label: 'Notes' },
@@ -59,6 +61,18 @@ export function SessionDetailPage() {
   );
   const openEvent = useCallback((eventId: string) => setParam('event', eventId), [setParam]);
   const closeEvent = useCallback(() => setParam('event', null), [setParam]);
+  // From the event drawer: the Review tab with that incident in focus.
+  const openIncident = useCallback(
+    (incidentId: string) =>
+      setParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('event');
+        next.set('tab', 'review');
+        next.set('incident', incidentId);
+        return next;
+      }),
+    [setParams],
+  );
 
   if (detail.isPending) return <Loading label="Loading session…" />;
   if (detail.isError) return <ErrorState error={detail.error} onRetry={() => void detail.refetch()} />;
@@ -72,6 +86,7 @@ export function SessionDetailPage() {
     periods: d.periods.length,
     devices: d.devices.length,
     notes: notesCount,
+    review: d.review.undecided.integrity + d.review.undecided.uncertain + d.review.undecided.technical,
   };
 
   return (
@@ -99,11 +114,12 @@ export function SessionDetailPage() {
         {tab === 'timeline' ? <TimelineTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} /> : null}
         {tab === 'events' ? <EventsTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} /> : null}
         {tab === 'identity' ? <IdentityTab d={d} onOpenEvent={openEvent} /> : null}
+        {tab === 'review' ? <ReviewTab d={d} onOpenEvent={openEvent} focusIncidentId={params.get('incident')} /> : null}
         {tab === 'periods' ? <PeriodsTab d={d} /> : null}
         {tab === 'devices' ? <DevicesTab d={d} /> : null}
         {tab === 'notes' ? <NotesTab d={d} onOpenEvent={openEvent} /> : null}
       </div>
-      {openEventId ? <EventDrawer key={openEventId} eventId={openEventId} sessionId={id} initial={initialEvent} onClose={closeEvent} /> : null}
+      {openEventId ? <EventDrawer key={openEventId} eventId={openEventId} sessionId={id} initial={initialEvent} onClose={closeEvent} onOpenIncident={openIncident} /> : null}
     </div>
   );
 }

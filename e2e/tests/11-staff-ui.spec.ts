@@ -69,16 +69,21 @@ test('staff UI: dashboard, live flag, drawer, review, notes, filters, report, CS
     await expect(sp.getByRole('dialog', { name: 'Image viewer' })).toBeVisible();
     await sp.getByRole('dialog', { name: 'Image viewer' }).getByRole('button', { name: 'Close' }).click();
 
-    /* ---------------- review with a note, and an event note */
-    await drawer.getByLabel('Review note (optional)').fill('Second person visible behind the candidate.');
-    await drawer.getByRole('button', { name: 'Mark reviewed' }).click();
-    await expect(drawer.locator('.review-panel')).toContainText('Reviewed');
-    await expect(drawer.locator('.review-note')).toContainText('Second person visible behind the candidate.');
+    /* ---------------- why it was recorded; a structured decision with a note; an event note */
+    await expect(drawer.getByTestId('explanation')).toContainText('Recorded when a second face or person stays in view');
+    await expect(drawer.getByTestId('record-decision')).toBeDisabled();
+    await drawer.getByLabel(/^Integrity concern/).check();
+    await drawer.getByLabel('Note (optional)').fill('Second person visible behind the candidate.');
+    await drawer.getByTestId('record-decision').click();
+    await expect(drawer.locator('.review-panel')).toContainText('Integrity concern');
+    await expect(drawer.locator('.review-note').first()).toContainText('Second person visible behind the candidate.');
+    await expect(drawer.getByTestId('decision-history')).toContainText('Decision history (1)');
     await drawer.getByPlaceholder('Add a note for other reviewers…').fill('Asked the candidate to keep the room clear.');
     await drawer.getByRole('button', { name: 'Add note' }).click();
     await expect(drawer.locator('.notes')).toContainText('Asked the candidate to keep the room clear.');
-    const reviewed = await staff.json<{ review: { status: string; note: string | null; byName: string | null }; notesCount: number }>('get', `/api/admin/events/${mp.id}`);
+    const reviewed = await staff.json<{ review: { status: string; resolution: string | null; note: string | null; byName: string | null }; notesCount: number }>('get', `/api/admin/events/${mp.id}`);
     expect(reviewed.review.status).toBe('reviewed');
+    expect(reviewed.review.resolution).toBe('concern');
     expect(reviewed.review.note).toBe('Second person visible behind the candidate.');
     expect(reviewed.notesCount).toBeGreaterThanOrEqual(1);
     await drawer.getByRole('button', { name: 'Close' }).click();
@@ -102,14 +107,15 @@ test('staff UI: dashboard, live flag, drawer, review, notes, filters, report, CS
     await sp.getByRole('button', { name: 'Clear filters' }).click();
 
     // Chrome's file-backed fake camera is (correctly) reported as a possible virtual camera: dismiss it.
-    const other = await staff.waitForEvent(s.sessionId, (e) => e.category !== 'neutral' && e.type !== 'multiple_people' && e.review.status === 'unreviewed', {
+    const other = await staff.waitForEvent(s.sessionId, (e) => ['integrity', 'uncertain', 'technical'].includes(e.category) && e.type !== 'multiple_people' && e.review.status === 'unreviewed', {
       timeout: 15_000,
       message: 'another non-neutral event to dismiss (camera_feed_suspect expected)',
     });
     await sp.reload();
     await rows.filter({ hasText: other.title }).first().click();
-    await eventDrawer(sp).getByRole('button', { name: 'Dismiss as false positive' }).click();
-    await expect(eventDrawer(sp).locator('.review-panel')).toContainText('Dismissed');
+    await eventDrawer(sp).getByLabel(/^False detection/).check();
+    await eventDrawer(sp).getByTestId('record-decision').click();
+    await expect(eventDrawer(sp).locator('.review-panel')).toContainText('False detection');
     await eventDrawer(sp).getByRole('button', { name: 'Close' }).click();
     expect((await staff.json<{ review: { status: string } }>('get', `/api/admin/events/${other.id}`)).review.status).toBe('dismissed');
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { EVENT_TYPES, REVIEW_STATUSES, type EventCategory, type EventSource, type EventType, type ReviewStatus, type Severity } from './events';
+import { EVENT_CATEGORIES, EVENT_TYPES, REVIEW_STATUSES, type EventCategory, type EventSource, type EventType, type ReviewStatus, type Severity } from './events';
 import type { ProctoringPolicy } from './policy';
 import type { CheckPurpose, ConnectionStatus, EndReason, HoldReason, PeriodKind, SessionEndReason, SessionStatus } from './session';
 import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityResultDTO, LivenessChallengeDTO, LivenessResultDTO } from './identity';
@@ -8,6 +8,9 @@ import { IDENTITY_CHECK_TRIGGERS } from './identity';
 import { externalVerifierUpdateSchema, type ExternalVerifierSettingsDTO } from './verifiers';
 import type { AccommodationKind, SessionAccommodationsDTO } from './accommodations';
 import { MFA_REQUIREMENTS, type MfaRequirement } from './mfa';
+import { reviewSlaSchema, type QueueView, type ReviewDecisionDTO, type ReviewResolution, type ReviewSlaSettings, type SessionReviewDTO, type SessionReviewSummaryDTO } from './review';
+import type { EventExplanation } from './explain';
+import type { Incident } from './incidents';
 
 /**
  * HTTP API contract. Paths are relative to the server origin.
@@ -59,12 +62,22 @@ export interface EventDTO {
   /** Surrounding context, e.g. { precededBy: ['session_resumed'], periodKind: 'active' }. */
   context: Record<string, unknown>;
   evidence: EvidenceRefDTO[];
-  review: { status: ReviewStatus; by: string | null; byName: string | null; at: number | null; note: string | null };
+  review: { status: ReviewStatus; resolution: ReviewResolution | null; by: string | null; byName: string | null; at: number | null; note: string | null };
   notesCount: number;
   /** When the server received the latest version. */
   receivedAt: number;
   /** true if delivered well after it occurred (e.g. buffered during an outage). */
   deliveredLate: boolean;
+}
+
+/** GET /api/admin/events/:id — the event with what a reviewer needs to decide it. */
+export interface EventDetailDTO extends EventDTO {
+  /** Why it was recorded, with this exam's settings (./explain.ts). */
+  explanation: EventExplanation;
+  /** Review decisions, oldest first. */
+  history: ReviewDecisionDTO[];
+  /** The incident it belongs to (flags close in time, ./incidents.ts); null for session changes. */
+  incident: Incident | null;
 }
 
 export interface PeriodDTO {
@@ -479,6 +492,15 @@ export interface SessionSummaryDTO {
   examVersion?: { id: string; number: number } | null;
   /** Kinds of the approved accommodations applied to this attempt (empty: none). Details: SessionDetailDTO.accommodations. */
   accommodations?: AccommodationKind[];
+  /** Review work on this session (queue state, assignee, outcome, service-level target). */
+  review?: SessionReviewSummaryDTO;
+}
+
+/** GET /api/admin/review-queue?view=&examId=&limit= */
+export interface ReviewQueueDTO {
+  items: SessionSummaryDTO[];
+  counts: Record<QueueView, number>;
+  sla: ReviewSlaSettings;
 }
 
 export interface IdentityCheckDTO {
@@ -560,6 +582,8 @@ export interface SessionDetailDTO {
   accommodations: SessionAccommodationsDTO | null;
   /** Identity verifications by staff (policy.identity.verification 'staff'), oldest first. */
   staffVerifications: StaffVerificationDTO[];
+  /** The session's review (queue state, escalation, outcome). */
+  review: SessionReviewDTO;
 }
 
 export const STAFF_VERIFICATION_METHODS = ['video_call', 'in_person', 'id_document_on_camera', 'other'] as const;
@@ -590,7 +614,7 @@ export interface SessionScoreDTO {
 
 /** GET /api/admin/sessions/:id/events?category=&type=&severity=&review=&since= */
 export const eventFilterSchema = z.object({
-  category: z.enum(['integrity', 'uncertain', 'neutral', 'technical']).optional(),
+  category: z.enum(EVENT_CATEGORIES).optional(),
   type: z.string().optional(),
   severity: z.enum(['info', 'low', 'medium', 'high']).optional(),
   review: z.enum(REVIEW_STATUSES).optional(),
@@ -603,8 +627,6 @@ export type TimelineItemDTO =
   | { kind: 'event'; at: number; event: EventDTO }
   | { kind: 'identity_check'; at: number; check: IdentityCheckDTO };
 
-/** POST /api/admin/events/:id/review */
-export const reviewRequestSchema = z.object({ status: z.enum(REVIEW_STATUSES), note: z.string().max(2000).optional() });
 /** POST /api/admin/sessions/:id/notes  and  POST /api/admin/events/:id/notes */
 export const noteRequestSchema = z.object({ text: z.string().min(1).max(5000) });
 /** POST /api/admin/sessions/:id/pause-requests/:requestId/decision */
@@ -678,6 +700,12 @@ export interface SessionReportDTO {
   /** Approved accommodations and the exam rules they changed (null: none). */
   accommodations: SessionAccommodationsDTO | null;
   limitations: string[];
+  /** The review of the session (state, outcome with its note, escalation). */
+  review?: SessionReviewDTO;
+  /** Flags grouped by time (./incidents.ts), oldest first. */
+  incidents?: Incident[];
+  /** Why each notable event was recorded (./explain.ts), by event id. */
+  explanations?: Record<string, EventExplanation>;
 }
 
 /* ---- exams, candidates, assignments */
@@ -878,6 +906,8 @@ export interface OrgSettingsDTO {
   externalVerifier: ExternalVerifierSettingsDTO;
   /** Who must use two-step sign-in (./mfa.ts). Only an owner can change it. */
   requireMfa: MfaRequirement;
+  /** Service-level targets for review work (./review.ts): decide held exams within minutes, flags within hours. */
+  reviewSla: ReviewSlaSettings;
 }
 
 export interface EmailAlertToggles {
@@ -900,7 +930,13 @@ export interface DetectionQualityDTO {
     reviewed: number;
     dismissed: number;
     unreviewed: number;
-    /** reviewed / (reviewed + dismissed); null if no decisions. Production precision proxy. */
+    /** Reviewed as "inconclusive" (the reviewer could not tell): excluded from precision. */
+    inconclusive: number;
+    /** Decisions by resolution (./review.ts); events decided with a plain status are not listed. */
+    byResolution: Partial<Record<ReviewResolution, number>>;
+    /** Events whose decision another reviewer changed (reviewer disagreement). */
+    overridden: number;
+    /** correct / (correct + false detections), "inconclusive" excluded; null if no decisions. Production precision proxy. */
     precision: number | null;
   }[];
   identity: {
@@ -908,8 +944,12 @@ export interface DetectionQualityDTO {
     byDecision: Record<IdentityDecision, number>;
     byTrigger: Record<string, Record<IdentityDecision, number>>;
     mismatchEventsDismissed: number;
+    /** Kept by a reviewer with a conclusion ("inconclusive" not counted). */
     mismatchEventsConfirmed: number;
+    mismatchEventsInconclusive: number;
   };
+  /** Reviewer agreement over the period: decisions on flags, and how many changed another reviewer's decision. */
+  reviewers: { decisions: number; overrides: number; overrideRate: number | null };
   offlineEvaluation: unknown | null; // { reports: [{ id, kind, createdAt, global, report }] } — latest per kind (see docs/accuracy/)
 }
 
@@ -1080,6 +1120,7 @@ export const settingsUpdateSchema = z.object({
   externalVerifier: externalVerifierUpdateSchema.optional(),
   /** Owner only. */
   requireMfa: z.enum(MFA_REQUIREMENTS).optional(),
+  reviewSla: reviewSlaSchema.partial().optional(),
 });
 export const legalHoldSchema = z.object({ enabled: z.boolean() });
 export const staffSubmitSchema = z.object({ note: z.string().max(1000).optional() });

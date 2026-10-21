@@ -10,6 +10,7 @@ import { EmptyState, ErrorState, Loading } from './components/Common';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { SessionsPage } from './pages/SessionsPage';
+import { ReviewQueuePage } from './pages/ReviewQueuePage';
 import { SessionDetailPage } from './pages/session/SessionDetailPage';
 import { ComparePage } from './pages/ComparePage';
 import { ReportPage } from './pages/ReportPage';
@@ -37,6 +38,7 @@ export default function AdminApp() {
       <Route element={<AuthedLayout />}>
         <Route index element={<DashboardPage />} />
         <Route path="sessions" element={<SessionsPage />} />
+        <Route path="review" element={<ReviewQueuePage />} />
         <Route path="sessions/:id" element={<SessionDetailPage />} />
         <Route path="sessions/:id/compare/:eventId" element={<ComparePage />} />
         <Route path="sessions/:id/report" element={<ReportPage />} />

@@ -1,8 +1,10 @@
 import {
   CATEGORY_LABELS,
+  RESOLUTION_INFO,
   type ConnectionStatus,
   type EventCategory,
   type IdentityDecision,
+  type ReviewResolution,
   type ReviewStatus,
   type SessionStatus,
   type Severity,
@@ -101,7 +103,24 @@ const REVIEW_CLASS: Record<ReviewStatus, string> = {
   dismissed: 'badge',
 };
 
-export function ReviewBadge({ status }: { status: ReviewStatus }) {
+const RESOLUTION_CLASS: Record<ReviewResolution, string> = {
+  concern: 'badge badge-danger',
+  no_concern: 'badge badge-success',
+  accommodation: 'badge badge-exception',
+  technical: 'badge badge-technical',
+  inconclusive: 'badge badge-warning',
+  false_detection: 'badge',
+};
+
+/** The review decision: the resolution when there is one (taxonomy), else the plain status. */
+export function ReviewBadge({ status, resolution }: { status: ReviewStatus; resolution?: ReviewResolution | null }) {
+  if (resolution && status !== 'unreviewed') {
+    return (
+      <span className={RESOLUTION_CLASS[resolution]} title={RESOLUTION_INFO[resolution].description}>
+        {RESOLUTION_INFO[resolution].label}
+      </span>
+    );
+  }
   return <span className={REVIEW_CLASS[status]}>{REVIEW_LABELS[status]}</span>;
 }
 

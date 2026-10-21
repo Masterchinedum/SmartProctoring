@@ -22,7 +22,7 @@ export function makeEvent(type: EventType, startedAt: number, patch: Partial<Eve
     details: {},
     context: {},
     evidence: [],
-    review: { status: 'unreviewed', by: null, byName: null, at: null, note: null },
+    review: { status: 'unreviewed', resolution: null, by: null, byName: null, at: null, note: null },
     notesCount: 0,
     receivedAt: startedAt + 1000,
     deliveredLate: false,

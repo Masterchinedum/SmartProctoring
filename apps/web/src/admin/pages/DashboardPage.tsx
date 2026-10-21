@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { EVENT_CATALOG, type EventCategory, type LiveEventDTO, type SessionSummaryDTO } from '@sp/shared';
+import { EVENT_CATALOG, isFlagCategory, type EventCategory, type LiveEventDTO, type SessionSummaryDTO } from '@sp/shared';
 import { announce, tabProps } from '../../lib/a11y';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { afterSessionAction, qk } from '../api/queries';
@@ -26,6 +26,7 @@ import {
 import { CategoryBadge, CategoryCounts, ConnectionBadge, DecisionBadge, ReviewBadge, StatusBadge } from '../components/Badges';
 import { EmptyState, ErrorState, Loading, PageHeader, Stat } from '../components/Common';
 import { EvidenceImage } from '../components/EvidenceImage';
+import { DueBadge } from '../components/ReviewBits';
 import { Clock, Countdown, LiveDuration, RelativeTime, ReportingInterrupted } from '../components/Time';
 
 const FLASH_MS = 10_000;
@@ -100,7 +101,7 @@ export function DashboardPage() {
     if (msg.type === 'event' && isNew && (msg.event.severity === 'high' || msg.event.category === 'integrity')) {
       flashIds([msg.event.id, msg.event.sessionId]);
     }
-    if (msg.type === 'event' && isNew && msg.event.category !== 'neutral') {
+    if (msg.type === 'event' && isNew && isFlagCategory(msg.event.category)) {
       announceFlag({ ...msg.event, candidateName: msg.candidateName, examTitle: msg.examTitle });
     }
   });
@@ -166,6 +167,7 @@ function NeedsAttention({ pauses, holds }: { pauses: AttentionPause[]; holds: Re
                 {h.hold.canReverify ? <span className="muted"> · released by staff, waiting for the candidate’s fresh identity check</span> : null}
               </div>
               {h.hold.message ? <div className="muted small">{h.hold.message}</div> : null}
+              {h.due && !h.hold.canReverify ? <DueBadge due={h.due} /> : null}
             </div>
             <Link className="btn btn-primary btn-sm" to={`/admin/sessions/${h.sessionId}`}>
               Review<span className="visually-hidden"> hold of {h.candidateName}</span>
@@ -475,7 +477,7 @@ function FlagsFeed({ events, flash }: { events: LiveEventDTO[]; flash: Set<strin
                     )}
                     {e.confidence != null ? <> · {formatPercent(e.confidence)} confidence</> : null}
                     {e.deliveredLate ? <span className="badge badge-technical">Delivered late</span> : null}
-                    {e.review.status !== 'unreviewed' ? <ReviewBadge status={e.review.status} /> : null}
+                    {e.review.status !== 'unreviewed' ? <ReviewBadge status={e.review.status} resolution={e.review.resolution} /> : null}
                   </div>
                 </div>
               </button>

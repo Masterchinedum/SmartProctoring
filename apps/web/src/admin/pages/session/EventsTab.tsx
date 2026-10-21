@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { EVENT_CATALOG } from '@sp/shared';
+import { EVENT_CATALOG, isFlagCategory } from '@sp/shared';
 import { api, shouldRetry } from '../../api/client';
 import { qk } from '../../api/queries';
 import { eventMatches, presentTypes, sortEvents, type EventFilterState, type EventSortKey } from '../../lib/filters';
@@ -100,7 +100,7 @@ export function EventsTab({
                   <td className="nowrap">{EVENT_CATALOG[e.type]?.span !== false ? <LiveDuration from={e.startedAt} to={e.endedAt} /> : <span className="muted">instant</span>}</td>
                   <td>{e.confidence != null ? formatPercent(e.confidence) : <span className="muted">n/a</span>}</td>
                   <td>
-                    {e.category === 'neutral' ? <span className="muted small">n/a</span> : <ReviewBadge status={e.review.status} />}
+                    {isFlagCategory(e.category) ? <ReviewBadge status={e.review.status} resolution={e.review.resolution} /> : <span className="muted small">n/a</span>}
                     {e.notesCount ? <div className="muted small">{e.notesCount} note(s)</div> : null}
                   </td>
                   <td>{e.evidence.length ? <EvidenceImage evidence={e.evidence[0]} size="thumb" alt="" /> : <span className="muted small">—</span>}</td>

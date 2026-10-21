@@ -6,12 +6,13 @@
  *
  *   event row touched by the mutation            -> webhook notification / email alert
  *   ------------------------------------------------------------------------------------------------
- *   non-neutral event, first seen               -> event.created   (webhook minSeverity filter)
- *   non-neutral span event, closed               -> event.closed    (dedupe per end time)
+ *   flag (integrity / uncertain / technical), first seen -> event.created (webhook minSeverity filter)
+ *   flag span event, closed                      -> event.closed    (dedupe per end time)
  *   identity_mismatch, first seen                -> identity.mismatch
  *   session_held / hold_released, first seen     -> session.held / session.released
  *   pause_requested, first seen                  -> session.pause_requested
  *   session_submitted / session_terminated       -> session.submitted / session.terminated
+ *   review_completed                             -> session.reviewed (outcome only)
  *   session_held | pause_requested | high-severity non-neutral event -> email alert (org toggles)
  *
  * The inserts run in a SAVEPOINT: if anything here fails, the integration rows are rolled back and logged, but
@@ -22,7 +23,7 @@
  * EVENT_CATALOG title/observation, never the client-supplied `observation`; other user-controlled text (the
  * candidate's pause reason) has links removed (lib/text-safety.ts). Event `details` are never forwarded.
  */
-import { EVENT_CATALOG, type EventSource, type EventType, type HoldReason, type SessionStatus } from '@sp/shared';
+import { EVENT_CATALOG, isFlagCategory, type EventSource, type EventType, type HoldReason, type SessionStatus } from '@sp/shared';
 import { and, eq, inArray } from 'drizzle-orm';
 import { events, webhooks, type EventRow } from '../db/schema.js';
 import { stripUrls } from '../lib/text-safety.js';
@@ -38,6 +39,7 @@ const SESSION_NOTIFICATIONS: Partial<Record<EventRow['type'], WebhookNotificatio
   session_submitted: 'session.submitted',
   session_terminated: 'session.terminated',
   score_regraded: 'session.regraded',
+  review_completed: 'session.reviewed',
 };
 
 function str(v: unknown): string | null {
@@ -118,7 +120,7 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           staffUrl: `${staffUrl}?event=${ev.id}`,
         };
 
-        if (ev.category !== 'neutral') {
+        if (isFlagCategory(ev.category)) {
           if (created) notifications.push({ type: 'event.created', dedupeKey: `event.created:${ev.id}`, sessionId: s.id, data: eventData, severity: ev.severity });
           if (ev.status === 'closed' && EVENT_CATALOG[ev.type]?.span) {
             notifications.push({ type: 'event.closed', dedupeKey: `event.closed:${ev.id}:${endedAt ?? startedAt}`, sessionId: s.id, data: eventData, severity: ev.severity });
@@ -150,6 +152,8 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           if (ev.type === 'pause_requested') data.pauseRequest = { id: str(d.requestId), reason: outboundReason(d.reason, 1000) };
           if (ev.type === 'session_submitted' || ev.type === 'score_regraded') data.score = s.score ? { points: s.score.points, maxPoints: s.score.maxPoints, autoGraded: s.score.autoGraded } : null;
           if (ev.type === 'score_regraded') data.reason = outboundReason(d.reason, 1000);
+          // The structured outcome only; the reviewer's note stays in the staff app.
+          if (ev.type === 'review_completed') data.outcome = str(d.outcome);
           // Free-text staff notes are never forwarded; only the structured automatic reason.
           if (ev.type === 'session_terminated') data.reason = str(d.reason) === 'abandoned_after_inactivity' ? 'abandoned_after_inactivity' : null;
           notifications.push({ type: sessionType, dedupeKey: `${sessionType}:${ev.id}`, sessionId: s.id, data });

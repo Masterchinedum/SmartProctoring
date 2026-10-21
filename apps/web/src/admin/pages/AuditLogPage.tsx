@@ -22,6 +22,7 @@ const COMMON_ACTIONS = [
   'auth.mfa_replaced',
   'auth.password_changed',
   'auth.recovery_code_used',
+  'audit_log.exported',
   'candidate.consent',
   'candidate.created',
   'candidate.deleted',
@@ -43,6 +44,10 @@ const COMMON_ACTIONS = [
   'note.created',
   'reference.re_enrolled',
   'retention.purge',
+  'review.assigned',
+  'review.escalated',
+  'review.reopened',
+  'review.resolved',
   'session.events_exported',
   'session.hold',
   'session.identity_verified_by_staff',
@@ -91,7 +96,11 @@ export function AuditLogPage() {
             Clear
           </button>
         ) : null}
+        <a className="btn btn-sm" href={api.auditLogCsvUrl({ action: debounced || undefined })} download data-testid="audit-export">
+          Download CSV{debounced ? ' (filtered)' : ''}
+        </a>
       </div>
+      <p className="small muted">The CSV holds who did what, when and why (with the full details of each entry), newest first, up to 50,000 entries; the export itself is recorded here.</p>
       {q.isPending ? (
         <Loading />
       ) : q.isError ? (

@@ -20,6 +20,7 @@ interface NavItem {
 export const NAV: NavItem[] = [
   { to: '/admin', label: 'Live', end: true },
   { to: '/admin/sessions', label: 'Sessions' },
+  { to: '/admin/review', label: 'Review queue' },
   { to: '/admin/exams', label: 'Exams' },
   { to: '/admin/candidates', label: 'Candidates' },
   { to: '/admin/quality', label: 'Quality' },

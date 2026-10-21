@@ -34,6 +34,7 @@ advice — review it with counsel for your jurisdictions.
 | Answers, timing, pauses, periods | During exam | Postgres | — | Your exam-records policy |
 | Device info (camera label, SHA-256 of camera id, user agent, screen size) | Check-in | `device_records` | — | With the session record |
 | Staff actions (reviews, notes, holds, evidence views) | Staff | `audit_log`, `notes` | — | Audit retention per your policy |
+| Review decisions (each conclusion on an event with its note, who, when) and the session review (assignee, escalation note, outcome and note) | Staff | `event_reviews`, `session_reviews`, `events` (current decision), `audit_log` | — | With the session (deleted with the candidate); audit copies per your audit retention. The outcome (never the notes) is sent to integrations |
 | Exam-page interaction timing: epoch ms of the last keydown, pointer movement / press, scroll and answer change — **no keys, no text, no pointer position** | Candidate's browser, during the exam | **Browser memory only** (the in-browser monitoring engine; its learned "working region" — head-pose statistics while typing / using the mouse — is kept in memory from one exam period to the next in the same page and discarded when the page closes or the camera changes). Never uploaded. It appears in the evaluation trace only when a tester opens the exam with `?trace=1` and downloads the file themselves | — | Until the page is closed |
 | Webhook notifications (candidate name + external id, exam title, event type/title/observation/times, links) — **no images, face data or scores** | Integrations | `webhook_deliveries` (sent to endpoints your admins configure) | — | 30 days (delivery log) |
 | Alert emails (candidate name, exam, observation sentence, link) — **no images** | Integrations | `email_alerts` queue, your SMTP provider | — | 30 days (queue) |
@@ -55,7 +56,9 @@ browser — see the interaction-timing row above), pointer positions, location.
   (view sessions and evidence, review events, add notes, manage holds). There is no public or
   unauthenticated evidence URL; evidence responses are `Cache-Control: no-store`.
 * Every evidence view, review decision, hold/release/termination, re-enrolment, settings change and
-  retention purge is written to `audit_log` (Audit log page).
+  retention purge is written to `audit_log` (Audit log page). Administrators can download it as CSV for an audit
+  or a data-subject request (it contains staff names and the notes recorded with decisions; the download is
+  itself audit-logged).
 
 ## 4. Retention and deletion
 

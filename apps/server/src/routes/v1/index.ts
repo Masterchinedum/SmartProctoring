@@ -124,6 +124,7 @@ async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSu
       counts: s.counts,
       hold: s.hold,
       accessLink: s.accessLink,
+      review: { state: s.review?.state ?? 'none', outcome: s.review?.outcome ?? null },
       staffUrl: sessionStaffUrl(ctx.config.publicUrl, s.id),
     };
   });
@@ -375,7 +376,9 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     const tz = resolveTimeZone((req.query as Record<string, unknown> | undefined)?.tz);
     const report = await buildSessionReport(ctx, id, key.orgId, { timeZone: tz });
     await apiAudit(ctx.db, key, ctx.now(), 'api.session.report_read', 'session', id);
-    return withoutFaceScores({ ...report, notableEvents: report.notableEvents.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)), staffUrl: sessionStaffUrl(ctx.config.publicUrl, id) });
+    // Explanations are reviewer-facing (they quote detector and identity measurements): not for integrations.
+    const { explanations: _explanations, ...rest } = report;
+    return withoutFaceScores({ ...rest, notableEvents: report.notableEvents.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)), staffUrl: sessionStaffUrl(ctx.config.publicUrl, id) });
   });
 
   app.get('/sessions/:id/events', auth, async (req) => {

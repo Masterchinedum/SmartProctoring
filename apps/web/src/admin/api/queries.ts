@@ -44,6 +44,8 @@ export const qk = {
   webhooks: ['integrations', 'webhooks'] as const,
   webhookDeliveries: (id: string) => ['integrations', 'webhooks', id, 'deliveries'] as const,
   verifierInfo: ['integrations', 'verifiers'] as const,
+  reviewQueueAll: ['review-queue'] as const,
+  reviewQueue: (p: object) => ['review-queue', p] as const,
 };
 
 /* ------------------------------------------------------------------ cache patching (realtime + mutations) */
@@ -105,7 +107,9 @@ export function applyEvent(qc: QueryClient, ev: EventDTO, names?: { candidateNam
         : old,
     );
   }
-  qc.setQueryData<EventDTO>(qk.event(ev.id), (old) => (old ? ev : old));
+  // Keep the detail fields (explanation, history, incident) and refresh them if the drawer is open.
+  qc.setQueryData<EventDTO>(qk.event(ev.id), (old) => (old ? { ...old, ...ev } : old));
+  if (names) void qc.invalidateQueries({ queryKey: qk.event(ev.id), exact: true });
   qc.setQueryData<{ items: TimelineItemDTO[] }>(qk.timeline(ev.sessionId), (old) => (old ? { items: upsertTimelineEvent(old.items, ev) } : old));
   qc.setQueryData<{ items: EventDTO[] }>(qk.sessionEvents(ev.sessionId), (old) => (old ? { items: upsertEvent(old.items, ev) } : old));
   // A regrade changes the score shown on the detail page and in the report.

@@ -16,8 +16,58 @@ export function SettingsPage() {
   return (
     <div className="stack">
       <SettingsForm key={JSON.stringify(q.data)} initial={q.data} />
+      <ReviewTargetsSection key={`sla-${JSON.stringify(q.data.reviewSla)}`} settings={q.data} />
       <SecuritySection settings={q.data} />
     </div>
+  );
+}
+
+/** Service-level targets for review work: shown in the review queue, on the dashboard and as monitoring metrics. */
+function ReviewTargetsSection({ settings }: { settings: OrgSettingsDTO }) {
+  const qc = useQueryClient();
+  const [hold, setHold] = useState(String(settings.reviewSla.holdMinutes));
+  const [flags, setFlags] = useState(String(settings.reviewSla.flagHours));
+  const h = Number(hold);
+  const f = Number(flags);
+  const valid = Number.isInteger(h) && h >= 1 && h <= 1440 && Number.isInteger(f) && f >= 1 && f <= 720;
+  const changed = h !== settings.reviewSla.holdMinutes || f !== settings.reviewSla.flagHours;
+  const m = useMutation({
+    mutationFn: () => api.updateSettings({ reviewSla: { holdMinutes: h, flagHours: f } }),
+    onSuccess: (s) => {
+      qc.setQueryData(qk.settings, s);
+      void qc.invalidateQueries({ queryKey: qk.reviewQueueAll });
+    },
+  });
+  return (
+    <section className="card stack" aria-labelledby="sla-title" data-testid="settings-review-targets">
+      <h2 id="sla-title">Review targets</h2>
+      <p className="small muted">
+        How quickly staff should decide. A held exam keeps the candidate waiting, so its target is in minutes. Reviews past a target are marked overdue in the review queue and
+        on the dashboard, and counted in the monitoring metrics.
+      </p>
+      <form
+        className="grid-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (valid && changed) m.mutate();
+        }}
+      >
+        <label>
+          Decide a held exam within (minutes)
+          <input type="number" min={1} max={1440} value={hold} onChange={(e) => setHold(e.target.value)} required />
+        </label>
+        <label>
+          Decide flags within (hours)
+          <input type="number" min={1} max={720} value={flags} onChange={(e) => setFlags(e.target.value)} required />
+        </label>
+        <div className="row">
+          <button type="submit" className="btn btn-primary" disabled={!valid || !changed || m.isPending}>
+            {m.isPending ? 'Saving…' : 'Save targets'}
+          </button>
+        </div>
+      </form>
+      {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+    </section>
   );
 }
 

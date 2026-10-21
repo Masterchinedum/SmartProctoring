@@ -117,6 +117,7 @@ function TimelineSection({ group, onOpenEvent, filtered }: { group: TimelineGrou
 }
 
 function TimelineEventRow({ event: e, onOpen }: { event: EventDTO; onOpen: () => void }) {
+  // Session changes are context: shown compactly. Policy exceptions keep their badge (they change the rules).
   const neutral = e.category === 'neutral';
   const shot = e.evidence.find((x) => x.kind === 'event_screenshot') ?? e.evidence[0];
   return (

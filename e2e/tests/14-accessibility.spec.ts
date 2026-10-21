@@ -295,7 +295,7 @@ test('keyboard-only exam and staff review: names, focus management, dialogs, liv
     const drawer = eventDrawer(sp);
     await expect(drawer).toBeVisible();
     await expect(drawer.getByRole('button', { name: 'Close' })).toBeFocused();
-    await expect(drawer.locator('.review-panel')).toBeVisible();
+    await expect(drawer.getByRole('heading', { name: 'Review', exact: true })).toBeVisible();
     await expectFocusTrapped(sp, drawer, 6);
     await expectNoA11yIssues(sp, 'event drawer');
     await sp.keyboard.press('Escape');
@@ -412,7 +412,9 @@ test('every staff page: accessible names, landmarks, headings, titles, contrast'
   const pages: [string, RegExp][] = [
     ['/admin', /^Live dashboard/],
     ['/admin/sessions', /^Sessions/],
+    ['/admin/review', /^Review queue/],
     [`/admin/sessions/${s.sessionId}`, /^Session details/],
+    [`/admin/sessions/${s.sessionId}?tab=review`, /^Session details/],
     [`/admin/sessions/${s.sessionId}/report`, /^Session report/],
     ['/admin/exams', /^Exams/],
     [`/admin/exams/${s.examId}`, /^Exam details/],

@@ -9,7 +9,12 @@
  * appeared"), never a conclusion ("the candidate cheated").
  */
 
-export const EVENT_CATEGORIES = ['integrity', 'uncertain', 'neutral', 'technical'] as const;
+/**
+ * integrity: a potential integrity issue; uncertain: an observation the system could not assess reliably;
+ * technical: a technical problem; neutral: a session change; exception: the exam ran under different rules for
+ * this candidate (an approved accommodation / policy exception) — context for reviewers, never a flag.
+ */
+export const EVENT_CATEGORIES = ['integrity', 'uncertain', 'technical', 'neutral', 'exception'] as const;
 export type EventCategory = (typeof EVENT_CATEGORIES)[number];
 
 export const SEVERITIES = ['info', 'low', 'medium', 'high'] as const;
@@ -78,6 +83,8 @@ export const EVENT_TYPES = [
   'score_regraded',
   'accommodations_applied',
   'identity_verified_by_staff',
+  'review_completed',
+  'review_reopened',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -400,7 +407,7 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
     span: false,
   },
   accommodations_applied: {
-    category: 'neutral',
+    category: 'exception',
     severity: 'info',
     title: 'Accommodations applied',
     observation: 'Approved accommodations were applied to this exam.',
@@ -409,11 +416,29 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
     span: false,
   },
   identity_verified_by_staff: {
-    category: 'neutral',
+    category: 'exception',
     severity: 'info',
     title: 'Identity verified by staff',
     observation: 'A staff member verified the candidate’s identity.',
     reviewerNote: 'Recorded when identity is verified by staff instead of the automated face check (an accommodation). Details include how it was verified and by whom.',
+    sources: ['staff'],
+    span: false,
+  },
+  review_completed: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Review completed',
+    observation: 'Staff completed the review of this exam.',
+    reviewerNote: 'Details include the outcome. The outcome is a staff decision, not an automated one.',
+    sources: ['staff'],
+    span: false,
+  },
+  review_reopened: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Review reopened',
+    observation: 'Staff reopened the review of this exam.',
+    reviewerNote: 'Details include the previous outcome and why it was reopened.',
     sources: ['staff'],
     span: false,
   },
@@ -433,7 +458,12 @@ export const CATEGORY_LABELS: Record<EventCategory, string> = {
   uncertain: 'Uncertain observation',
   neutral: 'Session change',
   technical: 'Technical problem',
+  exception: 'Policy exception',
 };
+
+/** Categories that are flags for review (the others are context: session changes and policy exceptions). */
+export const FLAG_CATEGORIES: readonly EventCategory[] = ['integrity', 'uncertain', 'technical'];
+export const isFlagCategory = (c: EventCategory): boolean => FLAG_CATEGORIES.includes(c);
 
 export const SEVERITY_RANK: Record<Severity, number> = { info: 0, low: 1, medium: 2, high: 3 };
 

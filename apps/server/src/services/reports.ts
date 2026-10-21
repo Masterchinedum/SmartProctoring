@@ -19,6 +19,9 @@ import {
   clockUsedMs,
   EVENT_CATALOG,
   EVENT_CATEGORIES,
+  explainEvent,
+  groupIncidents,
+  isFlagCategory,
   revertExceptions,
   SEVERITY_RANK,
   STAFF_VERIFICATION_METHOD_LABEL,
@@ -47,6 +50,7 @@ import { loadSessionTimeline } from './reports-timeline.js';
 import { capturesWithin, GAP_NOT_REPORTING, GAP_NOT_RETURNED, loadLateCaptures, unobservedOutages, withUnobservedOutages, type Span } from './reporting-gaps.js';
 import { mergePolicy } from './org.js';
 import { effectivePolicy } from './session-state.js';
+import { loadSessionReviewRows, toSessionReviewDTO } from './review.js';
 
 export const NOTABLE_EVENTS_LIMIT = 200;
 const MAX_BEHAVIOUR_LINES = 8;
@@ -242,13 +246,25 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     if (e.review.status === 'dismissed') cur.dismissed++;
     byTypeMap.set(e.type, cur);
   }
-  const catOrder: Record<EventCategory, number> = { integrity: 0, uncertain: 1, technical: 2, neutral: 3 };
+  const catOrder: Record<EventCategory, number> = { integrity: 0, uncertain: 1, technical: 2, neutral: 3, exception: 4 };
   const byType = [...byTypeMap.values()].sort((a, b) => catOrder[a.category] - catOrder[b.category] || b.count - a.count || (a.type < b.type ? -1 : 1));
 
   const notableAll = evs
     .filter((e) => (e.category === 'integrity' || e.category === 'uncertain') && e.review.status !== 'dismissed')
     .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.startedAt - b.startedAt || (a.id < b.id ? -1 : 1));
   const notableEvents = notableAll.slice(0, NOTABLE_EVENTS_LIMIT);
+
+  /* -------------------------------------------------------------- review: incidents, explanations, outcome */
+  const incidents = groupIncidents(evs, { now: endAt });
+  const explainCtx = {
+    policy: examRules,
+    events: evs,
+    accommodations: (session.accommodations?.items ?? []).map((i) => ({ kind: i.kind, params: i.params ?? {} })),
+    now: endAt,
+  };
+  const explanations = Object.fromEntries(notableEvents.map((e) => [e.id, explainEvent(e, explainCtx)]));
+  const reviewRows = await loadSessionReviewRows(db, [sessionId]);
+  const review = await toSessionReviewDTO(db, summary.review!, reviewRows.get(sessionId));
 
   /* -------------------------------------------------------------- narrative */
   const observations = buildObservations({ clock, session, exam, periods, events: evs, checks, identity, totals, uncoveredMs: totalsRaw.uncoveredMs, endAt, notableTruncated: notableAll.length - notableEvents.length });
@@ -274,6 +290,9 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     score: toScoreDTO(session.score),
     accommodations,
     limitations,
+    review,
+    incidents,
+    explanations,
   };
 }
 
@@ -658,11 +677,11 @@ function holdResolution(p: PeriodDTO, evs: EventDTO[], checks: IdentityCheckDTO[
 
 function behaviourLines(evs: EventDTO[], clock: Clock, endAt: number): string[] {
   const relevant = evs.filter(
-    (e) => e.review.status !== 'dismissed' && e.category !== 'neutral' && !['identity_mismatch', 'identity_unverifiable', 'reporting_interrupted'].includes(e.type),
+    (e) => e.review.status !== 'dismissed' && isFlagCategory(e.category) && !['identity_mismatch', 'identity_unverifiable', 'reporting_interrupted'].includes(e.type),
   );
   const groups = new Map<EventType, EventDTO[]>();
   for (const e of relevant) groups.set(e.type, [...(groups.get(e.type) ?? []), e]);
-  const catRank: Record<EventCategory, number> = { integrity: 0, uncertain: 1, technical: 2, neutral: 3 };
+  const catRank: Record<EventCategory, number> = { integrity: 0, uncertain: 1, technical: 2, neutral: 3, exception: 4 };
   const ranked = [...groups.entries()]
     .map(([type, list]) => ({ type, list, severity: Math.max(...list.map((e) => SEVERITY_RANK[e.severity])), total: list.reduce((s, e) => s + eventDuration(e, endAt), 0), category: list[0].category }))
     .sort((a, b) => catRank[a.category] - catRank[b.category] || b.severity - a.severity || b.total - a.total || b.list.length - a.list.length);

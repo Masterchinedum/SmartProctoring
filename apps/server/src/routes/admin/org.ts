@@ -24,7 +24,7 @@ import {
   type Paged,
   type StaffRole,
 } from '@sp/shared';
-import { and, desc, eq, like, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, like, lte, ne, sql, type SQL } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { getStaff, requireStaff, revokeStaffSessions } from '../../auth/staff.js';
@@ -39,13 +39,22 @@ import { clearLoginFailures } from '../../services/login-throttle.js';
 import { disableMfa } from '../../services/mfa.js';
 import { notifySecurityChange } from '../../services/security-notices.js';
 import { applyExternalVerifierUpdate, externalVerifierAuditMeta, toExternalVerifierDTO } from '../../verifiers/settings.js';
-import { blankToUndefined, escapeLike, idParam, loadOrgRow, pagingSchema, sanitizePolicyInput } from './common.js';
+import { blankToUndefined, escapeLike, idParam, loadOrgRow, noStore, pagingSchema, sanitizePolicyInput } from './common.js';
+import { CSV_BOM, csvRow } from '../../services/reports-csv.js';
 
-const auditQuerySchema = pagingSchema.extend({
+const auditFilterSchema = z.object({
   action: z.string().max(100).optional(),
   targetType: z.string().max(50).optional(),
   targetId: z.string().max(100).optional(),
+  /** Epoch ms, inclusive. */
+  from: z.coerce.number().int().min(0).optional(),
+  to: z.coerce.number().int().min(0).optional(),
 });
+const auditQuerySchema = pagingSchema.merge(auditFilterSchema);
+
+/** Rows in one audit-log CSV export at most (newest first; the response says when more matched). */
+export const AUDIT_EXPORT_MAX = 50_000;
+const AUDIT_CSV_COLUMNS = ['at', 'actorType', 'actorId', 'actorName', 'action', 'targetType', 'targetId', 'details'] as const;
 
 export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
   const s = orgSettings(org);
@@ -61,6 +70,7 @@ export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
     emailAlerts: { ...s.emailAlerts },
     externalVerifier: toExternalVerifierDTO(s.externalVerifier),
     requireMfa: s.requireMfa,
+    reviewSla: { ...s.reviewSla },
   };
 }
 
@@ -121,6 +131,10 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         if (staff.role !== 'owner') throw forbidden('Only an owner can change who must use two-step sign-in', 'owner_required');
         stored.requireMfa = body.requireMfa;
       }
+      if (body.reviewSla !== undefined) {
+        const provided = Object.fromEntries(Object.entries(body.reviewSla).filter(([, v]) => v !== undefined));
+        stored.reviewSla = { ...cur.reviewSla, ...provided };
+      }
       // External second-opinion verifier: the key pair is encrypted here and never returned (verifiers/settings.ts).
       const verifier = body.externalVerifier !== undefined ? applyExternalVerifierUpdate({ keyring: ctx.keyring, config: ctx.config.externalVerifiers, orgId: staff.orgId, now }, cur.externalVerifier, body.externalVerifier) : null;
       if (verifier) stored.externalVerifier = verifier.next;
@@ -161,6 +175,7 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
           ...(changed.includes('alertRecipients') ? { alertRecipients: { count: next.alertRecipients.length } } : {}),
           ...(changed.includes('emailAlerts') ? { emailAlerts: next.emailAlerts } : {}),
           ...(changed.includes('requireMfa') ? { requireMfa: { from: cur.requireMfa, to: next.requireMfa } } : {}),
+          ...(changed.includes('reviewSla') ? { reviewSla: { from: cur.reviewSla, to: next.reviewSla } } : {}),
           ...(changed.includes('externalVerifier') && verifier ? { externalVerifier: externalVerifierAuditMeta(cur.externalVerifier, next.externalVerifier, verifier.credentials) } : {}),
         },
         ip: req.ip,
@@ -274,42 +289,64 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
 
   /* ------------------------------------------------------------------ audit log */
 
-  app.get('/audit-log', admin, async (req): Promise<Paged<AuditLogEntryDTO>> => {
-    const staff = getStaff(req);
-    const q = auditQuerySchema.parse(blankToUndefined(req.query));
-    const conds = [
-      eq(auditLog.orgId, staff.orgId),
+  const auditWhere = (orgId: string, q: z.infer<typeof auditFilterSchema>) =>
+    and(
+      eq(auditLog.orgId, orgId),
       q.action ? like(auditLog.action, `${escapeLike(q.action.trim())}%`) : undefined,
       q.targetType ? eq(auditLog.targetType, q.targetType) : undefined,
       q.targetId ? eq(auditLog.targetId, q.targetId) : undefined,
-    ];
-    const where = and(...conds);
-    const [[{ total }], rows] = await Promise.all([
-      ctx.db.select({ total: sql<number>`count(*)::int` }).from(auditLog).where(where),
-      ctx.db
-        .select({ entry: auditLog, actorName: staffUsers.name, apiKeyName: apiKeys.name })
-        .from(auditLog)
-        .leftJoin(staffUsers, and(eq(auditLog.actorType, 'staff'), eq(staffUsers.id, auditLog.actorId)))
-        .leftJoin(apiKeys, and(eq(auditLog.actorType, 'api_key'), eq(apiKeys.id, auditLog.actorId)))
-        .where(where)
-        .orderBy(desc(auditLog.at), desc(auditLog.id))
-        .limit(q.limit)
-        .offset(q.offset),
-    ]);
-    return {
-      total,
-      items: rows.map(({ entry, actorName, apiKeyName }) => ({
-        id: entry.id,
-        at: entry.at.getTime(),
-        actorType: entry.actorType,
-        actorId: entry.actorId ?? null,
-        actorName: entry.actorType === 'system' ? 'System' : entry.actorType === 'api_key' ? (apiKeyName ? `API key “${apiKeyName}”` : 'API key') : (actorName ?? null),
-        action: entry.action,
-        targetType: entry.targetType,
-        targetId: entry.targetId ?? null,
-        meta: entry.meta ?? {},
-      })),
-    };
+      q.from != null ? gte(auditLog.at, new Date(q.from)) : undefined,
+      q.to != null ? lte(auditLog.at, new Date(q.to)) : undefined,
+    );
+  const auditEntries = async (where: SQL | undefined, limit: number, offset: number): Promise<AuditLogEntryDTO[]> => {
+    const rows = await ctx.db
+      .select({ entry: auditLog, actorName: staffUsers.name, apiKeyName: apiKeys.name })
+      .from(auditLog)
+      .leftJoin(staffUsers, and(eq(auditLog.actorType, 'staff'), eq(staffUsers.id, auditLog.actorId)))
+      .leftJoin(apiKeys, and(eq(auditLog.actorType, 'api_key'), eq(apiKeys.id, auditLog.actorId)))
+      .where(where)
+      .orderBy(desc(auditLog.at), desc(auditLog.id))
+      .limit(limit)
+      .offset(offset);
+    return rows.map(({ entry, actorName, apiKeyName }) => ({
+      id: entry.id,
+      at: entry.at.getTime(),
+      actorType: entry.actorType,
+      actorId: entry.actorId ?? null,
+      actorName: entry.actorType === 'system' ? 'System' : entry.actorType === 'api_key' ? (apiKeyName ? `API key “${apiKeyName}”` : 'API key') : (actorName ?? null),
+      action: entry.action,
+      targetType: entry.targetType,
+      targetId: entry.targetId ?? null,
+      meta: entry.meta ?? {},
+    }));
+  };
+
+  app.get('/audit-log', admin, async (req): Promise<Paged<AuditLogEntryDTO>> => {
+    const staff = getStaff(req);
+    const q = auditQuerySchema.parse(blankToUndefined(req.query));
+    const where = auditWhere(staff.orgId, q);
+    const [[{ total }], items] = await Promise.all([ctx.db.select({ total: sql<number>`count(*)::int` }).from(auditLog).where(where), auditEntries(where, q.limit, q.offset)]);
+    return { total, items };
+  });
+
+  /**
+   * The audit trail as CSV (same filters as the list; newest first, at most AUDIT_EXPORT_MAX rows — the
+   * X-Audit-Truncated header says when more matched). The export itself is audit-logged.
+   */
+  app.get('/audit-log.csv', admin, async (req, reply) => {
+    const staff = getStaff(req);
+    const q = auditFilterSchema.parse(blankToUndefined(req.query));
+    const where = auditWhere(staff.orgId, q);
+    const [{ total }] = await ctx.db.select({ total: sql<number>`count(*)::int` }).from(auditLog).where(where);
+    const items = await auditEntries(where, AUDIT_EXPORT_MAX, 0);
+    const now = ctx.now();
+    await audit(ctx.db, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'audit_log.exported', targetType: 'organization', targetId: staff.orgId, meta: { rows: items.length, matched: total, filters: q }, ip: req.ip, at: now });
+    const lines = [csvRow([...AUDIT_CSV_COLUMNS]), ...items.map((e) => csvRow([new Date(e.at).toISOString(), e.actorType, e.actorId, e.actorName, e.action, e.targetType, e.targetId, JSON.stringify(e.meta)]))];
+    noStore(reply)
+      .header('Content-Type', 'text/csv; charset=utf-8')
+      .header('Content-Disposition', `attachment; filename="audit-log-${new Date(now).toISOString().slice(0, 10)}.csv"`)
+      .header('X-Audit-Truncated', total > items.length ? 'true' : 'false');
+    return reply.send(CSV_BOM + lines.join('\r\n') + '\r\n');
   });
 
   /** Reset another user's two-step sign-in (a lost phone and no recovery codes): they set it up again at next sign-in. */

@@ -8,9 +8,10 @@
  * every instance: aggregate them with max(), not sum().
  */
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from '@prometheus-io/client';
-import { and, count, gte, inArray, isNotNull, min, sql } from 'drizzle-orm';
+import { DEFAULT_REVIEW_SLA } from '@sp/shared';
+import { and, count, eq, gte, inArray, isNotNull, min, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { emailAlerts, examSessions, webhookDeliveries, webhooks } from '../db/schema.js';
+import { emailAlerts, events, examSessions, organizations, sessionReviews, webhookDeliveries, webhooks } from '../db/schema.js';
 import { CAPACITY_REASONS, currentCapacity, samplingPressure } from '../services/capacity.js';
 import { CALIBRATION } from '../vision/calibration.js';
 import { EMBEDDING_MODEL_CURRENT } from '../vision/embeddings.js';
@@ -34,6 +35,11 @@ interface ClusterSnapshot {
   webhooksDisabled: number;
   emailPending: number;
   emailOldestPendingAt: Date | null;
+  /** Held exams past their organisation's review target (reviewSla.holdMinutes). */
+  holdsOverdue: number;
+  flagsUndecided: number;
+  oldestUndecidedFlagAt: Date | null;
+  reviewsEscalated: number;
 }
 
 export class AppMetrics {
@@ -213,6 +219,10 @@ export class AppMetrics {
     clusterGauge('sp_cluster_webhooks_disabled', 'Webhook endpoints disabled (after repeated failures or by staff).', [], (g, s) => g.set(s.webhooksDisabled));
     clusterGauge('sp_cluster_email_alerts_pending', 'Alert emails waiting to be sent or retried.', [], (g, s) => g.set(s.emailPending));
     clusterGauge('sp_cluster_email_alert_oldest_pending_seconds', 'Age of the oldest alert email still pending (0 when none).', [], (g, s, now) => g.set(ageSec(s.emailOldestPendingAt, now)));
+    clusterGauge('sp_cluster_review_holds_overdue', 'Exams on hold longer than their organisation’s review target (Settings → review targets).', [], (g, s) => g.set(s.holdsOverdue));
+    clusterGauge('sp_cluster_review_flags_undecided', 'Flags (integrity / uncertain / technical events) no reviewer has decided yet.', [], (g, s) => g.set(s.flagsUndecided));
+    clusterGauge('sp_cluster_review_oldest_undecided_flag_seconds', 'Age of the oldest undecided flag (0 when none).', [], (g, s, now) => g.set(ageSec(s.oldestUndecidedFlagAt, now)));
+    clusterGauge('sp_cluster_reviews_escalated', 'Session reviews escalated and not yet resolved.', [], (g, s) => g.set(s.reviewsEscalated));
   }
 
   /** Read gauges from this app's context at scrape time. */
@@ -298,7 +308,23 @@ export class AppMetrics {
         .where(and(sql`${webhookDeliveries.status} = 'failed'`, gte(webhookDeliveries.createdAt, since))),
       db.select({ n: count() }).from(webhooks).where(isNotNull(webhooks.disabledAt)),
       db.select({ n: count(), oldest: min(emailAlerts.createdAt) }).from(emailAlerts).where(sql`${emailAlerts.status} = 'pending'`),
-    ]).then(([sessions, interrupted, wh, whFailed, whDisabled, email]) => ({
+      db
+        .select({ n: count() })
+        .from(examSessions)
+        .innerJoin(organizations, eq(organizations.id, examSessions.orgId))
+        .where(
+          and(
+            eq(examSessions.status, 'on_hold'),
+            sql`${examSessions.holdSince} < ${new Date(ctx.now())}::timestamptz - make_interval(mins => coalesce((${organizations.settings} -> 'reviewSla' ->> 'holdMinutes')::int, ${DEFAULT_REVIEW_SLA.holdMinutes}))`,
+          ),
+        ),
+      // Served by the partial index events_undecided_flags_idx.
+      db
+        .select({ n: count(), oldest: min(events.firstReceivedAt) })
+        .from(events)
+        .where(and(eq(events.reviewStatus, 'unreviewed'), inArray(events.category, ['integrity', 'uncertain', 'technical']))),
+      db.select({ n: count() }).from(sessionReviews).where(eq(sessionReviews.state, 'escalated')),
+    ]).then(([sessions, interrupted, wh, whFailed, whDisabled, email, holdsOverdue, flags, escalated]) => ({
       sessions: Object.fromEntries(sessions.map((r) => [r.status, r.n])),
       reportingInterrupted: interrupted[0]?.n ?? 0,
       webhooksPending: wh[0]?.n ?? 0,
@@ -307,6 +333,10 @@ export class AppMetrics {
       webhooksDisabled: whDisabled[0]?.n ?? 0,
       emailPending: email[0]?.n ?? 0,
       emailOldestPendingAt: email[0]?.oldest ?? null,
+      holdsOverdue: holdsOverdue[0]?.n ?? 0,
+      flagsUndecided: flags[0]?.n ?? 0,
+      oldestUndecidedFlagAt: flags[0]?.oldest ?? null,
+      reviewsEscalated: escalated[0]?.n ?? 0,
     }));
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<null>((resolve) => {

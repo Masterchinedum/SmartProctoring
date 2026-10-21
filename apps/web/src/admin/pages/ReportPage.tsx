@@ -1,6 +1,6 @@
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { CATEGORY_LABELS, EVENT_CATALOG, EVENT_CATEGORIES, type SessionReportDTO } from '@sp/shared';
+import { CATEGORY_LABELS, EVENT_CATALOG, EVENT_CATEGORIES, isFlagCategory, SESSION_OUTCOME_INFO, type SessionReportDTO } from '@sp/shared';
 import { api, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { formatDateTime, formatDuration, formatPercent, formatSimilarity, formatTime } from '../lib/format';
@@ -10,6 +10,7 @@ import { formatExceptionValue } from '../lib/accommodations';
 import { CategoryBadge, DecisionBadge, ReviewBadge, SeverityBadge } from '../components/Badges';
 import { ErrorState, Loading } from '../components/Common';
 import { EvidenceImage } from '../components/EvidenceImage';
+import { OutcomeBadge, ReviewStateBadge } from '../components/ReviewBits';
 import { readableReason } from './session/TimelineTab';
 
 export function ReportPage() {
@@ -18,6 +19,73 @@ export function ReportPage() {
   if (q.isPending) return <Loading label="Generating report…" />;
   if (q.isError) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
   return <Report r={q.data} sessionId={id} onRefresh={() => void q.refetch()} refreshing={q.isFetching} />;
+}
+
+/** The staff review of the exam (outcome, escalation) and its incidents. */
+function ReviewOutcomeSection({ r }: { r: SessionReportDTO }) {
+  const rv = r.review;
+  const incidents = r.incidents ?? [];
+  if (!rv && !incidents.length) return null;
+  return (
+    <section className="report-section" data-testid="report-review">
+      <h2>Review</h2>
+      {rv ? (
+        rv.state === 'resolved' && rv.resolution ? (
+          <div className="stack tight">
+            <div className="row tight">
+              <OutcomeBadge outcome={rv.resolution.outcome} />
+              <span className="small muted">
+                {SESSION_OUTCOME_INFO[rv.resolution.outcome].description} Decided by {rv.resolution.by?.name ?? 'staff'} on {formatDateTime(rv.resolution.at)}.
+              </span>
+            </div>
+            {rv.resolution.note ? <blockquote className="review-note">{rv.resolution.note}</blockquote> : null}
+          </div>
+        ) : (
+          <div className="row tight">
+            <ReviewStateBadge state={rv.state} />
+            <span className="small muted">
+              The review is not complete{rv.undecided.integrity + rv.undecided.uncertain + rv.undecided.technical ? `: ${rv.undecided.integrity + rv.undecided.uncertain + rv.undecided.technical} flag(s) not decided yet` : ''}.
+            </span>
+          </div>
+        )
+      ) : null}
+      {rv?.escalation ? (
+        <div className="small">
+          Escalated by {rv.escalation.by?.name ?? 'staff'} on {formatDateTime(rv.escalation.at)}: {rv.escalation.note}
+        </div>
+      ) : null}
+      {incidents.length ? (
+        <>
+          <h3>Incidents ({incidents.length})</h3>
+          <p className="small muted">Flags close in time, grouped.</p>
+          <table className="table compact">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Category</th>
+                <th>What was observed</th>
+                <th>Undecided</th>
+              </tr>
+            </thead>
+            <tbody>
+              {incidents.map((i) => (
+                <tr key={i.id}>
+                  <td className="nowrap">
+                    {formatTime(i.startedAt)}–{formatTime(i.endedAt)}
+                  </td>
+                  <td>
+                    <CategoryBadge category={i.category} /> <SeverityBadge severity={i.severity} />
+                  </td>
+                  <td>{i.title}</td>
+                  <td>{i.undecided || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : null}
+    </section>
+  );
 }
 
 function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; sessionId: string; onRefresh: () => void; refreshing: boolean }) {
@@ -127,6 +195,8 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
         </div>
       </section>
 
+      <ReviewOutcomeSection r={r} />
+
       <section className="report-section">
         <h2>Periods (every active period, pause and resume)</h2>
         {periods.length === 0 ? (
@@ -218,9 +288,9 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
             <tr>
               <th>Category</th>
               <th>Total</th>
-              <th>Reviewed</th>
-              <th>Dismissed (false positive)</th>
-              <th>Unreviewed</th>
+              <th>Kept (reviewed)</th>
+              <th>False detections</th>
+              <th>Undecided</th>
             </tr>
           </thead>
           <tbody>
@@ -232,9 +302,9 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
                     <CategoryBadge category={c} /> <span className="small muted">{CATEGORY_LABELS[c]}</span>
                   </td>
                   <td>{v.total}</td>
-                  <td>{c === 'neutral' ? '—' : v.reviewed}</td>
-                  <td>{c === 'neutral' ? '—' : v.dismissed}</td>
-                  <td>{c === 'neutral' ? '—' : v.unreviewed}</td>
+                  <td>{!isFlagCategory(c) ? '—' : v.reviewed}</td>
+                  <td>{!isFlagCategory(c) ? '—' : v.dismissed}</td>
+                  <td>{!isFlagCategory(c) ? '—' : v.unreviewed}</td>
                 </tr>
               );
             })}
@@ -268,7 +338,7 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
                     </td>
                     <td>{row.count}</td>
                     <td>{row.totalDurationMs ? formatDuration(row.totalDurationMs) : '—'}</td>
-                    <td>{row.category === 'neutral' ? '—' : row.dismissed}</td>
+                    <td>{!isFlagCategory(row.category) ? '—' : row.dismissed}</td>
                   </tr>
                 ))}
             </tbody>
@@ -290,9 +360,20 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
                     <CategoryBadge category={e.category} />
                     <SeverityBadge severity={e.severity} />
                     <strong>{e.title}</strong>
-                    <ReviewBadge status={e.review.status} />
+                    <ReviewBadge status={e.review.status} resolution={e.review.resolution} />
                   </div>
                   <div>{e.observation}</div>
+                  {r.explanations?.[e.id]?.rule ? (
+                    <div className="small">
+                      <span className="muted">Why recorded:</span> {r.explanations[e.id].rule}
+                      {r.explanations[e.id].factors.filter((f) => f.effect === 'weakens' || f.effect === 'explains').map((f) => (
+                        <div key={f.text} className="muted">
+                          {f.effect === 'weakens' ? 'Less reliable: ' : 'May explain it: '}
+                          {f.text}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   <div className="small muted">
                     {EVENT_CATALOG[e.type]?.span === false ? null : e.durationMs != null && e.endedAt != null ? <>Duration {formatDuration(e.durationMs)} · </> : <>Ongoing · </>}
                     {e.confidence != null ? <>confidence {formatPercent(e.confidence)} · </> : null}

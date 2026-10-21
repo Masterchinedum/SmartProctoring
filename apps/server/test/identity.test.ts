@@ -308,6 +308,18 @@ describe('mid-exam identity samples', () => {
     expect((await eventsOf(s.id)).find((e) => e.type === 'camera_feed_suspect')!.status).toBe('closed');
   });
 
+  it('identical frames are not flagged when the exam switched camera-integrity checks off', async () => {
+    const { exam } = await env.newExam({ policy: { detection: { enabled: { cameraIntegrity: false } } } });
+    const s = await env.newSession({ examId: exam.id });
+    const c = env.candidateClient(s.token);
+    await startedSession(env, c);
+    for (let i = 0; i < 4; i++) {
+      env.clock.advance(30_000);
+      await sample(env, c, { person: 'alice', dhash: 'abcdefabcdef0123' });
+    }
+    expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('camera_feed_suspect');
+  });
+
   it('stores probe images only for non-matching samples by default', async () => {
     const { s, c } = await freshSession();
     await startedSession(env, c);

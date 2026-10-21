@@ -139,6 +139,22 @@ groups:
         annotations:
           summary: Staff alert emails have been waiting for more than 30 minutes (SMTP problem?)
 
+  - name: smartproctoring-review
+    rules:
+      - alert: SmartProctoringHoldsOverdue
+        expr: max(sp_cluster_review_holds_overdue) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} exam(s) on hold longer than the review target — candidates are waiting for a staff decision"
+
+      - alert: SmartProctoringReviewBacklogOld
+        expr: max(sp_cluster_review_oldest_undecided_flag_seconds) > 7 * 24 * 3600
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: A flag has been waiting for a reviewer decision for more than a week (review queue backlog)
+
   - name: smartproctoring-service
     rules:
       - alert: SmartProctoringServerErrors

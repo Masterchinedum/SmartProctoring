@@ -11,7 +11,7 @@
  * retried (1, 5, 15, 30 min; 5 attempts). Emails are plain text + simple HTML with a link to the session in the
  * staff app; they never contain images, face data or similarity scores. Rows are deleted after 30 days.
  */
-import { SEVERITY_RANK, type HoldReason, type Severity } from '@sp/shared';
+import { isFlagCategory, SEVERITY_RANK, type EventCategory, type HoldReason, type Severity } from '@sp/shared';
 import { and, asc, eq, inArray, lt, lte, max, ne } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
@@ -45,8 +45,8 @@ export function alertKindEnabled(s: Pick<OrgSettings, 'emailAlerts'>, kind: Emai
 }
 
 /** Whether a new event of this severity/category is a "high severity" alert. */
-export function isHighSeverityAlert(category: string, severity: Severity): boolean {
-  return category !== 'neutral' && SEVERITY_RANK[severity] >= SEVERITY_RANK.high;
+export function isHighSeverityAlert(category: EventCategory, severity: Severity): boolean {
+  return isFlagCategory(category) && SEVERITY_RANK[severity] >= SEVERITY_RANK.high;
 }
 
 export interface EmailAlertInput {

@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, findMigrationsDir, migrate, type Database } from '../src/db/index.js';
-import { examSessions, exams, examVersions } from '../src/db/schema.js';
+import { eventReviews, events, examSessions, exams, examVersions } from '../src/db/schema.js';
 import { gradeSession } from '../src/services/grading.js';
 import { sessionExamContent, versionForStart } from '../src/services/exam-versions.js';
 import { dbUrl, TEST_ADMIN_URL } from './global-setup.js';
@@ -140,5 +140,48 @@ describe('0007_exam_versions', () => {
     // A draft never versioned gets version 1 when an attempt starts (under the exam row lock).
     const idleVersion = await db.transaction((tx) => versionForStart(tx, draftIdle, Date.now()));
     expect(idleVersion).toMatchObject({ number: 1, reason: 'started', contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+  });
+});
+
+describe('0010_review_workflow', () => {
+  it('re-categorises policy exceptions and starts the review history with the existing decisions', async () => {
+    const database = await databaseAt('0009_staff_mfa');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    const org = (await one(`INSERT INTO organizations (name) VALUES ('Old Org') RETURNING id`)).id;
+    const cand = (await one(`INSERT INTO candidates (org_id, name) VALUES ($1, 'Old Candidate') RETURNING id`, [org])).id;
+    const exam = (await one(`INSERT INTO exams (org_id, title, duration_sec, status, policy) VALUES ($1, 'Old', 600, 'published', '{}') RETURNING id`, [org])).id;
+    const session = (await one(`INSERT INTO exam_sessions (org_id, exam_id, candidate_id, access_token_hash, duration_ms, status) VALUES ($1, $2, $3, 'h', 600000, 'submitted') RETURNING id`, [org, exam, cand])).id;
+    const reviewer = (await one(`INSERT INTO staff_users (org_id, email, name, role, password_hash) VALUES ($1, 'rev@old.example', 'Old Reviewer', 'reviewer', 'x') RETURNING id`, [org])).id;
+    const reviewedAt = new Date('2026-10-01T10:00:00Z');
+    let n = 0;
+    const event = async (type: string, category: string, review: string, by: string | null, note: string | null) => {
+      const id = `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
+      await sql(
+        `INSERT INTO events (id, org_id, session_id, type, category, severity, source, status, title, observation, started_at, first_received_at, received_at, review_status, reviewed_by, reviewed_at, review_note)
+         VALUES ($1, $2, $3, $4, $5, 'low', 'client_vision', 'closed', 't', 'o', now(), now(), now(), $6, $7, $8, $9)`,
+        [id, org, session, type, category, review, by, review === 'unreviewed' ? null : reviewedAt, note],
+      );
+      return id;
+    };
+    const reviewed = await event('looking_away', 'integrity', 'reviewed', reviewer, 'Looked at notes on the desk.');
+    const dismissedByGone = await event('multiple_people', 'integrity', 'dismissed', '00000000-0000-4000-8000-0000000000ff', null);
+    const open = await event('tab_hidden', 'integrity', 'unreviewed', null, null);
+    const acc = await event('accommodations_applied', 'neutral', 'unreviewed', null, null);
+    const staffVer = await event('identity_verified_by_staff', 'neutral', 'unreviewed', null, null);
+
+    await migrate(database);
+
+    const db = database.db;
+    const cats = new Map((await db.select({ id: events.id, c: events.category, r: events.resolution }).from(events)).map((r) => [r.id, r]));
+    expect(cats.get(acc)?.c).toBe('exception');
+    expect(cats.get(staffVer)?.c).toBe('exception');
+    expect(cats.get(reviewed)).toEqual({ id: reviewed, c: 'integrity', r: null });
+    const history = await db.select().from(eventReviews);
+    expect(history.map((h) => h.eventId).sort()).toEqual([reviewed, dismissedByGone].sort());
+    expect(history.find((h) => h.eventId === reviewed)).toMatchObject({ reviewerId: reviewer, status: 'reviewed', resolution: null, note: 'Looked at notes on the desk.', previousStatus: 'unreviewed', overrides: false, at: reviewedAt, sessionId: session, orgId: org });
+    // A reviewer who no longer exists: the decision is kept without a reviewer.
+    expect(history.find((h) => h.eventId === dismissedByGone)).toMatchObject({ reviewerId: null, status: 'dismissed' });
+    expect(history.some((h) => h.eventId === open)).toBe(false);
   });
 });

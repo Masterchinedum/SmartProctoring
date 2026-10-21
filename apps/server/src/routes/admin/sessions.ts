@@ -23,6 +23,7 @@
  */
 import {
   extendTimeSchema,
+  FLAG_CATEGORIES,
   holdRequestSchema,
   legalHoldSchema,
   noteRequestSchema,
@@ -78,6 +79,7 @@ import {
   terminateSession,
 } from '../../services/session-actions.js';
 import { effectivePolicy } from '../../services/session-state.js';
+import { loadSessionReviewRows, toSessionReviewDTO } from '../../services/review.js';
 import { actorOf, assertSessionInOrg, blankToUndefined, escapeLike, idParam, isUuid, listParam, loadOrgRow, loadScopedSession, noStore, pagingSchema } from './common.js';
 import { eventFilterConds, loadLiveEvents } from './events.js';
 
@@ -139,7 +141,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         orderBy: [desc(examSessions.updatedAt), desc(examSessions.id)],
         limit: DASHBOARD_SESSION_LIMIT,
       }),
-      loadLiveEvents(ctx.db, staff.orgId, [ne(events.category, 'neutral')], DASHBOARD_EVENT_LIMIT),
+      loadLiveEvents(ctx.db, staff.orgId, [inArray(events.category, [...FLAG_CATEGORIES])], DASHBOARD_EVENT_LIMIT),
       ctx.db
         .select({ request: pauseRequests, sessionId: examSessions.id, candidateName: candidates.name, examTitle: exams.title })
         .from(pauseRequests)
@@ -194,7 +196,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     const id = idParam(req, 'id', 'Session', 'session_not_found');
     const { session, exam } = await loadScopedSession(ctx.db, staff.orgId, id);
     const org = await loadOrgRow(ctx, staff.orgId);
-    const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices, staffVerifications] = await Promise.all([
+    const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices, staffVerifications, reviewRows] = await Promise.all([
       // The access link (a bearer credential) only for admins, only on this explicit detail response.
       loadSessionSummaries(ctx, ctx.db, { orgId: staff.orgId, sessionIds: [id], includeAccessLink: roleAtLeast(staff.role, 'admin') }),
       loadPeriodDTOs(ctx.db, id),
@@ -204,8 +206,10 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       loadNoteDTOs(ctx.db, { sessionId: id }),
       loadDeviceRecordDTOs(ctx.db, id),
       loadStaffVerifications(ctx.db, id),
+      loadSessionReviewRows(ctx.db, [id]),
     ]);
     if (!summary) throw notFound('Session not found', 'session_not_found');
+    const review = await toSessionReviewDTO(ctx.db, summary.review!, reviewRows.get(id));
     return {
       summary,
       policy: effectivePolicy(session, exam, org),
@@ -220,6 +224,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       devices,
       consent: { acceptedAt: ms(session.consentAcceptedAt), noticeVersion: session.consentNoticeVersion ?? null },
       score: toScoreDTO(session.score),
+      review,
     };
   });
 

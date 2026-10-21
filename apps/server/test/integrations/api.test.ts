@@ -187,7 +187,7 @@ describe('integration API endpoints', () => {
     expect(json(await v1(key, 'GET', `/sessions?examId=${env.exam.id}`)).items.every((x: IntegrationSessionDTO) => x.accessLink === null)).toBe(true);
     json(await admin.post(`/sessions/${s.id}/submit`, {}));
     dto = json<IntegrationSessionDTO>(await v1(key, 'GET', `/sessions/${s.id}`));
-    expect(dto).toMatchObject({ status: 'submitted', endReason: 'staff_submitted', hold: null });
+    expect(dto).toMatchObject({ status: 'submitted', endReason: 'staff_submitted', hold: null, review: { state: 'none', outcome: null } });
     expect(dto.score).toMatchObject({ maxPoints: 10, autoGraded: false });
 
     const byExt = json(await v1(key, 'GET', `/sessions?externalId=${env.candidate.externalId}&status=submitted`));
@@ -208,6 +208,10 @@ describe('integration API endpoints', () => {
     expect(mp).toMatchObject({ type: 'multiple_people', evidenceCount: 1, staffUrl: `http://exam.test/admin/sessions/${s.id}?event=${evId}` });
     expect(mp.evidence).toBeUndefined();
     expect(JSON.stringify(report)).not.toContain('/api/admin/evidence');
+    // Incidents and the review are included; the reviewer-facing explanations (detector / identity measurements) are not.
+    expect(report.incidents.length).toBeGreaterThan(0);
+    expect(report.review).toMatchObject({ state: 'none' });
+    expect(report.explanations).toBeUndefined();
     // Events: EventDTO without evidence URLs, filterable.
     const evs = json(await v1(key, 'GET', `/sessions/${s.id}/events`)).items as { id: string; type: string; evidenceCount: number }[];
     expect(evs.map((e) => e.type)).toEqual(expect.arrayContaining(['session_started', 'multiple_people', 'looking_away', 'session_held', 'session_submitted']));

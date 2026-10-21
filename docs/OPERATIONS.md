@@ -181,6 +181,7 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_cluster_sessions{status}`, `sp_cluster_sessions_reporting_interrupted` | sessions in progress; how many browsers stopped reporting |
   | `sp_cluster_webhook_deliveries_pending`, `sp_cluster_webhook_oldest_pending_seconds`, `sp_cluster_webhook_deliveries_failed_24h`, `sp_cluster_webhooks_disabled` | webhook backlog, retry age, dead letters, disabled endpoints |
   | `sp_cluster_email_alerts_pending`, `sp_cluster_email_alert_oldest_pending_seconds` | alert-email backlog |
+  | `sp_cluster_review_holds_overdue`, `sp_cluster_review_flags_undecided`, `sp_cluster_review_oldest_undecided_flag_seconds`, `sp_cluster_reviews_escalated` | review backlog: exams on hold past the organisation's review target, undecided flags and the oldest one's age, open escalations |
   | `sp_cluster_metrics_up` | 0 = the `sp_cluster_*` values could not be read in this scrape |
   | `process_*`, `nodejs_*` | CPU, memory, heap, GC, event-loop lag |
 
@@ -250,6 +251,16 @@ the old secret stops working immediately — update the receiver at the same tim
 test email** (a 502 shows the SMTP server's answer). Check SPF/DKIM for `SMTP_FROM` and the recipients'
 spam folders. Alerts are throttled to one email per session per 5 minutes (later ones are combined);
 failed sends are retried for about 50 minutes.
+
+**Exams are on hold longer than the review target** (`SmartProctoringHoldsOverdue`, red “overdue” on the
+dashboard). Candidates are waiting: open **Review queue → Overdue**, assign the exams and decide each hold
+(release, with a fresh identity check where appropriate, or terminate). Targets are set in **Settings → Review
+targets** (default: held exams within 15 minutes, flags within 72 hours); staffing for exam days should follow
+the hold target.
+
+**Review backlog** (`SmartProctoringReviewBacklogOld`, or a long **Review queue → All waiting**). Assign
+sessions to reviewers; decide technical and low-severity flags in bulk and close-in-time flags as incidents on a
+session's Review tab; escalate what needs a second opinion (an administrator resolves escalated reviews).
 
 **A staff member lost their phone (two-step sign-in).** They sign in with one of their recovery codes and set up
 the new phone under *Account & security → Move to a new phone*. Without recovery codes: an administrator (an

@@ -85,6 +85,16 @@ server-side identity match, read other sessions, or change category/severity (th
 * API keys: 256-bit, shown once, sha256 stored, revocation effective on the next request, per-key rate limit,
   every write/report read audited as actor `api_key`. They cannot call the staff API.
 
+### Review decisions
+* Reviewer decisions are structured (resolution taxonomy) and kept as a history (`event_reviews`); changing another
+  reviewer's decision requires a reason and is recorded as an override (shown as a disagreement in the staff app and
+  on the Quality page). Bulk decisions never override someone else's decision and are limited to technical /
+  low-severity flags; incident decisions are checked against incidents recomputed on the server. Reviewers assign
+  reviews only to themselves; administrators assign anyone and resolve escalated reviews. Assignment, escalation,
+  resolution and reopening are audit-logged, and the audit trail can be exported as CSV by administrators (the
+  export itself is audited). Integrations receive the review outcome but never staff notes or the event
+  explanations (which quote detector and identity measurements).
+
 ### Authorisation
 * Every `/api/admin/*` route has `requireStaff(<role>)`; every query is scoped by the staff member's
   organisation (other organisations' ids return 404). Only owners create/modify owners and admins; the last

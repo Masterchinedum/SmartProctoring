@@ -99,6 +99,7 @@ export const CATEGORY_SHORT: Record<EventCategory, string> = {
   uncertain: 'Uncertain',
   neutral: 'Session change',
   technical: 'Technical',
+  exception: 'Policy exception',
 };
 
 export const SEVERITY_LABELS: Record<Severity, string> = { info: 'Info', low: 'Low', medium: 'Medium', high: 'High' };

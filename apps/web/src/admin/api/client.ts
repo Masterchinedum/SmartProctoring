@@ -4,11 +4,14 @@ import type {
   ApiKeyDTO,
   AssignmentDTO,
   AuditLogEntryDTO,
+  BulkReviewRequest,
+  BulkReviewResultDTO,
   CandidateDTO,
   CreatedApiKeyDTO,
   CreatedWebhookDTO,
   DashboardDTO,
   DetectionQualityDTO,
+  EventDetailDTO,
   EventDTO,
   ExamDTO,
   ExamExport,
@@ -30,7 +33,11 @@ import type {
   RecoveryCodesDTO,
   RegradeRequest,
   RegradeResultDTO,
-  ReviewStatus,
+  QueueView,
+  ReviewQueueDTO,
+  ReviewRequest,
+  SessionReviewDTO,
+  SessionReviewOutcome,
   SessionDetailDTO,
   SessionReportDTO,
   SessionSummaryDTO,
@@ -217,9 +224,18 @@ export const api = {
   // ---- events
   events: (p: { category?: string; severity?: string; review?: string; since?: number; limit?: number }) =>
     request<{ items: LiveEventDTO[] }>('GET', `${A}/events`, { query: { ...p } }),
-  event: (id: string) => request<EventDTO>('GET', `${A}/events/${enc(id)}`),
-  reviewEvent: (id: string, status: ReviewStatus, note?: string) =>
-    request<EventDTO>('POST', `${A}/events/${enc(id)}/review`, { body: { status, note: note || undefined } }),
+  event: (id: string) => request<EventDetailDTO>('GET', `${A}/events/${enc(id)}`),
+  /** A decision: a resolution (or `{ status: 'unreviewed' }` to reset); a note is required to change someone else's decision. */
+  reviewEvent: (id: string, decision: ReviewRequest) => request<EventDetailDTO>('POST', `${A}/events/${enc(id)}/review`, { body: { ...decision, note: decision.note || undefined } }),
+  reviewEventsBulk: (body: BulkReviewRequest) => request<BulkReviewResultDTO>('POST', `${A}/events/review-bulk`, { body: { ...body, note: body.note || undefined } }),
+
+  // ---- review queue / session review
+  reviewQueue: (p: { view: QueueView; examId?: string; limit?: number }) => request<ReviewQueueDTO>('GET', `${A}/review-queue`, { query: { ...p } }),
+  assignReview: (sessionId: string, assigneeId: string | null) => request<SessionReviewDTO>('POST', `${A}/sessions/${enc(sessionId)}/review/assign`, { body: { assigneeId } }),
+  escalateReview: (sessionId: string, note: string) => request<SessionReviewDTO>('POST', `${A}/sessions/${enc(sessionId)}/review/escalate`, { body: { note } }),
+  resolveReview: (sessionId: string, outcome: SessionReviewOutcome, note?: string) =>
+    request<SessionReviewDTO>('POST', `${A}/sessions/${enc(sessionId)}/review/resolve`, { body: { outcome, note: note || undefined } }),
+  reopenReview: (sessionId: string, note: string) => request<SessionReviewDTO>('POST', `${A}/sessions/${enc(sessionId)}/review/reopen`, { body: { note } }),
   eventNotes: (id: string) => request<{ items: NoteDTO[] }>('GET', `${A}/events/${enc(id)}/notes`),
   addEventNote: (id: string, text: string) => request<NoteDTO>('POST', `${A}/events/${enc(id)}/notes`, { body: { text } }),
   compare: (eventId: string) => request<IdentityComparisonDTO>('GET', `${A}/identity/compare/${enc(eventId)}`),
@@ -267,6 +283,11 @@ export const api = {
   updateUser: (id: string, patch: { name?: string; role?: StaffRole; disabled?: boolean; password?: string }) =>
     request<StaffUserDTO>('PUT', `${A}/users/${enc(id)}`, { body: patch }),
   auditLog: (p: { limit: number; offset: number; action?: string }) => request<Paged<AuditLogEntryDTO>>('GET', `${A}/audit-log`, { query: { ...p } }),
+  /** The audit trail as CSV (same filters; downloaded by the browser with the staff cookie). */
+  auditLogCsvUrl: (p: { action?: string; from?: number; to?: number }) => {
+    const q = new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => [k, String(v)]));
+    return `${A}/audit-log.csv${q.size ? `?${q}` : ''}`;
+  },
   detectionQuality: (p: { from?: number; to?: number }) => request<DetectionQualityDTO>('GET', `${A}/metrics/detection-quality`, { query: { ...p } }),
 
   // ---- integrations (API keys, webhooks, email alerts)

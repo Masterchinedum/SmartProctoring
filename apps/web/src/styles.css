@@ -20,6 +20,7 @@
   --cat-uncertain: #965800;
   --cat-neutral: #5b6474;
   --cat-technical: #6d3fc0;
+  --cat-exception: #0b6e75;
   /* Boundaries of form controls (WCAG 1.4.11: >= 3:1 against the page) and the focus ring. */
   --border-strong: #7d8697;
   --focus: #1b4fc4;
@@ -92,6 +93,7 @@ label.inline { flex-direction: row; align-items: center; gap: 8px; font-weight: 
 .badge-uncertain { background: #fff4e0; color: var(--cat-uncertain); }
 .badge-neutral { background: #eef0f3; color: var(--cat-neutral); }
 .badge-technical { background: #f1eafc; color: var(--cat-technical); }
+.badge-exception { background: #e0f3f4; color: var(--cat-exception); }
 .badge-success { background: #e5f5ec; color: var(--success); }
 .badge-danger { background: #fdecea; color: var(--danger); }
 .badge-warning { background: #fff4e0; color: var(--warning); }

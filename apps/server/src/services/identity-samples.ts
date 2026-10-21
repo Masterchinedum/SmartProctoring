@@ -703,7 +703,9 @@ async function applyEvidence(
   const identical = safeHamming(st.lastSampleDhash, dhash) === 0;
   st.identicalDhashStreak = identical ? Math.max(2, st.identicalDhashStreak + 1) : 1;
   st.lastSampleDhash = dhash;
-  if (st.identicalDhashStreak >= IDENTICAL_SAMPLES_SUSPECT && !st.openFeedSuspectEventId) {
+  // Part of the exam's camera-integrity checks: off when the exam switched them off (like the browser's own checks).
+  const feedChecksOn = env.policy.detection.enabled.cameraIntegrity !== false;
+  if (feedChecksOn && st.identicalDhashStreak >= IDENTICAL_SAMPLES_SUSPECT && !st.openFeedSuspectEventId) {
     const ev = await m.addEvent({
       type: 'camera_feed_suspect',
       source: 'server_identity',
@@ -716,7 +718,7 @@ async function applyEvidence(
     });
     st.openFeedSuspectEventId = ev.id;
     if (row.frameEvidenceId) await m.tx.update(evidence).set({ eventId: ev.id }).where(eq(evidence.id, row.frameEvidenceId));
-  } else if (st.openFeedSuspectEventId && st.identicalDhashStreak >= IDENTICAL_SAMPLES_SUSPECT) {
+  } else if (feedChecksOn && st.openFeedSuspectEventId && st.identicalDhashStreak >= IDENTICAL_SAMPLES_SUSPECT) {
     const [cur] = await m.tx.select({ details: events.details }).from(events).where(eq(events.id, st.openFeedSuspectEventId));
     await m.updateEvent(st.openFeedSuspectEventId, { details: { ...(cur?.details ?? {}), samples: st.identicalDhashStreak } });
   } else if (st.openFeedSuspectEventId && !identical) {
