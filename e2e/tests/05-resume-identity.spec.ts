@@ -177,7 +177,9 @@ test('room goes dark mid-exam: uncertain lighting observation with guidance — 
     await c.answerStandardQuestions();
 
     /* ---------------- dark: guidance, limited monitoring, uncertain observation */
-    await expect(c.tid('candidate-prompt').filter({ hasText: 'Your face is too dark' })).toBeVisible({ timeout: 80_000 });
+    // The darkness guidance also appears inside the "couldn't confirm your identity" prompt when both show: either one
+    // is the candidate's guidance, so take the first match rather than require exactly one.
+    await expect(c.tid('candidate-prompt').filter({ hasText: 'Your face is too dark' }).first()).toBeVisible({ timeout: 80_000 });
     expect(Date.now() - t0).toBeGreaterThan(50_000);
     await expect(c.tid('monitoring-status')).toContainText('Monitoring limited', { timeout: 20_000 });
     const lighting = await staff.waitForEventType(s.sessionId, 'lighting_unusable', { timeout: 30_000 });
