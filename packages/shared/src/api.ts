@@ -463,6 +463,8 @@ export interface SessionSummaryDTO {
   accessLink: string | null;
   /** Evidence retention purge suspended (POST /sessions/:id/legal-hold). Optional for backwards compatibility. */
   legalHold?: boolean;
+  /** The exam version this attempt is pinned to (set when it starts; null before). */
+  examVersion?: { id: string; number: number } | null;
 }
 
 export interface IdentityCheckDTO {
@@ -539,7 +541,15 @@ export interface SessionDetailDTO {
   notes: NoteDTO[];
   devices: DeviceRecordDTO[];
   consent: { acceptedAt: number | null; noticeVersion: string | null };
-  score: { points: number; maxPoints: number; autoGraded: boolean } | null;
+  score: SessionScoreDTO | null;
+}
+
+/** An attempt's score. `regrades` (oldest first) records every administrator regrade with the score before it. */
+export interface SessionScoreDTO {
+  points: number;
+  maxPoints: number;
+  autoGraded: boolean;
+  regrades: { at: number; byStaffId: string; reason: string; keysFromVersion: number; previous: { points: number; maxPoints: number } }[];
 }
 
 /** GET /api/admin/sessions/:id/events?category=&type=&severity=&review=&since= */
@@ -592,7 +602,8 @@ export interface IdentityComparisonDTO {
 export interface SessionReportDTO {
   generatedAt: number;
   session: SessionSummaryDTO;
-  exam: { id: string; title: string; durationSec: number };
+  /** `version`: the exam version the attempt was pinned to (null when it never started). */
+  exam: { id: string; title: string; durationSec: number; version?: number | null };
   candidate: { id: string; name: string; email: string | null; externalId: string | null };
   totals: {
     wallClockMs: number;
@@ -622,7 +633,7 @@ export interface SessionReportDTO {
   /** Narrative observations — factual, non-accusatory. */
   observations: string[];
   reviewerNotes: NoteDTO[];
-  score: { points: number; maxPoints: number; autoGraded: boolean } | null;
+  score: SessionScoreDTO | null;
   limitations: string[];
 }
 
@@ -661,6 +672,111 @@ export interface ExamDTO {
   createdAt: number;
   updatedAt: number;
   stats: { assigned: number; active: number; completed: number; flagged: number };
+  /**
+   * The version candidates who start now get (null while the exam was never published). Every attempt keeps the
+   * version it started with: later edits never change what a candidate already sees or how it is graded.
+   */
+  currentVersion: ExamVersionRefDTO | null;
+}
+
+/* ---- exam versions (immutable snapshots of what candidates see and how it is graded) */
+
+export interface ExamVersionRefDTO {
+  id: string;
+  number: number;
+  createdAt: number;
+}
+
+/** A question as frozen in an exam version (stable id across versions while its type is unchanged). */
+export interface ExamVersionQuestionDTO {
+  id: string;
+  type: QuestionType;
+  prompt: string;
+  options: { id: string; text: string }[];
+  correct: string[];
+  points: number;
+}
+
+export const EXAM_VERSION_QUESTION_FIELDS = ['type', 'prompt', 'options', 'correct', 'points', 'position'] as const;
+export type ExamVersionQuestionField = (typeof EXAM_VERSION_QUESTION_FIELDS)[number];
+export const EXAM_VERSION_EXAM_FIELDS = ['title', 'description', 'instructions', 'durationSec', 'policy'] as const;
+export type ExamVersionExamField = (typeof EXAM_VERSION_EXAM_FIELDS)[number];
+
+/** What a version changed relative to the one before it (the first version lists every question as added). */
+export interface ExamVersionChangesDTO {
+  added: string[];
+  removed: string[];
+  changed: { questionId: string; fields: ExamVersionQuestionField[] }[];
+  exam: ExamVersionExamField[];
+}
+
+export const EXAM_VERSION_REASONS = ['published', 'edited', 'started', 'migrated'] as const;
+export type ExamVersionReason = (typeof EXAM_VERSION_REASONS)[number];
+
+export interface ExamVersionSummaryDTO extends ExamVersionRefDTO {
+  reason: ExamVersionReason;
+  createdBy: { id: string; name: string } | null;
+  /** sha256 of the canonical snapshot (null for versions created by the upgrade migration). */
+  contentHash: string | null;
+  changes: ExamVersionChangesDTO;
+  questionCount: number;
+  totalPoints: number;
+  /** Attempts pinned to this version. */
+  sessions: { started: number; finished: number };
+  current: boolean;
+}
+
+/** GET /api/admin/exams/:id/versions/:versionId */
+export interface ExamVersionDTO extends ExamVersionSummaryDTO {
+  title: string;
+  description: string;
+  instructions: string;
+  durationSec: number;
+  /** The exam's own rules as stored with the version (merged with the organisation default at each start). */
+  policy: Record<string, unknown>;
+  questions: ExamVersionQuestionDTO[];
+}
+
+/* ---- exam export / import (GET /api/admin/exams/:id/export, POST /api/admin/exams/import) */
+
+export const EXAM_EXPORT_FORMAT = 'smartproctoring.exam';
+export const EXAM_EXPORT_FORMAT_VERSION = 1;
+
+/** A portable exam document: questions with answer keys, duration and the exam's own rules. Imported as a new draft. */
+export const examExportSchema = z.object({
+  format: z.literal(EXAM_EXPORT_FORMAT),
+  formatVersion: z.literal(EXAM_EXPORT_FORMAT_VERSION),
+  exportedAt: z.number().optional(),
+  /** Where it came from (informational; never used to link the import to the source). */
+  source: z.object({ examId: z.string().optional(), version: z.number().int().nullable().optional(), title: z.string().optional() }).optional(),
+  exam: examInputSchema,
+});
+export type ExamExport = z.infer<typeof examExportSchema>;
+
+/* ---- regrade (POST /api/admin/exams/:id/regrade) */
+
+/**
+ * Re-score the finished attempts pinned to `sessionsOnVersionId` with the answer keys and points of
+ * `keysFromVersionId` (e.g. a corrected answer key). Prompts and options stay what the candidates saw; questions the
+ * keys version does not have keep their original key. Without `apply` it only previews.
+ */
+export const regradeRequestSchema = z.object({
+  sessionsOnVersionId: z.string().uuid(),
+  keysFromVersionId: z.string().uuid(),
+  apply: z.boolean().default(false),
+  reason: z.string().trim().min(1).max(1000),
+});
+export type RegradeRequest = z.infer<typeof regradeRequestSchema>;
+
+export interface RegradeResultDTO {
+  /** Whether scores were written (only with `apply`, and only for attempts whose score changes). */
+  applied: boolean;
+  /** Questions whose key or points differ between the two versions (by id). */
+  changedQuestions: { questionId: string; prompt: string; correct: { from: string[]; to: string[] }; points: { from: number; to: number } }[];
+  /** Every finished attempt on the version; `changed`: its score differs with the new keys (only those are regraded). */
+  sessions: { sessionId: string; candidateName: string; before: { points: number; maxPoints: number }; after: { points: number; maxPoints: number }; changed: boolean }[];
+  /** Attempts on the version that have not finished yet: they are graded with their own version's keys when they finish. */
+  inProgress: number;
 }
 
 export const candidateInputSchema = z.object({

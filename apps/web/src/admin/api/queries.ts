@@ -29,6 +29,8 @@ export const qk = {
   exams: ['exams'] as const,
   exam: (id: string) => ['exam', id] as const,
   examSessions: (id: string) => ['exam', id, 'sessions'] as const,
+  examVersions: (id: string) => ['exam', id, 'versions'] as const,
+  examVersion: (id: string, versionId: string) => ['exam', id, 'versions', versionId] as const,
   candidates: (q: string) => ['candidates', q] as const,
   candidatesAll: ['candidates'] as const,
   candidate: (id: string) => ['candidate', id] as const,
@@ -105,7 +107,8 @@ export function applyEvent(qc: QueryClient, ev: EventDTO, names?: { candidateNam
   qc.setQueryData<EventDTO>(qk.event(ev.id), (old) => (old ? ev : old));
   qc.setQueryData<{ items: TimelineItemDTO[] }>(qk.timeline(ev.sessionId), (old) => (old ? { items: upsertTimelineEvent(old.items, ev) } : old));
   qc.setQueryData<{ items: EventDTO[] }>(qk.sessionEvents(ev.sessionId), (old) => (old ? { items: upsertEvent(old.items, ev) } : old));
-  if (names && PERIOD_EVENT_TYPES.has(ev.type)) refreshSessionStructure(qc, ev.sessionId);
+  // A regrade changes the score shown on the detail page and in the report.
+  if (names && (PERIOD_EVENT_TYPES.has(ev.type) || ev.type === 'score_regraded')) refreshSessionStructure(qc, ev.sessionId);
   return { isNew };
 }
 

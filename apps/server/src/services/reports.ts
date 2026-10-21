@@ -36,7 +36,8 @@ import { and, asc, eq } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { candidates, examSessions, exams, identityReferences, organizations, type IdentityReference } from '../db/schema.js';
 import { notFound } from '../lib/errors.js';
-import { loadNoteDTOs, loadSessionSummaries, sessionClock } from './dto.js';
+import { loadNoteDTOs, loadSessionSummaries, sessionClock, toScoreDTO } from './dto.js';
+import { loadVersion } from './exam-versions.js';
 import { capFirst, formatDuration, lcFirst, listJoin, makeClock, pct, plural, type Clock } from './reports-format.js';
 import { loadSessionTimeline } from './reports-timeline.js';
 import { capturesWithin, GAP_NOT_REPORTING, GAP_NOT_RETURNED, loadLateCaptures, unobservedOutages, withUnobservedOutages, type Span } from './reporting-gaps.js';
@@ -169,12 +170,13 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
   const { session, exam, candidate, org } = row;
   const now = ctx.now();
 
-  const [[summary], timeline, refs, notes, lateCaptures] = await Promise.all([
+  const [[summary], timeline, refs, notes, lateCaptures, pinned] = await Promise.all([
     loadSessionSummaries(ctx, db, { orgId, sessionIds: [sessionId] }),
     loadSessionTimeline(db, sessionId),
     db.select().from(identityReferences).where(eq(identityReferences.sessionId, sessionId)).orderBy(asc(identityReferences.version)),
     loadNoteDTOs(db, { sessionId }),
     loadLateCaptures(db, sessionId),
+    session.examVersionId ? loadVersion(db, session.examVersionId) : Promise.resolve(null),
   ]);
   if (!summary) throw notFound('Session not found', 'session_not_found');
   const policy = effectivePolicy(session, exam, org);
@@ -245,7 +247,8 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
   return {
     generatedAt: now,
     session: summary,
-    exam: { id: exam.id, title: exam.title, durationSec: exam.durationSec },
+    // The attempt's own version: its title is what the candidate saw, even if the exam was renamed since.
+    exam: { id: exam.id, title: pinned?.title ?? exam.title, durationSec: exam.durationSec, version: pinned?.number ?? null },
     candidate: { id: candidate.id, name: candidate.name, email: candidate.email ?? null, externalId: candidate.externalId ?? null },
     totals,
     periods,
@@ -255,7 +258,7 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     notableEvents,
     observations,
     reviewerNotes: notes,
-    score: session.score ? { points: session.score.points, maxPoints: session.score.maxPoints, autoGraded: session.score.autoGraded } : null,
+    score: toScoreDTO(session.score),
     limitations,
   };
 }

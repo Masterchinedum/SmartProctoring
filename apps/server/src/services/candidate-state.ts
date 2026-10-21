@@ -2,9 +2,10 @@ import { END_REASONS, type CandidateAnswerDTO, type CandidateQuestionDTO, type C
 import { and, desc, eq, gte } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
-import { answers, candidates, examSessions, exams, organizations, pauseRequests, questions, sessionPeriods, type ExamSession } from '../db/schema.js';
+import { answers, candidates, examSessions, exams, organizations, pauseRequests, sessionPeriods, type ExamSession } from '../db/schema.js';
 import { conflict, notFound } from '../lib/errors.js';
 import { ms, remainingMs, toHoldDTO, toPauseRequestDTO } from './dto.js';
+import { sessionExamContent } from './exam-versions.js';
 import { identitySampleRequest } from './identity-evidence.js';
 import { noticeFor } from './privacy.js';
 import { effectivePolicy, requiredCheckFor } from './session-state.js';
@@ -39,13 +40,15 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
   const { session: s, exam, org, candidate } = row;
   const now = ctx.now();
   const policy = effectivePolicy(s, exam, org);
-  const qs = await db.select().from(questions).where(eq(questions.examId, exam.id)).orderBy(questions.position);
+  // The attempt's pinned exam version (before it starts: the version it would start with).
+  const { snapshot } = await sessionExamContent(db, s, exam);
+  const qs = snapshot.questions;
 
   const showQuestions = (s.status === 'active' && instanceInControl(s, instanceId)) || s.status === 'submitted';
   let qDTO: CandidateQuestionDTO[] | null = null;
   let aDTO: CandidateAnswerDTO[] | null = null;
   if (showQuestions) {
-    qDTO = qs.map((q, i) => ({ id: q.id, index: i, type: q.type, prompt: q.prompt, options: (q.options ?? []).map((o) => ({ id: o.id, text: o.text })), points: q.points }));
+    qDTO = qs.map((q, i) => ({ id: q.id, index: i, type: q.type, prompt: q.prompt, options: q.options.map((o) => ({ id: o.id, text: o.text })), points: q.points }));
     const ans = await db.select().from(answers).where(eq(answers.sessionId, s.id));
     aDTO = ans.map((a) => ({ questionId: a.questionId, value: a.value ?? null, clientSeq: a.clientSeq, savedAt: a.savedAt.getTime() }));
   }
@@ -88,9 +91,9 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
     },
     exam: {
       id: exam.id,
-      title: exam.title,
-      description: exam.description,
-      instructions: exam.instructions,
+      title: snapshot.title,
+      description: snapshot.description,
+      instructions: snapshot.instructions,
       durationSec: Math.round(s.durationMs / 1000),
       questionCount: qs.length,
       policy,

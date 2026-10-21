@@ -5,6 +5,7 @@ import { api, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { formatDateTime, formatDuration, formatPercent, formatSimilarity, formatTime } from '../lib/format';
 import { DECISION_LABELS, END_REASON_LABELS, PERIOD_LABELS, STATUS_LABELS } from '../lib/labels';
+import { formatScore } from '../lib/examVersions';
 import { CategoryBadge, DecisionBadge, ReviewBadge, SeverityBadge } from '../components/Badges';
 import { ErrorState, Loading } from '../components/Common';
 import { EvidenceImage } from '../components/EvidenceImage';
@@ -41,7 +42,8 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
           <div className="report-kicker">Exam session report</div>
           <h1>{r.candidate.name}</h1>
           <div>
-            {r.exam.title} · allotted {formatDuration(r.exam.durationSec * 1000)}
+            {r.exam.title}
+            {r.exam.version != null ? ` (version ${r.exam.version})` : ''} · allotted {formatDuration(r.exam.durationSec * 1000)}
           </div>
           <div className="muted small">
             {r.candidate.email ? <>{r.candidate.email} · </> : null}
@@ -79,8 +81,8 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
           {r.score ? (
             <Total
               label="Score"
-              value={`${r.score.points} / ${r.score.maxPoints}`}
-              sub={r.score.autoGraded ? 'auto-graded' : 'includes manually graded questions'}
+              value={formatScore(r.score)}
+              sub={`${r.score.autoGraded ? 'auto-graded' : 'includes manually graded questions'}${r.score.regrades.length ? ` · regraded ${r.score.regrades.length}×, was ${formatScore(r.score.regrades[0].previous)}` : ''}`}
             />
           ) : null}
         </div>

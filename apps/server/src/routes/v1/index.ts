@@ -38,7 +38,7 @@ import { z } from 'zod';
 import { bearerApiKey, getApiKey, requireApiKey, type ApiKeyPrincipal } from '../../auth/api-key.js';
 import type { Ctx } from '../../context.js';
 import type { DbOrTx } from '../../db/index.js';
-import { candidates, examSessions, exams, type Candidate } from '../../db/schema.js';
+import { candidates, examSessions, examVersions, exams, type Candidate } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { sha256Hex } from '../../lib/crypto.js';
 import { conflict, notFound, validationFailed } from '../../lib/errors.js';
@@ -111,6 +111,7 @@ async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSu
       status: s.status,
       endReason: s.endReason,
       exam: s.exam,
+      examVersion: s.examVersion?.number ?? null,
       candidate: s.candidate,
       createdAt: x?.createdAt.getTime() ?? 0,
       startedAt: s.startedAt,
@@ -118,7 +119,7 @@ async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSu
       remainingMs: s.remainingMs,
       timerRunning: s.timerRunning,
       pauseCount: s.pauseCount,
-      score: x?.score ? { points: x.score.points, maxPoints: x.score.maxPoints, autoGraded: x.score.autoGraded } : null,
+      score: x?.score ? { points: x.score.points, maxPoints: x.score.maxPoints, autoGraded: x.score.autoGraded, regraded: x.score.regrades?.length ?? 0 } : null,
       counts: s.counts,
       hold: s.hold,
       accessLink: s.accessLink,
@@ -174,8 +175,9 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     const key = getApiKey(req);
     const q = examsQuerySchema.parse(blankToUndefined(req.query));
     const rows = await ctx.db
-      .select({ id: exams.id, title: exams.title, status: exams.status, durationSec: exams.durationSec })
+      .select({ id: exams.id, title: exams.title, status: exams.status, durationSec: exams.durationSec, version: examVersions.number })
       .from(exams)
+      .leftJoin(examVersions, eq(examVersions.id, exams.currentVersionId))
       .where(and(eq(exams.orgId, key.orgId), q.status ? eq(exams.status, q.status) : undefined))
       .orderBy(desc(exams.createdAt), desc(exams.id));
     return { items: rows };

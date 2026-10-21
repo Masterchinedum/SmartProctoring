@@ -7,6 +7,7 @@ import { api, shouldRetry } from '../../api/client';
 import { qk } from '../../api/queries';
 import { DEFAULT_FILTERS, type EventFilterState } from '../../lib/filters';
 import { formatDateTime, formatSimilarity } from '../../lib/format';
+import { formatScore } from '../../lib/examVersions';
 import { END_REASON_LABELS, HOLD_REASON_LABELS } from '../../lib/labels';
 import { ConnectionBadge, DecisionBadge, StatusBadge } from '../../components/Badges';
 import { ErrorState, Loading } from '../../components/Common';
@@ -125,6 +126,7 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
           <h1>{s.candidate.name}</h1>
           <div className="muted">
             <Link to={`/admin/exams/${s.exam.id}`}>{s.exam.title}</Link>
+            {s.examVersion ? <span title="Every attempt keeps the exam version it started with"> (version {s.examVersion.number})</span> : null}
             {s.candidate.email ? <> · {s.candidate.email}</> : null}
             {s.candidate.externalId ? <> · ID {s.candidate.externalId}</> : null} ·{' '}
             <Link to={`/admin/candidates/${s.candidate.id}`}>Candidate profile</Link>
@@ -162,8 +164,17 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
         <Fact label="Score">
           {d.score ? (
             <>
-              {d.score.points} / {d.score.maxPoints}
+              {formatScore(d.score)}
               {!d.score.autoGraded ? <span className="muted small"> (includes manually graded questions)</span> : null}
+              {d.score.regrades.length ? (
+                <div className="small muted" data-testid="score-regrades">
+                  {d.score.regrades.map((r) => (
+                    <div key={r.at} title={r.reason}>
+                      Regraded {formatDateTime(r.at)} with the keys of v{r.keysFromVersion} (was {formatScore(r.previous)})
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </>
           ) : (
             <span className="muted">—</span>

@@ -23,6 +23,9 @@ import {
 import type {
   AnswerValue,
   CandidateCommand,
+  ExamVersionChangesDTO,
+  ExamVersionQuestionDTO,
+  ExamVersionReason,
   CheckPurpose,
   ConnectionStatus,
   DeviceInfo,
@@ -172,11 +175,44 @@ export const exams = pgTable(
     durationSec: integer('duration_sec').notNull(),
     policy: jsonb('policy').$type<ProctoringPolicyInput>().notNull().default({}),
     status: text('status').$type<'draft' | 'published' | 'archived'>().notNull().default('draft'),
+    /** The version attempts get when they start (services/exam-versions.ts); null until the exam is first published. */
+    currentVersionId: uuid('current_version_id'),
     createdBy: uuid('created_by'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [index('exams_org_idx').on(t.orgId)],
+);
+
+/**
+ * Immutable snapshots of an exam: what candidates see (title, instructions, questions, options) and how it is graded
+ * (answer keys, points), plus the duration and the exam's own rules. A new version is written when a published exam
+ * changes; an attempt pins the current version when it starts (exam_sessions.exam_version_id) and keeps it, so later
+ * edits never change a running or finished attempt. Never updated or deleted on its own (cascades with the exam).
+ */
+export const examVersions = pgTable(
+  'exam_versions',
+  {
+    id: id(),
+    examId: uuid('exam_id')
+      .notNull()
+      .references(() => exams.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id').notNull(),
+    number: integer('number').notNull(),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    instructions: text('instructions').notNull(),
+    durationSec: integer('duration_sec').notNull(),
+    policy: jsonb('policy').$type<ProctoringPolicyInput>().notNull(),
+    questions: jsonb('questions').$type<ExamVersionQuestionDTO[]>().notNull(),
+    /** sha256 of the canonical snapshot (null for versions written by the upgrade migration). */
+    contentHash: text('content_hash'),
+    changes: jsonb('changes').$type<ExamVersionChangesDTO>().notNull(),
+    reason: text('reason').$type<ExamVersionReason>().notNull(),
+    createdBy: uuid('created_by'),
+    createdAt: ts('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('exam_versions_exam_number_uq').on(t.examId, t.number)],
 );
 
 export interface QuestionOption {
@@ -304,6 +340,10 @@ export interface SessionScore {
   autoGraded: boolean;
   gradedAt: number;
   perQuestion: { questionId: string; points: number; maxPoints: number; correct: boolean | null }[];
+  /** The answer keys / points the score uses: the attempt's own version, or a later one after a regrade. */
+  keysVersionId?: string | null;
+  /** Explicit regrades (POST /api/admin/exams/:id/regrade), oldest first: the score before each one. */
+  regrades?: { at: number; by: string; reason: string; keysFromVersionId: string; keysFromVersion: number; previous: { points: number; maxPoints: number } }[];
 }
 
 export const examSessions = pgTable(
@@ -316,6 +356,8 @@ export const examSessions = pgTable(
     examId: uuid('exam_id')
       .notNull()
       .references(() => exams.id, { onDelete: 'cascade' }),
+    /** The exam version this attempt is pinned to: set when it starts, never changed afterwards. */
+    examVersionId: uuid('exam_version_id').references(() => examVersions.id),
     candidateId: uuid('candidate_id')
       .notNull()
       .references(() => candidates.id, { onDelete: 'cascade' }),
@@ -386,6 +428,7 @@ export const examSessions = pgTable(
     index('exam_sessions_org_status_idx').on(t.orgId, t.status),
     index('exam_sessions_exam_idx').on(t.examId),
     index('exam_sessions_candidate_idx').on(t.candidateId),
+    index('exam_sessions_exam_version_idx').on(t.examVersionId),
     // Sweeper look-ups (jobs/sweeper.ts). Neither index contains a column the routine heartbeat writes
     // (last_heartbeat_at, monitoring, ...), so heartbeat updates stay HOT (no index maintenance per heartbeat).
     index('exam_sessions_online_idx').on(t.status).where(sql`${t.connection} = 'online'`),
@@ -926,6 +969,7 @@ export type StaffSession = typeof staffSessions.$inferSelect;
 export type LoginThrottleRow = typeof loginThrottle.$inferSelect;
 export type Exam = typeof exams.$inferSelect;
 export type Question = typeof questions.$inferSelect;
+export type ExamVersion = typeof examVersions.$inferSelect;
 export type Candidate = typeof candidates.$inferSelect;
 export type ExamSession = typeof examSessions.$inferSelect;
 export type SessionPeriod = typeof sessionPeriods.$inferSelect;

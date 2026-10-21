@@ -59,6 +59,7 @@ function ExamForm({ exam, orgDefault }: { exam: ExamDTO | null; orgDefault: Proc
       setDirty(false);
       qc.setQueryData(qk.exam(saved.id), saved);
       void qc.invalidateQueries({ queryKey: qk.exams });
+      void qc.invalidateQueries({ queryKey: qk.examVersions(saved.id) });
       navigate(`/admin/exams/${saved.id}`);
     },
   });
@@ -80,7 +81,11 @@ function ExamForm({ exam, orgDefault }: { exam: ExamDTO | null; orgDefault: Proc
       <PageHeader
         back={<Link to={exam ? `/admin/exams/${exam.id}` : '/admin/exams'}>← {exam ? 'Exam' : 'Exams'}</Link>}
         title={exam ? `Edit: ${exam.title}` : 'New exam'}
-        subtitle={exam?.status === 'published' ? 'This exam is published. Changes can affect candidates who have not finished yet — avoid editing questions or rules while sessions are in progress.' : undefined}
+        subtitle={
+          exam?.status === 'published'
+            ? `This exam is published. Saving creates version ${(exam.currentVersion?.number ?? 0) + 1} for candidates who start from then on; attempts already started keep their version. A corrected answer key reaches finished attempts only through a regrade (exam page → Versions). A changed duration applies to candidates assigned afterwards.`
+            : undefined
+        }
       />
 
       <section className="card stack">

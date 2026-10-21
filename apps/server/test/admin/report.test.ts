@@ -125,7 +125,7 @@ describe('session report totals', () => {
   it('includes session, exam and candidate headers', () => {
     expect(report.generatedAt).toBe(env.clock.t);
     expect(report.session).toMatchObject({ id: env.session.id, status: 'submitted' });
-    expect(report.exam).toEqual({ id: env.exam.id, title: 'Sample Exam', durationSec: 3600 });
+    expect(report.exam).toEqual({ id: env.exam.id, title: 'Sample Exam', durationSec: 3600, version: 1 });
     expect(report.candidate).toMatchObject({ id: env.candidate.id, name: 'Alice Candidate' });
   });
 

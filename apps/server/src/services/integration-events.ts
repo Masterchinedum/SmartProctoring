@@ -37,6 +37,7 @@ const SESSION_NOTIFICATIONS: Partial<Record<EventRow['type'], WebhookNotificatio
   pause_requested: 'session.pause_requested',
   session_submitted: 'session.submitted',
   session_terminated: 'session.terminated',
+  score_regraded: 'session.regraded',
 };
 
 function str(v: unknown): string | null {
@@ -147,7 +148,8 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
             data.requireCheck = d.requireCheck !== false;
           }
           if (ev.type === 'pause_requested') data.pauseRequest = { id: str(d.requestId), reason: outboundReason(d.reason, 1000) };
-          if (ev.type === 'session_submitted') data.score = s.score ? { points: s.score.points, maxPoints: s.score.maxPoints, autoGraded: s.score.autoGraded } : null;
+          if (ev.type === 'session_submitted' || ev.type === 'score_regraded') data.score = s.score ? { points: s.score.points, maxPoints: s.score.maxPoints, autoGraded: s.score.autoGraded } : null;
+          if (ev.type === 'score_regraded') data.reason = outboundReason(d.reason, 1000);
           // Free-text staff notes are never forwarded; only the structured automatic reason.
           if (ev.type === 'session_terminated') data.reason = str(d.reason) === 'abandoned_after_inactivity' ? 'abandoned_after_inactivity' : null;
           notifications.push({ type: sessionType, dedupeKey: `${sessionType}:${ev.id}`, sessionId: s.id, data });

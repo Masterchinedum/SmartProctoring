@@ -46,6 +46,7 @@ import {
 } from '../db/schema.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { sessionClock, staffVisibleKey } from './dto.js';
+import { loadVersion, versionForStart } from './exam-versions.js';
 import { gradeSession } from './grading.js';
 import { enqueueIntegrationNotifications } from './integration-events.js';
 import { mergePolicy, orgThresholds } from './org.js';
@@ -539,10 +540,15 @@ export function assertStatus(m: SessionMutation, allowed: SessionStatus[], messa
 /** ready -> active: clock starts, active period opens, policy snapshot taken. */
 export async function startExam(m: SessionMutation): Promise<void> {
   assertStatus(m, ['ready'], 'The exam can only be started after the readiness check');
-  const policy = await m.policy();
+  // The attempt is pinned to the exam's current version (questions, answer keys, the exam's own rules) for good:
+  // later edits of the exam never reach it (services/exam-versions.ts).
+  const pinned = m.session.examVersionId ? await loadVersion(m.tx, m.session.examVersionId) : null;
+  const version = pinned ?? (await versionForStart(m.tx, m.session.examId, m.now));
+  const org = await m.org();
+  const policy = mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, version.policy as Record<string, unknown>);
   // Admission at exam start (candidate-actions.ts startSession) may have held the start back while the server was busy.
   const deferredMs = m.session.startDeferredSince ? Math.max(0, m.now - m.session.startDeferredSince.getTime()) : null;
-  m.set({ status: 'active', startedAt: m.session.startedAt ?? new Date(m.now), policy, currentQuestionIndex: m.session.currentQuestionIndex ?? 0, startDeferredSince: null });
+  m.set({ status: 'active', startedAt: m.session.startedAt ?? new Date(m.now), examVersionId: version.id, policy, currentQuestionIndex: m.session.currentQuestionIndex ?? 0, startDeferredSince: null });
   m.clockStart();
   await m.switchPeriod('active', m.now);
   m.resetIdentityCounters();
@@ -660,7 +666,7 @@ export async function finalizeSession(
     if (endReason !== 'candidate_submitted') await m.enqueueCommand({ kind: 'submitted', reason: endReason });
   }
   if (wasStarted && endReason !== 'abandoned') {
-    const score = await gradeSession(m.tx, m.session.id, m.session.examId, at);
+    const score = await gradeSession(m.tx, m.session, at);
     m.set({ score });
   }
 }

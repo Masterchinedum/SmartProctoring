@@ -55,8 +55,10 @@ curl -s "$SP/api/v1/exams" -H "Authorization: Bearer $SP_KEY"
 
 ### Exams
 
-`GET /api/v1/exams?status=published` → `{ items: [{ id, title, status, durationSec }] }`
-(`status` is `draft`, `published` or `archived`; omit it for all).
+`GET /api/v1/exams?status=published` → `{ items: [{ id, title, status, durationSec, version }] }`
+(`status` is `draft`, `published` or `archived`; omit it for all). `version` is the exam version candidates who start
+now get (null while the exam was never published): publishing, and every later edit of a published exam, creates a
+new version, and each attempt keeps the version it started with — its questions, answer keys and points.
 
 ```bash
 curl -s "$SP/api/v1/exams?status=published" -H "Authorization: Bearer $SP_KEY"
@@ -108,10 +110,11 @@ A *session* is one candidate's attempt at one exam.
 {
   "id": "5f0c…", "status": "submitted", "endReason": "candidate_submitted",
   "exam": { "id": "…", "title": "Algebra final" },
+  "examVersion": 3,
   "candidate": { "id": "…", "name": "Ada Lovelace", "email": "ada@example.edu", "externalId": "S-10442" },
   "createdAt": 1790240400000, "startedAt": 1790244000000, "endedAt": 1790247300000,
   "remainingMs": 0, "timerRunning": false, "pauseCount": 1,
-  "score": { "points": 17, "maxPoints": 20, "autoGraded": true },
+  "score": { "points": 17, "maxPoints": 20, "autoGraded": true, "regraded": 0 },
   "counts": { "integrity": 2, "uncertain": 1, "technical": 0, "unreviewed": 3, "open": 0, "highSeverity": 1 },
   "hold": null,
   "accessLink": "https://proctor.example.com/take/…",
@@ -124,7 +127,10 @@ A *session* is one candidate's attempt at one exam.
   inactivity period — no score is implied). `hold` is set while the exam is `on_hold` (reason, since, message).
 * `counts` are observations awaiting or after human review — not a verdict. Dismissed events are not
   counted in the category totals.
-* `score` is present once answers were graded (open questions are not auto-graded: `autoGraded: false`).
+* `score` is present once answers were graded (open questions are not auto-graded: `autoGraded: false`), with the
+  answer keys of the attempt's own exam version (`examVersion`; null until the attempt starts). `regraded` counts
+  administrator regrades (a corrected answer key applied to finished attempts — see `session.regraded` below); the
+  report's `score.regrades` lists each one with the score before it and the reason.
 
 `GET /api/v1/sessions/:id/report?tz=Europe/Berlin` → the same final report the staff app shows (periods,
 totals of observed / unobserved time, identity-check summary, event counts per category and type, notable
@@ -166,6 +172,7 @@ delivers a `ping` immediately.
 | `session.pause_requested` | The candidate asked for a pause that needs approval | session fields, `pauseRequest { id, reason }` |
 | `session.submitted` | Submitted by the candidate, on time expiry or by staff | session fields, `endReason`, `score` |
 | `session.terminated` | Ended by staff, or closed automatically after inactivity | session fields, `endReason`, `reason` (`abandoned_after_inactivity` or null) |
+| `session.regraded` | An administrator regraded the finished attempt with corrected answer keys / points (sent only when its score or a question's result changed) | session fields, `score` (the new one), `reason` (the administrator's) |
 | `ping` | “Send test” in the staff app | `{ webhookId, message, sentBy }` |
 
 Event fields: `id, sessionId, type, category, severity, title, observation, status, startedAt, endedAt,
@@ -279,6 +286,7 @@ app.post('/hooks/smartproctoring', express.raw({ type: 'application/json' }), (r
    `event.created` with minimum severity `high`.
 4. On `session.submitted`: fetch `GET /api/v1/sessions/:id` (score, counts) and, after staff review,
    `GET /api/v1/sessions/:id/report` to archive the report with the grade.
+5. On `session.regraded` (subscribe to it if you store grades): replace the stored grade with the new `score`.
 
 Candidates that should not be able to start any more (e.g. withdrew) can be handled by staff (terminate).
 Sessions nobody touches are closed automatically after the organisation's inactivity period

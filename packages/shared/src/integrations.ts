@@ -49,6 +49,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'session.released', // hold released by staff
   'session.pause_requested', // candidate requested a pause that needs approval
   'session.submitted', // submitted (candidate, time expiry or staff) — includes the score when graded
+  'session.regraded', // the score changed after an administrator corrected answer keys (exam versions) — includes the new score
   'session.terminated', // ended without submission (staff, or closed automatically after inactivity)
   'identity.mismatch', // convenience: a possible different person was observed (sent regardless of minSeverity)
 ] as const;
@@ -63,6 +64,7 @@ export const WEBHOOK_EVENT_LABELS: Record<WebhookEventType, string> = {
   'session.released': 'Hold released',
   'session.pause_requested': 'Pause requested (needs approval)',
   'session.submitted': 'Exam submitted',
+  'session.regraded': 'Score regraded',
   'session.terminated': 'Exam ended without submission',
   'identity.mismatch': 'Possible different person',
 };
@@ -213,6 +215,8 @@ export interface IntegrationExamDTO {
   title: string;
   status: 'draft' | 'published' | 'archived';
   durationSec: number;
+  /** The version candidates who start now get (null while the exam was never published). */
+  version: number | null;
 }
 
 export interface IntegrationCandidateDTO {
@@ -242,6 +246,8 @@ export interface IntegrationSessionDTO {
   status: SessionStatus;
   endReason: SessionEndReason | null;
   exam: { id: string; title: string };
+  /** The exam version the attempt is pinned to (null before it starts). */
+  examVersion: number | null;
   candidate: { id: string; name: string; email: string | null; externalId: string | null };
   createdAt: number;
   startedAt: number | null;
@@ -249,7 +255,8 @@ export interface IntegrationSessionDTO {
   remainingMs: number;
   timerRunning: boolean;
   pauseCount: number;
-  score: { points: number; maxPoints: number; autoGraded: boolean } | null;
+  /** `regraded`: how many times an administrator regraded the attempt (session.regraded webhook). */
+  score: { points: number; maxPoints: number; autoGraded: boolean; regraded: number } | null;
   /** Event counts (dismissed events excluded from the category counts). */
   counts: { integrity: number; uncertain: number; technical: number; unreviewed: number; open: number; highSeverity: number };
   hold: HoldDTO | null;

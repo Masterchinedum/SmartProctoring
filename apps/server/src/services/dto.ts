@@ -15,6 +15,7 @@ import {
   type NoteDTO,
   type PauseRequestDTO,
   type PeriodDTO,
+  type SessionScoreDTO,
   type SessionSummaryDTO,
   type StaffUserDTO,
   type DeviceRecordDTO,
@@ -28,6 +29,7 @@ import {
   deviceRecords,
   events,
   evidence,
+  examVersions,
   exams,
   identityChecks,
   identityReferences,
@@ -384,11 +386,23 @@ export async function loadSessionCounts(db: DbOrTx, sessionIds: string[]): Promi
   return out;
 }
 
+export function toScoreDTO(score: ExamSession['score']): SessionScoreDTO | null {
+  if (!score) return null;
+  return {
+    points: score.points,
+    maxPoints: score.maxPoints,
+    autoGraded: score.autoGraded,
+    regrades: (score.regrades ?? []).map((r) => ({ at: r.at, byStaffId: r.by, reason: r.reason, keysFromVersion: r.keysFromVersion, previous: r.previous })),
+  };
+}
+
 export function toSessionSummaryDTO(
   ctx: Pick<Ctx, 'config' | 'keyring'>,
   input: {
     session: ExamSession;
     exam: { id: string; title: string };
+    /** The exam version the attempt is pinned to (null before it starts). */
+    examVersion?: { id: string; number: number } | null;
     candidate: Pick<Candidate, 'id' | 'name' | 'email' | 'externalId'>;
     counts?: SessionCounts;
     pendingPauseRequest?: PauseRequest | null;
@@ -402,6 +416,7 @@ export function toSessionSummaryDTO(
   return {
     id: s.id,
     exam: { id: input.exam.id, title: input.exam.title },
+    examVersion: input.examVersion ?? null,
     candidate: { id: input.candidate.id, name: input.candidate.name, email: input.candidate.email ?? null, externalId: input.candidate.externalId ?? null },
     status: s.status,
     endReason: s.endReason ?? null,
@@ -480,10 +495,16 @@ export async function loadSessionSummaries(ctx: Pick<Ctx, 'config' | 'keyring' |
   }
   if (q.where) conds.push(q.where);
   let query = db
-    .select({ session: examSessions, exam: { id: exams.id, title: exams.title }, candidate: { id: candidates.id, name: candidates.name, email: candidates.email, externalId: candidates.externalId } })
+    .select({
+      session: examSessions,
+      exam: { id: exams.id, title: exams.title },
+      examVersion: { id: examVersions.id, number: examVersions.number },
+      candidate: { id: candidates.id, name: candidates.name, email: candidates.email, externalId: candidates.externalId },
+    })
     .from(examSessions)
     .innerJoin(exams, eq(exams.id, examSessions.examId))
     .innerJoin(candidates, eq(candidates.id, examSessions.candidateId))
+    .leftJoin(examVersions, eq(examVersions.id, examSessions.examVersionId))
     .where(and(...conds))
     .orderBy(...(q.orderBy ?? [desc(examSessions.updatedAt)]))
     .$dynamic();
@@ -500,7 +521,7 @@ export async function loadSessionSummaries(ctx: Pick<Ctx, 'config' | 'keyring' |
   return rows.map((r) =>
     toSessionSummaryDTO(
       ctx,
-      { session: r.session, exam: r.exam, candidate: r.candidate, counts: counts.get(r.session.id), pendingPauseRequest: pendingBySession.get(r.session.id) ?? null, includeAccessLink: q.includeAccessLink === true },
+      { session: r.session, exam: r.exam, examVersion: r.examVersion, candidate: r.candidate, counts: counts.get(r.session.id), pendingPauseRequest: pendingBySession.get(r.session.id) ?? null, includeAccessLink: q.includeAccessLink === true },
       now,
     ),
   );

@@ -1,5 +1,6 @@
 /**
- * Staff API: exams (CRUD, publish/archive, non-breaking edits after publication), assignments (dedupe),
+ * Staff API: exams (CRUD, publish/archive, versioned edits after publication — test/admin/exam-versions.test.ts covers
+ * attempts, regrades and import/export), assignments (dedupe),
  * candidates (CRUD, delete rules) and approved ID photos (accept / reject with FakeVisionService).
  */
 import type { CandidateDTO, ExamDTO, ExamInput } from '@sp/shared';
@@ -73,53 +74,59 @@ describe('exams', () => {
     exam = edited;
   });
 
-  it('publishes, then only allows non-breaking edits (409 with an explanation otherwise)', async () => {
+  it('publishes as version 1; edits of a published exam are free and each one is a new version', async () => {
     exam = json(await admin.post(`/exams/${exam.id}/publish`));
     expect(exam.status).toBe('published');
+    expect(exam.currentVersion).toMatchObject({ number: 1, createdAt: env.clock.t });
     const qs = exam.questions;
     const body = (questions: unknown[]) => ({ ...baseExam, title: exam.title, questions });
 
-    const removed = await admin.put(`/exams/${exam.id}`, body([qs[0]]));
-    expect(removed.statusCode).toBe(409);
-    expect(removed.json()).toMatchObject({ error: 'question_removal_not_allowed', details: { questionIds: [qs[1].id] } });
-    expect(removed.json().message).toMatch(/existing answers/);
+    // Reorder, retype (a new question id), reword, re-key, append (a client-made id is ignored), remove: all allowed.
+    const v2 = json(await admin.put(`/exams/${exam.id}`, body([{ ...qs[1], correct: ['7±0.2'] }, { ...qs[0], type: 'long_text', correct: [] }, { id: 'client-made-up', type: 'short_text', prompt: 'Symbol for silver?', options: [], correct: ['Ag'], points: 1 }])));
+    expect(v2.currentVersion.number).toBe(2);
+    expect(v2.questions[0].id).toBe(qs[1].id);
+    expect(v2.questions[1].id).not.toBe(qs[0].id); // type change: a new question
+    expect(v2.questions[2].id).not.toBe('client-made-up');
+    const v3 = json(await admin.put(`/exams/${exam.id}`, body([v2.questions[0], v2.questions[2]])));
+    expect(v3.currentVersion.number).toBe(3);
+    // Saving unchanged content creates no version.
+    expect(json(await admin.put(`/exams/${exam.id}`, body(v3.questions))).currentVersion).toEqual(v3.currentVersion);
 
-    expect((await admin.put(`/exams/${exam.id}`, body([qs[1], qs[0]]))).json().error).toBe('question_reorder_not_allowed');
-    expect((await admin.put(`/exams/${exam.id}`, body([{ ...qs[0], type: 'long_text' }, qs[1]]))).json().error).toBe('question_type_change_not_allowed');
-
-    // Non-breaking: reword, change points / answer key, append a question (with a client id that is ignored).
-    const ok = json(
-      await admin.put(`/exams/${exam.id}`, body([{ ...qs[0], prompt: 'Symbol for gold (element)?', points: 3 }, { ...qs[1], correct: ['7±0.2'] }, { id: 'client-made-up', type: 'long_text', prompt: 'Explain.', options: [], correct: [], points: 5 }])),
-    );
-    expect(ok.questions.map((q: { id: string }) => q.id).slice(0, 2)).toEqual([qs[0].id, qs[1].id]);
-    expect(ok.questions[2].id).not.toBe('client-made-up');
-    expect(ok.questions[0]).toMatchObject({ prompt: 'Symbol for gold (element)?', points: 3 });
-
-    // A choice question can gain options but not lose them.
-    const choice = json(await admin.post('/exams', baseExam));
-    json(await admin.post(`/exams/${choice.id}/publish`));
-    const cq = choice.questions[0];
-    const lose = await admin.put(`/exams/${choice.id}`, { ...baseExam, questions: [{ ...cq, options: [cq.options[0], { id: 'c', text: 'Ice' }], correct: ['a'] }, choice.questions[1]] });
-    expect(lose.json()).toMatchObject({ error: 'option_removal_not_allowed', details: { optionIds: ['b'] } });
-    const gain = json(
-      await admin.put(`/exams/${choice.id}`, { ...baseExam, questions: [{ ...cq, options: [...cq.options.map((o: { id: string; text: string }) => ({ ...o, text: o.text.toUpperCase() })), { id: 'c', text: 'Ice' }] }, choice.questions[1]] }),
-    );
-    expect(gain.questions[0].options.map((o: { id: string }) => o.id)).toEqual(['a', 'b', 'c']);
+    const versions = json(await reviewer.get(`/exams/${exam.id}/versions`)).items;
+    expect(versions.map((v: { number: number; reason: string; current: boolean }) => [v.number, v.reason, v.current])).toEqual([
+      [3, 'edited', true],
+      [2, 'edited', false],
+      [1, 'published', false],
+    ]);
+    expect(versions[1].changes).toEqual({
+      added: [v2.questions[1].id, v2.questions[2].id],
+      removed: [qs[0].id],
+      changed: [{ questionId: qs[1].id, fields: ['correct', 'position'] }],
+      exam: [],
+    });
+    expect(versions[0].changes).toMatchObject({ removed: [v2.questions[1].id], changed: [{ questionId: v2.questions[2].id, fields: ['position'] }] });
+    expect(versions[2]).toMatchObject({ createdBy: { id: env.users.admin.id, name: 'Test admin' }, questionCount: 2, totalPoints: 3, sessions: { started: 0, finished: 0 }, contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    const updates = (await env.ctx.db.select().from(auditLog).where(and(eq(auditLog.targetId, exam.id), eq(auditLog.action, 'exam.updated')))).map((a) => (a.meta as { version: number | null }).version);
+    expect(updates).toHaveLength(4); // draft edit, v2, v3, the unchanged save
+    expect(updates).toEqual(expect.arrayContaining([null, 2, 3]));
+    exam = v3;
   });
 
-  it('keeps existing answers valid across edits of an exam in progress', async () => {
+  it('keeps an attempt in progress on its version: later edits change neither its questions nor its answers', async () => {
     const cand = await env.newCandidate('Edith Edit');
     const assigned = json(await admin.post(`/exams/${exam.id}/assignments`, { candidateIds: [cand.id] }));
     const c = env.candidateClient(assigned.items[0].accessLink.split('/take/')[1]);
     await startedSession(env, c);
-    const q0 = exam.questions[0].id;
-    json(await c.req('PUT', `/api/candidate/answers/${q0}`, { value: 'Au', clientSeq: 1, answeredAt: env.clock.t }));
+    const silver = exam.questions[1].id;
+    json(await c.req('PUT', `/api/candidate/answers/${silver}`, { value: 'Ag', clientSeq: 1, answeredAt: env.clock.t }));
+    // Remove the answered question and reword the other one.
     const current = json(await reviewer.get(`/exams/${exam.id}`));
-    json(await admin.put(`/exams/${exam.id}`, { ...baseExam, title: current.title, questions: current.questions.map((q: { prompt: string }) => ({ ...q, prompt: `${q.prompt} ` })) }));
-    const [a] = await env.ctx.db.select().from(answers).where(eq(answers.questionId, q0));
-    expect(a.value).toBe('Au');
+    json(await admin.put(`/exams/${exam.id}`, { ...baseExam, title: current.title, questions: [{ ...current.questions[0], prompt: 'pH of pure water at 25 °C?' }] }));
+    const [a] = await env.ctx.db.select().from(answers).where(eq(answers.questionId, silver));
+    expect(a.value).toBe('Ag');
     const st = json(await c.req('GET', '/api/candidate/session'));
-    expect(st.questions.map((q: { id: string }) => q.id)).toEqual(current.questions.map((q: { id: string }) => q.id));
+    expect(st.questions.map((q: { id: string; prompt: string }) => [q.id, q.prompt])).toEqual(current.questions.map((q: { id: string; prompt: string }) => [q.id, q.prompt]));
+    json(await c.req('PUT', `/api/candidate/answers/${silver}`, { value: 'Ag ', clientSeq: 2, answeredAt: env.clock.t }));
   });
 
   it('archives (read-only, no new assignments) and lists exam sessions', async () => {

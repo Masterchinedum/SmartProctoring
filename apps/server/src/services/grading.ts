@@ -1,7 +1,8 @@
-import type { AnswerValue, QuestionType } from '@sp/shared';
+import type { AnswerValue, ExamVersionQuestionDTO, QuestionType } from '@sp/shared';
 import { eq } from 'drizzle-orm';
 import type { DbOrTx } from '../db/index.js';
-import { answers, questions, type SessionScore } from '../db/schema.js';
+import { answers, type ExamSession, type SessionScore } from '../db/schema.js';
+import { sessionExamContent } from './exam-versions.js';
 
 export function normalizeText(s: string): string {
   return s.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -62,22 +63,38 @@ export function isAnswerCorrect(type: QuestionType, correct: string[], value: An
   }
 }
 
-/** Auto-grade all answers of a session. long_text questions are counted in maxPoints but need manual grading. */
-export async function gradeSession(db: DbOrTx, sessionId: string, examId: string, now: number): Promise<SessionScore> {
-  const qs = await db.select().from(questions).where(eq(questions.examId, examId)).orderBy(questions.position);
-  const ans = await db.select().from(answers).where(eq(answers.sessionId, sessionId));
-  const byQ = new Map(ans.map((a) => [a.questionId, a.value]));
+/**
+ * Score answers against questions (the attempt's version, or another version's keys for a regrade). long_text
+ * questions count in maxPoints but need manual grading.
+ */
+export function scoreAnswers(
+  qs: Pick<ExamVersionQuestionDTO, 'id' | 'type' | 'correct' | 'points'>[],
+  answerValues: ReadonlyMap<string, AnswerValue | null | undefined>,
+  now: number,
+  keysVersionId: string | null,
+): SessionScore {
   let points = 0;
   let maxPoints = 0;
   let autoGraded = true;
   const perQuestion: SessionScore['perQuestion'] = [];
   for (const q of qs) {
     maxPoints += q.points;
-    const correct = isAnswerCorrect(q.type, q.correct ?? [], byQ.get(q.id));
+    const correct = isAnswerCorrect(q.type, q.correct ?? [], answerValues.get(q.id) ?? undefined);
     if (correct == null) autoGraded = false;
     const p = correct ? q.points : 0;
     points += p;
     perQuestion.push({ questionId: q.id, points: p, maxPoints: q.points, correct });
   }
-  return { points: Math.round(points * 1000) / 1000, maxPoints, autoGraded, gradedAt: now, perQuestion };
+  return { points: Math.round(points * 1000) / 1000, maxPoints, autoGraded, gradedAt: now, perQuestion, keysVersionId };
+}
+
+export async function sessionAnswerValues(db: DbOrTx, sessionId: string): Promise<Map<string, AnswerValue | null>> {
+  const ans = await db.select().from(answers).where(eq(answers.sessionId, sessionId));
+  return new Map(ans.map((a) => [a.questionId, a.value]));
+}
+
+/** Auto-grade a session with the answer keys of the exam version it is pinned to (services/exam-versions.ts). */
+export async function gradeSession(db: DbOrTx, session: Pick<ExamSession, 'id' | 'examId' | 'examVersionId'>, now: number): Promise<SessionScore> {
+  const { version, snapshot } = await sessionExamContent(db, session);
+  return scoreAnswers(snapshot.questions, await sessionAnswerValues(db, session.id), now, version?.id ?? null);
 }

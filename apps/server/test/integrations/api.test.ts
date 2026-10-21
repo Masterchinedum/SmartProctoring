@@ -100,10 +100,10 @@ describe('integration API authentication', () => {
 });
 
 describe('integration API endpoints', () => {
-  it('GET /exams lists id, title, status, durationSec with a status filter', async () => {
+  it('GET /exams lists id, title, status, durationSec, version with a status filter', async () => {
     await env.newExam({ title: 'Draft exam' }).then(async ({ exam }) => admin.post(`/exams/${exam.id}/archive`));
     const all = json(await v1(key, 'GET', '/exams')).items as { id: string; title: string; status: string; durationSec: number }[];
-    expect(all.find((e) => e.id === env.exam.id)).toEqual({ id: env.exam.id, title: 'Sample Exam', status: 'published', durationSec: 3600 });
+    expect(all.find((e) => e.id === env.exam.id)).toEqual({ id: env.exam.id, title: 'Sample Exam', status: 'published', durationSec: 3600, version: 1 });
     const published = json(await v1(key, 'GET', '/exams?status=published')).items as { status: string }[];
     expect(published.every((e) => e.status === 'published')).toBe(true);
     expect(published.length).toBeLessThan(all.length);

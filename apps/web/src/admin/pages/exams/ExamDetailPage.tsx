@@ -11,8 +11,10 @@ import { ALL_POLICY_FIELDS, changedFromDefault, formatPolicyValue, getPath, POLI
 import { CategoryCounts, ConnectionBadge, StatusBadge } from '../../components/Badges';
 import { CopyButton, EmptyState, ErrorState, Loading, PageHeader } from '../../components/Common';
 import { ConfirmDialog } from '../../components/Modal';
+import { downloadJson, exportFileName } from '../../lib/examVersions';
 import { TimeOfDay } from '../../components/Time';
 import { EXAM_STATUS_CLASS, EXAM_STATUS_LABEL } from './ExamsPage';
+import { ExamVersionsPanel } from './ExamVersions';
 
 export function ExamDetailPage() {
   const { id = '' } = useParams();
@@ -25,8 +27,16 @@ export function ExamDetailPage() {
     void qc.invalidateQueries({ queryKey: qk.exams });
     setConfirm(null);
   };
-  const publish = useMutation({ mutationFn: () => api.publishExam(id), onSuccess: setExam });
+  const publish = useMutation({
+    mutationFn: () => api.publishExam(id),
+    onSuccess: (e) => {
+      setExam(e);
+      void qc.invalidateQueries({ queryKey: qk.examVersions(id) });
+    },
+  });
   const archive = useMutation({ mutationFn: () => api.archiveExam(id), onSuccess: setExam });
+  // The editable copy (for a published exam: its current version), as a portable file with answer keys.
+  const exportExam = useMutation({ mutationFn: () => api.exportExam(id), onSuccess: (doc) => downloadJson(doc, exportFileName(doc.exam.title)) });
 
   if (exam.isPending) return <Loading />;
   if (exam.isError) return <ErrorState error={exam.error} onRetry={() => void exam.refetch()} />;
@@ -42,13 +52,18 @@ export function ExamDetailPage() {
             {e.title} <span className={EXAM_STATUS_CLASS[e.status]}>{EXAM_STATUS_LABEL[e.status]}</span>
           </>
         }
-        subtitle={`${formatDuration(e.durationSec * 1000)} · ${e.questions.length} question${e.questions.length === 1 ? '' : 's'} · ${points} point${points === 1 ? '' : 's'}`}
+        subtitle={`${formatDuration(e.durationSec * 1000)} · ${e.questions.length} question${e.questions.length === 1 ? '' : 's'} · ${points} point${points === 1 ? '' : 's'}${e.currentVersion ? ` · version ${e.currentVersion.number}` : ''}`}
         actions={
           isAdmin ? (
             <>
-              <Link className="btn" to={`/admin/exams/${id}/edit`}>
-                Edit
-              </Link>
+              {e.status !== 'archived' ? (
+                <Link className="btn" to={`/admin/exams/${id}/edit`}>
+                  Edit
+                </Link>
+              ) : null}
+              <button type="button" className="btn" disabled={exportExam.isPending} onClick={() => exportExam.mutate()} title="Download the questions, answer keys and rules as a file that can be imported as a new exam">
+                Export
+              </button>
               {e.status === 'draft' ? (
                 <button type="button" className="btn btn-primary" onClick={() => setConfirm('publish')}>
                   Publish…
@@ -63,6 +78,11 @@ export function ExamDetailPage() {
           ) : null
         }
       />
+      {exportExam.isError ? (
+        <div className="banner banner-danger" role="alert">
+          {errorMessage(exportExam.error)}
+        </div>
+      ) : null}
       <div className="stats-row">
         <div className="stat">
           <div className="stat-value">{e.stats.assigned}</div>
@@ -107,11 +127,12 @@ export function ExamDetailPage() {
 
       {isAdmin ? <AssignPanel exam={e} /> : null}
       <ExamSessions examId={id} />
+      <ExamVersionsPanel exam={e} isAdmin={isAdmin} />
 
       {confirm === 'publish' ? (
         <ConfirmDialog
           title="Publish this exam?"
-          message="Candidates can then be assigned and start the exam with their access link. Check the questions and proctoring rules first."
+          message="This creates version 1 of the exam (or the next version, if it was published before). Candidates can then be assigned and start it with their access link. Check the questions and proctoring rules first."
           confirmLabel="Publish"
           busy={publish.isPending}
           error={publish.isError ? errorMessage(publish.error) : null}
@@ -355,6 +376,7 @@ function ExamSessions({ examId }: { examId: string }) {
                 <th>Candidate</th>
                 <th>Status</th>
                 <th>Started</th>
+                <th>Version</th>
                 <th>Flags</th>
                 <th>Unreviewed</th>
                 <th>Access link</th>
@@ -378,6 +400,7 @@ function ExamSessions({ examId }: { examId: string }) {
                   <td>
                     <TimeOfDay at={s.startedAt} />
                   </td>
+                  <td className="small">{s.examVersion ? `v${s.examVersion.number}` : <span className="muted">—</span>}</td>
                   <td>
                     <CategoryCounts counts={s.counts} compact />
                   </td>

@@ -2,6 +2,7 @@ import type { ExamInput, QuestionInput } from '@sp/shared';
 import { eq } from 'drizzle-orm';
 import type { DbOrTx } from '../db/index.js';
 import { exams, questions, type Exam, type Question } from '../db/schema.js';
+import { recordExamVersion } from './exam-versions.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -20,7 +21,7 @@ function questionRow(examId: string, q: QuestionInput, position: number, now: Da
   };
 }
 
-/** Insert an exam and its questions (positions follow array order). */
+/** Insert an exam and its questions (positions follow array order). An exam created published gets its version 1. */
 export async function createExam(db: DbOrTx, orgId: string, input: ExamInput, opts: { createdBy?: string | null; status?: Exam['status']; now?: number } = {}): Promise<{ exam: Exam; questions: Question[] }> {
   const now = new Date(opts.now ?? Date.now());
   const [exam] = await db
@@ -39,6 +40,7 @@ export async function createExam(db: DbOrTx, orgId: string, input: ExamInput, op
     })
     .returning();
   const qs = input.questions?.length ? await db.insert(questions).values(input.questions.map((q, i) => questionRow(exam.id, q, i, now))).returning() : [];
+  if (exam.status === 'published') await recordExamVersion(db, exam, { reason: 'published', by: opts.createdBy ?? null, now: now.getTime() });
   return { exam, questions: qs.sort((a, b) => a.position - b.position) };
 }
 

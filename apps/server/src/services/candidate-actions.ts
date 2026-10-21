@@ -6,6 +6,7 @@ import {
   EVENT_TYPES,
   PRIVACY_NOTICE_VERSION,
   type EventType,
+  type ExamVersionQuestionDTO,
   type CandidateCommand,
   type ConsentRequest,
   type HeartbeatRequest,
@@ -17,13 +18,14 @@ import {
 } from '@sp/shared';
 import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { answers, examSessions, pauseRequests, questions, sessionCommands, type ExamSession, type Question } from '../db/schema.js';
+import { answers, examSessions, pauseRequests, sessionCommands, type ExamSession } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { badRequest, conflict, invalidState, notFound, validationFailed } from '../lib/errors.js';
 import { assertInControl, buildCandidateState, instanceInControl, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { recordMultipleInstances } from './checks.js';
 import { applyInstanceUsage, evaluateInstanceUsage } from './instance-usage.js';
 import { currentCapacity } from './capacity.js';
+import { sessionExamContent } from './exam-versions.js';
 import { identitySampleRequest, sampleWatchdog } from './identity-evidence.js';
 import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
 import { assertStatus, finalizeSession, identityState, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession, type SessionMutation } from './session-state.js';
@@ -89,7 +91,7 @@ export async function candidateSubmit(ctx: Ctx, sessionId: string, instanceId: s
 
 /* ------------------------------------------------------------------ answers */
 
-function validateAnswer(q: Question, value: SaveAnswerRequest['value']): void {
+function validateAnswer(q: Pick<ExamVersionQuestionDTO, 'type' | 'options'>, value: SaveAnswerRequest['value']): void {
   if (value === null) return;
   const optionIds = new Set((q.options ?? []).map((o) => o.id));
   switch (q.type) {
@@ -113,7 +115,8 @@ function validateAnswer(q: Question, value: SaveAnswerRequest['value']): void {
 }
 
 export async function saveAnswer(ctx: Ctx, session: ExamSession, instanceId: string, questionId: string, body: SaveAnswerRequest): Promise<SaveAnswerResponse> {
-  const [q] = await ctx.db.select().from(questions).where(and(eq(questions.id, questionId), eq(questions.examId, session.examId)));
+  // Only questions of the attempt's own exam version (services/exam-versions.ts).
+  const q = (await sessionExamContent(ctx.db, session)).snapshot.questions.find((x) => x.id === questionId);
   if (!q) throw notFound('Question not found', 'question_not_found');
   validateAnswer(q, body.value);
   return withSession(ctx, session.id, async (m) => {

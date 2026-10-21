@@ -58,6 +58,7 @@ import {
   toHoldDTO,
   toNoteDTO,
   toPauseRequestDTO,
+  toScoreDTO,
 } from '../../services/dto.js';
 import { buildSessionReport } from '../../services/reports.js';
 import { eventsToCsv } from '../../services/reports-csv.js';
@@ -211,7 +212,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       notes: noteList,
       devices,
       consent: { acceptedAt: ms(session.consentAcceptedAt), noticeVersion: session.consentNoticeVersion ?? null },
-      score: session.score ? { points: session.score.points, maxPoints: session.score.maxPoints, autoGraded: session.score.autoGraded } : null,
+      score: toScoreDTO(session.score),
     };
   });
 

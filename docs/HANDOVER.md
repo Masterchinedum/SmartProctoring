@@ -153,6 +153,12 @@ shipped.
 | Peak protection | **Admission at exam start** (starts deferred while at capacity, clock not running, ≤ 5 min) and **load-aware sampling** (routine samples spaced out, never beyond the Balanced intensity; triggered and evidence-building samples untouched) — measured: identity sample p95 12.0 → 3.7 s, check-in frame p95 8.6 → 3.0 s at a synchronised start of 136 on 4 vCPU (PERFORMANCE §7.8) | `services/candidate-actions.ts`, `services/identity-evidence.ts` |
 | Tests | CI fetches the public face photos at pinned commits (SHA-256 checked, never committed) so the real-model tests run; `E2E_NO_SKIP` / `SP_REQUIRE_TEST_IMAGES` turn a missing image into a failure; core e2e (01–18) on every PR; the Docker image built and booted on every PR; the whole e2e suite nightly | `.github/workflows/`, `e2e/scripts/fetch-faces.ts` |
 
+## 3c. Round 4 — exam operations, governance and enterprise readiness (October 2026)
+
+| Area | Change | Where |
+|---|---|---|
+| Exam versions | Publishing, and every edit of a published exam, writes an immutable version; each attempt keeps the version it started with (questions served, answers accepted, grading, report). Content can therefore be edited freely while exams run. Version list with per-question diffs and attempt counts, version viewer with answer keys, export / import (`*.exam.json`, imported as a draft), audited **regrade** with preview (corrected key → finished attempts; timeline entry, score history, `session.regraded` webhook). Migration 0007 versions existing exams; `test/migrations.test.ts` upgrades a database holding old data | `services/exam-versions.ts`, `services/regrade.ts`, `routes/admin/exams.ts`, staff app → exam page → Versions |
+
 ## 4. Known limitations / before launch
 
 1. **Accuracy on your population.** The v2 calibration was fitted on public photos rendered through a laptop-webcam

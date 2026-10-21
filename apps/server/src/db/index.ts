@@ -68,15 +68,18 @@ export function findMigrationsDir(): string {
   throw new Error('Could not locate the drizzle migrations folder (set MIGRATIONS_DIR).');
 }
 
-/** Apply pending migrations. Safe to call concurrently from several instances (advisory lock). */
-export async function migrate(database: Database): Promise<void> {
+/**
+ * Apply pending migrations. Safe to call concurrently from several instances (advisory lock). `migrationsFolder` is for
+ * upgrade tests that stop at an earlier migration (test/migrations.test.ts).
+ */
+export async function migrate(database: Database, opts: { migrationsFolder?: string } = {}): Promise<void> {
   const client = await database.pool.connect();
   try {
     // Index builds on large tables may take longer than the request-oriented statement_timeout.
     await client.query('SET statement_timeout = 0');
     await client.query('SELECT pg_advisory_lock(727274001)');
     try {
-      await drizzleMigrate(drizzle(client, { schema }), { migrationsFolder: findMigrationsDir() });
+      await drizzleMigrate(drizzle(client, { schema }), { migrationsFolder: opts.migrationsFolder ?? findMigrationsDir() });
     } finally {
       await client.query('SELECT pg_advisory_unlock(727274001)');
       await client.query('RESET statement_timeout');

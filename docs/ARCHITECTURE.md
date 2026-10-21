@@ -75,6 +75,24 @@ No code copied from third parties. See `THIRD_PARTY_NOTICES.md`.
 Runs only in `active` (and during `paused` if `timerBehavior='continue'`, and during an unannounced
 disconnect if `disconnectTimerBehavior='continue'`).
 
+### Exam versions (`services/exam-versions.ts`, `services/regrade.ts`)
+
+The `questions` table is the working copy staff edit. Publishing an exam, and every later edit of a published exam that
+changes its content, writes an immutable row in `exam_versions` (title, instructions, duration, the exam's own rules,
+and the questions with options, answer keys and points; a sha256 of the canonical snapshot; a per-question diff against
+the previous version), under the exam row lock so numbers never collide. **start** pins the session to the exam's
+current version (`exam_sessions.exam_version_id`; lock-free for published exams, so a synchronised start does not queue
+on the exam row — a draft started directly is versioned first). From then on the questions served, the answers
+accepted, grading and the report all read the pinned snapshot (`sessionExamContent`; versions are cached in memory by
+id, they never change). Edits therefore never reach an attempt that already started, and content can be edited
+freely; a question whose type changes gets a new id so answers never mix kinds of question. A corrected answer key
+reaches finished attempts only through an explicit, audited **regrade** (`POST /api/admin/exams/:id/regrade`: preview,
+then apply; only attempts whose result changes are written, each with a neutral `score_regraded` timeline event, the
+score history in `score.regrades`, an audit entry and the `session.regraded` webhook). Exams export to / import from a
+portable JSON document (`smartproctoring.exam`, format version 1; an import is a new draft). Migration 0007 gave every
+published, archived or started exam version 1 (`reason: migrated`) and pinned started attempts to it
+(`test/migrations.test.ts` checks the upgrade on old data).
+
 ## 4. Identity pipeline (server)
 
 1. Decode JPEG (sharp), letterbox to 640×640, YuNet → faces with 5 landmarks + score (NMS).

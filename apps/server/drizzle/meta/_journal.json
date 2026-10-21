@@ -50,6 +50,13 @@
       "when": 1792575523447,
       "tag": "0006_exam_start_admission",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792578328455,
+      "tag": "0007_exam_versions",
+      "breakpoints": true
     }
   ]
 }
