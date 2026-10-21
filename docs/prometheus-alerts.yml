@@ -139,6 +139,14 @@ groups:
         annotations:
           summary: Staff alert emails have been waiting for more than 30 minutes (SMTP problem?)
 
+      - alert: SmartProctoringApiKeysExpiringSoon
+        expr: max(sp_cluster_api_keys_expiring_soon) > 0
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} integration API key(s) expire within 14 days"
+          description: Integrations → API keys shows which ("Expires in N days"). Create a replacement with the same access, have it deployed, then revoke the old key (docs/OPERATIONS.md §7, "Rotating an API key").
+
   - name: smartproctoring-review
     rules:
       - alert: SmartProctoringHoldsOverdue

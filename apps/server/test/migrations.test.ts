@@ -11,8 +11,9 @@ import { eq } from 'drizzle-orm';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, findMigrationsDir, migrate, type Database } from '../src/db/index.js';
-import { DEFAULT_IDENTITY_THRESHOLDS, resolvePolicy } from '@sp/shared';
-import { decisionConfigs, eventReviews, events, evidence, examSessions, exams, examVersions, organizations, privacyRequests } from '../src/db/schema.js';
+import { API_KEY_SCOPES, DEFAULT_IDENTITY_THRESHOLDS, resolvePolicy } from '@sp/shared';
+import { apiIdempotencyKeys, apiKeys, decisionConfigs, eventReviews, events, evidence, examSessions, exams, examVersions, organizations, privacyRequests } from '../src/db/schema.js';
+import { authenticateApiKey, generateApiKey } from '../src/auth/api-key.js';
 import { calibrationBreakdown } from '../src/services/calibration.js';
 import { ensureDecisionConfigs, listDecisionConfigs } from '../src/services/decision-configs.js';
 import { gradeSession } from '../src/services/grading.js';
@@ -330,5 +331,31 @@ describe('0014_scheduling_recovery', () => {
     expect(sessionWindow(after)).toEqual({ startsAt, endsAt: null });
     const idx = await one(`SELECT indexdef FROM pg_indexes WHERE indexname = 'exam_sessions_offline_idx'`);
     expect(idx.indexdef).toMatch(/WHERE \(connection = 'offline'::text\)/);
+  });
+});
+
+describe('0015_integration_api_maturity', () => {
+  it('gives keys that existed before scopes the full access they had, and no expiry; adds the idempotency store', async () => {
+    const database = await databaseAt('0014_scheduling_recovery');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    const org = (await one(`INSERT INTO organizations (name) VALUES ('Old Org') RETURNING id`)).id;
+    const { key, prefix, hash } = generateApiKey();
+    const old = (await one(`INSERT INTO api_keys (org_id, name, prefix, key_hash, scope) VALUES ($1, 'Old LMS', $2, $3, 'integration') RETURNING id`, [org, prefix, hash])).id;
+    const revoked = (await one(`INSERT INTO api_keys (org_id, name, prefix, key_hash, scope, revoked_at) VALUES ($1, 'Old revoked', 'sp_live_x', 'h2', 'integration', now()) RETURNING id`, [org])).id;
+
+    await migrate(database);
+
+    const db = database.db;
+    const rows = await db.select().from(apiKeys).where(eq(apiKeys.orgId, org));
+    expect(rows.map((r) => r.id).sort()).toEqual([old, revoked].sort());
+    for (const r of rows) expect(r, r.name).toMatchObject({ scopes: [...API_KEY_SCOPES], expiresAt: null });
+    const auth = await authenticateApiKey({ db, now: () => Date.now() }, key, '127.0.0.1');
+    expect(auth).toMatchObject({ ok: true, principal: { id: old, scopes: [...API_KEY_SCOPES], expiresAt: null } });
+    // New keys get explicit scopes from the server; the column default is no access at all.
+    const [fresh] = await db.insert(apiKeys).values({ orgId: org, name: 'New', prefix: 'sp_live_n', keyHash: 'h3' }).returning();
+    expect(fresh.scopes).toEqual([]);
+    await db.insert(apiIdempotencyKeys).values({ orgId: org, key: 'k-1', apiKeyId: old, method: 'POST', path: '/api/v1/candidates', requestHash: 'x', createdAt: new Date() });
+    await expect(db.insert(apiIdempotencyKeys).values({ orgId: org, key: 'k-1', method: 'POST', path: '/api/v1/candidates', requestHash: 'y' })).rejects.toThrow();
   });
 });

@@ -24,6 +24,7 @@ import type {
   AccommodationBasis,
   AccommodationKind,
   AnswerValue,
+  ApiKeyScope,
   CandidateCommand,
   ExamVersionChangesDTO,
   ExamVersionQuestionDTO,
@@ -1193,13 +1194,48 @@ export const apiKeys = pgTable(
     /** sha256 hex of the full key. */
     keyHash: text('key_hash').notNull(),
     scope: text('scope').$type<'integration'>().notNull().default('integration'),
+    /**
+     * What the key may do (API_KEY_SCOPES, canonical order). Always set explicitly on insert; keys that existed before
+     * scopes (migration 0015) were given every scope of that time, i.e. the full access they had.
+     */
+    scopes: jsonb('scopes').$type<ApiKeyScope[]>().notNull().default([]),
     createdBy: uuid('created_by'),
     createdAt: createdAt(),
     lastUsedAt: ts('last_used_at'),
+    /** After this time the key is refused (401 api_key_expired); null = never expires. */
+    expiresAt: ts('expires_at'),
     revokedAt: ts('revoked_at'),
     revokedBy: uuid('revoked_by'),
   },
   (t) => [uniqueIndex('api_keys_hash_uq').on(t.keyHash), index('api_keys_org_idx').on(t.orgId, t.createdAt)],
+);
+
+/**
+ * `Idempotency-Key` records of the integration API (services/idempotency.ts): one row per (organisation, key), deleted
+ * after 24 h by the `api-idempotency` job. While the first request runs `statusCode` is null (a concurrent repeat gets
+ * 409 idempotency_key_in_use); once it succeeded, its response is stored — encrypted, since it can contain candidates'
+ * exam links (AAD `api-idempotency:<id>`) — and replayed for repeats of the same request.
+ */
+export const apiIdempotencyKeys = pgTable(
+  'api_idempotency_keys',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    key: text('key').notNull(),
+    apiKeyId: uuid('api_key_id').references(() => apiKeys.id, { onDelete: 'set null' }),
+    method: text('method').notNull(),
+    path: text('path').notNull(),
+    /** sha256 of the method, path, query string and canonical JSON body. */
+    requestHash: text('request_hash').notNull(),
+    /** HTTP status of the stored response; null while the first request is in progress. */
+    statusCode: integer('status_code'),
+    responseEnc: bytea('response_enc'),
+    createdAt: createdAt(),
+    completedAt: ts('completed_at'),
+  },
+  (t) => [uniqueIndex('api_idempotency_keys_org_key_uq').on(t.orgId, t.key), index('api_idempotency_keys_created_idx').on(t.createdAt)],
 );
 
 export const webhooks = pgTable(
@@ -1327,6 +1363,7 @@ export type Note = typeof notes.$inferSelect;
 export type AuditLogRow = typeof auditLog.$inferSelect;
 export type DeviceRecord = typeof deviceRecords.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
+export type ApiIdempotencyKey = typeof apiIdempotencyKeys.$inferSelect;
 export type Webhook = typeof webhooks.$inferSelect;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 export type EmailAlert = typeof emailAlerts.$inferSelect;

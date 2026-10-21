@@ -27,7 +27,11 @@ const feedQuerySchema = eventFilterSchema.extend({ limit: z.coerce.number().int(
 
 /** Parse the shared event filters into SQL conditions (null = a filter that can match nothing). */
 export function eventFilterConds(query: unknown): SQL[] | null {
-  const f = eventFilterSchema.parse(blankToUndefined(query));
+  return eventFilterCondsFrom(eventFilterSchema.parse(blankToUndefined(query)));
+}
+
+/** The same, from already parsed filters (the integration API parses with its own documented schema). */
+export function eventFilterCondsFrom(f: z.infer<typeof eventFilterSchema>): SQL[] | null {
   const conds: SQL[] = [];
   if (f.category) conds.push(eq(events.category, f.category));
   if (f.severity) conds.push(eq(events.severity, f.severity));

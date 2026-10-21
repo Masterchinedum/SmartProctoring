@@ -8,10 +8,10 @@
  * every instance: aggregate them with max(), not sum().
  */
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from '@prometheus-io/client';
-import { DEFAULT_REVIEW_SLA } from '@sp/shared';
-import { and, count, eq, gte, inArray, isNotNull, min, sql } from 'drizzle-orm';
+import { API_KEY_EXPIRY_WARNING_DAYS, DEFAULT_REVIEW_SLA } from '@sp/shared';
+import { and, count, eq, gt, gte, inArray, isNotNull, isNull, lte, min, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { emailAlerts, events, examSessions, organizations, sessionReviews, webhookDeliveries, webhooks } from '../db/schema.js';
+import { apiKeys, emailAlerts, events, examSessions, organizations, sessionReviews, webhookDeliveries, webhooks } from '../db/schema.js';
 import { CAPACITY_REASONS, currentCapacity, samplingPressure } from '../services/capacity.js';
 import { CALIBRATION } from '../vision/calibration.js';
 import { EMBEDDING_MODEL_CURRENT } from '../vision/embeddings.js';
@@ -40,6 +40,8 @@ interface ClusterSnapshot {
   flagsUndecided: number;
   oldestUndecidedFlagAt: Date | null;
   reviewsEscalated: number;
+  /** Unrevoked API keys expiring within API_KEY_EXPIRY_WARNING_DAYS (not yet expired). */
+  apiKeysExpiringSoon: number;
 }
 
 export class AppMetrics {
@@ -228,6 +230,12 @@ export class AppMetrics {
     clusterGauge('sp_cluster_review_flags_undecided', 'Flags (integrity / uncertain / technical events) no reviewer has decided yet.', [], (g, s) => g.set(s.flagsUndecided));
     clusterGauge('sp_cluster_review_oldest_undecided_flag_seconds', 'Age of the oldest undecided flag (0 when none).', [], (g, s, now) => g.set(ageSec(s.oldestUndecidedFlagAt, now)));
     clusterGauge('sp_cluster_reviews_escalated', 'Session reviews escalated and not yet resolved.', [], (g, s) => g.set(s.reviewsEscalated));
+    clusterGauge(
+      'sp_cluster_api_keys_expiring_soon',
+      `Integration API keys (not revoked) that expire within the next ${API_KEY_EXPIRY_WARNING_DAYS} days, all organisations: replace them before they stop working.`,
+      [],
+      (g, s) => g.set(s.apiKeysExpiringSoon),
+    );
   }
 
   /** Read gauges from this app's context at scrape time. */
@@ -329,7 +337,11 @@ export class AppMetrics {
         .from(events)
         .where(and(eq(events.reviewStatus, 'unreviewed'), inArray(events.category, ['integrity', 'uncertain', 'technical']))),
       db.select({ n: count() }).from(sessionReviews).where(eq(sessionReviews.state, 'escalated')),
-    ]).then(([sessions, interrupted, wh, whFailed, whDisabled, email, holdsOverdue, flags, escalated]) => ({
+      db
+        .select({ n: count() })
+        .from(apiKeys)
+        .where(and(isNull(apiKeys.revokedAt), gt(apiKeys.expiresAt, new Date(ctx.now())), lte(apiKeys.expiresAt, new Date(ctx.now() + API_KEY_EXPIRY_WARNING_DAYS * 86_400_000)))),
+    ]).then(([sessions, interrupted, wh, whFailed, whDisabled, email, holdsOverdue, flags, escalated, keysExpiring]) => ({
       sessions: Object.fromEntries(sessions.map((r) => [r.status, r.n])),
       reportingInterrupted: interrupted[0]?.n ?? 0,
       webhooksPending: wh[0]?.n ?? 0,
@@ -342,6 +354,7 @@ export class AppMetrics {
       flagsUndecided: flags[0]?.n ?? 0,
       oldestUndecidedFlagAt: flags[0]?.oldest ?? null,
       reviewsEscalated: escalated[0]?.n ?? 0,
+      apiKeysExpiringSoon: keysExpiring[0]?.n ?? 0,
     }));
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<null>((resolve) => {

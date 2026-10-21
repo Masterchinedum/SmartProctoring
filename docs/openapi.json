@@ -1,0 +1,3586 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SmartProctoring Integration API",
+    "version": "1.1.0",
+    "description": "Connect an LMS, HR system or other back office: list exams, create or update candidates, assign them to exams (you receive their personal exam links), and read attempts, final reports and event lists. Webhooks (notifications we send to you) are described in docs/INTEGRATION_API.md §3.\n\nConventions: JSON in and out; timestamps are epoch milliseconds (UTC); errors are `{ error, message, details? }` with a specific `error` code; lists take `limit` / `offset`. Responses may gain new fields at any time: ignore fields you do not know.\n\nPrivacy: responses never contain images, face templates or face-similarity scores; evidence stays behind staff sign-in (`staffUrl` links)."
+  },
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ],
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Exams",
+      "description": "Exams and assigning candidates to them."
+    },
+    {
+      "name": "Candidates",
+      "description": "The people who take exams."
+    },
+    {
+      "name": "Sessions",
+      "description": "Attempts: status, results, reports and events."
+    },
+    {
+      "name": "Meta",
+      "description": "About the API itself."
+    }
+  ],
+  "paths": {
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenApiDocument",
+        "summary": "This OpenAPI document",
+        "description": "The OpenAPI 3.1 description of the integration API (the same as docs/openapi.json for this version). No API key needed: it contains no organisation data.\n\nNo API key needed.",
+        "tags": [
+          "Meta"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/exams": {
+      "get": {
+        "operationId": "listExams",
+        "summary": "List exams",
+        "description": "The organisation’s exams, newest first.\n\nRequires the `exams:read` scope.",
+        "tags": [
+          "Exams"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "exams:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Only exams with this status (default: all).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "published",
+                "archived"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The exams.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Exam"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: `validation_failed` — the request does not match the schema (`details`: a list of `{ path, message }`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/candidates": {
+      "post": {
+        "operationId": "upsertCandidate",
+        "summary": "Create or update a candidate",
+        "description": "Upsert by `externalId`: if a candidate with this external id exists, its name (and email, when given) is updated; otherwise a candidate is created. Without `externalId` a new candidate is always created.\n\nRequires the `candidates:write` scope.\n\nSend an `Idempotency-Key` header to make retries safe: a repeat with the same key and request within 24 hours returns the stored response.\n\nRecorded in the organisation’s audit log (actor: the API key).",
+        "tags": [
+          "Candidates"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "candidates:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CandidateInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A candidate with this `externalId` existed: updated, or already up to date.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              },
+              "Idempotent-Replayed": {
+                "$ref": "#/components/headers/IdempotentReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateUpsertResult"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              },
+              "Idempotent-Replayed": {
+                "$ref": "#/components/headers/IdempotentReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateUpsertResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: `validation_failed` — the request does not match the schema (`details`: a list of `{ path, message }`); `invalid_idempotency_key` — the Idempotency-Key header is malformed (1–255 characters: letters, digits and `- _ . : ~ + / =`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "Conflict: `idempotency_key_in_use` — a request with this Idempotency-Key is still being processed: retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listCandidates",
+        "summary": "Find candidates",
+        "description": "Candidates, oldest first, optionally filtered by external id or email.\n\nRequires the `candidates:read` scope.",
+        "tags": [
+          "Candidates"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "candidates:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "externalId",
+            "in": "query",
+            "required": false,
+            "description": "Exact external id.",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "email",
+            "in": "query",
+            "required": false,
+            "description": "Email address (case-insensitive).",
+            "schema": {
+              "type": "string",
+              "maxLength": 254
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Number of items to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The matching candidates.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Candidate"
+                      }
+                    },
+                    "total": {
+                      "description": "Number of matches over all pages.",
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: `validation_failed` — the request does not match the schema (`details`: a list of `{ path, message }`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/exams/{examId}/assignments": {
+      "post": {
+        "operationId": "assignCandidates",
+        "summary": "Assign candidates to an exam",
+        "description": "Creates an attempt for each candidate and returns their personal exam links. A candidate who already has a not-yet-finished attempt at this exam keeps it (`existing: true`), so retrying is safe. Unknown candidates fail the whole request (nothing is created).\n\nRequires the `assignments:write` scope.\n\nSend an `Idempotency-Key` header to make retries safe: a repeat with the same key and request within 24 hours returns the stored response.\n\nRecorded in the organisation’s audit log (actor: the API key).",
+        "tags": [
+          "Exams"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "assignments:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "examId",
+            "in": "path",
+            "required": true,
+            "description": "Exam id.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One item per candidate, in the requested order.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              },
+              "Idempotent-Replayed": {
+                "$ref": "#/components/headers/IdempotentReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Assignment"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: `validation_failed` — the request does not match the schema (`details`: a list of `{ path, message }`); `invalid_idempotency_key` — the Idempotency-Key header is malformed (1–255 characters: letters, digits and `- _ . : ~ + / =`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Not found: `exam_not_found` — no such exam in your organisation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `exam_not_published` — the exam is a draft or archived; `idempotency_key_in_use` — a request with this Idempotency-Key is still being processed: retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "summary": "List attempts",
+        "description": "Attempts (sessions), newest first. `accessLink` is always null in lists.\n\nRequires the `sessions:read` scope.",
+        "tags": [
+          "Sessions"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "sessions:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "examId",
+            "in": "query",
+            "required": false,
+            "description": "Only attempts at this exam.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "candidateId",
+            "in": "query",
+            "required": false,
+            "description": "Only this candidate’s attempts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "externalId",
+            "in": "query",
+            "required": false,
+            "description": "Only attempts of the candidate with this external id.",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated statuses, e.g. `submitted,terminated` (invited, ready, active, paused, on_hold, submitted, terminated).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Number of items to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The matching attempts.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Session"
+                      }
+                    },
+                    "total": {
+                      "description": "Number of matches over all pages.",
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: `validation_failed` — the request does not match the schema (`details`: a list of `{ path, message }`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/sessions/{id}": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Get an attempt",
+        "description": "Status, times, score, event counts, hold and review of one attempt.\n\nRequires the `sessions:read` scope.",
+        "tags": [
+          "Sessions"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "sessions:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Session id.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The attempt.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Not found: `session_not_found` — no such session in your organisation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/sessions/{id}/window": {
+      "put": {
+        "operationId": "rescheduleSession",
+        "summary": "Set, change or clear the scheduling window of an attempt",
+        "description": "Only before the exam starts. Both bounds null clears the window. The same rules as on assignment: `endsAt` after `startsAt`, at least 5 minutes long, not in the past, at most two years ahead. An unchanged window records nothing; a change is sent as the `session.rescheduled` webhook. Returns the attempt (with `accessLink` null).\n\nRequires the `assignments:write` scope.\n\nSend an `Idempotency-Key` header to make retries safe: a repeat with the same key and request within 24 hours returns the stored response.\n\nRecorded in the organisation’s audit log (actor: the API key).",
+        "tags": [
+          "Sessions"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "assignments:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Session id.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RescheduleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The attempt with its new window.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              },
+              "Idempotent-Replayed": {
+                "$ref": "#/components/headers/IdempotentReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: `validation_failed` — the request does not match the schema (`details`: a list of `{ path, message }`); `invalid_idempotency_key` — the Idempotency-Key header is malformed (1–255 characters: letters, digits and `- _ . : ~ + / =`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Not found: `session_not_found` — no such session in your organisation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `already_started` — the exam has started, so its window can no longer be changed; `invalid_state` — the attempt has ended; `idempotency_key_in_use` — a request with this Idempotency-Key is still being processed: retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/sessions/{id}/report": {
+      "get": {
+        "operationId": "getSessionReport",
+        "summary": "Get the final report of an attempt",
+        "description": "The report the staff app shows, without evidence images or the reviewer-facing explanations.\n\nRequires the `reports:read` scope.\n\nRecorded in the organisation’s audit log (actor: the API key).",
+        "tags": [
+          "Sessions"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "reports:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Session id.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tz",
+            "in": "query",
+            "required": false,
+            "description": "IANA time zone for times written in sentences, e.g. `Europe/Berlin` (default and fallback for unknown zones: UTC).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Not found: `session_not_found` — no such session in your organisation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/sessions/{id}/events": {
+      "get": {
+        "operationId": "listSessionEvents",
+        "summary": "List the events of an attempt",
+        "description": "Proctoring events in chronological order. Unknown event types in `type` match nothing.\n\nRequires the `events:read` scope.\n\nRecorded in the organisation’s audit log (actor: the API key).",
+        "tags": [
+          "Sessions"
+        ],
+        "security": [
+          {
+            "apiKey": [
+              "events:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Session id.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "description": "integrity: a potential integrity issue; uncertain: an observation that could not be assessed reliably; technical: a technical problem; neutral: a session change; exception: the attempt ran under an approved accommodation (context, never a flag).",
+            "schema": {
+              "$ref": "#/components/schemas/EventCategory"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated event types.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "description": "Exactly this severity.",
+            "schema": {
+              "$ref": "#/components/schemas/Severity"
+            }
+          },
+          {
+            "name": "review",
+            "in": "query",
+            "required": false,
+            "description": "Review status.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "unreviewed",
+                "reviewed",
+                "dismissed"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Only events the server received (first or updated) at or after this time, epoch ms — for incremental polling.",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The events.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Event"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: `validation_failed` — the request does not match the schema (`details`: a list of `{ path, message }`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Not found: `session_not_found` — no such session in your organisation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "sp_live_ followed by 43 characters",
+        "description": "An organisation API key (Settings → Integrations → API keys), sent as `Authorization: Bearer sp_live_…`. Each key has scopes; each operation lists the one it requires:\n\n* `exams:read` — List exams (GET /exams).\n* `candidates:read` — Find candidates by external id or email (GET /candidates).\n* `candidates:write` — Create or update candidates by external id (POST /candidates).\n* `assignments:write` — Assign candidates to exams (POST /exams/{examId}/assignments) and read candidates’ personal exam links (accessLink of GET /sessions/{id}).\n* `sessions:read` — Status, times, score and event counts of attempts (GET /sessions, GET /sessions/{id}).\n* `reports:read` — Final reports (GET /sessions/{id}/report).\n* `events:read` — Proctoring event lists (GET /sessions/{id}/events)."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "description": "The body of every non-2xx response.",
+        "type": "object",
+        "properties": {
+          "error": {
+            "description": "Machine-readable code, e.g. `invalid_api_key`, `api_key_expired`, `insufficient_scope`, `validation_failed`, `session_not_found`, `rate_limited`.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable explanation in English. It may change: do not parse it.",
+            "type": "string"
+          },
+          "details": {
+            "description": "More information when available. `validation_failed`: a list of `{ path, message }`; `insufficient_scope`: `{ requiredScope, scopes }`."
+          }
+        },
+        "required": [
+          "error",
+          "message"
+        ]
+      },
+      "EventType": {
+        "description": "Event type. New types may be added: treat an unknown type like any other observation of its category.",
+        "type": "string",
+        "enum": [
+          "identity_mismatch",
+          "multiple_people",
+          "candidate_absent",
+          "looking_away",
+          "repeated_looking_away",
+          "offscreen_attention_pattern",
+          "unusual_movement",
+          "phone_detected",
+          "unauthorized_object",
+          "camera_covered",
+          "camera_feed_suspect",
+          "tab_hidden",
+          "window_unfocused",
+          "fullscreen_exited",
+          "clipboard_attempt",
+          "multiple_instances",
+          "identity_unverifiable",
+          "face_obstructed",
+          "lighting_unusable",
+          "camera_disconnected",
+          "camera_permission_lost",
+          "camera_frozen",
+          "reporting_interrupted",
+          "monitoring_degraded",
+          "session_started",
+          "checkin_completed",
+          "reference_created",
+          "id_photo_compared",
+          "identity_verified",
+          "pause_requested",
+          "pause_denied",
+          "session_paused",
+          "session_resumed",
+          "unobserved_period",
+          "camera_changed",
+          "environment_changed",
+          "additional_display_detected",
+          "session_held",
+          "hold_released",
+          "session_submitted",
+          "session_expired",
+          "session_terminated",
+          "time_extended",
+          "score_regraded",
+          "accommodations_applied",
+          "identity_verified_by_staff",
+          "review_completed",
+          "review_reopened",
+          "session_rescheduled",
+          "session_reopened"
+        ]
+      },
+      "EventCategory": {
+        "description": "integrity: a potential integrity issue; uncertain: an observation that could not be assessed reliably; technical: a technical problem; neutral: a session change; exception: the attempt ran under an approved accommodation (context, never a flag).",
+        "type": "string",
+        "enum": [
+          "integrity",
+          "uncertain",
+          "technical",
+          "neutral",
+          "exception"
+        ]
+      },
+      "Severity": {
+        "type": "string",
+        "enum": [
+          "info",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "SessionStatus": {
+        "type": "string",
+        "enum": [
+          "invited",
+          "ready",
+          "active",
+          "paused",
+          "on_hold",
+          "submitted",
+          "terminated"
+        ]
+      },
+      "EndReason": {
+        "type": "string",
+        "enum": [
+          "candidate_submitted",
+          "time_expired",
+          "staff_submitted",
+          "staff_terminated",
+          "candidate_withdrew",
+          "abandoned",
+          "resume_limit"
+        ]
+      },
+      "AccommodationKind": {
+        "type": "string",
+        "enum": [
+          "extra_time",
+          "rest_breaks",
+          "no_liveness_challenge",
+          "assistive_technology",
+          "detection_exemptions",
+          "support_person",
+          "staff_identity_verification",
+          "no_camera"
+        ]
+      },
+      "Exam": {
+        "description": "An exam.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "description": "Only published exams can be assigned.",
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ]
+          },
+          "durationSec": {
+            "description": "Exam time in seconds (approved extra time comes on top, per candidate).",
+            "type": "integer",
+            "minimum": 0
+          },
+          "version": {
+            "description": "The exam version candidates who start now get (null while the exam was never published). Each attempt keeps the version it started with.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status",
+          "durationSec",
+          "version"
+        ]
+      },
+      "CandidateInput": {
+        "description": "A candidate to create, or to update by `externalId`.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "Full name (required; surrounding spaces are removed).",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "email": {
+            "description": "Optional email address. Omit it to keep the stored one; null removes it.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "email"
+          },
+          "externalId": {
+            "description": "Your own stable id for the person (student number, employee id). With it the request is an upsert: an existing candidate with this id is updated.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "Candidate": {
+        "description": "A candidate (a person who takes exams).",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "externalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "description": "Epoch milliseconds (UTC).",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "email",
+          "externalId",
+          "createdAt"
+        ]
+      },
+      "CandidateUpsertResult": {
+        "type": "object",
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/Candidate"
+          },
+          "created": {
+            "description": "true: a new candidate was created (HTTP 201). false: the candidate with this `externalId` was updated, or was already up to date (HTTP 200).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "candidate",
+          "created"
+        ]
+      },
+      "AssignmentRequest": {
+        "description": "Who to assign: at least one id in total, at most 1000 in each list.",
+        "type": "object",
+        "properties": {
+          "candidateIds": {
+            "description": "Candidate ids (as returned by POST /candidates).",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "maxItems": 1000
+          },
+          "externalIds": {
+            "description": "Your external ids (create the candidates with POST /candidates first).",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "maxItems": 1000
+          },
+          "window": {
+            "description": "Scheduling window for the new attempts (the candidate can start only inside it). A candidate’s existing unfinished attempt keeps its own window.",
+            "$ref": "#/components/schemas/WindowInput"
+          }
+        }
+      },
+      "Assignment": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "description": "The attempt (session) id.",
+            "type": "string",
+            "format": "uuid"
+          },
+          "candidateId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "candidateName": {
+            "type": "string"
+          },
+          "externalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "accessLink": {
+            "description": "The candidate’s personal exam link (`https://…/take/<token>`). Treat it like a password: show it only to that candidate.",
+            "type": "string"
+          },
+          "existing": {
+            "description": "true: the candidate already had a not-yet-finished attempt at this exam; its id and link are returned and nothing was created.",
+            "type": "boolean"
+          },
+          "window": {
+            "description": "The attempt’s scheduling window (an existing attempt keeps its own; null: none).",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Window"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "sessionId",
+          "candidateId",
+          "candidateName",
+          "externalId",
+          "accessLink",
+          "existing",
+          "window"
+        ]
+      },
+      "Hold": {
+        "description": "Why and since when the attempt is on hold.",
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "identity_mismatch",
+              "identity_unverifiable",
+              "id_photo_mismatch",
+              "pause_limit",
+              "staff",
+              "id_photo_unverifiable",
+              "staff_verification",
+              "resume_limit",
+              "recovery"
+            ]
+          },
+          "since": {
+            "description": "When the hold started.",
+            "type": "integer"
+          },
+          "message": {
+            "description": "What the candidate is told.",
+            "type": "string"
+          },
+          "canReverify": {
+            "description": "The candidate may verify their identity again by themselves.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reason",
+          "since",
+          "message",
+          "canReverify"
+        ]
+      },
+      "Window": {
+        "description": "The window in which the candidate can start the exam.",
+        "type": "object",
+        "properties": {
+          "startsAt": {
+            "description": "When the candidate can start (null: open — any time until endsAt). The check-in may begin 30 minutes earlier.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "endsAt": {
+            "description": "Until when the candidate can start (null: open). An exam that started in time is never cut off.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "startsAt",
+          "endsAt"
+        ]
+      },
+      "WindowInput": {
+        "description": "A scheduling window: the candidate can start the exam only inside it. At least 5 minutes long, closing in the future, at most two years ahead.",
+        "type": "object",
+        "properties": {
+          "startsAt": {
+            "description": "From when the candidate can start (null or omitted: open). The check-in may begin 30 minutes earlier.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8640000000000000
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "endsAt": {
+            "description": "Until when the candidate can start (null or omitted: open). An exam that started in time is never cut off.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8640000000000000
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        }
+      },
+      "RescheduleRequest": {
+        "description": "The new window; both bounds null clears it.",
+        "type": "object",
+        "properties": {
+          "window": {
+            "$ref": "#/components/schemas/WindowInput"
+          },
+          "note": {
+            "description": "Why (recorded on the timeline and in the audit log; never sent in webhooks).",
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "window"
+        ]
+      },
+      "Session": {
+        "description": "One candidate’s attempt at one exam.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionStatus"
+          },
+          "endReason": {
+            "description": "Set once ended. `submitted`: candidate_submitted, time_expired or staff_submitted. `terminated`: staff_terminated, candidate_withdrew (no score) or abandoned (closed automatically after inactivity; no score implied).",
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "candidate_submitted",
+              "time_expired",
+              "staff_submitted",
+              "staff_terminated",
+              "candidate_withdrew",
+              "abandoned",
+              "resume_limit",
+              null
+            ]
+          },
+          "exam": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title"
+            ]
+          },
+          "examVersion": {
+            "description": "The exam version the attempt is pinned to (null until it starts).",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "accommodations": {
+            "description": "Approved accommodations applied to the attempt (empty: none). Extra time is already included in the duration.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccommodationKind"
+            }
+          },
+          "candidate": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "externalId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "email",
+              "externalId"
+            ]
+          },
+          "createdAt": {
+            "description": "Epoch milliseconds (UTC).",
+            "type": "integer"
+          },
+          "startedAt": {
+            "description": "Epoch milliseconds (UTC).",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "endedAt": {
+            "description": "Epoch milliseconds (UTC).",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "remainingMs": {
+            "description": "Exam time left.",
+            "type": "number",
+            "minimum": 0
+          },
+          "timerRunning": {
+            "type": "boolean"
+          },
+          "pauseCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "score": {
+            "description": "Present once answers were graded, with the answer keys of the attempt’s own exam version.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "points": {
+                "type": "number"
+              },
+              "maxPoints": {
+                "type": "number"
+              },
+              "autoGraded": {
+                "description": "false while open questions are not graded (they are never graded automatically).",
+                "type": "boolean"
+              },
+              "regraded": {
+                "description": "How many times an administrator regraded the attempt (see the session.regraded webhook).",
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "points",
+              "maxPoints",
+              "autoGraded",
+              "regraded"
+            ]
+          },
+          "counts": {
+            "description": "Observations awaiting or after human review — not a verdict. Dismissed events are not counted in the category totals.",
+            "type": "object",
+            "properties": {
+              "integrity": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "uncertain": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "technical": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unreviewed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "open": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "highSeverity": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "integrity",
+              "uncertain",
+              "technical",
+              "unreviewed",
+              "open",
+              "highSeverity"
+            ]
+          },
+          "hold": {
+            "description": "Why and since when the attempt is on hold.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Hold"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "accessLink": {
+            "description": "The candidate’s personal exam link: only in GET /sessions/{id}, only for keys with the `assignments:write` scope, and only while the attempt can still be taken (null otherwise).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "window": {
+            "description": "The scheduling window (null: none — the exam can be started any time).",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Window"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "review": {
+            "description": "The staff review of the attempt.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`none`: no staff member has picked up the review yet.",
+                "type": "string",
+                "enum": [
+                  "none",
+                  "open",
+                  "escalated",
+                  "resolved"
+                ]
+              },
+              "outcome": {
+                "description": "Set once resolved: a staff decision, never automated.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "no_concerns",
+                  "concerns",
+                  "inconclusive",
+                  "technical_issues",
+                  null
+                ]
+              }
+            },
+            "required": [
+              "state",
+              "outcome"
+            ]
+          },
+          "staffUrl": {
+            "description": "Link into the staff app (staff sign-in required).",
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "endReason",
+          "exam",
+          "examVersion",
+          "accommodations",
+          "candidate",
+          "createdAt",
+          "startedAt",
+          "endedAt",
+          "remainingMs",
+          "timerRunning",
+          "pauseCount",
+          "score",
+          "counts",
+          "hold",
+          "accessLink",
+          "window",
+          "review",
+          "staffUrl"
+        ]
+      },
+      "Event": {
+        "description": "A proctoring event: an observation awaiting human review, never a verdict.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "$ref": "#/components/schemas/EventType"
+          },
+          "category": {
+            "$ref": "#/components/schemas/EventCategory"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          },
+          "source": {
+            "description": "What observed it.",
+            "type": "string",
+            "enum": [
+              "client_vision",
+              "client_browser",
+              "server_identity",
+              "server_system",
+              "staff"
+            ]
+          },
+          "status": {
+            "description": "open: still going on (events with a duration).",
+            "type": "string",
+            "enum": [
+              "open",
+              "closed"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "observation": {
+            "description": "What was observed, in plain words (never a conclusion).",
+            "type": "string"
+          },
+          "startedAt": {
+            "description": "Epoch milliseconds (UTC).",
+            "type": "integer"
+          },
+          "endedAt": {
+            "description": "Epoch milliseconds (UTC).",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "durationMs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "confidence": {
+            "description": "0..1 where meaningful; null for session changes.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "details": {
+            "description": "Type-specific measurements (never face-similarity scores: such fields are null).",
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "context": {
+            "description": "What surrounded it, e.g. `{ \"precededBy\": [\"session_resumed\"], \"periodKind\": \"active\" }`.",
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "review": {
+            "description": "The human review of the event.",
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "unreviewed",
+                  "reviewed",
+                  "dismissed"
+                ]
+              },
+              "resolution": {
+                "description": "The reviewer’s structured conclusion (null when undecided or for older plain decisions).",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "concern",
+                  "no_concern",
+                  "accommodation",
+                  "technical",
+                  "inconclusive",
+                  "false_detection",
+                  null
+                ]
+              },
+              "by": {
+                "description": "Staff user id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "byName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "description": "Epoch milliseconds (UTC).",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "resolution",
+              "by",
+              "byName",
+              "at",
+              "note"
+            ]
+          },
+          "notesCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "receivedAt": {
+            "description": "When the server received the latest version (what `since` filters on).",
+            "type": "integer"
+          },
+          "deliveredLate": {
+            "description": "Reported well after it happened (e.g. buffered while the candidate was offline).",
+            "type": "boolean"
+          },
+          "evidenceCount": {
+            "description": "Evidence images kept for it (they stay in the staff app).",
+            "type": "integer",
+            "minimum": 0
+          },
+          "staffUrl": {
+            "description": "The event in the staff app (staff sign-in required).",
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "id",
+          "sessionId",
+          "type",
+          "category",
+          "severity",
+          "source",
+          "status",
+          "title",
+          "observation",
+          "startedAt",
+          "endedAt",
+          "durationMs",
+          "confidence",
+          "details",
+          "context",
+          "review",
+          "notesCount",
+          "receivedAt",
+          "deliveredLate",
+          "evidenceCount",
+          "staffUrl"
+        ]
+      },
+      "SessionReport": {
+        "description": "The final report the staff app shows, with evidence replaced by counts and staff links, and without the reviewer-facing explanations.",
+        "type": "object",
+        "properties": {
+          "generatedAt": {
+            "description": "Epoch milliseconds (UTC).",
+            "type": "integer"
+          },
+          "session": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "exam": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "title"
+                ]
+              },
+              "candidate": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "externalId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "email",
+                  "externalId"
+                ]
+              },
+              "status": {
+                "$ref": "#/components/schemas/SessionStatus"
+              },
+              "endReason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/EndReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "connection": {
+                "type": "string",
+                "enum": [
+                  "online",
+                  "offline",
+                  "never_connected"
+                ]
+              },
+              "lastHeartbeatAt": {
+                "description": "Epoch milliseconds (UTC).",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "reportingInterruptedSince": {
+                "description": "Epoch milliseconds (UTC).",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "monitoring": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "ok",
+                      "attention",
+                      "degraded",
+                      "off"
+                    ]
+                  },
+                  "faces": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "open": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/EventType"
+                    }
+                  },
+                  "lookDirection": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "left",
+                      "right",
+                      "up",
+                      "down",
+                      "down_left",
+                      "down_right",
+                      "up_left",
+                      "up_right",
+                      null
+                    ]
+                  },
+                  "at": {
+                    "description": "Epoch milliseconds (UTC).",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "state",
+                  "faces",
+                  "label",
+                  "open",
+                  "at"
+                ]
+              },
+              "identity": {
+                "type": "object",
+                "properties": {
+                  "lastDecision": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "match",
+                      "mismatch",
+                      "inconclusive",
+                      "unable_to_verify",
+                      null
+                    ]
+                  },
+                  "lastAt": {
+                    "description": "Epoch milliseconds (UTC).",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "lastSimilarity": {
+                    "description": "Always null: face-similarity scores are never returned.",
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "lastDecision",
+                  "lastAt",
+                  "lastSimilarity"
+                ]
+              },
+              "remainingMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "timerRunning": {
+                "type": "boolean"
+              },
+              "startedAt": {
+                "description": "Epoch milliseconds (UTC).",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "endedAt": {
+                "description": "Epoch milliseconds (UTC).",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "pauseCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "counts": {
+                "description": "Observations awaiting or after human review — not a verdict. Dismissed events are not counted in the category totals.",
+                "type": "object",
+                "properties": {
+                  "integrity": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "uncertain": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "technical": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unreviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "open": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "highSeverity": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "integrity",
+                  "uncertain",
+                  "technical",
+                  "unreviewed",
+                  "open",
+                  "highSeverity"
+                ]
+              },
+              "pendingPauseRequest": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "requestedAt": {
+                    "description": "Epoch milliseconds (UTC).",
+                    "type": "integer"
+                  },
+                  "reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "approved",
+                      "denied",
+                      "cancelled"
+                    ]
+                  },
+                  "decidedAt": {
+                    "description": "Epoch milliseconds (UTC).",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "decidedBy": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "decisionNote": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "requestedAt",
+                  "reason",
+                  "status",
+                  "decidedAt",
+                  "decidedBy",
+                  "decisionNote"
+                ]
+              },
+              "hold": {
+                "description": "Why and since when the attempt is on hold.",
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Hold"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "accessLink": {
+                "description": "Always null in reports.",
+                "type": "null"
+              },
+              "legalHold": {
+                "type": "boolean"
+              },
+              "window": {
+                "description": "The window in which the candidate can start the exam.",
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Window"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reconnectCount": {
+                "description": "Times the exam was reopened in a new browser window since the start or the last staff decision.",
+                "type": "integer",
+                "minimum": 0
+              },
+              "examVersion": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "number": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "number"
+                ]
+              },
+              "accommodations": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AccommodationKind"
+                }
+              },
+              "review": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "description": "`none`: no staff member has picked up the review yet.",
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "open",
+                      "escalated",
+                      "resolved"
+                    ]
+                  },
+                  "assignee": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name"
+                    ]
+                  },
+                  "outcome": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "no_concerns",
+                      "concerns",
+                      "inconclusive",
+                      "technical_issues",
+                      null
+                    ]
+                  },
+                  "undecided": {
+                    "type": "object",
+                    "properties": {
+                      "integrity": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "uncertain": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "technical": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "integrity",
+                      "uncertain",
+                      "technical"
+                    ]
+                  },
+                  "topSeverity": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Severity"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "due": {
+                    "description": "The organisation’s review target that applies now (null: nothing waiting).",
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "hold",
+                          "flags"
+                        ]
+                      },
+                      "since": {
+                        "description": "Epoch milliseconds (UTC).",
+                        "type": "integer"
+                      },
+                      "dueAt": {
+                        "description": "Epoch milliseconds (UTC).",
+                        "type": "integer"
+                      },
+                      "overdue": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "since",
+                      "dueAt",
+                      "overdue"
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "assignee",
+                  "outcome",
+                  "undecided",
+                  "topSeverity",
+                  "due"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "exam",
+              "candidate",
+              "status",
+              "endReason",
+              "connection",
+              "lastHeartbeatAt",
+              "reportingInterruptedSince",
+              "monitoring",
+              "identity",
+              "remainingMs",
+              "timerRunning",
+              "startedAt",
+              "endedAt",
+              "pauseCount",
+              "counts",
+              "pendingPauseRequest",
+              "hold",
+              "accessLink"
+            ]
+          },
+          "exam": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "title": {
+                "type": "string"
+              },
+              "durationSec": {
+                "type": "integer"
+              },
+              "version": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "durationSec"
+            ]
+          },
+          "candidate": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "externalId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "email",
+              "externalId"
+            ]
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "wallClockMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "observedMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "unobservedMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "activeMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "pausedMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "disconnectedMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "heldMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "pauseCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "examTimeUsedMs": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "wallClockMs",
+              "observedMs",
+              "unobservedMs",
+              "activeMs",
+              "pausedMs",
+              "disconnectedMs",
+              "heldMs",
+              "pauseCount",
+              "examTimeUsedMs"
+            ]
+          },
+          "periods": {
+            "description": "The attempt’s timeline split into observed and unobserved periods.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "check_in",
+                    "active",
+                    "paused",
+                    "disconnected",
+                    "on_hold",
+                    "resume_check"
+                  ]
+                },
+                "observed": {
+                  "description": "Monitoring was running (pauses, disconnections and holds are unobserved by design).",
+                  "type": "boolean"
+                },
+                "startedAt": {
+                  "description": "Epoch milliseconds (UTC).",
+                  "type": "integer"
+                },
+                "endedAt": {
+                  "description": "Epoch milliseconds (UTC).",
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "meta": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "observed",
+                "startedAt",
+                "endedAt",
+                "reason",
+                "meta"
+              ]
+            }
+          },
+          "identity": {
+            "type": "object",
+            "properties": {
+              "referenceCreatedAt": {
+                "description": "Epoch milliseconds (UTC).",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "checks": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "matches": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "mismatches": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "inconclusive": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unableToVerify": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "idPhoto": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "decision": {
+                    "type": "string",
+                    "enum": [
+                      "match",
+                      "mismatch",
+                      "inconclusive",
+                      "unable_to_verify"
+                    ]
+                  },
+                  "similarity": {
+                    "description": "Always null.",
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "decision",
+                  "similarity"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "referenceCreatedAt",
+              "checks",
+              "matches",
+              "mismatches",
+              "inconclusive",
+              "unableToVerify",
+              "idPhoto",
+              "summary"
+            ]
+          },
+          "eventCounts": {
+            "type": "object",
+            "properties": {
+              "integrity": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "dismissed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unreviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "total",
+                  "dismissed",
+                  "reviewed",
+                  "unreviewed"
+                ]
+              },
+              "uncertain": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "dismissed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unreviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "total",
+                  "dismissed",
+                  "reviewed",
+                  "unreviewed"
+                ]
+              },
+              "technical": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "dismissed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unreviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "total",
+                  "dismissed",
+                  "reviewed",
+                  "unreviewed"
+                ]
+              },
+              "neutral": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "dismissed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unreviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "total",
+                  "dismissed",
+                  "reviewed",
+                  "unreviewed"
+                ]
+              },
+              "exception": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "dismissed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unreviewed": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "total",
+                  "dismissed",
+                  "reviewed",
+                  "unreviewed"
+                ]
+              }
+            },
+            "required": [
+              "integrity",
+              "uncertain",
+              "technical",
+              "neutral",
+              "exception"
+            ]
+          },
+          "byType": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "$ref": "#/components/schemas/EventType"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "category": {
+                  "$ref": "#/components/schemas/EventCategory"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "totalDurationMs": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "dismissed": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "type",
+                "title",
+                "category",
+                "count",
+                "totalDurationMs",
+                "dismissed"
+              ]
+            }
+          },
+          "notableEvents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "observations": {
+            "description": "Factual sentences (never a verdict).",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reviewerNotes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "sessionId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "eventId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "authorId": {
+                  "type": "string"
+                },
+                "authorName": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "createdAt": {
+                  "description": "Epoch milliseconds (UTC).",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "sessionId",
+                "eventId",
+                "authorId",
+                "authorName",
+                "text",
+                "createdAt"
+              ]
+            }
+          },
+          "score": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "points": {
+                "type": "number"
+              },
+              "maxPoints": {
+                "type": "number"
+              },
+              "autoGraded": {
+                "type": "boolean"
+              },
+              "regrades": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "at": {
+                      "description": "Epoch milliseconds (UTC).",
+                      "type": "integer"
+                    },
+                    "byStaffId": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "keysFromVersion": {
+                      "type": "integer"
+                    },
+                    "previous": {
+                      "type": "object",
+                      "properties": {
+                        "points": {
+                          "type": "number"
+                        },
+                        "maxPoints": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "points",
+                        "maxPoints"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "at",
+                    "byStaffId",
+                    "reason",
+                    "keysFromVersion",
+                    "previous"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "points",
+              "maxPoints",
+              "autoGraded",
+              "regrades"
+            ]
+          },
+          "accommodations": {
+            "description": "Approved accommodations and the exam rules they changed (never why they were granted). null: none.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "$ref": "#/components/schemas/AccommodationKind"
+                    },
+                    "params": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "grantedAt": {
+                      "description": "Epoch milliseconds (UTC).",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "params",
+                    "label",
+                    "grantedAt"
+                  ]
+                }
+              },
+              "extraTimeMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "exceptions": {
+                "description": "Every exam rule the accommodations changed.",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "from": {},
+                    "to": {},
+                    "kinds": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AccommodationKind"
+                      }
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "label",
+                    "kinds"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "items",
+              "extraTimeMs",
+              "exceptions"
+            ]
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "review": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`none`: no staff member has picked up the review yet.",
+                "type": "string",
+                "enum": [
+                  "none",
+                  "open",
+                  "escalated",
+                  "resolved"
+                ]
+              },
+              "assignee": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ]
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "no_concerns",
+                  "concerns",
+                  "inconclusive",
+                  "technical_issues",
+                  null
+                ]
+              },
+              "undecided": {
+                "type": "object",
+                "properties": {
+                  "integrity": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "uncertain": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "technical": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "integrity",
+                  "uncertain",
+                  "technical"
+                ]
+              },
+              "topSeverity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Severity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "due": {
+                "description": "The organisation’s review target that applies now (null: nothing waiting).",
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "hold",
+                      "flags"
+                    ]
+                  },
+                  "since": {
+                    "description": "Epoch milliseconds (UTC).",
+                    "type": "integer"
+                  },
+                  "dueAt": {
+                    "description": "Epoch milliseconds (UTC).",
+                    "type": "integer"
+                  },
+                  "overdue": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "since",
+                  "dueAt",
+                  "overdue"
+                ]
+              },
+              "assignedAt": {
+                "description": "Epoch milliseconds (UTC).",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "escalation": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "at": {
+                    "description": "Epoch milliseconds (UTC).",
+                    "type": "integer"
+                  },
+                  "by": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name"
+                    ]
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "at",
+                  "by",
+                  "note"
+                ]
+              },
+              "resolution": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "no_concerns",
+                      "concerns",
+                      "inconclusive",
+                      "technical_issues"
+                    ]
+                  },
+                  "note": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "at": {
+                    "description": "Epoch milliseconds (UTC).",
+                    "type": "integer"
+                  },
+                  "by": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name"
+                    ]
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "note",
+                  "at",
+                  "by"
+                ]
+              }
+            },
+            "required": [
+              "state",
+              "assignee",
+              "outcome",
+              "undecided",
+              "topSeverity",
+              "due",
+              "assignedAt",
+              "escalation",
+              "resolution"
+            ]
+          },
+          "incidents": {
+            "description": "Flags close in time, grouped (oldest first).",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "startedAt": {
+                  "description": "Epoch milliseconds (UTC).",
+                  "type": "integer"
+                },
+                "endedAt": {
+                  "description": "Epoch milliseconds (UTC).",
+                  "type": "integer"
+                },
+                "open": {
+                  "type": "boolean"
+                },
+                "category": {
+                  "$ref": "#/components/schemas/EventCategory"
+                },
+                "severity": {
+                  "$ref": "#/components/schemas/Severity"
+                },
+                "eventIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "types": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "$ref": "#/components/schemas/EventType"
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "count"
+                    ]
+                  }
+                },
+                "title": {
+                  "type": "string"
+                },
+                "undecided": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "id",
+                "startedAt",
+                "endedAt",
+                "open",
+                "category",
+                "severity",
+                "eventIds",
+                "types",
+                "title",
+                "undecided"
+              ]
+            }
+          },
+          "staffUrl": {
+            "description": "Link into the staff app (staff sign-in required).",
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "generatedAt",
+          "session",
+          "exam",
+          "candidate",
+          "totals",
+          "periods",
+          "identity",
+          "eventCounts",
+          "byType",
+          "notableEvents",
+          "observations",
+          "reviewerNotes",
+          "score",
+          "accommodations",
+          "limitations",
+          "staffUrl"
+        ]
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "Optional. A unique value per logical request (a random UUID is ideal), so a retry cannot apply the request twice. The first successful (2xx) response is stored for 24 hours, per organisation: a repeat with the same key and the same request returns it again with `Idempotent-Replayed: true`. A failed request (4xx / 5xx) changed nothing and stores nothing, so it may be retried with the same key. The same key with a different method, path or body is refused (422 `idempotency_key_reused`); while the first request is still running, a repeat gets 409 `idempotency_key_in_use` (a request interrupted for more than 60 s no longer blocks its key).",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9._~:+/=-]{1,255}$"
+        }
+      }
+    },
+    "headers": {
+      "RateLimitLimit": {
+        "description": "Requests allowed per minute for this API key.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "RateLimitRemaining": {
+        "description": "Requests left in the current window.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "RateLimitReset": {
+        "description": "Seconds until the window resets.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "RetryAfter": {
+        "description": "Seconds to wait before retrying.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "IdempotentReplayed": {
+        "description": "`true` when this is the stored response of an earlier request with the same `Idempotency-Key`.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "true"
+          ]
+        }
+      },
+      "WwwAuthenticate": {
+        "description": "Bearer challenge (RFC 6750).",
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "No valid API key: `invalid_api_key` — missing, malformed, unknown or revoked; `api_key_expired` — the key is past its expiry date (an administrator creates a new one).",
+        "headers": {
+          "WWW-Authenticate": {
+            "$ref": "#/components/headers/WwwAuthenticate"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "`insufficient_scope` — the API key does not have the scope this operation requires (`details.requiredScope`).",
+        "headers": {
+          "WWW-Authenticate": {
+            "$ref": "#/components/headers/WwwAuthenticate"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "IdempotencyKeyReused": {
+        "description": "`idempotency_key_reused` — this Idempotency-Key was used for a different request (method, path or body) in the last 24 hours. Use a new key for a new request.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "`rate_limited` — too many requests for this API key; wait `Retry-After` seconds.",
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -83,7 +83,22 @@ server-side identity match, read other sessions, or change category/severity (th
   dual-stack switch, a counter restart or a page reload are not signals): a `multiple_instances` event
   (`details.signal`, `ipHashes`, `uaChanged`) and a mandatory reconnect (identity) check for both devices.
 * API keys: 256-bit, shown once, sha256 stored, revocation effective on the next request, per-key rate limit,
-  every write/report read audited as actor `api_key`. They cannot call the staff API.
+  every write/report read audited as actor `api_key`. They cannot call the staff API. Least privilege: each key
+  carries **scopes** (`exams:read`, `candidates:read|write`, `assignments:write`, `sessions:read`, `reports:read`,
+  `events:read`); every `/api/v1` route is registered from the endpoint catalogue with the scope it requires
+  (`packages/shared/src/integrations.ts`; a contract test fails on any route outside it), checked after
+  authentication (403 `insufficient_scope`, RFC 6750 `WWW-Authenticate`). Candidates' exam links (a credential for
+  the exam) are returned only to keys with `assignments:write`, never in lists or reports. Keys may **expire**
+  (at most 3 years ahead; refused with 401 `api_key_expired`, never extended — rotate instead); keys expiring
+  within 14 days or expired while in use are flagged on the Integrations page, in the operational checks and by
+  `sp_cluster_api_keys_expiring_soon`. Keys created before scopes existed were migrated with every scope (the
+  access they had). Creation (with scopes and expiry) and revocation are audited.
+* Integration API `Idempotency-Key`: scoped to the organisation (the unique index on `(org, key)` is the lock, so
+  concurrent duplicates run once; the others get 409), bound to a hash of method, path, query and canonical body
+  (another request with the key → 422), only 2xx responses are kept and replayed, for 24 h, **encrypted** with the
+  keyring (they can contain exam links; AAD `api-idempotency:<id>`, covered by `rekey`) and purged hourly. The
+  scope check runs before any replay. The OpenAPI document (`GET /api/v1/openapi.json`) is public: it describes the
+  contract only (no organisation data) and is rate-limited per address.
 
 ### Review decisions
 * Reviewer decisions are structured (resolution taxonomy) and kept as a history (`event_reviews`); changing another
@@ -272,7 +287,8 @@ fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, 
 - [ ] Rotate `EVIDENCE_KEY` by moving the old key to `EVIDENCE_KEYS_OLD`, restart, then run `rekey`; remove the
       old key only once `rekey --dry-run` reports nothing left under it (`docs/OPERATIONS.md` §3).
 - [ ] Rotating `SESSION_SECRET` signs every staff member out. Rotate webhook secrets and API keys on staff
-      turnover; revoke unused keys.
+      turnover; revoke unused keys. Give each integration its own API key with only the scopes it needs (read only
+      for reporting tools) and an expiry (default one year); alert on `sp_cluster_api_keys_expiring_soon`.
 - [ ] Remove `BOOTSTRAP_ADMIN_PASSWORD` from the environment after the first start; the owner changes it.
 - [ ] External face verifier (organisations can opt in by default): set `EXTERNAL_VERIFIERS=none` if face images
       must never leave your infrastructure; otherwise give the IAM user/role only `rekognition:CompareFaces`, opt

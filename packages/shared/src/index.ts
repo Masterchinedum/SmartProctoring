@@ -17,3 +17,4 @@ export * from './governance';
 export * from './privacy-ops';
 export * from './residency';
 export * from './scheduling';
+export * from './openapi';

@@ -20,7 +20,8 @@
     "retention:run": "tsx src/scripts/retention-cli.ts",
     "rekey": "tsx src/scripts/rekey-cli.ts",
     "storage:move": "tsx src/scripts/storage-move-cli.ts",
-    "staff-access": "tsx src/scripts/staff-access-cli.ts"
+    "staff-access": "tsx src/scripts/staff-access-cli.ts",
+    "openapi": "tsx src/scripts/openapi-cli.ts"
   },
   "dependencies": {
     "@aws-sdk/client-rekognition": "^3.1139.0",

@@ -77,19 +77,25 @@ export function windowProblem(w: SessionWindow, now: number): string | null {
 /** An instant in requests: epoch milliseconds, or an ISO 8601 date-time with a time zone (e.g. 2026-11-02T09:00:00Z). */
 export const timestampInputSchema = z
   .union([z.number().int().min(0).max(8.64e15), z.string().datetime({ offset: true })])
-  .transform((v) => (typeof v === 'number' ? v : Date.parse(v)));
+  .transform((v) => (typeof v === 'number' ? v : Date.parse(v)))
+  .describe('Epoch milliseconds, or an ISO 8601 date-time with a time zone (e.g. 2026-11-02T09:00:00Z).');
 
-export const sessionWindowInputSchema = z.object({
-  startsAt: timestampInputSchema.nullable().default(null),
-  endsAt: timestampInputSchema.nullable().default(null),
-});
+/** Descriptions are published in the integration API's OpenAPI document (./openapi.ts). */
+export const sessionWindowInputSchema = z
+  .object({
+    startsAt: timestampInputSchema.nullable().default(null).describe('From when the candidate can start (null or omitted: open). The check-in may begin 30 minutes earlier.'),
+    endsAt: timestampInputSchema.nullable().default(null).describe('Until when the candidate can start (null or omitted: open). An exam that started in time is never cut off.'),
+  })
+  .describe('A scheduling window: the candidate can start the exam only inside it. At least 5 minutes long, closing in the future, at most two years ahead.');
 export type SessionWindowInput = z.input<typeof sessionWindowInputSchema>;
 
 /** POST /api/admin/sessions/:id/reschedule and PUT /api/v1/sessions/:id/window. Both bounds null clears the window. */
-export const rescheduleRequestSchema = z.object({
-  window: sessionWindowInputSchema,
-  note: z.string().trim().max(1000).optional(),
-});
+export const rescheduleRequestSchema = z
+  .object({
+    window: sessionWindowInputSchema,
+    note: z.string().trim().max(1000).optional().describe('Why (recorded on the timeline and in the audit log; never sent in webhooks).'),
+  })
+  .describe('The new window; both bounds null clears it.');
 export type RescheduleRequest = z.infer<typeof rescheduleRequestSchema>;
 
 /* =================================================================== reopen for recovery */

@@ -1102,10 +1102,11 @@ export type { IdentityCheckTrigger };
  *   POST /tools/identity-test?testId=&mode=enroll|probe|reset  (image/jpeg) -> IdentityTestResponse (camera self-test; nothing stored) [reviewer]
  *   WS   /live                                    -> LiveMessage frames                            [reviewer]
  *
- *   Integrations (types in ./integrations.ts; public integration API /api/v1/* documented in docs/INTEGRATION_API.md):
+ *   Integrations (types in ./integrations.ts; public integration API /api/v1/* documented in docs/INTEGRATION_API.md,
+ *   its endpoint catalogue INTEGRATION_ENDPOINTS in ./integrations.ts and the OpenAPI document GET /api/v1/openapi.json):
  *   GET  /integrations/status                      -> IntegrationStatusDTO                          [admin]
- *   GET  /api-keys                                 -> { items: ApiKeyDTO[] }                        [admin]
- *   POST /api-keys {name}                          -> CreatedApiKeyDTO  (secret shown once)         [admin]
+ *   GET  /api-keys                                 -> { items: ApiKeyDTO[] }  (with scopes, expiresAt) [admin]
+ *   POST /api-keys {name, scopes?, expiresAt?}     -> CreatedApiKeyDTO  (secret shown once; scopes default to all, expiresAt to never) [admin]
  *   POST /api-keys/:id/revoke                      -> ApiKeyDTO                                     [admin]
  *   GET  /webhooks                                 -> { items: WebhookDTO[] }                       [admin]
  *   POST /webhooks  WebhookInput                   -> CreatedWebhookDTO  (secret shown once)        [admin]

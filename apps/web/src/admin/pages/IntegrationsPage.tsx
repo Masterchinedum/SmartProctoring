@@ -2,10 +2,16 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  API_KEY_EXPIRY_WARNING_DAYS,
+  API_KEY_MAX_LIFETIME_DAYS,
+  API_KEY_READ_ONLY_SCOPES,
+  API_KEY_SCOPE_INFO,
+  API_KEY_SCOPES,
   SEVERITIES,
   WEBHOOK_EVENT_LABELS,
   WEBHOOK_EVENT_TYPES,
   type ApiKeyDTO,
+  type ApiKeyScope,
   type IntegrationStatusDTO,
   type OrgSettingsDTO,
   type Severity,
@@ -14,9 +20,19 @@ import {
 } from '@sp/shared';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
-import { formatDate, formatDateTime } from '../lib/format';
+import { serverNow } from '../lib/clock';
+import { formatDate, formatDateTime, pluralize } from '../lib/format';
 import {
+  apiKeyStatus,
+  apiKeyWarnings,
+  DEFAULT_EXPIRY_CHOICE,
   DEFAULT_WEBHOOK_DRAFT,
+  describeScopes,
+  EXPIRY_CHOICES,
+  expiryFromChoice,
+  isoDay,
+  SCOPE_PRESET_LABELS,
+  scopesForPreset,
   deliveryResult,
   deliveryStatus,
   MAX_ALERT_RECIPIENTS,
@@ -26,6 +42,8 @@ import {
   validateWebhookDraft,
   webhookStatus,
   webhookToDraft,
+  type ExpiryChoice,
+  type ScopePreset,
   type WebhookDraft,
 } from '../lib/integrations';
 import { SEVERITY_LABELS } from '../lib/labels';
@@ -86,13 +104,26 @@ function ApiKeysSection({ status }: { status: IntegrationStatusDTO | undefined }
   const qc = useQueryClient();
   const q = useQuery({ queryKey: qk.apiKeys, queryFn: api.apiKeys, retry: shouldRetry });
   const [name, setName] = useState('');
-  const [created, setCreated] = useState<{ name: string; secret: string } | null>(null);
+  const [preset, setPreset] = useState<ScopePreset>('full');
+  const [custom, setCustom] = useState<ApiKeyScope[]>([...API_KEY_READ_ONLY_SCOPES]);
+  const [expiry, setExpiry] = useState<ExpiryChoice>(DEFAULT_EXPIRY_CHOICE);
+  const [expiryDate, setExpiryDate] = useState('');
+  const [touched, setTouched] = useState(false);
+  const [created, setCreated] = useState<ApiKeyDTO & { secret: string } | null>(null);
   const [revoking, setRevoking] = useState<ApiKeyDTO | null>(null);
+  const now = serverNow();
+  const scopes = scopesForPreset(preset, custom);
+  const expiresAt = expiryFromChoice(expiry, now, expiryDate);
+  const errors = {
+    scopes: scopes.length === 0 ? 'Choose at least one permission' : null,
+    expiry: 'error' in expiresAt ? expiresAt.error : null,
+  };
   const create = useMutation({
-    mutationFn: () => api.createApiKey(name.trim()),
+    mutationFn: () => api.createApiKey({ name: name.trim(), scopes, expiresAt: 'expiresAt' in expiresAt ? expiresAt.expiresAt : null }),
     onSuccess: (r) => {
-      setCreated({ name: r.apiKey.name, secret: r.secret });
+      setCreated({ ...r.apiKey, secret: r.secret });
       setName('');
+      setTouched(false);
       void qc.invalidateQueries({ queryKey: qk.apiKeys });
     },
   });
@@ -103,34 +134,118 @@ function ApiKeysSection({ status }: { status: IntegrationStatusDTO | undefined }
       void qc.invalidateQueries({ queryKey: qk.apiKeys });
     },
   });
+  const warnings = q.data ? apiKeyWarnings(q.data.items, now) : { expiring: 0, expired: 0 };
 
   return (
     <section className="card stack">
       <h2>API keys</h2>
       <p className="muted small">
         Keys let your LMS or HR system call the integration API: list exams, create candidates, assign exams and read results and reports. A key belongs to this
-        organisation and never gives access to evidence images or the staff app.
+        organisation and never gives access to evidence images or the staff app. Give each system only the permissions it needs, and an expiry date.
         {status ? (
           <>
             {' '}
-            API base URL: <code>{status.apiBaseUrl}</code> <CopyButton text={status.apiBaseUrl} label="Copy URL" className="link-btn" /> — see <code>docs/INTEGRATION_API.md</code>.
+            API base URL: <code>{status.apiBaseUrl}</code> <CopyButton text={status.apiBaseUrl} label="Copy URL" className="link-btn" /> — the API is described in{' '}
+            <a href={`${status.apiBaseUrl}/openapi.json`} target="_blank" rel="noreferrer">
+              openapi.json
+            </a>{' '}
+            and <code>docs/INTEGRATION_API.md</code>.
           </>
         ) : null}
       </p>
+      {warnings.expired || warnings.expiring ? (
+        <div className="banner banner-warning small" data-testid="api-key-expiry-warning">
+          {[
+            warnings.expired ? `${pluralize(warnings.expired, 'key has', 'keys have')} expired` : '',
+            warnings.expiring ? `${pluralize(warnings.expiring, 'key expires', 'keys expire')} within ${API_KEY_EXPIRY_WARNING_DAYS} days` : '',
+          ]
+            .filter(Boolean)
+            .join('; ')}
+          . Create a replacement, update the connected system, then revoke the old key.
+        </div>
+      ) : null}
       <form
-        className="row"
+        className="stack api-key-form"
+        aria-label="Create an API key"
         onSubmit={(e) => {
           e.preventDefault();
-          if (name.trim()) create.mutate();
+          setTouched(true);
+          if (name.trim() && !errors.scopes && !errors.expiry) create.mutate();
         }}
       >
-        <label className="grow">
-          <span className="visually-hidden">Key name</span>
-          <input type="text" placeholder="Name, e.g. Moodle production" value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <button type="submit" className="btn btn-primary" disabled={!name.trim() || create.isPending}>
-          {create.isPending ? 'Creating…' : 'Create API key'}
-        </button>
+        <div className="row">
+          <label className="grow">
+            Key name
+            <input type="text" placeholder="e.g. Moodle production" value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label>
+            Access
+            <select value={preset} onChange={(e) => setPreset(e.target.value as ScopePreset)}>
+              {(Object.keys(SCOPE_PRESET_LABELS) as ScopePreset[]).map((p) => (
+                <option key={p} value={p}>
+                  {SCOPE_PRESET_LABELS[p]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Expires
+            <select value={expiry} onChange={(e) => setExpiry(e.target.value as ExpiryChoice)}>
+              {EXPIRY_CHOICES.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {expiry === 'date' ? (
+            <label>
+              Expiry date
+              <input
+                type="date"
+                value={expiryDate}
+                min={isoDay(now + 86_400_000)}
+                max={isoDay(now + API_KEY_MAX_LIFETIME_DAYS * 86_400_000)}
+                onChange={(e) => setExpiryDate(e.target.value)}
+                aria-invalid={touched && !!errors.expiry}
+                aria-describedby="api-key-expiry-help"
+              />
+              <span id="api-key-expiry-help" className={touched && errors.expiry ? 'text-danger small' : 'muted small'}>
+                {touched && errors.expiry ? errors.expiry : 'The key stops working at the end of that day.'}
+              </span>
+            </label>
+          ) : null}
+        </div>
+        {preset === 'custom' ? (
+          <fieldset className="stack-tight" aria-describedby={touched && errors.scopes ? 'api-key-scopes-error' : undefined}>
+            <legend>Permissions</legend>
+            {API_KEY_SCOPES.map((s) => (
+              <label key={s} className="switch">
+                <input type="checkbox" checked={custom.includes(s)} onChange={(e) => setCustom(e.target.checked ? [...custom, s] : custom.filter((x) => x !== s))} />
+                <span>
+                  {API_KEY_SCOPE_INFO[s].label} <code className="muted small">{s}</code>
+                  <span className="muted small"> — {API_KEY_SCOPE_INFO[s].description}</span>
+                </span>
+              </label>
+            ))}
+            {touched && errors.scopes ? (
+              <span id="api-key-scopes-error" className="text-danger small">
+                {errors.scopes}
+              </span>
+            ) : null}
+          </fieldset>
+        ) : (
+          <p className="muted small">
+            {preset === 'full'
+              ? 'Full access: read exams, candidates, attempts, reports and events; create candidates and assign exams (with the candidates’ exam links).'
+              : 'Read only: exams, candidates, attempts, reports and events. No changes, and no candidates’ exam links.'}
+          </p>
+        )}
+        <div className="row">
+          <button type="submit" className="btn btn-primary" disabled={!name.trim() || create.isPending}>
+            {create.isPending ? 'Creating…' : 'Create API key'}
+          </button>
+        </div>
       </form>
       {create.isError ? <div className="banner banner-danger" role="alert">{errorMessage(create.error)}</div> : null}
       {q.isPending ? (
@@ -146,43 +261,57 @@ function ApiKeysSection({ status }: { status: IntegrationStatusDTO | undefined }
               <tr>
                 <th>Name</th>
                 <th>Key</th>
+                <th>Access</th>
                 <th>Created</th>
+                <th>Expires</th>
                 <th>Last used</th>
                 <th>Status</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              {q.data.items.map((k) => (
-                <tr key={k.id} className={k.revokedAt ? 'row-disabled' : ''}>
-                  <td>
-                    <strong>{k.name}</strong>
-                  </td>
-                  <td>
-                    <code>{k.prefix}…</code>
-                  </td>
-                  <td className="small">
-                    {formatDate(k.createdAt)}
-                    {k.createdBy ? <div className="muted">by {k.createdBy.name}</div> : null}
-                  </td>
-                  <td className="small">{k.lastUsedAt ? <RelativeTime at={k.lastUsedAt} /> : <span className="muted">Never</span>}</td>
-                  <td>{k.revokedAt ? <span className="badge" title={formatDateTime(k.revokedAt)}>Revoked {formatDate(k.revokedAt)}</span> : <span className="badge badge-success">Active</span>}</td>
-                  <td>
-                    {!k.revokedAt ? (
-                      <button type="button" className="btn btn-sm" onClick={() => setRevoking(k)}>
-                        Revoke
-                      </button>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
+              {q.data.items.map((k) => {
+                const st = apiKeyStatus(k, now);
+                return (
+                  <tr key={k.id} className={k.revokedAt ? 'row-disabled' : ''}>
+                    <td>
+                      <strong>{k.name}</strong>
+                    </td>
+                    <td>
+                      <code>{k.prefix}…</code>
+                    </td>
+                    <td className="small" title={k.scopes.join(', ')}>
+                      {describeScopes(k.scopes)}
+                    </td>
+                    <td className="small">
+                      {formatDate(k.createdAt)}
+                      {k.createdBy ? <div className="muted">by {k.createdBy.name}</div> : null}
+                    </td>
+                    <td className="small">{k.expiresAt ? <span title={formatDateTime(k.expiresAt)}>{formatDate(k.expiresAt)}</span> : <span className="muted">No expiry</span>}</td>
+                    <td className="small">{k.lastUsedAt ? <RelativeTime at={k.lastUsedAt} /> : <span className="muted">Never</span>}</td>
+                    <td>
+                      <span className={TONE_CLASS[st.tone]} title={st.hint}>
+                        {st.label}
+                      </span>
+                    </td>
+                    <td>
+                      {!k.revokedAt ? (
+                        <button type="button" className="btn btn-sm" onClick={() => setRevoking(k)}>
+                          Revoke
+                        </button>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
       {created ? (
         <SecretModal title={`API key “${created.name}” created`} secret={created.secret} onClose={() => setCreated(null)}>
-          Send it as <code>Authorization: Bearer …</code>. Store it in your integration’s secret store. If it is lost, create a new key and revoke this one.
+          Send it as <code>Authorization: Bearer …</code>. Store it in your integration’s secret store. Access: {describeScopes(created.scopes).toLowerCase()};{' '}
+          {created.expiresAt ? `it stops working after ${formatDateTime(created.expiresAt)}` : 'it does not expire'}. If it is lost, create a new key and revoke this one.
         </SecretModal>
       ) : null}
       {revoking ? (

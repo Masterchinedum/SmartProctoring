@@ -464,6 +464,25 @@ for face analysis, default CPU count − 1), `VISION_WORKERS`, `VISION_NICE`, `P
   (`Authorization: Bearer sp_live_…`, only sha256 stored, audit actor `api_key`, per-key rate limit):
   exams, candidate upsert by `externalId`, assignments (access links), session summaries, the staff
   report and event list **without evidence URLs**. Customer documentation: `docs/INTEGRATION_API.md`.
+  * **The contract is code**: `packages/shared/src/integrations.ts` holds zod schemas for every request, query and
+    response, and the endpoint catalogue (`INTEGRATION_ENDPOINTS`: method, path, required scope, idempotency, error
+    codes). The DTO types are inferred from the schemas; the server registers each route from the catalogue (its
+    preHandlers — API key, scope, idempotency — come from there); `packages/shared/src/openapi.ts` converts the
+    schemas (a focused zod → JSON Schema 2020-12 converter for the features used; anything else throws) into the
+    OpenAPI 3.1 document served at `GET /api/v1/openapi.json` (public) and committed as `docs/openapi.json`
+    (`pnpm --filter @sp/server openapi`). `test/integrations/contract.test.ts` checks that no route exists outside
+    the catalogue, exercises every endpoint and validates each response strictly (undescribed fields fail) and
+    each error code against the document.
+  * **Scopes and expiry** (`auth/api-key.ts`): `api_keys.scopes` (jsonb, canonical order; migration 0015 gave
+    existing keys all of them) and `expires_at`; `requireScope(scope)` → 403 `insufficient_scope`; expired → 401
+    `api_key_expired`. `accessLink` in `GET /sessions/:id` only with `assignments:write`. Expiring keys: the
+    Integrations page, the `api_keys` operational check (`services/privacy-ops.ts`) and the
+    `sp_cluster_api_keys_expiring_soon` gauge.
+  * **Idempotency** (`services/idempotency.ts`): `Idempotency-Key` on every POST. `api_idempotency_keys` (unique
+    `(org_id, key)` — the insert is the lock), request hash over method, path, query and canonical JSON body; 2xx
+    responses stored encrypted (AAD `api-idempotency:<id>`, `rekey` target) by a route `onSend` hook and replayed
+    with `Idempotent-Replayed: true`; other statuses release the key; 422 for another request, 409 while running
+    (in-progress rows older than 60 s are taken over); the hourly `api-idempotency` job deletes rows after 24 h.
 * **Webhooks**: a durable outbox. `withSession()` calls `services/integration-events.ts` inside the
   session transaction (savepoint), so every event touched by any mutation — candidate ingest, identity
   engine, staff actions, sweeper expiry/timeouts, abandonment — becomes `webhook_deliveries` rows

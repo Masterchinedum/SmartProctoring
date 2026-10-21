@@ -323,7 +323,7 @@ describe('retention preview and job health', () => {
       const checks = json<OpsChecksDTO>(await a3.get('/ops/checks')).checks;
       expect(checks.find((c) => c.id === 'retention_job')).toMatchObject({ status: 'ok' });
       expect(checks.find((c) => c.id === 'retention_overdue')).toMatchObject({ status: 'ok' });
-      expect(checks.map((c) => c.id)).toEqual(['retention_job', 'retention_overdue', 'privacy_requests', 'capacity', 'webhooks', 'email_alerts']);
+      expect(checks.map((c) => c.id)).toEqual(['retention_job', 'retention_overdue', 'privacy_requests', 'capacity', 'webhooks', 'email_alerts', 'api_keys']);
 
       // Stale after 3 hours without a successful run; a run that fails as a whole is recorded with its error.
       env2.clock.advance(4 * 3600_000);

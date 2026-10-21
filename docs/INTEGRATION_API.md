@@ -19,16 +19,54 @@ An administrator sets both up in the staff app under **Integrations** (Settings 
 
 ## 1. API keys
 
-* Create a key in **Integrations → API keys** (administrators only). The key looks like
-  `sp_live_` followed by 43 characters and is **shown once** — store it in your secret manager.
-  SmartProctoring keeps only a SHA-256 hash and a short prefix (e.g. `sp_live_AbCdEfGh`) so you can
-  recognise it in the list, together with its creation time and when it was last used.
-* A key belongs to one organisation and has the fixed scope `integration` (everything on this page).
-  It cannot use the staff API.
-* **Revoke** a key in the same list; it stops working immediately. Creating and revoking keys, and
-  every write made with a key, is recorded in the audit log (actor “API key ‘name’”).
-* At most 25 active keys per organisation. Rotate by creating a new key, deploying it, then revoking the
-  old one.
+* Create a key in **Integrations → API keys** (administrators only): a name, its **access** (full access, read only,
+  or chosen permissions — the scopes below) and its **expiry** (in 30 days, 90 days, 1 year (the default) or 2 years,
+  on a date, or never; at most 3 years ahead). The key looks like `sp_live_` followed by 43 characters and is
+  **shown once** — store it in your secret manager. SmartProctoring keeps only a SHA-256 hash and a short prefix
+  (e.g. `sp_live_AbCdEfGh`) so you can recognise it in the list, together with its access, creation time, expiry and
+  when it was last used.
+* A key belongs to one organisation and only works on the integration API (`/api/v1/*`, everything on this page): it
+  cannot use the staff API.
+* **Revoke** a key in the same list; it stops working immediately. Creating and revoking keys (with their scopes and
+  expiry), and every write made with a key, is recorded in the audit log (actor “API key ‘name’”).
+* At most 25 active keys per organisation (revoked and expired keys do not count).
+
+### Scopes
+
+Every endpoint requires one scope. Give each system only what it needs: a reporting or archiving tool needs only
+`:read` scopes; an LMS that enrols students and hands out exam links needs `candidates:write` and `assignments:write`.
+
+| Scope | Allows | Endpoints |
+|---|---|---|
+| `exams:read` | listing exams | `GET /exams` |
+| `candidates:read` | finding candidates | `GET /candidates` |
+| `candidates:write` | creating and updating candidates | `POST /candidates` |
+| `assignments:write` | assigning candidates to exams, scheduling and rescheduling when they can start, and seeing their personal exam links | `POST /exams/{examId}/assignments`, `PUT /sessions/{id}/window`; also `accessLink` in `GET /sessions/{id}` |
+| `sessions:read` | attempts: status, times, score, event counts, hold, review | `GET /sessions`, `GET /sessions/{id}` |
+| `reports:read` | final reports | `GET /sessions/{id}/report` |
+| `events:read` | proctoring event lists | `GET /sessions/{id}/events` |
+
+* **Full access** (the staff app's default) has every scope; **Read only** has every `:read` scope — no changes and
+  no candidates' exam links (`accessLink` is `null` in `GET /sessions/{id}` without `assignments:write`, because a link
+  lets its holder take the exam as the candidate). **Choose permissions…** ticks scopes one by one.
+* A request without the scope its endpoint needs gets `403 insufficient_scope` with
+  `details: { "requiredScope": "candidates:write", "scopes": [...] }` and
+  `WWW-Authenticate: Bearer realm="…", error="insufficient_scope", scope="candidates:write"`.
+* **Keys created before scopes existed** (API version 1.0) were given every scope of version 1.1 — the full access
+  they had — and no expiry, so existing integrations keep working unchanged. Scopes added in later versions are never
+  added to existing keys automatically: create a new key that has them.
+
+### Expiry and rotation
+
+* After its expiry time a key is refused with `401 api_key_expired` (the message names the date); it is never
+  extended. The Integrations page marks keys that expire within 14 days (“Expires in 5 days”) and expired keys, with a
+  banner; **Privacy → Operational checks** warns about keys expiring within 14 days and fails for a key that expired
+  while a system was still using it; operators can alert on the Prometheus gauge
+  `sp_cluster_api_keys_expiring_soon`.
+* **Rotate** a key (before it expires, when a person who knew it leaves, or if it may have leaked): create a new key
+  with the same access, deploy it to the connected system, check that the new key's “Last used” changes, then revoke
+  the old key. Both keys work in between, so there is no downtime. `Idempotency-Key`s are shared by all keys of the
+  organisation, so a retry sent with the new key is still recognised.
 
 Every request sends the key as a bearer token:
 
@@ -41,21 +79,80 @@ curl -s "$SP/api/v1/exams" -H "Authorization: Bearer $SP_KEY"
 ### Conventions
 
 * JSON in, JSON out (`Content-Type: application/json`). Timestamps are **epoch milliseconds** (UTC).
-* Errors: non-2xx with `{ "error": "<code>", "message": "...", "details"?: ... }`.
-  `401 invalid_api_key` (missing, malformed or revoked key), `404 *_not_found` (also for ids of another
-  organisation), `400 validation_failed` (with `details: [{ path, message }]`), `409` for state
-  conflicts (e.g. `exam_not_published`), `429 rate_limited`.
+* Responses may gain **new fields** in later versions (never removed or changed in meaning within a major version):
+  ignore fields you do not know. Enumerations (e.g. event `type`) may gain values.
+* Errors: non-2xx with `{ "error": "<code>", "message": "...", "details"?: ... }`. Codes:
+
+  | Status | `error` | When |
+  |---|---|---|
+  | 400 | `validation_failed` | the request does not match the schema (`details: [{ path, message }]`) |
+  | 400 | `invalid_idempotency_key` | a malformed `Idempotency-Key` header |
+  | 401 | `invalid_api_key` | missing, malformed, unknown or revoked key |
+  | 401 | `api_key_expired` | the key is past its expiry |
+  | 403 | `insufficient_scope` | the key lacks the endpoint's scope |
+  | 404 | `exam_not_found`, `session_not_found` | unknown id — also for ids of another organisation |
+  | 409 | `exam_not_published`, `already_started`, `invalid_state` | state conflicts (e.g. rescheduling an exam that started or ended) |
+  | 409 | `idempotency_key_in_use` | the first request with this `Idempotency-Key` is still running (retry after `Retry-After` seconds) |
+  | 422 | `idempotency_key_reused` | the `Idempotency-Key` was used for a different request |
+  | 429 | `rate_limited` | too many requests |
+
 * Rate limit: 600 requests per minute per key by default (`API_RATE_LIMIT_PER_MINUTE`). Responses carry
   `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset`; on 429 wait `retry-after` seconds.
 * Lists accept `limit` (1–500, default 100) and `offset`, and return `{ items, total }`.
+
+### Idempotency
+
+Every `POST` and `PUT` accepts an optional **`Idempotency-Key`** header, so a retry after a timeout or a dropped
+connection can never apply the request twice (for example, create a second candidate when no `externalId` is sent):
+
+```bash
+curl -s -X POST "$SP/api/v1/candidates" -H "Authorization: Bearer $SP_KEY" \
+  -H "Idempotency-Key: 3f1d7a0e-5b1c-4f7e-9d67-2d4b1c0a9e11" \
+  -H 'Content-Type: application/json' -d '{"name":"Ada Lovelace"}'
+```
+
+* The key: **1–255 characters** — letters, digits and `- _ . : ~ + / =`. Use a new random UUID per logical request
+  and reuse it only for retries of that request. Anything else is refused (`400 invalid_idempotency_key`).
+* The first **successful (2xx)** response is stored for **24 hours**. A repeat with the same key and the same request
+  returns it again — same status and body — with the header **`Idempotent-Replayed: true`**; nothing is executed again.
+  Stored responses are kept encrypted (they can contain exam links) and deleted after 24 hours.
+* "The same request" means the same method, path, query string and JSON body (the order of object keys does not
+  matter). The same key with a different request is refused with **`422 idempotency_key_reused`**.
+* A **failed** request (any 4xx or 5xx) changed nothing and stores nothing: retry it — corrected if needed — with the
+  same key.
+* While the first request with a key is still running, a concurrent repeat gets **`409 idempotency_key_in_use`** with
+  `Retry-After: 1`; retry it and you receive the stored response. A request interrupted mid-way (e.g. the server
+  restarted) no longer blocks its key after 60 seconds.
+* Keys are scoped to your **organisation** and shared by all its API keys (a retry after a key rotation is still
+  recognised); other organisations' keys never collide with yours. A key without the endpoint's scope is refused
+  (403) before any replay.
+* Without the header, requests behave as before. `POST /exams/{examId}/assignments` is safe to retry even without it
+  (a candidate keeps their unfinished attempt), but the header returns exactly the first response, including
+  `existing: false` for the attempts it created.
+
+### OpenAPI document
+
+`GET /api/v1/openapi.json` returns the **OpenAPI 3.1** description of this API — every endpoint, parameter, request
+and response schema, error code, required scope and header — for code generators (e.g. openapi-generator,
+openapi-typescript), API clients (Postman, Insomnia) or contract tests on your side. It needs **no API key** (it
+contains no organisation data; limited to 60 requests per minute per address) and its `servers` entry is this
+server's API base URL. The same document is in the repository as `docs/openapi.json`; both are generated from the
+schemas the server itself uses to validate requests (`packages/shared/src/integrations.ts`), and the server's
+contract tests check every response against them. `info.version` is the API version (see the changelog at the end).
+
+```bash
+curl -s "$SP/api/v1/openapi.json" -o smartproctoring-openapi.json
+```
 
 ---
 
 ## 2. Endpoints
 
+The scope each endpoint requires is given in brackets; the OpenAPI document lists the same.
+
 ### Exams
 
-`GET /api/v1/exams?status=published` → `{ items: [{ id, title, status, durationSec, version }] }`
+`GET /api/v1/exams?status=published` [`exams:read`] → `{ items: [{ id, title, status, durationSec, version }] }`
 (`status` is `draft`, `published` or `archived`; omit it for all). `version` is the exam version candidates who start
 now get (null while the exam was never published): publishing, and every later edit of a published exam, creates a
 new version, and each attempt keeps the version it started with — its questions, answer keys and points.
@@ -66,7 +163,7 @@ curl -s "$SP/api/v1/exams?status=published" -H "Authorization: Bearer $SP_KEY"
 
 ### Candidates
 
-`POST /api/v1/candidates` `{ name, email?, externalId? }` — **upsert by `externalId`**: if a candidate with
+`POST /api/v1/candidates` [`candidates:write`] `{ name, email?, externalId? }` — **upsert by `externalId`**: if a candidate with
 this external id exists, its name (and email, when given) is updated and `200 { candidate, created: false }`
 is returned; otherwise a candidate is created: `201 { candidate, created: true }`. Without `externalId` a new
 candidate is always created. Use your own stable user id (student number, employee id) as `externalId`.
@@ -78,12 +175,12 @@ curl -s -X POST "$SP/api/v1/candidates" -H "Authorization: Bearer $SP_KEY" \
 # {"candidate":{"id":"7c0e…","name":"Ada Lovelace","email":"ada@example.edu","externalId":"S-10442","createdAt":1790240400000},"created":true}
 ```
 
-`GET /api/v1/candidates?externalId=S-10442` (or `?email=`) → `{ items: [candidate], total }`.
+`GET /api/v1/candidates?externalId=S-10442` (or `?email=`) [`candidates:read`] → `{ items: [candidate], total }`.
 
 ### Assignments (exam links)
 
-`POST /api/v1/exams/:examId/assignments` `{ candidateIds?: string[], externalIds?: string[], window?: { startsAt?, endsAt? } }`
-(together at most 1000 candidates) → `{ items: [{ sessionId, candidateId, candidateName, externalId, accessLink, existing, window }] }`.
+`POST /api/v1/exams/:examId/assignments` [`assignments:write`] `{ candidateIds?: string[], externalIds?: string[], window?: { startsAt?, endsAt? } }`
+(at least one id, at most 1000 in each list) → `{ items: [{ sessionId, candidateId, candidateName, externalId, accessLink, existing, window }] }`.
 
 * The exam must be **published** (`409 exam_not_published` otherwise).
 * Unknown candidates → `400 validation_failed` naming them (nothing is created).
@@ -108,7 +205,7 @@ curl -s -X POST "$SP/api/v1/exams/$EXAM_ID/assignments" -H "Authorization: Beare
 
 ### Rescheduling
 
-`PUT /api/v1/sessions/:id/window` `{ window: { startsAt?, endsAt? }, note? }` → the session (below). Sets, changes or
+`PUT /api/v1/sessions/:id/window` [`assignments:write`] `{ window: { startsAt?, endsAt? }, note? }` → the session (below). Sets, changes or
 clears (both `null`) the window of a session **that has not started**; `409 already_started` once the candidate
 started, `409 invalid_state` once the session ended. The same rules as on assignment. Recorded in the audit log
 (actor: the API key) and on the session's timeline, and sent as `session.rescheduled`.
@@ -117,10 +214,10 @@ started, `409 invalid_state` once the session ended. The same rules as on assign
 
 A *session* is one candidate's attempt at one exam.
 
-`GET /api/v1/sessions?examId=&externalId=&candidateId=&status=&limit=&offset=` → `{ items, total }` (same shape as below, with `accessLink: null`)
+`GET /api/v1/sessions?examId=&externalId=&candidateId=&status=&limit=&offset=` [`sessions:read`] → `{ items, total }` (same shape as below, with `accessLink: null`)
 (`status` accepts a comma-separated list: `invited,ready,active,paused,on_hold,submitted,terminated`).
 
-`GET /api/v1/sessions/:id` →
+`GET /api/v1/sessions/:id` [`sessions:read`] →
 
 ```json
 {
@@ -136,10 +233,13 @@ A *session* is one candidate's attempt at one exam.
   "hold": null,
   "window": { "startsAt": 1790240400000, "endsAt": 1790251200000 },
   "accessLink": "https://proctor.example.com/take/…",
+  "review": { "state": "resolved", "outcome": "no_concerns" },
   "staffUrl": "https://proctor.example.com/admin/sessions/5f0c…"
 }
 ```
 
+* `accessLink`: the candidate's personal exam link, only for keys with the `assignments:write` scope (`null`
+  otherwise, in lists, in reports and in the answer of `PUT /sessions/:id/window`).
 * `status` / `endReason`: `submitted` with `candidate_submitted`, `time_expired`, `staff_submitted` or
   `resume_limit` (the exam was interrupted — reopened in a new browser window, or disconnected — more often or for
   longer than the exam's resume rules allow, and the rules say to end it; the saved answers are graded);
@@ -171,15 +271,17 @@ A *session* is one candidate's attempt at one exam.
   integrity process), `inconclusive` or `technical_issues` (problems outside the candidate's control may have
   affected the attempt). The outcome is a staff decision, never automated; it is also sent as `session.reviewed`.
 
-`GET /api/v1/sessions/:id/report?tz=Europe/Berlin` → the same final report the staff app shows (periods,
+`GET /api/v1/sessions/:id/report?tz=Europe/Berlin` [`reports:read`] → the same final report the staff app shows (periods,
 totals of observed / unobserved time, identity-check summary, event counts per category and type, notable
 events, factual observations, reviewer notes, limitations, the review with its outcome and note, and the incidents
 — flags close in time, grouped). The differences: evidence references are replaced by `evidenceCount` and a
 `staffUrl` per event, plus a `staffUrl` for the session, and the reviewer-facing explanations of events are left
 out (they quote detector and identity measurements). `tz` sets the time zone for times written in sentences
-(default UTC).
+(default UTC; an unknown zone falls back to UTC). Face-similarity values are always `null`. The full structure is in
+the OpenAPI document (`SessionReport`).
 
-`GET /api/v1/sessions/:id/events?category=&type=&severity=&since=` → `{ items: Event[] }`, chronological.
+`GET /api/v1/sessions/:id/events?category=&type=&severity=&review=&since=` [`events:read`] → `{ items: Event[] }`,
+chronological. `type` takes a comma-separated list; `review` is `unreviewed`, `reviewed` or `dismissed`.
 Categories: `integrity` (a potential integrity issue), `uncertain` (an observation that could not be assessed
 reliably), `technical` (a technical problem), `neutral` (a session change) and `exception` (the attempt ran under
 an approved accommodation / policy exception — context, never a flag). `review.resolution` is the reviewer's
@@ -274,7 +376,11 @@ X-SmartProctoring-Signature: t=1790244123,v1=5d41402abc4b2a76b9719d911017c592…
 
 `X-SmartProctoring-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`. Compute
 the HMAC over the **raw request body exactly as received** (before any JSON parsing), compare in
-constant time, and reject timestamps more than 5 minutes away from your clock (replay protection).
+constant time, and reject timestamps more than 5 minutes away from your clock (replay protection). The two functions
+below (Node.js and Python) are copied verbatim by SmartProctoring's own tests and run against signatures made by the
+server's signing code, so they stay correct; in another language, follow the same steps: split the header on `,`
+into `t` and `v1`, require `t` to be digits and `v1` 64 lowercase hex characters, check the time, compute
+HMAC-SHA256 with the secret over the bytes `<t>.` followed by the raw body, and compare in constant time.
 
 Node.js (18+, no dependencies):
 
@@ -307,6 +413,48 @@ export function verifySmartProctoringSignature(rawBody, header, secret, toleranc
 ```
 <!-- verify-snippet:end -->
 
+Python (3.8+, standard library only):
+
+<!-- verify-snippet-python:start -->
+```python
+import hashlib
+import hmac
+import re
+import time
+
+
+def verify_smartproctoring_signature(raw_body, header, secret, tolerance_sec=300, now_sec=None):
+    """Verify a SmartProctoring webhook request.
+
+    raw_body: the request body exactly as received (bytes; not re-serialised JSON)
+    header: the X-SmartProctoring-Signature header (str or None)
+    secret: the webhook's signing secret (whsec_...)
+    tolerance_sec: maximum clock difference accepted (replay protection)
+    now_sec: current unix time in seconds (defaults to the system clock)
+    """
+    if not isinstance(header, str) or not secret:
+        return False
+    parts = {}
+    for item in header.split(","):
+        key, sep, value = item.partition("=")
+        if sep and key.strip():
+            parts[key.strip()] = value.strip()
+    t, v1 = parts.get("t", ""), parts.get("v1", "")
+    if not re.fullmatch(r"[0-9]+", t) or not re.fullmatch(r"[0-9a-f]{64}", v1):
+        return False
+    now = int(time.time()) if now_sec is None else now_sec
+    if abs(now - int(t)) > tolerance_sec:
+        return False
+    if isinstance(raw_body, str):
+        raw_body = raw_body.encode("utf-8")
+    expected = hmac.new(secret.encode("utf-8"), t.encode("ascii") + b"." + raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, v1)
+```
+<!-- verify-snippet-python:end -->
+
+In Flask, pass `request.get_data()` (the raw bytes) and `request.headers.get("X-SmartProctoring-Signature")`; in
+Django, `request.body` and `request.headers.get("X-SmartProctoring-Signature")`.
+
 Example receiver with Express (keep the body raw for verification):
 
 ```js
@@ -328,7 +476,10 @@ app.post('/hooks/smartproctoring', express.raw({ type: 'application/json' }), (r
 
 ## 4. Typical LMS flow
 
-1. Nightly or on enrolment: `POST /api/v1/candidates` for each student (upsert by your student id).
+0. Create one API key for the LMS with `exams:read`, `candidates:write`, `assignments:write`, `sessions:read` and
+   `reports:read` (or full access), expiring in a year; put a reminder to rotate it in your calendar.
+1. Nightly or on enrolment: `POST /api/v1/candidates` for each student (upsert by your student id), with an
+   `Idempotency-Key` per request so retries are safe.
 2. When the exam is scheduled: `POST /api/v1/exams/:examId/assignments` with the students' `externalIds` and the
    `window` in which they may start; show each student their `accessLink` inside the LMS (before the window the link
    shows when the exam opens). A student who has to move: `PUT /api/v1/sessions/:id/window`.
@@ -343,3 +494,25 @@ app.post('/hooks/smartproctoring', express.raw({ type: 'application/json' }), (r
 Candidates that should not be able to start any more (e.g. withdrew) can be handled by staff (terminate).
 Sessions nobody touches are closed automatically after the organisation's inactivity period
 (Settings → Retention, default 30 days) with `endReason: "abandoned"`.
+
+---
+
+## 5. Changelog
+
+The API version is `info.version` of the OpenAPI document. Within version 1, changes are additive: new endpoints,
+new optional request fields, new response fields and new enumeration values.
+
+* **1.1.0** (October 2026)
+  * **Scheduling and recovery**: a scheduling `window` on `POST /exams/{examId}/assignments`, on sessions and on
+    assignment items; `PUT /sessions/{id}/window` to reschedule an attempt that has not started (409
+    `already_started` / `invalid_state`); end reason and hold reason `resume_limit`, hold reason `recovery`; webhooks
+    `session.rescheduled` and `session.reopened`; `session.submitted` carries `reason` for `resume_limit`.
+  * **API keys** have **scopes** (403 `insufficient_scope`) and an optional **expiry** (401 `api_key_expired`);
+    existing keys were given every scope and no expiry. `accessLink` in `GET /sessions/{id}` requires the
+    `assignments:write` scope.
+  * **`Idempotency-Key`** on every `POST` and `PUT` (`Idempotent-Replayed`, 409 `idempotency_key_in_use`, 422
+    `idempotency_key_reused`, 400 `invalid_idempotency_key`).
+  * **OpenAPI 3.1 document** at `GET /api/v1/openapi.json` (and `docs/openapi.json`). The events list documents its
+    `review` filter. A Python webhook signature verifier next to the Node.js one.
+* **1.0.0** (September 2026) — exams, candidate upsert, assignments with exam links, sessions, reports, events;
+  signed webhooks.

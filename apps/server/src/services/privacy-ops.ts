@@ -5,13 +5,13 @@
  *    but not yet deleted (the job is behind or failing), the sessions kept by a legal hold, and the job's last run
  *    (job_status, services/job-status.ts). Nothing is deleted. The due dates use the same SQL as the job's pre-filter
  *    (the job decides per session with the effective policy, so an invalid stored policy may make it a day apart).
- *  - opsChecks: retention, overdue privacy requests, face-analysis capacity of this instance, failing webhooks and
- *    email alerts — each as ok / warning / failing with one sentence saying what to do.
+ *  - opsChecks: retention, overdue privacy requests, face-analysis capacity of this instance, failing webhooks, email
+ *    alerts and expiring API keys — each as ok / warning / failing with one sentence saying what to do.
  */
-import { PRIVACY_DUE_SOON_DAYS, type OpsCheckDTO, type OpsChecksDTO, type RetentionPreviewDTO } from '@sp/shared';
+import { API_KEY_EXPIRY_WARNING_DAYS, PRIVACY_DUE_SOON_DAYS, type OpsCheckDTO, type OpsChecksDTO, type RetentionPreviewDTO } from '@sp/shared';
 import { and, asc, eq, gt, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { candidates, emailAlerts, events, examSessions, exams, organizations, privacyRequests, webhooks } from '../db/schema.js';
+import { apiKeys, candidates, emailAlerts, events, examSessions, exams, organizations, privacyRequests, webhooks } from '../db/schema.js';
 import { currentCapacity, type CapacityReason } from './capacity.js';
 import { loadJobStatus, RETENTION_JOB, toRetentionJobStatusDTO } from './job-status.js';
 import { OPEN_PRIVACY_STATUSES } from './privacy-requests.js';
@@ -91,6 +91,11 @@ const CAPACITY_TEXT: Record<CapacityReason, string> = {
   database_pool_exhausted: 'requests are waiting for a database connection',
 };
 
+/** An expired key last used this close to its expiry was probably still in use: the connected system now fails. */
+const EXPIRED_IN_USE_WINDOW_MS = 7 * DAY_MS;
+
+const utcDate = (t: number) => new Date(t).toISOString().slice(0, 10);
+
 function ago(now: number, t: number): string {
   const m = Math.max(0, Math.round((now - t) / 60_000));
   if (m < 90) return `${m} min ago`;
@@ -100,7 +105,7 @@ function ago(now: number, t: number): string {
 
 export async function opsChecks(ctx: Ctx, orgId: string, now: number): Promise<OpsChecksDTO> {
   const nowDate = new Date(now);
-  const [preview, [requests], hooks, [mail]] = await Promise.all([
+  const [preview, [requests], hooks, [mail], keys] = await Promise.all([
     retentionPreview(ctx, orgId, 1, now),
     ctx.db
       .select({
@@ -121,6 +126,11 @@ export async function opsChecks(ctx: Ctx, orgId: string, now: number): Promise<O
       })
       .from(emailAlerts)
       .where(eq(emailAlerts.orgId, orgId)),
+    ctx.db
+      .select({ name: apiKeys.name, expiresAt: apiKeys.expiresAt, lastUsedAt: apiKeys.lastUsedAt })
+      .from(apiKeys)
+      .where(and(eq(apiKeys.orgId, orgId), isNull(apiKeys.revokedAt)))
+      .orderBy(asc(apiKeys.expiresAt)),
   ]);
   const checks: OpsCheckDTO[] = [];
 
@@ -196,6 +206,33 @@ export async function opsChecks(ctx: Ctx, orgId: string, now: number): Promise<O
             detail: `${mail.failed} alert email(s) failed in the last 24 h${mail.stuck ? `, ${mail.stuck} waiting for over 30 minutes` : ''}. Check the SMTP settings and the server log.`,
           }
         : { id: 'email_alerts', label: 'Email alerts', status: 'ok', detail: 'Alert emails are being sent.' },
+  );
+
+  const exp = (k: (typeof keys)[number]) => k.expiresAt?.getTime() ?? Infinity;
+  const usable = keys.filter((k) => exp(k) > now);
+  const expiring = usable.filter((k) => exp(k) <= now + API_KEY_EXPIRY_WARNING_DAYS * DAY_MS);
+  const expiredInUse = keys.filter((k) => exp(k) <= now && k.lastUsedAt != null && k.lastUsedAt.getTime() >= exp(k) - EXPIRED_IN_USE_WINDOW_MS);
+  checks.push(
+    expiredInUse.length
+      ? {
+          id: 'api_keys',
+          label: 'API keys',
+          status: 'failing',
+          detail: `${expiredInUse.length} API key(s) expired while still in use (“${expiredInUse[0].name}” on ${utcDate(exp(expiredInUse[0]))}): the connected system now gets “API key expired” errors. Create a new key for it on the Integrations page, then revoke the expired one.`,
+        }
+      : expiring.length
+        ? {
+            id: 'api_keys',
+            label: 'API keys',
+            status: 'warning',
+            detail: `${expiring.length} API key(s) expire within ${API_KEY_EXPIRY_WARNING_DAYS} days (“${expiring[0].name}” on ${utcDate(exp(expiring[0]))}). Create a replacement on the Integrations page, update the connected system, then revoke the old key.`,
+          }
+        : {
+            id: 'api_keys',
+            label: 'API keys',
+            status: 'ok',
+            detail: usable.length ? `${usable.length} active API key(s); none expire within ${API_KEY_EXPIRY_WARNING_DAYS} days.` : 'No active API keys.',
+          },
   );
 
   return { now, checks };

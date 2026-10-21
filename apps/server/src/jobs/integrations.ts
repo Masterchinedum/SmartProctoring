@@ -5,10 +5,12 @@
  *   webhooks            every 5 s (+ kicked after commits)  services/webhooks.ts      deliverDueWebhooks
  *   email-alerts        every 10 s (+ kicked after commits) services/email-alerts.ts  runEmailAlertJob
  *   abandoned-sessions  hourly                              services/abandonment.ts   closeAbandonedSessions
+ *   api-idempotency     hourly                              services/idempotency.ts   purgeIdempotencyKeys (records > 24 h)
  */
 import type { Ctx } from '../context.js';
 import { ABANDON_JOB, ABANDON_JOB_INTERVAL_MS, closeAbandonedSessions } from '../services/abandonment.js';
 import { EMAIL_ALERT_JOB, EMAIL_JOB_INTERVAL_MS, runEmailAlertJob } from '../services/email-alerts.js';
+import { IDEMPOTENCY_JOB, IDEMPOTENCY_JOB_INTERVAL_MS, purgeIdempotencyKeys } from '../services/idempotency.js';
 import { deliverDueWebhooks, WEBHOOK_JOB } from '../services/webhooks.js';
 
 export function registerIntegrationJobs(ctx: Ctx): void {
@@ -37,6 +39,15 @@ export function registerIntegrationJobs(ctx: Ctx): void {
     async run(c) {
       const r = await closeAbandonedSessions(c);
       if (r.closed) c.log.info({ closed: r.closed }, 'closed abandoned sessions');
+    },
+  });
+  ctx.jobs.register({
+    name: IDEMPOTENCY_JOB,
+    intervalMs: IDEMPOTENCY_JOB_INTERVAL_MS,
+    runAtStart: true,
+    async run(c) {
+      const n = await purgeIdempotencyKeys(c);
+      if (n) c.log.info({ deleted: n }, 'deleted expired Idempotency-Key records');
     },
   });
 }

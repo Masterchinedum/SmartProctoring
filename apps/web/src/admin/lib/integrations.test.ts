@@ -1,5 +1,21 @@
+import { API_KEY_READ_ONLY_SCOPES, API_KEY_SCOPES } from '@sp/shared';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_WEBHOOK_DRAFT, deliveryResult, deliveryStatus, parseRecipients, toggleEvent, validateWebhookDraft, webhookStatus } from './integrations';
+import {
+  apiKeyStatus,
+  apiKeyWarnings,
+  DEFAULT_WEBHOOK_DRAFT,
+  deliveryResult,
+  deliveryStatus,
+  describeScopes,
+  expiryFromChoice,
+  isoDay,
+  parseRecipients,
+  scopePreset,
+  scopesForPreset,
+  toggleEvent,
+  validateWebhookDraft,
+  webhookStatus,
+} from './integrations';
 
 describe('integrations helpers', () => {
   it('parses recipient lists (separators, case, duplicates, invalid entries)', () => {
@@ -35,5 +51,53 @@ describe('integrations helpers', () => {
     expect(deliveryResult({ attempts: 1, lastStatusCode: 200, lastError: null })).toBe('HTTP 200');
     expect(deliveryResult({ attempts: 3, lastStatusCode: null, lastError: 'Connection refused' })).toBe('Connection refused');
     expect(deliveryResult({ attempts: 0, lastStatusCode: null, lastError: null })).toBe('Not attempted yet');
+  });
+
+  it('maps API key scopes to access presets and plain descriptions', () => {
+    expect(scopePreset([...API_KEY_SCOPES].reverse())).toBe('full');
+    expect(scopePreset(API_KEY_READ_ONLY_SCOPES)).toBe('read');
+    expect(scopePreset(['exams:read', 'assignments:write'])).toBe('custom');
+    expect(scopesForPreset('full', [])).toEqual([...API_KEY_SCOPES]);
+    expect(scopesForPreset('read', ['candidates:write'])).toEqual([...API_KEY_READ_ONLY_SCOPES]);
+    expect(scopesForPreset('custom', ['sessions:read', 'exams:read', 'sessions:read'])).toEqual(['exams:read', 'sessions:read']);
+    expect(describeScopes(API_KEY_SCOPES)).toBe('Full access');
+    expect(describeScopes(API_KEY_READ_ONLY_SCOPES)).toBe('Read only');
+    expect(describeScopes(['exams:read', 'assignments:write'])).toBe('Read exams, Assign exams and see exam links');
+    expect(describeScopes([])).toBe('No permissions');
+  });
+
+  it('turns the expiry choice into a time (a date means the end of that day, local time)', () => {
+    const now = new Date(2026, 9, 21, 12, 0, 0).getTime();
+    expect(expiryFromChoice('never', now)).toEqual({ expiresAt: null });
+    expect(expiryFromChoice('30', now)).toEqual({ expiresAt: now + 30 * 86_400_000 });
+    expect(expiryFromChoice('365', now)).toEqual({ expiresAt: now + 365 * 86_400_000 });
+    expect(expiryFromChoice('date', now, '2026-12-31')).toEqual({ expiresAt: new Date(2026, 11, 31, 23, 59, 59).getTime() });
+    expect(expiryFromChoice('date', now, '2026-10-21')).toEqual({ expiresAt: new Date(2026, 9, 21, 23, 59, 59).getTime() });
+    expect(expiryFromChoice('date', now, '')).toEqual({ error: 'Choose a date' });
+    expect(expiryFromChoice('date', now, '2026-10-20')).toEqual({ error: 'Choose a date in the future' });
+    expect(expiryFromChoice('date', now, '2030-01-01')).toEqual({ error: 'Choose a date within 3 years' });
+    expect(isoDay(now)).toBe('2026-10-21');
+  });
+
+  it('describes API key states and counts the keys needing attention', () => {
+    const now = new Date(2026, 9, 21, 12, 0, 0).getTime();
+    const day = 86_400_000;
+    expect(apiKeyStatus({ revokedAt: now - day, expiresAt: null }, now)).toMatchObject({ label: 'Revoked 20 Oct 2026', tone: 'neutral' });
+    expect(apiKeyStatus({ revokedAt: null, expiresAt: now - day }, now)).toMatchObject({ label: 'Expired 20 Oct 2026', tone: 'danger' });
+    expect(apiKeyStatus({ revokedAt: null, expiresAt: now + 5 * day }, now)).toMatchObject({ label: 'Expires in 5 days', tone: 'warning' });
+    expect(apiKeyStatus({ revokedAt: null, expiresAt: now + day - 1 }, now)).toMatchObject({ label: 'Expires in 1 day' });
+    expect(apiKeyStatus({ revokedAt: null, expiresAt: now + 30 * day }, now)).toMatchObject({ label: 'Active', tone: 'success' });
+    expect(apiKeyStatus({ revokedAt: null, expiresAt: null }, now)).toMatchObject({ label: 'Active' });
+    expect(
+      apiKeyWarnings(
+        [
+          { revokedAt: null, expiresAt: now + 3 * day },
+          { revokedAt: null, expiresAt: now - day },
+          { revokedAt: now, expiresAt: now - day },
+          { revokedAt: null, expiresAt: null },
+        ],
+        now,
+      ),
+    ).toEqual({ expiring: 1, expired: 1 });
   });
 });

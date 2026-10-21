@@ -60,8 +60,8 @@ Exams, questions, per-exam proctoring policy, candidates, ID photos, invite link
 retention settings, audit log, detection-quality metrics, and a camera & identity self-test page
 (`/admin/tools/camera-test`) to try the real checks on your own webcam.
 
-**Integrations** — organisation API keys and a REST integration API (`/api/v1`) to create candidates,
-issue invite links and pull reports from an LMS/HR system; signed webhooks (HMAC-SHA256, durable
+**Integrations** — organisation API keys (scoped, with expiry) and a REST integration API (`/api/v1`, OpenAPI 3.1
+document, idempotent POSTs) to create candidates, issue invite links and pull reports from an LMS/HR system; signed webhooks (HMAC-SHA256, durable
 outbox with retries) for flags, holds, pause requests and submissions; optional SMTP email alerts
 with per-session throttling. See [docs/INTEGRATION_API.md](docs/INTEGRATION_API.md).
 

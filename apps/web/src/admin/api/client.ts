@@ -1,6 +1,7 @@
 import type {
   AccommodationDTO,
   ApiError as ApiErrorBody,
+  ApiKeyCreateInput,
   ApiKeyDTO,
   AssignmentDTO,
   AuditLogEntryDTO,
@@ -337,7 +338,7 @@ export const api = {
   // ---- integrations (API keys, webhooks, email alerts)
   integrationStatus: () => request<IntegrationStatusDTO>('GET', `${A}/integrations/status`),
   apiKeys: () => request<{ items: ApiKeyDTO[] }>('GET', `${A}/api-keys`),
-  createApiKey: (name: string) => request<CreatedApiKeyDTO>('POST', `${A}/api-keys`, { body: { name } }),
+  createApiKey: (input: ApiKeyCreateInput) => request<CreatedApiKeyDTO>('POST', `${A}/api-keys`, { body: input }),
   revokeApiKey: (id: string) => request<ApiKeyDTO>('POST', `${A}/api-keys/${enc(id)}/revoke`),
   webhooks: () => request<{ items: WebhookDTO[] }>('GET', `${A}/webhooks`),
   createWebhook: (input: WebhookInput) => request<CreatedWebhookDTO>('POST', `${A}/webhooks`, { body: input }),

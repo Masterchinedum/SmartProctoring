@@ -206,7 +206,8 @@ anything still refers to it).
      pnpm --filter @sp/server rekey                # re-encrypts in batches (--batch-size, default 200)
      ```
      It covers every encrypted value: evidence blobs (images, each in its own storage location, §2), ID-photo, reference and check-frame face
-     templates, stored access tokens, webhook secrets and external-verifier access keys. Progress goes to stderr; the summary names each
+     templates, stored access tokens, webhook secrets, external-verifier access keys and the integration API responses
+     kept for 24 hours for `Idempotency-Key` replays. Progress goes to stderr; the summary names each
      `EVIDENCE_KEYS_OLD` key id as "still needed" or "no longer needed"; the run is audit-logged
      (`keys.rekeyed`). Exit code 0 = nothing left under an old key, 3 = items remain (or failed — see the
      output), 75 = another run holds the lock.
@@ -270,19 +271,20 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_http_requests_total`, `sp_http_request_duration_seconds` `{method,route,status}` | request rate, errors and latency per route pattern |
   | `sp_db_pool_connections{state}` | Postgres pool: total / idle / waiting |
   | `sp_staff_websockets` | open staff dashboards |
-  | `sp_job_runs_total{job,result}`, `sp_job_duration_seconds`, `sp_job_last_success_timestamp_seconds` `{job}` | background jobs (`retention`, `webhooks`, `email-alerts`, `abandoned-sessions`, `sweeper`): ok / failed / skipped (another instance ran it) |
+  | `sp_job_runs_total{job,result}`, `sp_job_duration_seconds`, `sp_job_last_success_timestamp_seconds` `{job}` | background jobs (`retention`, `webhooks`, `email-alerts`, `abandoned-sessions`, `api-idempotency`, `sweeper`): ok / failed / skipped (another instance ran it) |
   | `sp_retention_failures_total` | sessions retention could not purge (retried next hour) |
   | `sp_evidence_storage_errors_total{op,location}` | evidence store put / get / delete failures (disk, S3), per storage location (§2) |
   | `sp_cluster_sessions{status}`, `sp_cluster_sessions_reporting_interrupted` | sessions in progress; how many browsers stopped reporting |
   | `sp_cluster_webhook_deliveries_pending`, `sp_cluster_webhook_oldest_pending_seconds`, `sp_cluster_webhook_deliveries_failed_24h`, `sp_cluster_webhooks_disabled` | webhook backlog, retry age, dead letters, disabled endpoints |
   | `sp_cluster_email_alerts_pending`, `sp_cluster_email_alert_oldest_pending_seconds` | alert-email backlog |
   | `sp_cluster_review_holds_overdue`, `sp_cluster_review_flags_undecided`, `sp_cluster_review_oldest_undecided_flag_seconds`, `sp_cluster_reviews_escalated` | review backlog: exams on hold past the organisation's review target, undecided flags and the oldest one's age, open escalations |
+  | `sp_cluster_api_keys_expiring_soon` | integration API keys (not revoked) that expire within 14 days — rotate them (§7) |
   | `sp_cluster_metrics_up` | 0 = the `sp_cluster_*` values could not be read in this scrape |
   | `process_*`, `nodejs_*` | CPU, memory, heap, GC, event-loop lag |
 
   Suggested alerts, as a Prometheus rules file to adapt: [`docs/prometheus-alerts.yml`](prometheus-alerts.yml)
   (face-analysis latency and refusals, capacity, reporting outage, retention, evidence storage, webhook backlog,
-  identity mismatch and *unable to verify* rates, no vision worker). `rekey` (key rotation) is a command, not a
+  identity mismatch and *unable to verify* rates, no vision worker, API keys about to expire). `rekey` (key rotation) is a command, not a
   service: it reports progress on stderr and in its exit code (§3).
 * Capacity: a `server overloaded (event loop lagging | database pool exhausted | face analysis queue long)`
   warning (at most one a minute, with the numbers under `loadMonitor`) means this instance is at its limit —
@@ -447,8 +449,29 @@ or refuses deletes (S3 permissions), or the database was unavailable. Once fixed
 `pnpm --filter @sp/server retention:run` (or wait for the next hour) and check the page again. "No successful run for
 over 3 hours" with no error means no server runs background jobs: at least one must have `SWEEPER_ENABLED` on.
 
-**An API key was leaked.** Integrations → API keys → **Revoke** (effective immediately), create a new key
-and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) shows what the key did.
+**An API key was leaked.** Integrations → API keys → **Revoke** (effective immediately), create a new key with the
+same access and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) shows what the key did.
+
+**Rotating an API key** (it expires soon — “Expires in N days” on the Integrations page, the *API keys* operational
+check, the `SmartProctoringApiKeysExpiringSoon` alert — or someone who knew it left). Keys cannot be extended, so:
+1. Integrations → API keys: create a new key with the **same access** (the list shows each key's access) and an
+   expiry (default one year).
+2. Give it to the team running the connected system and have them replace the old key in their secret store. Both
+   keys work meanwhile, so there is no downtime; `Idempotency-Key`s are shared by the organisation's keys, so retries
+   in flight are still recognised.
+3. Wait until the new key's **Last used** changes and the old one's stops changing, then **Revoke** the old key.
+
+**Operational checks show "API keys — Failing" (a key expired while still in use).** The system using it now gets
+`401 api_key_expired` on every request. Create a new key with the same access, have it deployed, then revoke the
+expired key (that clears the check). "Needs attention" means a key expires within 14 days: rotate it as above.
+
+**An integration gets `403 insufficient_scope`.** The key lacks the permission that endpoint needs (the response's
+`details.requiredScope`; the scopes table is in `docs/INTEGRATION_API.md` §1). Keys' permissions cannot be changed:
+create a key with the needed access, deploy it, revoke the old one.
+
+**An integration gets `409 idempotency_key_in_use` or `422 idempotency_key_reused`.** 409: it retried while its first
+request was still running — retrying after a second returns the stored response. 422: it reused an `Idempotency-Key`
+for a different request within 24 hours — it must send a new key per new request (`docs/INTEGRATION_API.md` §1).
 
 ## 8. Integrations configuration
 
@@ -467,10 +490,15 @@ and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) s
 | `EXTERNAL_VERIFIER_TIMEOUT_MS` | 4000 | Deadline per external comparison (retry included); afterwards the internal decision stands alone. |
 
 Background jobs (advisory-lock guarded, one instance at a time): `webhooks` every 5 s (plus immediately
-after a change), `email-alerts` every 10 s, `abandoned-sessions` hourly. Webhook attempts have a 10 s
+after a change), `email-alerts` every 10 s, `abandoned-sessions` hourly, `api-idempotency` hourly (deletes stored
+`Idempotency-Key` responses older than 24 hours). Webhook attempts have a 10 s
 timeout and are retried after 30 s, 1 min, 2 min, 5 min, 15 min, 30 min, 1 h, 2 h and 6 h (10 attempts).
 Delivery records and queued alert emails contain candidate names and are deleted after 30 days.
-Customer-facing documentation of the API and webhooks: `docs/INTEGRATION_API.md`.
+Customer-facing documentation of the API and webhooks: `docs/INTEGRATION_API.md`; the OpenAPI 3.1 document is served
+at `GET /api/v1/openapi.json` (no API key, 60 requests per minute per address) and committed as `docs/openapi.json` —
+regenerate it with `pnpm --filter @sp/server openapi -- --out ../../docs/openapi.json` after changing
+`packages/shared/src/integrations.ts` (a server test fails while it is out of date; `-- --check ../../docs/openapi.json`
+only checks).
 
 Outbound network: allow egress to your SMTP server and to the webhook receivers (and, if an organisation enables
 the external face verifier, to `rekognition.<region>.amazonaws.com`). Webhook requests come

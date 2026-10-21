@@ -42,9 +42,10 @@ src/
   services/retention.ts  evidence & event-metadata retention (hourly job + retention-cli)
   jobs/runner.ts       JobRunner (ctx.jobs): periodic jobs, each run guarded by a pg advisory lock
   jobs/sweeper.ts      heartbeat timeouts, clock expiry, stale checks (sweepOnce(ctx) for tests)
-  jobs/integrations.ts registers the webhooks (5 s), email-alerts (10 s) and abandoned-sessions (hourly) jobs
-  auth/api-key.ts      organisation API keys (Bearer sp_live_…; sha256 only) — requireApiKey / getApiKey
-  routes/v1/*          /api/v1/* integration API (docs/INTEGRATION_API.md)
+  jobs/integrations.ts registers the webhooks (5 s), email-alerts (10 s), abandoned-sessions and api-idempotency (hourly) jobs
+  auth/api-key.ts      organisation API keys (Bearer sp_live_…; sha256 only; scopes, expiry) — requireApiKey / requireScope / getApiKey
+  routes/v1/*          /api/v1/* integration API (docs/INTEGRATION_API.md), registered from INTEGRATION_ENDPOINTS (@sp/shared)
+  services/idempotency.ts  Idempotency-Key for /api/v1 POSTs (preHandler guard + onSend store, 24 h, encrypted responses)
   routes/admin/integrations.ts  /api/admin api-keys, webhooks (+ deliveries), email-alerts/test, integrations/status
   services/integration-events.ts  outbox hook called by withSession() (webhook + email rows in the same tx)
   services/webhooks.ts webhook outbox delivery (claim/lease, HMAC signature, backoff, auto-disable, housekeeping)
@@ -137,6 +138,11 @@ after-commit "kicks" are no-ops).
   candidate state maps it to `endReason: null` (EndReason contract unchanged).
 * Tests: `createTestEnv({ mailer: new MemoryMailer() })` enables email alerts; `env.ctx.config.webhooks` can be
   tweaked per test (allowPrivateNetworks is true outside production, so a local http receiver works).
+* Integration API contract: change `packages/shared/src/integrations.ts` (schemas + INTEGRATION_ENDPOINTS) first, then
+  the handler; bump INTEGRATION_API_VERSION, regenerate `docs/openapi.json` (`pnpm --filter @sp/server openapi -- --out
+  ../../docs/openapi.json`) and update docs/INTEGRATION_API.md (incl. its changelog). test/integrations/contract.test.ts
+  fails on undocumented routes, fields or error codes; a new zod feature the converter (shared/src/openapi.ts) does not
+  know throws.
 
 ## Candidate-side services (for reference)
 checks.ts (start/frames/complete: adaptive progress, liveness, gallery reference, ID photo, resume/reconnect/reverify,
