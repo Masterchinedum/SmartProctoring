@@ -93,6 +93,30 @@ portable JSON document (`smartproctoring.exam`, format version 1; an import is a
 published, archived or started exam version 1 (`reason: migrated`) and pinned started attempts to it
 (`test/migrations.test.ts` checks the upgrade on old data).
 
+### Accommodations (`packages/shared/src/accommodations.ts`, `services/accommodations.ts`)
+
+Approved per-candidate exceptions to exam rules, granted and revoked (never edited) by administrators, each
+audit-logged without its encrypted note. Every kind only *relaxes* rules and is expressed as overrides of resolved
+policy fields (`applyAccommodations`), so the server, the candidate client and the reports read one consistent
+policy: extra time (added to `duration_ms`), rest breaks (never stricter than the exam), no head-turn challenge,
+assistive technology (no fullscreen / blur recording / clipboard block), behaviour detectors off, a support person
+(other people in view not observed), **identity verified by staff** and **no camera**. Those two are policy modes
+(`identity.verification: 'staff'`, `camera.enabled: false`) whose invariants the policy schema enforces (staff mode:
+no live-person or ID-photo check; no camera: every camera detector and screenshot off, staff verification forced).
+
+A session carries a snapshot (`exam_sessions.accommodations`) that follows the records until the exam starts
+(refreshed after each grant / revocation, at assignment and again at start) and is then frozen with the policy
+snapshot, together with the exact list of exam rules it changed (`exceptions`). Start records a neutral
+`accommodations_applied` event; the session page, the report (section + attributed limitations — the exam's own
+rules are reconstructed by reverting the exceptions) and the integration API show what applies, never why.
+
+Staff mode: checks are `attest` checks (`checks.mode`; no frames, no face processing — frames are refused). The
+check-in ends on a `staff_verification` hold; releasing it requires the staff member to record how they verified
+the candidate (`identity_verified_by_staff` event + audit). No face reference exists, so identity samples are never
+requested or accepted, and the no-samples watchdog is off. After a pause or reconnection the exam continues, behind
+another verification hold when `identity.staffReverifyOnContinue`. Without a camera the candidate client skips the
+camera step and never opens a camera; its monitoring runtime observes the browser rules only.
+
 ## 4. Identity pipeline (server)
 
 1. Decode JPEG (sharp), letterbox to 640×640, YuNet → faces with 5 landmarks + score (NMS).

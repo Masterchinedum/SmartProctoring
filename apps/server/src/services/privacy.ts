@@ -13,5 +13,7 @@ export function noticeFor(org: Organization | null, policy: ProctoringPolicy, ca
     idPhotoComparison: policy.identity.idPhotoComparison !== 'off' && !!candidate.idPhotoEmbedding,
     // Names the external second-opinion provider while one is active (verifiers/, docs/EXTERNAL_VERIFIER.md).
     externalVerifier: externalVerifierNoticeNameFor(settings.externalVerifier),
+    camera: policy.camera.enabled,
+    identityVerification: policy.identity.verification,
   });
 }

@@ -5,9 +5,10 @@ import { BrandHeader, ContactLine, Page, ScreenHeading, Toasts } from '../compon
 import { enterFullscreen } from '../screens/exam/ExamScreen';
 import { CalibrationStep } from './CalibrationStep';
 import { ReadinessStep } from './ReadinessStep';
+import { AttestStep } from './AttestStep';
 import { VerifyStep } from './VerifyStep';
 
-type Step = 'intro' | 'camera' | 'calibrate' | 'verify' | 'result';
+type Step = 'intro' | 'camera' | 'calibrate' | 'verify' | 'attest' | 'result';
 
 const INTRO: Record<CheckPurpose, { title: string; body: string[] } | null> = {
   initial: null,
@@ -56,8 +57,13 @@ const READY_RECONNECT_INTRO = {
 export function CheckFlow({ purpose, onCancel, onPassedPending }: { purpose: CheckPurpose; onCancel?: () => void; onPassedPending?: (pending: boolean) => void }) {
   const ctrl = useController();
   const snap = useSnapshot();
-  const intro = purpose === 'reconnect' && snap.state?.session.status === 'ready' ? READY_RECONNECT_INTRO : INTRO[purpose];
-  const [step, setStep] = useState<Step>(intro ? 'intro' : 'camera');
+  const policy = snap.state?.exam.policy;
+  // Identity verified by staff (an approved arrangement): no face check — the camera (if used) is confirmed, then an
+  // attest check (no pictures). Without a camera there is no camera step at all.
+  const attest = policy?.identity.verification === 'staff';
+  const cameraOn = policy?.camera?.enabled !== false;
+  const intro = attest ? null : purpose === 'reconnect' && snap.state?.session.status === 'ready' ? READY_RECONNECT_INTRO : INTRO[purpose];
+  const [step, setStep] = useState<Step>(intro ? 'intro' : attest && !cameraOn ? 'attest' : 'camera');
   const [result, setResult] = useState<{ res: CompleteCheckResponse; check: StartCheckResponse } | null>(null);
   const [verifyKey, setVerifyKey] = useState(0);
 
@@ -119,7 +125,20 @@ export function CheckFlow({ purpose, onCancel, onPassedPending }: { purpose: Che
       </div>
     );
   } else if (step === 'camera') {
-    body = <ReadinessStep onReady={() => setStep('calibrate')} />;
+    body = attest ? (
+      <ReadinessStep
+        cameraOnly
+        onReady={() => {
+          // No face calibration with staff verification: monitoring learns the working position as it goes.
+          ctrl.setCalibration(null, purpose);
+          setStep('attest');
+        }}
+      />
+    ) : (
+      <ReadinessStep onReady={() => setStep('calibrate')} />
+    );
+  } else if (step === 'attest') {
+    body = <AttestStep purpose={purpose} onResult={onResult} />;
   } else if (step === 'calibrate') {
     body = <CalibrationStep onDone={onCalibrated} />;
   } else if (step === 'verify') {

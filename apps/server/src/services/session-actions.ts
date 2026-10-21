@@ -6,14 +6,15 @@
  *  - returns the fresh SessionSummaryDTO (after commit; realtime is published automatically).
  */
 import { randomUUID } from 'node:crypto';
-import type { SessionSummaryDTO } from '@sp/shared';
-import { and, eq } from 'drizzle-orm';
+import type { CheckPurpose, SessionSummaryDTO, StaffVerificationMethod } from '@sp/shared';
+import { and, desc, eq } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
-import { examSessions, exams, identityReferences, pauseRequests, type ExamSession } from '../db/schema.js';
+import { events, examSessions, exams, identityReferences, pauseRequests, type ExamSession } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { randomToken, sha256Hex } from '../lib/crypto.js';
 import { conflict, invalidState, notFound } from '../lib/errors.js';
+import { applicableAccommodations, sessionSnapshot } from './accommodations.js';
 import { accessLinkFromToken, loadSessionSummary } from './dto.js';
 import { assertStatus, finalizeSession, holdNow, pauseNow, TERMINAL, withSession, type SessionMutation } from './session-state.js';
 
@@ -56,6 +57,8 @@ export async function createExamSession(ctx: Ctx, db: DbOrTx, input: { orgId: st
   const token = randomToken(32);
   const now = ctx.now();
   const id = randomUUID();
+  // The candidate's approved accommodations for this exam (kept up to date until the exam starts; accommodations.ts).
+  const acc = sessionSnapshot(await applicableAccommodations(db, input.candidateId, input.examId, now), exam.durationSec * 1000, now);
   const [session] = await db
     .insert(examSessions)
     .values({
@@ -65,7 +68,8 @@ export async function createExamSession(ctx: Ctx, db: DbOrTx, input: { orgId: st
       candidateId: input.candidateId,
       accessTokenHash: sha256Hex(token),
       accessTokenEnc: ctx.keyring.encryptString(token, `access-token:${id}`),
-      durationMs: exam.durationSec * 1000,
+      durationMs: exam.durationSec * 1000 + (acc?.extraTimeMs ?? 0),
+      accommodations: acc,
       createdAt: new Date(now),
       updatedAt: new Date(now),
     })
@@ -137,21 +141,48 @@ export const RELEASE_REVERIFY_MESSAGE = 'An administrator has reviewed your exam
  *    until they pass; then the exam continues).
  *  - reEnroll: staff confirmed the person and authorise a NEW identity reference at that check (implies requireCheck).
  *  - Holds raised before a reference existed return the session to the initial check.
+ *  - A 'staff_verification' hold (identity verified by staff — an accommodation) is released only with `verification`
+ *    (how the staff member verified the candidate), recorded as an identity_verified_by_staff event; no check follows,
+ *    the verification is the check. Sessions verified by staff have no face reference by design.
  */
-export async function releaseHold(ctx: Ctx, sessionId: string, actor: Actor, opts: { note?: string | null; requireCheck?: boolean; reEnroll?: boolean } = {}): Promise<SessionSummaryDTO> {
+export async function releaseHold(
+  ctx: Ctx,
+  sessionId: string,
+  actor: Actor,
+  opts: { note?: string | null; requireCheck?: boolean; reEnroll?: boolean; verification?: { method: StaffVerificationMethod; note?: string | null } | null } = {},
+): Promise<SessionSummaryDTO> {
   await withSession(ctx, sessionId, async (m) => {
     assertOrg(m, actor);
     assertStatus(m, ['on_hold'], 'The exam is not on hold');
-    const reEnroll = opts.reEnroll === true;
-    const requireCheck = reEnroll || opts.requireCheck !== false;
+    const staffMode = (await m.policy()).identity.verification === 'staff';
+    const verificationHold = m.session.holdReason === 'staff_verification';
+    if (verificationHold && !opts.verification) {
+      throw conflict('verification_required', 'Confirm that you have verified the candidate’s identity, and how, to release this hold.');
+    }
+    const reEnroll = !staffMode && opts.reEnroll === true;
+    const requireCheck = !verificationHold && (reEnroll || opts.requireCheck !== false);
     const [ref] = await m.tx
       .select({ id: identityReferences.id })
       .from(identityReferences)
       .where(and(eq(identityReferences.sessionId, sessionId), eq(identityReferences.active, true)));
     const prev = m.session.holdPrevStatus ?? 'active';
     const details = { requireCheck, reEnroll, note: opts.note ?? null, by: actor.id, reason: m.session.holdReason };
+    if (verificationHold) {
+      const [held] = await m.tx
+        .select({ details: events.details })
+        .from(events)
+        .where(and(eq(events.sessionId, sessionId), eq(events.type, 'session_held')))
+        .orderBy(desc(events.startedAt))
+        .limit(1);
+      const purpose = ((held?.details as { purpose?: CheckPurpose } | undefined)?.purpose ?? null) as CheckPurpose | null;
+      const verification = { method: opts.verification!.method, note: opts.verification!.note?.trim() || null, by: actor.id, purpose };
+      await m.addEvent({ type: 'identity_verified_by_staff', source: 'staff', details: verification });
+      await auditAction(m, actor, 'session.identity_verified_by_staff', { method: verification.method, purpose });
+    }
     await m.addEvent({ type: 'hold_released', source: 'staff', details });
-    if (!ref) {
+    // No reference to compare with: back to the initial check — unless identity is verified by staff (no reference by
+    // design), where only a hold from before the check-in goes back to it.
+    if (staffMode ? prev === 'invited' : !ref) {
       // No protected reference yet (hold during the initial check): back to the initial check.
       await m.closeOpenPeriod(m.now);
       m.set({ status: 'invited', ...clearedHold(), checkAttemptsResetAt: new Date(m.now), reEnrollAuthorized: false, verifiedInstanceId: null });

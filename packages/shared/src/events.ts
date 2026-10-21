@@ -76,6 +76,8 @@ export const EVENT_TYPES = [
   'session_terminated',
   'time_extended',
   'score_regraded',
+  'accommodations_applied',
+  'identity_verified_by_staff',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -394,6 +396,24 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
     title: 'Score regraded',
     observation: 'An administrator regraded the exam with corrected answer keys.',
     reviewerNote: 'Details include the exam version whose answer keys were used, the score before and after, and the reason.',
+    sources: ['staff'],
+    span: false,
+  },
+  accommodations_applied: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Accommodations applied',
+    observation: 'Approved accommodations were applied to this exam.',
+    reviewerNote: 'Details list each accommodation and every exam rule it changed. Observations an accommodation turned off are absent by design, not because nothing happened.',
+    sources: ['server_system'],
+    span: false,
+  },
+  identity_verified_by_staff: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Identity verified by staff',
+    observation: 'A staff member verified the candidate’s identity.',
+    reviewerNote: 'Recorded when identity is verified by staff instead of the automated face check (an accommodation). Details include how it was verified and by whom.',
     sources: ['staff'],
     span: false,
   },

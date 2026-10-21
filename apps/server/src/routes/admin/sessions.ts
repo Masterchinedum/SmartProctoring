@@ -46,6 +46,7 @@ import { getStaff, requireStaff, roleAtLeast } from '../../auth/staff.js';
 import { candidates, events, examSessions, exams, notes, pauseRequests } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { notFound, validationFailed } from '../../lib/errors.js';
+import { mergePolicy } from '../../services/org.js';
 import {
   loadDeviceRecordDTOs,
   loadIdentityCheckDTOs,
@@ -58,8 +59,10 @@ import {
   toHoldDTO,
   toNoteDTO,
   toPauseRequestDTO,
+  loadStaffVerifications,
   toScoreDTO,
 } from '../../services/dto.js';
+import { toSessionAccommodationsDTO } from '../../services/accommodations.js';
 import { buildSessionReport } from '../../services/reports.js';
 import { eventsToCsv } from '../../services/reports-csv.js';
 import { resolveTimeZone } from '../../services/reports-format.js';
@@ -191,7 +194,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     const id = idParam(req, 'id', 'Session', 'session_not_found');
     const { session, exam } = await loadScopedSession(ctx.db, staff.orgId, id);
     const org = await loadOrgRow(ctx, staff.orgId);
-    const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices] = await Promise.all([
+    const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices, staffVerifications] = await Promise.all([
       // The access link (a bearer credential) only for admins, only on this explicit detail response.
       loadSessionSummaries(ctx, ctx.db, { orgId: staff.orgId, sessionIds: [id], includeAccessLink: roleAtLeast(staff.role, 'admin') }),
       loadPeriodDTOs(ctx.db, id),
@@ -200,11 +203,15 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       loadPauseRequestDTOs(ctx.db, id),
       loadNoteDTOs(ctx.db, { sessionId: id }),
       loadDeviceRecordDTOs(ctx.db, id),
+      loadStaffVerifications(ctx.db, id),
     ]);
     if (!summary) throw notFound('Session not found', 'session_not_found');
     return {
       summary,
       policy: effectivePolicy(session, exam, org),
+      // Exceptions are frozen at start; before that, against the exam's current rules.
+      accommodations: toSessionAccommodationsDTO(session, session.policy ? null : mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, exam.policy as Record<string, unknown>)),
+      staffVerifications,
       periods,
       identityChecks,
       references,
@@ -294,7 +301,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   app.post('/sessions/:id/release', reviewer, async (req) => {
     const id = idParam(req, 'id', 'Session', 'session_not_found');
     const body = releaseRequestSchema.parse(req.body ?? {});
-    return releaseHold(ctx, id, actorOf(req), { note: body.note ?? null, requireCheck: body.requireCheck, reEnroll: body.reEnroll });
+    return releaseHold(ctx, id, actorOf(req), { note: body.note ?? null, requireCheck: body.requireCheck, reEnroll: body.reEnroll, verification: body.verification ?? null });
   });
 
   app.post('/sessions/:id/terminate', admin, async (req) => {

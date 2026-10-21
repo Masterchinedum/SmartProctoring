@@ -15,9 +15,12 @@ import {
   type NoteDTO,
   type PauseRequestDTO,
   type PeriodDTO,
+  type CheckPurpose,
   type SessionScoreDTO,
   type SessionSummaryDTO,
   type StaffUserDTO,
+  type StaffVerificationDTO,
+  type StaffVerificationMethod,
   type DeviceRecordDTO,
   type IdentityReferenceDTO,
 } from '@sp/shared';
@@ -417,6 +420,7 @@ export function toSessionSummaryDTO(
     id: s.id,
     exam: { id: input.exam.id, title: input.exam.title },
     examVersion: input.examVersion ?? null,
+    accommodations: (s.accommodations?.items ?? []).map((i) => i.kind),
     candidate: { id: input.candidate.id, name: input.candidate.name, email: input.candidate.email ?? null, externalId: input.candidate.externalId ?? null },
     status: s.status,
     endReason: s.endReason ?? null,
@@ -525,6 +529,22 @@ export async function loadSessionSummaries(ctx: Pick<Ctx, 'config' | 'keyring' |
       now,
     ),
   );
+}
+
+/** Identity verifications by staff (identity_verified_by_staff events), oldest first. */
+export async function loadStaffVerifications(db: DbOrTx, sessionId: string): Promise<StaffVerificationDTO[]> {
+  const rows = await db
+    .select({ at: events.startedAt, details: events.details })
+    .from(events)
+    .where(and(eq(events.sessionId, sessionId), eq(events.type, 'identity_verified_by_staff')))
+    .orderBy(events.startedAt);
+  const byIds = [...new Set(rows.map((r) => (r.details as { by?: string }).by).filter((x): x is string => !!x))];
+  const staff = byIds.length ? await db.select({ id: staffUsers.id, name: staffUsers.name }).from(staffUsers).where(inArray(staffUsers.id, byIds)) : [];
+  const names = new Map(staff.map((s) => [s.id, s.name]));
+  return rows.map((r) => {
+    const d = r.details as { by?: string; method?: StaffVerificationMethod; purpose?: CheckPurpose | null; note?: string | null };
+    return { at: r.at.getTime(), by: d.by ? { id: d.by, name: names.get(d.by) ?? 'Former staff member' } : null, method: d.method ?? 'other', purpose: d.purpose ?? null, note: d.note ?? null };
+  });
 }
 
 /** Summary of a single session regardless of org (caller must authorise). */

@@ -6,6 +6,7 @@ import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityResul
 import type { MonitoringStatus } from './observation';
 import { IDENTITY_CHECK_TRIGGERS } from './identity';
 import { externalVerifierUpdateSchema, type ExternalVerifierSettingsDTO } from './verifiers';
+import type { AccommodationKind, SessionAccommodationsDTO } from './accommodations';
 
 /**
  * HTTP API contract. Paths are relative to the server origin.
@@ -161,6 +162,8 @@ export interface CandidateSessionState {
     policy: ProctoringPolicy;
   };
   candidate: { id: string; name: string; hasIdPhoto: boolean };
+  /** The candidate's approved accommodations for this exam, in plain words (none: empty). */
+  accommodations?: string[];
   consent: { accepted: boolean; acceptedAt: number | null; notice: PrivacyNoticeDTO };
   /** Only present while the exam is active on the verified browser instance, or after submission. Never served while paused/on hold (unmonitored). */
   questions: CandidateQuestionDTO[] | null;
@@ -200,6 +203,12 @@ export interface StartCheckResponse {
    * because the pictures were not clear enough to compare (poor light, blur, distance — counted as half an attempt).
    */
   attemptsAfter?: { failed: number; unclear: number };
+  /**
+   * 'face' (default): camera, live-person and identity frames as below. 'attest': identity is verified by staff
+   * (policy.identity.verification 'staff') — no frames are sent; with the camera on the client only confirms it works,
+   * then completes the check (which usually leads to a 'staff_verification' hold).
+   */
+  mode?: 'face' | 'attest';
   /** Frames needed for the identity portion (frontal) — the minimum; see CheckFrameResponse.progress. */
   frontalFramesRequired: number;
   /** Upper bound of frontal frames the server accepts for this check (adaptive collection). */
@@ -465,6 +474,8 @@ export interface SessionSummaryDTO {
   legalHold?: boolean;
   /** The exam version this attempt is pinned to (set when it starts; null before). */
   examVersion?: { id: string; number: number } | null;
+  /** Kinds of the approved accommodations applied to this attempt (empty: none). Details: SessionDetailDTO.accommodations. */
+  accommodations?: AccommodationKind[];
 }
 
 export interface IdentityCheckDTO {
@@ -542,6 +553,28 @@ export interface SessionDetailDTO {
   devices: DeviceRecordDTO[];
   consent: { acceptedAt: number | null; noticeVersion: string | null };
   score: SessionScoreDTO | null;
+  /** Approved accommodations applied to this attempt and every exam rule they changed (null: none). */
+  accommodations: SessionAccommodationsDTO | null;
+  /** Identity verifications by staff (policy.identity.verification 'staff'), oldest first. */
+  staffVerifications: StaffVerificationDTO[];
+}
+
+export const STAFF_VERIFICATION_METHODS = ['video_call', 'in_person', 'id_document_on_camera', 'other'] as const;
+export type StaffVerificationMethod = (typeof STAFF_VERIFICATION_METHODS)[number];
+export const STAFF_VERIFICATION_METHOD_LABEL: Record<StaffVerificationMethod, string> = {
+  video_call: 'Video call',
+  in_person: 'In person',
+  id_document_on_camera: 'ID document shown on camera',
+  other: 'Other',
+};
+
+export interface StaffVerificationDTO {
+  at: number;
+  by: { id: string; name: string } | null;
+  method: StaffVerificationMethod;
+  /** The check it followed: 'initial' at check-in, else a pause / reconnection. */
+  purpose: CheckPurpose | null;
+  note: string | null;
 }
 
 /** An attempt's score. `regrades` (oldest first) records every administrator regrade with the score before it. */
@@ -582,6 +615,11 @@ export const releaseRequestSchema = z.object({
   requireCheck: z.boolean().default(true),
   /** Staff confirm the person is the right candidate and authorize establishing a NEW identity reference at the next check. */
   reEnroll: z.boolean().default(false),
+  /**
+   * Required to release a 'staff_verification' hold: the staff member confirms they verified the candidate's identity,
+   * and how (recorded as an identity_verified_by_staff event).
+   */
+  verification: z.object({ method: z.enum(STAFF_VERIFICATION_METHODS), note: z.string().trim().max(1000).optional() }).optional(),
 });
 /** POST /api/admin/sessions/:id/terminate */
 export const terminateRequestSchema = z.object({ reason: z.string().min(1).max(1000) });
@@ -634,6 +672,8 @@ export interface SessionReportDTO {
   observations: string[];
   reviewerNotes: NoteDTO[];
   score: SessionScoreDTO | null;
+  /** Approved accommodations and the exam rules they changed (null: none). */
+  accommodations: SessionAccommodationsDTO | null;
   limitations: string[];
 }
 

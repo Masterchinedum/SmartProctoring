@@ -19,7 +19,9 @@ import {
   clockUsedMs,
   EVENT_CATALOG,
   EVENT_CATEGORIES,
+  revertExceptions,
   SEVERITY_RANK,
+  STAFF_VERIFICATION_METHOD_LABEL,
   type SessionEndReason,
   type EventCategory,
   type EventDTO,
@@ -30,17 +32,20 @@ import {
   type PeriodKind,
   type ProctoringPolicy,
   type SessionReportDTO,
+  type StaffVerificationDTO,
   type TimelineItemDTO,
 } from '@sp/shared';
 import { and, asc, eq } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { candidates, examSessions, exams, identityReferences, organizations, type IdentityReference } from '../db/schema.js';
 import { notFound } from '../lib/errors.js';
-import { loadNoteDTOs, loadSessionSummaries, sessionClock, toScoreDTO } from './dto.js';
+import { accommodationLimitations, toSessionAccommodationsDTO } from './accommodations.js';
+import { loadNoteDTOs, loadSessionSummaries, loadStaffVerifications, sessionClock, toScoreDTO } from './dto.js';
 import { loadVersion } from './exam-versions.js';
 import { capFirst, formatDuration, lcFirst, listJoin, makeClock, pct, plural, type Clock } from './reports-format.js';
 import { loadSessionTimeline } from './reports-timeline.js';
 import { capturesWithin, GAP_NOT_REPORTING, GAP_NOT_RETURNED, loadLateCaptures, unobservedOutages, withUnobservedOutages, type Span } from './reporting-gaps.js';
+import { mergePolicy } from './org.js';
 import { effectivePolicy } from './session-state.js';
 
 export const NOTABLE_EVENTS_LIMIT = 200;
@@ -65,6 +70,7 @@ const HOLD_REASON_TEXT: Record<HoldReason, string> = {
   pause_limit: 'the pause was longer than the exam rules allow',
   staff: 'a staff member placed it on hold',
   id_photo_unverifiable: 'the live image could not be compared dependably with the approved ID photo (not evidence of a different person)',
+  staff_verification: 'the candidate waited for a staff member to verify their identity',
 };
 
 const DETECTOR_LABELS: Record<keyof ProctoringPolicy['detection']['enabled'], string> = {
@@ -180,6 +186,10 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
   ]);
   if (!summary) throw notFound('Session not found', 'session_not_found');
   const policy = effectivePolicy(session, exam, org);
+  // Accommodations: what they changed (frozen at start), and the exam's own rules (limitations attribute each change).
+  const accommodations = toSessionAccommodationsDTO(session, session.policy ? null : mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, exam.policy as Record<string, unknown>));
+  const examRules = revertExceptions(policy, accommodations?.exceptions ?? []);
+  const staffVerifications = policy.identity.verification === 'staff' ? await loadStaffVerifications(db, sessionId) : null;
   const { events: evs, checks } = timeline;
 
   const endAt = session.endedAt ? session.endedAt.getTime() : now;
@@ -213,7 +223,7 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     inconclusive: checks.filter((c) => c.decision === 'inconclusive').length,
     unableToVerify: checks.filter((c) => c.decision === 'unable_to_verify').length,
     idPhoto,
-    summary: identitySummary({ clock, session, refs, checks, events: evs, idPhoto, items: timeline.items, endAt }),
+    summary: identitySummary({ clock, session, refs, checks, events: evs, idPhoto, items: timeline.items, endAt, staffVerifications }),
   };
 
   /* -------------------------------------------------------------- event counts */
@@ -242,7 +252,10 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
 
   /* -------------------------------------------------------------- narrative */
   const observations = buildObservations({ clock, session, exam, periods, events: evs, checks, identity, totals, uncoveredMs: totalsRaw.uncoveredMs, endAt, notableTruncated: notableAll.length - notableEvents.length });
-  const limitations = buildLimitations({ clock, periods, events: evs, policy, endAt, evidencePurgedAt: session.evidencePurgedAt?.getTime() ?? null, lateCaptures });
+  const limitations = [
+    ...buildLimitations({ clock, periods, events: evs, policy: examRules, endAt, evidencePurgedAt: session.evidencePurgedAt?.getTime() ?? null, lateCaptures }),
+    ...accommodationLimitations(session.accommodations),
+  ];
 
   return {
     generatedAt: now,
@@ -259,6 +272,7 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     observations,
     reviewerNotes: notes,
     score: toScoreDTO(session.score),
+    accommodations,
     limitations,
   };
 }
@@ -274,6 +288,8 @@ interface IdentitySummaryInput {
   idPhoto: { decision: string; similarity: number | null } | null;
   items: TimelineItemDTO[];
   endAt: number;
+  /** Set when identity is verified by staff (policy.identity.verification 'staff'): the verifications on record. */
+  staffVerifications?: StaffVerificationDTO[] | null;
 }
 
 /** How far before an identity observation the report looks for what preceded it. */
@@ -383,6 +399,13 @@ export function identitySummary(input: IdentitySummaryInput): string {
   const openMismatch = mismatchEvents.filter((e) => e.review.status !== 'dismissed');
   const dismissedMismatch = mismatchEvents.length - openMismatch.length;
   const unverifiable = events.filter((e) => e.type === 'identity_unverifiable' && e.review.status !== 'dismissed');
+
+  if (input.staffVerifications) {
+    const v = input.staffVerifications;
+    if (!v.length) return 'Identity is verified by staff for this candidate instead of the automated face check; no verification has been recorded yet.';
+    const list = v.map((x) => `${clock.time(x.at)} (${STAFF_VERIFICATION_METHOD_LABEL[x.method].toLowerCase()}${x.by ? `, ${x.by.name}` : ''}${x.purpose && x.purpose !== 'initial' ? `, after a ${x.purpose === 'resume' ? 'pause' : x.purpose === 'reconnect' ? 'reconnection' : 'hold'}` : ''})`);
+    return `Identity was verified by staff instead of the automated face check: ${listJoin(list)}. No automated identity comparisons were made.`;
+  }
 
   if (refs.length === 0 && checks.length === 0) {
     return input.session.status === 'invited'

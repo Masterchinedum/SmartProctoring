@@ -21,6 +21,8 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import type {
+  AccommodationBasis,
+  AccommodationKind,
   AnswerValue,
   CandidateCommand,
   ExamVersionChangesDTO,
@@ -41,6 +43,7 @@ import type {
   LivenessResultDTO,
   MonitoringStatus,
   PeriodKind,
+  PolicyExceptionDTO,
   ProctoringPolicyInput,
   QuestionType,
   ReviewStatus,
@@ -265,6 +268,61 @@ export const candidates = pgTable(
   (t) => [index('candidates_org_idx').on(t.orgId), index('candidates_email_idx').on(t.orgId, t.email)],
 );
 
+/* ------------------------------------------------------------------ accommodations */
+
+/**
+ * Approved per-candidate exceptions to exam rules (packages/shared/src/accommodations.ts, services/accommodations.ts).
+ * Never edited: a change is a revocation plus a new grant, so the record of what applied when stays intact.
+ */
+export const accommodations = pgTable(
+  'accommodations',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    candidateId: uuid('candidate_id')
+      .notNull()
+      .references(() => candidates.id, { onDelete: 'cascade' }),
+    /** null: every exam of the candidate. */
+    examId: uuid('exam_id').references(() => exams.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<AccommodationKind>().notNull(),
+    params: jsonb('params').$type<Record<string, unknown>>().notNull().default({}),
+    basis: text('basis').$type<AccommodationBasis>().notNull(),
+    /** Administrators' note, encrypted (AAD accommodation-note:<id>); null when empty. */
+    noteEnc: bytea('note_enc'),
+    validUntil: ts('valid_until'),
+    grantedBy: uuid('granted_by'),
+    grantedAt: ts('granted_at').notNull(),
+    revokedAt: ts('revoked_at'),
+    revokedBy: uuid('revoked_by'),
+    revokeReason: text('revoke_reason'),
+  },
+  (t) => [index('accommodations_candidate_idx').on(t.candidateId), index('accommodations_org_idx').on(t.orgId)],
+);
+export type Accommodation = typeof accommodations.$inferSelect;
+
+/** An accommodation as applied to a session (exam_sessions.accommodations). */
+export interface SessionAccommodationItem {
+  id: string;
+  kind: AccommodationKind;
+  params: Record<string, unknown>;
+  basis: AccommodationBasis;
+  grantedAt: number;
+}
+
+/**
+ * The accommodations of a session: recomputed while it has not started (so grants and revocations reach it), frozen
+ * when it starts. `extraTimeMs` is included in exam_sessions.duration_ms.
+ */
+export interface SessionAccommodations {
+  items: SessionAccommodationItem[];
+  extraTimeMs: number;
+  at: number;
+  /** The exam rules the accommodations changed, recorded when the exam starts (until then computed on read). */
+  exceptions?: PolicyExceptionDTO[];
+}
+
 /* ------------------------------------------------------------------ exam sessions */
 
 /** Server-side identity aggregation state (ARCHITECTURE §4.5). */
@@ -367,6 +425,8 @@ export const examSessions = pgTable(
     accessTokenEnc: bytea('access_token_enc'),
     status: text('status').$type<SessionStatus>().notNull().default('invited'),
     endReason: text('end_reason').$type<SessionEndReason>(),
+    /** Approved accommodations (see SessionAccommodations); null: none applied. */
+    accommodations: jsonb('accommodations').$type<SessionAccommodations>(),
     /** Policy snapshot taken when the exam starts (null => use exam policy). */
     policy: jsonb('policy').$type<ProctoringPolicyInput>(),
     durationMs: integer('duration_ms').notNull(),
@@ -541,6 +601,8 @@ export const checks = pgTable(
       .notNull()
       .references(() => examSessions.id, { onDelete: 'cascade' }),
     purpose: text('purpose').$type<CheckPurpose>().notNull(),
+    /** 'face': camera, live-person and identity frames. 'attest': identity verified by staff — no frames (StartCheckResponse.mode). */
+    mode: text('mode').$type<'face' | 'attest'>().notNull().default('face'),
     clientInstanceId: text('client_instance_id').notNull(),
     device: jsonb('device').$type<DeviceInfo>().notNull(),
     status: text('status').$type<'open' | 'passed' | 'retry' | 'held' | 'failed' | 'expired'>().notNull().default('open'),

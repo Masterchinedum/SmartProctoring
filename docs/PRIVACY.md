@@ -40,6 +40,8 @@ advice — review it with counsel for your jurisdictions.
 | API-key activity (writes, report/event reads) | Your integrations | `audit_log` (actor `api_key`) | — | Audit retention per your policy |
 | **Optional, off by default:** probe image + one reference/ID-photo image sent for an external second opinion at the decision points an administrator selected (`docs/EXTERNAL_VERIFIER.md`) | Identity checks | Sent to the configured provider (e.g. Amazon Rekognition, in the chosen AWS region) over TLS; SmartProctoring stores only the resulting score/outcome with the check | In transit (TLS) | Provider's terms (opt out of AI-service content use) |
 | External verifier credentials (AWS access key pair, optional) | Administrator | `organizations.settings` | Yes (AES-256-GCM) | Until removed or the provider is switched off |
+| Accommodations: what was granted (e.g. extra time, identity verified by staff), a **broad basis only** (accessibility / technical / other — never a diagnosis), scope, dates, who granted / revoked it, and an optional administrators' note | Administrator | `accommodations`; a copy of what applied (without basis or note) on each session | Note: yes (AES-256-GCM); visible to administrators only, never in the audit log, reports or integrations | Until revoked records are deleted with the candidate |
+| Staff identity verification (method, optional note, who, when) — when identity is verified by staff instead of the automated face check | Staff | `events` (`identity_verified_by_staff`), `audit_log` | — | Event retention period |
 
 Not collected: continuous video/audio, screen contents, other applications, other monitors or
 devices, clipboard contents, keystrokes (which keys; only the time of the last key press is used, in the
@@ -76,8 +78,13 @@ browser — see the interaction-timing row above), pointer positions, location.
 ## 5. Candidate rights and alternatives
 
 Provide an alternative assessment arrangement for candidates who do not consent or need an
-accommodation (e.g. a camera-less policy, or in-person proctoring). The notice directs candidates to
-the privacy contact configured in Settings. Data subject access requests can be served from the
+accommodation. The product supports this per candidate (Candidates → Accommodations): extra time, rest
+breaks, no head-turn challenge, assistive technology, behaviour detectors off, an approved support
+person, **identity verified by a staff member instead of the automated face check** (no face template is
+created and no face comparison is made), and **no camera at all**. Each one is shown to the candidate on
+the welcome screen, the privacy notice describes exactly what still runs (without a camera it mentions no
+camera monitoring and no images), and every exam rule it changed is listed on the session and in its
+report. The notice directs candidates to the privacy contact configured in Settings. Data subject access requests can be served from the
 session report plus the evidence listed in the session's Identity and Events tabs.
 
 ## 6. Accuracy and fairness
@@ -85,7 +92,10 @@ session report plus the evidence listed in the session's Identity and Events tab
 Face verification and behavioural detection are probabilistic. The product (a) gates identity
 decisions on image quality and returns “unable to verify” instead of guessing, (b) requires repeated
 confirmation before raising a possible-different-person event during an exam, (c) routes uncertain
-cases to human review, and (d) measures accuracy per detection. See `docs/accuracy/` for methodology,
+cases to human review, (d) measures accuracy per detection, and (e) lets an organisation replace the
+automated face check by staff verification for a candidate the technology does not serve well (for
+example a facial difference or a face covering) — documented as an accommodation, not as an exception
+hidden in the data. See `docs/accuracy/` for methodology,
 results and the protocol to evaluate on your own consented, demographically diverse data before
 launch.
 

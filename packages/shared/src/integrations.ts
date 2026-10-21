@@ -13,6 +13,7 @@ import type { AssignmentDTO, EventDTO, HoldDTO, SessionReportDTO } from './api';
 import { candidateInputSchema } from './api';
 import { SEVERITIES, type EventCategory, type EventType, type Severity } from './events';
 import type { SessionEndReason, SessionStatus } from './session';
+import type { AccommodationKind } from './accommodations';
 
 /* =================================================================== API keys */
 
@@ -248,6 +249,8 @@ export interface IntegrationSessionDTO {
   exam: { id: string; title: string };
   /** The exam version the attempt is pinned to (null before it starts). */
   examVersion: number | null;
+  /** Approved accommodations applied to the attempt (kinds; extra time is included in the duration). Empty: none. */
+  accommodations: AccommodationKind[];
   candidate: { id: string; name: string; email: string | null; externalId: string | null };
   createdAt: number;
   startedAt: number | null;

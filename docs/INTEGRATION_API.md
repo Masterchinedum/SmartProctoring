@@ -111,6 +111,7 @@ A *session* is one candidate's attempt at one exam.
   "id": "5f0c…", "status": "submitted", "endReason": "candidate_submitted",
   "exam": { "id": "…", "title": "Algebra final" },
   "examVersion": 3,
+  "accommodations": ["extra_time"],
   "candidate": { "id": "…", "name": "Ada Lovelace", "email": "ada@example.edu", "externalId": "S-10442" },
   "createdAt": 1790240400000, "startedAt": 1790244000000, "endedAt": 1790247300000,
   "remainingMs": 0, "timerRunning": false, "pauseCount": 1,
@@ -127,6 +128,10 @@ A *session* is one candidate's attempt at one exam.
   inactivity period — no score is implied). `hold` is set while the exam is `on_hold` (reason, since, message).
 * `counts` are observations awaiting or after human review — not a verdict. Dismissed events are not
   counted in the category totals.
+* `accommodations`: the kinds of approved accommodations applied to the attempt (`extra_time`, `rest_breaks`,
+  `no_liveness_challenge`, `assistive_technology`, `detection_exemptions`, `support_person`,
+  `staff_identity_verification`, `no_camera`); extra time is already included in the duration. The report lists
+  each one and every exam rule it changed (`accommodations.exceptions`), never why it was granted.
 * `score` is present once answers were graded (open questions are not auto-graded: `autoGraded: false`), with the
   answer keys of the attempt's own exam version (`examVersion`; null until the attempt starts). `regraded` counts
   administrator regrades (a corrected answer key applied to finished attempts — see `session.regraded` below); the
@@ -167,7 +172,7 @@ delivers a `ping` immediately.
 | `event.created` | A potential-integrity, uncertain or technical event is observed, at or above the webhook's minimum severity (neutral session changes are never sent as events) | event fields (below) |
 | `event.closed` | Such an event (one with a duration) ended | event fields |
 | `identity.mismatch` | A possible different person was observed (always sent when subscribed, regardless of minimum severity) | event fields |
-| `session.held` | The exam was put on hold (identity review, pause limit, staff…) | session fields, `reason` = hold reason |
+| `session.held` | The exam was put on hold (identity review, pause limit, staff, `staff_verification` = waiting for a staff member to verify identity under that accommodation…) | session fields, `reason` = hold reason |
 | `session.released` | Staff released a hold | session fields, `reason`, `requireCheck` |
 | `session.pause_requested` | The candidate asked for a pause that needs approval | session fields, `pauseRequest { id, reason }` |
 | `session.submitted` | Submitted by the candidate, on time expiry or by staff | session fields, `endReason`, `score` |

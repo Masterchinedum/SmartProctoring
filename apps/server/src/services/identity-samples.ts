@@ -26,7 +26,7 @@ import { DEFAULT_POLICY, type HoldDTO, type IdentityCheckTrigger, type IdentityD
 import { and, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { events, evidence, examSessions, identityChecks, identitySampleFrames, type ExamSession, type IdentityCheck, type IdentityCheckContext, type IdentityEngineState, type IdentitySampleFrame, type PendingBurst } from '../db/schema.js';
-import { invalidState } from '../lib/errors.js';
+import { conflict, invalidState } from '../lib/errors.js';
 import { advisoryGuidance, CALIBRATION, decideIdentity, deserializeEmbeddings, hammingHex, INCONCLUSIVE_GUIDANCE, posteriorSwap, serializeEmbeddings, type ImageAnalysis } from '../vision/index.js';
 import { assertInControl } from './candidate-state.js';
 import { toHoldDTO } from './dto.js';
@@ -205,6 +205,7 @@ async function processSample(ctx: Ctx, session: ExamSession, instanceId: string,
 
   assertInControl(session, instanceId);
   if (!['active', 'paused', 'on_hold'].includes(session.status)) throw invalidState('Identity samples are only accepted during the exam');
+  if (sessionPolicy(session).verification === 'staff') throw conflict('identity_samples_off', 'Identity is verified by a staff member for this exam; no identity pictures are taken.');
 
   const active = await loadActiveReference(ctx, ctx.db, session.id);
   if (!active) throw invalidState('No identity reference exists for this exam');

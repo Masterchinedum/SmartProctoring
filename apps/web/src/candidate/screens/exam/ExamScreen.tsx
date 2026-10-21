@@ -94,7 +94,7 @@ export function ExamScreen() {
         <CountdownDisplay announceMarks />
         <div className="spacer" />
         <div className={`cand-selfview cand-mon-${monState}`}>
-          <CameraPreview stream={snap.camera.stream} className="cand-preview-mini" label="Your camera (self-view)" />
+          {state.exam.policy.camera?.enabled !== false ? <CameraPreview stream={snap.camera.stream} className="cand-preview-mini" label="Your camera (self-view)" /> : null}
           <div className="stack" style={{ gap: 2 }}>
             {/* The dot's colour repeats the text; the text alone carries the status. */}
             <span className="cand-mon-status" data-testid="monitoring-status">

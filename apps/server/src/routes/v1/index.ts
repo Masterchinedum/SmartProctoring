@@ -112,6 +112,7 @@ async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSu
       endReason: s.endReason,
       exam: s.exam,
       examVersion: s.examVersion?.number ?? null,
+      accommodations: s.accommodations ?? [],
       candidate: s.candidate,
       createdAt: x?.createdAt.getTime() ?? 0,
       startedAt: s.startedAt,

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { SessionDetailDTO, SessionSummaryDTO } from '@sp/shared';
+import { STAFF_VERIFICATION_METHOD_LABEL, STAFF_VERIFICATION_METHODS, type SessionDetailDTO, type SessionSummaryDTO, type StaffVerificationMethod } from '@sp/shared';
 import { api, errorMessage } from '../../api/client';
 import { afterSessionAction } from '../../api/queries';
 import { useAuth } from '../../auth';
@@ -47,7 +47,7 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
       <div className="row">
         {s.status === 'on_hold' ? (
           <button type="button" className={s.hold?.canReverify ? 'btn' : 'btn btn-primary'} onClick={() => setDialog('release')}>
-            {s.hold?.canReverify ? 'Change release…' : 'Release hold…'}
+            {s.hold?.reason === 'staff_verification' ? 'Verify identity…' : s.hold?.canReverify ? 'Change release…' : 'Release hold…'}
           </button>
         ) : null}
         {canHold ? (
@@ -171,10 +171,73 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
 }
 
 function ReleaseDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
+  if (d.summary.hold?.reason === 'staff_verification') return <VerifyIdentityDialog d={d} onDone={onDone} onCancel={onCancel} />;
+  return <ReleaseHoldDialog d={d} onDone={onDone} onCancel={onCancel} />;
+}
+
+/**
+ * Identity verified by staff (an accommodation): the staff member confirms they verified the candidate and how. That
+ * releases the hold without a further check; it is recorded on the timeline, in the report and the audit log.
+ */
+function VerifyIdentityDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
+  const [method, setMethod] = useState<StaffVerificationMethod | ''>('');
+  const [note, setNote] = useState('');
+  const [confirmed, setConfirmed] = useState(false);
+  const m = useMutation({
+    mutationFn: () => api.release(d.summary.id, { requireCheck: false, reEnroll: false, verification: { method: method as StaffVerificationMethod, note: note.trim() || undefined } }),
+    onSuccess: onDone,
+  });
+  const started = d.summary.startedAt != null;
+  return (
+    <Modal
+      title="Verify the candidate’s identity"
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn" onClick={onCancel} disabled={m.isPending}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-primary" data-testid="verify-identity" onClick={() => m.mutate()} disabled={!method || !confirmed || m.isPending}>
+            {m.isPending ? 'Saving…' : started ? 'Verified — continue the exam' : 'Verified — candidate may start'}
+          </button>
+        </>
+      }
+    >
+      <div className="stack">
+        <p className="small">
+          {d.summary.candidate.name}’s identity is verified by staff instead of the automated face check (an approved accommodation). Verify them by your organisation’s procedure —
+          for example a video call where they show photo ID — then record how.
+        </p>
+        <label>
+          How did you verify their identity?
+          <select value={method} onChange={(e) => setMethod(e.target.value as StaffVerificationMethod)}>
+            <option value="">Choose…</option>
+            {STAFF_VERIFICATION_METHODS.map((x) => (
+              <option key={x} value={x}>
+                {STAFF_VERIFICATION_METHOD_LABEL[x]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Note (optional; recorded in the timeline)
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} rows={2} placeholder="e.g. Student card shown on camera, name and photo match." />
+        </label>
+        <label className="inline">
+          <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />I confirm that I verified this person is {d.summary.candidate.name}.
+        </label>
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+      </div>
+    </Modal>
+  );
+}
+
+function ReleaseHoldDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
   const [note, setNote] = useState('');
   const [requireCheck, setRequireCheck] = useState(true);
   const [reEnroll, setReEnroll] = useState(false);
-  const m = useMutation({ mutationFn: () => api.release(d.summary.id, { note, requireCheck: requireCheck || reEnroll, reEnroll }), onSuccess: onDone });
+  const staffVerified = d.policy.identity.verification === 'staff';
+  const m = useMutation({ mutationFn: () => api.release(d.summary.id, { note, requireCheck: requireCheck || reEnroll, reEnroll: !staffVerified && reEnroll }), onSuccess: onDone });
   const reason = d.summary.hold?.reason;
   return (
     <Modal
@@ -206,10 +269,12 @@ function ReleaseDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (
           <input type="checkbox" checked={requireCheck || reEnroll} disabled={reEnroll} onChange={(e) => setRequireCheck(e.target.checked)} />
           Require a fresh identity check before the candidate continues (recommended)
         </label>
-        <label className="inline">
-          <input type="checkbox" checked={reEnroll} onChange={(e) => setReEnroll(e.target.checked)} />
-          Authorise re-enrolment of the identity reference
-        </label>
+        {staffVerified ? null : (
+          <label className="inline">
+            <input type="checkbox" checked={reEnroll} onChange={(e) => setReEnroll(e.target.checked)} />
+            Authorise re-enrolment of the identity reference
+          </label>
+        )}
         {reEnroll ? (
           <div className="banner banner-warning small">
             <strong>Only use this if you have confirmed by other means that the person now present is the registered candidate</strong> (for example a video call with photo ID).

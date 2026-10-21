@@ -8,9 +8,11 @@ import { qk } from '../../api/queries';
 import { DEFAULT_FILTERS, type EventFilterState } from '../../lib/filters';
 import { formatDateTime, formatSimilarity } from '../../lib/format';
 import { formatScore } from '../../lib/examVersions';
+import { kindsSummary } from '../../lib/accommodations';
 import { END_REASON_LABELS, HOLD_REASON_LABELS } from '../../lib/labels';
 import { ConnectionBadge, DecisionBadge, StatusBadge } from '../../components/Badges';
 import { ErrorState, Loading } from '../../components/Common';
+import { AccommodationsCard } from '../../components/AccommodationsCard';
 import { EventDrawer } from '../../components/EventDetail';
 import { Clock, Countdown, LastHeartbeat, RelativeTime, ReportingInterrupted } from '../../components/Time';
 import { MonitoringLine } from '../DashboardPage';
@@ -75,6 +77,7 @@ export function SessionDetailPage() {
   return (
     <div className="stack session-detail">
       <SessionHeader d={d} receivedAt={detail.dataUpdatedAt} />
+      <AccommodationsCard acc={d.accommodations} verifications={d.staffVerifications} started={d.summary.startedAt != null} />
       <PauseDecisionBanner d={d} />
       <SessionActions d={d} />
       {/* WAI-ARIA tabs: ←/→/Home/End move between tabs (automatic activation); Tab moves into the panel. */}
@@ -137,6 +140,11 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
           {!terminal ? <ConnectionBadge connection={s.connection} /> : null}
           {s.endReason ? <span className="badge">{END_REASON_LABELS[s.endReason]}</span> : null}
           {legalHold ? <span className="badge badge-info" title="Evidence is not purged while legal hold is on">Legal hold</span> : null}
+          {s.accommodations?.length ? (
+            <span className="badge badge-info" title={kindsSummary(s.accommodations)}>
+              Accommodations
+            </span>
+          ) : null}
         </div>
       </div>
       {s.reportingInterruptedSince ? <ReportingInterrupted since={s.reportingInterruptedSince} /> : null}

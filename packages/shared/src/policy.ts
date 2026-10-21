@@ -8,6 +8,16 @@ import { z } from 'zod';
 
 export const identityPolicySchema = z
   .object({
+    /**
+     * Who establishes the candidate's identity. 'automatic' (default): the camera check-in builds a protected face
+     * reference and later checks and samples compare against it. 'staff': a staff member verifies the candidate (video
+     * call, ID shown, in person) before the exam can start — the check-in confirms the camera only, no face reference
+     * is built and no automated identity comparisons are made. Usually an accommodation for one candidate (for example
+     * a face covering or a facial difference); forced on when the camera is not used.
+     */
+    verification: z.enum(['automatic', 'staff']).default('automatic'),
+    /** 'staff' verification: also after pauses and reconnections (a staff member confirms before the exam continues). */
+    staffReverifyOnContinue: z.boolean().default(false),
     /** Active liveness challenge (random head-turn sequence verified server-side) at check-in and resume. */
     liveness: z.enum(['active', 'off']).default('active'),
     /** Number of randomized liveness actions. */
@@ -196,20 +206,48 @@ export const evidencePolicySchema = z.object({
   keepMatchingIdentitySamples: z.boolean().default(false),
 });
 
+export const cameraPolicySchema = z.object({
+  /**
+   * false: the exam runs without a camera (usually an accommodation for one candidate): no camera check, no camera
+   * monitoring and no images; identity is verified by staff. Browser rules (fullscreen, tab switches…) still apply.
+   */
+  enabled: z.boolean().default(true),
+});
+
 export const retentionPolicySchema = z.object({
   /** Days after the session ends before screenshots and identity references are deleted. null = use org default. */
   evidenceDays: z.number().int().min(1).max(3650).nullable().default(null),
 });
 
-export const proctoringPolicySchema = z.object({
-  identity: identityPolicySchema.default({}),
-  pause: pausePolicySchema.default({}),
-  connection: connectionPolicySchema.default({}),
-  browser: browserPolicySchema.default({}),
-  detection: detectionPolicySchema.default({}),
-  evidence: evidencePolicySchema.default({}),
-  retention: retentionPolicySchema.default({}),
-});
+export const proctoringPolicySchema = z
+  .object({
+    identity: identityPolicySchema.default({}),
+    camera: cameraPolicySchema.default({}),
+    pause: pausePolicySchema.default({}),
+    connection: connectionPolicySchema.default({}),
+    browser: browserPolicySchema.default({}),
+    detection: detectionPolicySchema.default({}),
+    evidence: evidencePolicySchema.default({}),
+    retention: retentionPolicySchema.default({}),
+  })
+  .transform(enforceModes);
+
+/**
+ * Settings that cannot apply in a mode are switched off, so every reader of a resolved policy (server, candidate
+ * client, reports) sees one consistent picture: without a camera nothing camera-based runs and identity is verified
+ * by staff; with staff verification no automated face check (live-person, ID photo) runs.
+ */
+function enforceModes<P extends { identity: { verification: 'automatic' | 'staff'; liveness: 'active' | 'off'; idPhotoComparison: 'off' | 'advisory' | 'required' }; camera: { enabled: boolean }; detection: { enabled: Record<string, boolean> }; evidence: { screenshots: boolean; keepMatchingIdentitySamples: boolean } }>(p: P): P {
+  if (p.camera.enabled && p.identity.verification === 'automatic') return p;
+  const identity = { ...p.identity, verification: 'staff' as const, liveness: 'off' as const, idPhotoComparison: 'off' as const };
+  if (p.camera.enabled) return { ...p, identity };
+  return {
+    ...p,
+    identity,
+    detection: { ...p.detection, enabled: Object.fromEntries(Object.keys(p.detection.enabled).map((k) => [k, false])) },
+    evidence: { ...p.evidence, screenshots: false, keepMatchingIdentitySamples: false },
+  };
+}
 
 export type IdentityPolicy = z.infer<typeof identityPolicySchema>;
 export type PausePolicy = z.infer<typeof pausePolicySchema>;
@@ -217,6 +255,7 @@ export type ConnectionPolicy = z.infer<typeof connectionPolicySchema>;
 export type BrowserPolicy = z.infer<typeof browserPolicySchema>;
 export type DetectionPolicy = z.infer<typeof detectionPolicySchema>;
 export type EvidencePolicy = z.infer<typeof evidencePolicySchema>;
+export type CameraPolicy = z.infer<typeof cameraPolicySchema>;
 export type ProctoringPolicy = z.infer<typeof proctoringPolicySchema>;
 export type ProctoringPolicyInput = z.input<typeof proctoringPolicySchema>;
 

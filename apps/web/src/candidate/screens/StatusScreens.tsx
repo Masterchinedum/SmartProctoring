@@ -16,10 +16,11 @@ export function ReadyScreen() {
   const [showNotice, setShowNotice] = useState(false);
   const p = state.exam.policy;
 
-  // Keep the camera on so monitoring can start immediately with the exam.
+  // Keep the camera on so monitoring can start immediately with the exam (never for an exam without a camera).
+  const cameraOn = p.camera?.enabled !== false;
   useEffect(() => {
-    if (!ctrl.camera.state.wanted) void ctrl.camera.start();
-  }, [ctrl]);
+    if (cameraOn && !ctrl.camera.state.wanted) void ctrl.camera.start();
+  }, [ctrl, cameraOn]);
 
   const start = async () => {
     setBusy(true);

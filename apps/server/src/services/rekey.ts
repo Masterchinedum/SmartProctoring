@@ -9,6 +9,7 @@
  *     check_frames.embedding_enc            frame:<frameId>
  *     exam_sessions.access_token_enc        access-token:<sessionId>
  *     webhooks.secret_enc                   webhook-secret:<webhookId>
+ *     accommodations.note_enc               accommodation-note:<accommodationId>
  *   evidence blobs (storage; evidence.key_id)  evidence:<evidenceId>   (purged rows have no blob)
  *   organizations.settings.externalVerifier.credentialsEnc (base64 in JSON)  external-verifier:<orgId>
  *
@@ -24,9 +25,10 @@ import { and, asc, eq, gt, isNotNull, isNull, ne, sql, type SQL } from 'drizzle-
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import type { Ctx } from '../context.js';
 import type { Database, Db } from '../db/index.js';
-import { candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, webhooks } from '../db/schema.js';
+import { accommodations, candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, webhooks } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { verifierCredentialsAad } from '../verifiers/settings.js';
+import { accommodationNoteAad } from './accommodations.js';
 import { frameAad, idPhotoAad, referenceAad, sampleFrameAad } from './identity-common.js';
 
 /**
@@ -56,6 +58,7 @@ export const COLUMN_TARGETS: ColumnTarget[] = [
   { name: 'sample_frame_embeddings', table: identitySampleFrames, id: identitySampleFrames.id, col: identitySampleFrames.embeddingEnc, aad: sampleFrameAad },
   { name: 'access_tokens', table: examSessions, id: examSessions.id, col: examSessions.accessTokenEnc, aad: (id) => `access-token:${id}` },
   { name: 'webhook_secrets', table: webhooks, id: webhooks.id, col: webhooks.secretEnc, aad: (id) => `webhook-secret:${id}` },
+  { name: 'accommodation_notes', table: accommodations, id: accommodations.id, col: accommodations.noteEnc, aad: accommodationNoteAad },
 ];
 export const EVIDENCE_TARGET = 'evidence_blobs';
 /** External verifier key pairs: base64 ciphertext inside organizations.settings (verifiers/settings.ts). */

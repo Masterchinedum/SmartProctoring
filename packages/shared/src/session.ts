@@ -24,6 +24,7 @@ export const HOLD_REASONS = [
   'pause_limit', // pause exceeded configured maximum duration
   'staff', // held manually by staff
   'id_photo_unverifiable', // comparison with the approved ID photo was inconclusive / not possible (policy: required) — NOT a mismatch
+  'staff_verification', // identity is verified by staff (policy.identity.verification 'staff'): waiting for a staff member
 ] as const;
 export type HoldReason = (typeof HOLD_REASONS)[number];
 

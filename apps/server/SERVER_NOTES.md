@@ -105,7 +105,7 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
   idPhotoEvidenceId, idPhotoQuality, idPhotoApprovedAt/By. The candidate check decrypts with the same AAD.
 * Access link display: `accessLinkFor(ctx, sessionRow)`.
 * Encrypted AADs in use: `evidence:<evidenceId>`, `access-token:<sessionId>`, `idphoto:<candidateId>`,
-  `reference:<referenceId>`, `frame:<frameId>`, `sample-frame:<frameId>`, `webhook-secret:<webhookId>`, `external-verifier:<orgId>` (base64
+  `reference:<referenceId>`, `frame:<frameId>`, `sample-frame:<frameId>`, `webhook-secret:<webhookId>`, `accommodation-note:<accommodationId>`, `external-verifier:<orgId>` (base64
   inside organizations.settings.externalVerifier.credentialsEnc; rekey target `external_verifier_credentials`).
   A NEW encrypted column must be
   added to services/rekey.ts `COLUMN_TARGETS` (test/rekey.test.ts fails for an uncovered bytea column).

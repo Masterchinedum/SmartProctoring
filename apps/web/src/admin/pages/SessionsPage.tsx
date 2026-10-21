@@ -6,6 +6,7 @@ import { api, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { formatSimilarity } from '../lib/format';
 import { STATUS_LABELS } from '../lib/labels';
+import { kindsSummary } from '../lib/accommodations';
 import { CategoryCounts, ConnectionBadge, DecisionBadge, StatusBadge } from '../components/Badges';
 import { EmptyState, ErrorState, Loading, PageHeader, Pager } from '../components/Common';
 import { Countdown, RelativeTime, TimeOfDay } from '../components/Time';
@@ -115,6 +116,11 @@ export function SessionsPage() {
                       <div className="row tight">
                         <StatusBadge status={s.status} />
                         {s.status !== 'submitted' && s.status !== 'terminated' ? <ConnectionBadge connection={s.connection} /> : null}
+                        {s.accommodations?.length ? (
+                          <span className="badge badge-info" title={`Approved accommodations: ${kindsSummary(s.accommodations)}`}>
+                            Accommodations
+                          </span>
+                        ) : null}
                       </div>
                       {s.reportingInterruptedSince ? (
                         <div className="text-danger small">

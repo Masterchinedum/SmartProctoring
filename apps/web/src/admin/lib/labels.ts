@@ -83,6 +83,7 @@ export const HOLD_REASON_LABELS: Record<HoldReason, string> = {
   pause_limit: 'Pause exceeded the maximum allowed duration',
   staff: 'Placed on hold by staff',
   id_photo_unverifiable: 'Could not be verified against the approved ID photo (image unclear — not a mismatch)',
+  staff_verification: 'Waiting for staff to verify identity (accommodation)',
 };
 
 export const END_REASON_LABELS: Record<SessionEndReason, string> = {

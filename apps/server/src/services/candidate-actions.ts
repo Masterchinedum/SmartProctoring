@@ -274,7 +274,7 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
  * is not holding a backlog), and no such observation is open yet.
  */
 function noSamplesObservationDue(s: ExamSession, policy: ProctoringPolicy['identity'], body: HeartbeatRequest, now: number): boolean {
-  if (s.status !== 'active' || s.reportingEventId || reportingInterruptedSince(body, s, now)) return false;
+  if (s.status !== 'active' || s.reportingEventId || policy.verification === 'staff' || reportingInterruptedSince(body, s, now)) return false;
   const st = identityState(s);
   return !st.openNoSamplesEventId && sampleWatchdog(policy, st, now) === 'unanswered';
 }

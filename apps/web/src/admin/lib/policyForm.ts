@@ -133,6 +133,37 @@ export const POLICY_GROUPS: PolicyGroup[] = [
     ],
   },
   {
+    id: 'alternatives',
+    title: 'Alternative arrangements',
+    description:
+      'Usually set for one candidate as an accommodation (Candidates → Accommodations) rather than for the whole exam. Identity verified by staff replaces the automated face check; without a camera nothing camera-based runs.',
+    advanced: true,
+    fields: [
+      {
+        path: 'identity.verification',
+        label: 'Identity verification',
+        kind: 'enum',
+        options: [
+          { value: 'automatic', label: 'Automatic face check (recommended)' },
+          { value: 'staff', label: 'By a staff member before the exam starts' },
+        ],
+        help: 'By staff: no face reference is built and no automated identity comparisons are made; a staff member records how they verified each candidate. The live-person and ID-photo checks are switched off.',
+      },
+      {
+        path: 'identity.staffReverifyOnContinue',
+        label: 'Staff re-verify after pauses and reconnections',
+        kind: 'boolean',
+        help: 'Only with identity verified by staff: the exam waits for a staff member after every pause or reconnection.',
+      },
+      {
+        path: 'camera.enabled',
+        label: 'Use the camera',
+        kind: 'boolean',
+        help: 'Off: no camera check, no camera observations and no images; identity is verified by staff. Browser rules still apply.',
+      },
+    ],
+  },
+  {
     id: 'pause',
     title: 'Pausing',
     description: 'Candidates can pause and resume later (even after closing the browser). Monitoring stops during a pause; the period is recorded as unobserved.',

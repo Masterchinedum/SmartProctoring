@@ -10,6 +10,7 @@ import { setServerTime, useNow } from '../lib/clock';
 import { formatDuration, formatPercent, formatSimilarity, formatTime } from '../lib/format';
 import { monitoringStale } from '../lib/liveness';
 import { CATEGORY_SHORT, HOLD_REASON_LABELS } from '../lib/labels';
+import { kindsSummary } from '../lib/accommodations';
 import {
   BOARD_GROUP_LABELS,
   BOARD_GROUPS,
@@ -315,12 +316,19 @@ export function SessionCard({ s, flash }: { s: LiveSession; flash: boolean }) {
         <div className="sc-badges">
           <StatusBadge status={s.status} />
           {s.status !== 'submitted' && s.status !== 'terminated' ? <ConnectionBadge connection={s.connection} /> : null}
+          {s.accommodations?.length ? (
+            <span className="badge badge-info" title={`Approved accommodations: ${kindsSummary(s.accommodations)}`} aria-label={`Approved accommodations: ${kindsSummary(s.accommodations)}`}>
+              Acc.
+            </span>
+          ) : null}
         </div>
       </div>
       {s.reportingInterruptedSince ? <ReportingInterrupted since={s.reportingInterruptedSince} /> : null}
       {s.hold ? (
         s.hold.canReverify ? (
           <div className="sc-alert warning">On hold — waiting for the candidate to re-verify</div>
+        ) : s.hold.reason === 'staff_verification' ? (
+          <div className="sc-alert warning">Waiting for staff to verify identity</div>
         ) : (
           <div className="sc-alert danger">On hold: {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason}</div>
         )

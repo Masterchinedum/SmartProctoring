@@ -37,6 +37,7 @@ export const HOLD_REASON_SENTENCES: Record<HoldReason, string> = {
   pause_limit: 'the pause was longer than the exam rules allow',
   staff: 'a staff member placed it on hold',
   id_photo_unverifiable: 'the live image could not be compared dependably with the approved ID photo (image quality; not evidence of a different person)',
+  staff_verification: 'the candidate is waiting for a staff member to verify their identity (an approved arrangement instead of the automated face check)',
 };
 
 export function alertKindEnabled(s: Pick<OrgSettings, 'emailAlerts'>, kind: EmailAlertKind): boolean {

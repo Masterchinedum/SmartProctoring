@@ -6,6 +6,7 @@ import { qk } from '../api/queries';
 import { formatDateTime, formatDuration, formatPercent, formatSimilarity, formatTime } from '../lib/format';
 import { DECISION_LABELS, END_REASON_LABELS, PERIOD_LABELS, STATUS_LABELS } from '../lib/labels';
 import { formatScore } from '../lib/examVersions';
+import { formatExceptionValue } from '../lib/accommodations';
 import { CategoryBadge, DecisionBadge, ReviewBadge, SeverityBadge } from '../components/Badges';
 import { ErrorState, Loading } from '../components/Common';
 import { EvidenceImage } from '../components/EvidenceImage';
@@ -66,6 +67,35 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
         This report lists observations made by automated proctoring for human review. It does not determine that misconduct occurred. Unobserved periods (pauses,
         disconnections, holds) carry no observations.
       </div>
+
+      {r.accommodations ? (
+        <section className="report-section" data-testid="report-accommodations">
+          <h2>Approved accommodations</h2>
+          <p className="small">
+            {r.accommodations.items.map((i) => i.label).join('; ')}. The exam rules below were changed for this candidate; observations they turned off are absent by design.
+          </p>
+          <table className="table compact exceptions-table">
+            <thead>
+              <tr>
+                <th>Rule</th>
+                <th>Exam</th>
+                <th>This candidate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {r.accommodations.exceptions.map((e) => (
+                <tr key={e.path}>
+                  <td>{e.label}</td>
+                  <td>{formatExceptionValue(e, e.from)}</td>
+                  <td>
+                    <strong>{formatExceptionValue(e, e.to)}</strong>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ) : null}
 
       <section className="report-section">
         <h2>Summary</h2>

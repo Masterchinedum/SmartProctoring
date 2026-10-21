@@ -228,7 +228,9 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
     }
     m.set({ activeInstanceId: instanceId });
 
-    const livenessOn = policy.identity.liveness === 'active';
+    // Identity verified by staff: the check confirms the camera (if one is used) and nothing else — no frames.
+    const attest = policy.identity.verification === 'staff';
+    const livenessOn = !attest && policy.identity.liveness === 'active';
     const spec: CheckLivenessSpec | null = livenessOn
       ? { challengeId: randomUUID(), steps: generateLivenessSteps(policy.identity.livenessSteps), targetYawDeg: TARGET_YAW_DEG, targetPitchDeg: TARGET_PITCH_DEG }
       : null;
@@ -239,6 +241,7 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
       .values({
         sessionId: s.id,
         purpose: required,
+        mode: attest ? 'attest' : 'face',
         clientInstanceId: instanceId,
         device: body.device,
         status: 'open',
@@ -274,8 +277,9 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
         : null,
       attemptsRemaining: remaining(max, failed),
       attemptsAfter: { failed: remaining(max, failed + 1), unclear: remaining(max, failed + QUALITY_RETRY_WEIGHT) },
-      frontalFramesRequired: frontalFramesRequired(required, required === 'initial' || reEnrollmentApplies(s, required)),
-      maxFrontalFrames: MAX_FRONTAL_FRAMES_EXTENDED,
+      mode: attest ? 'attest' : 'face',
+      frontalFramesRequired: attest ? 0 : frontalFramesRequired(required, required === 'initial' || reEnrollmentApplies(s, required)),
+      maxFrontalFrames: attest ? 0 : MAX_FRONTAL_FRAMES_EXTENDED,
     };
   });
 }
@@ -329,6 +333,7 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
   const { check } = await loadCheckFor(ctx, sessionId, checkId, instanceId);
   const now = ctx.now();
   if (check.status !== 'open') throw conflict('check_closed', 'This check is no longer open. Start a new check.');
+  if (check.mode === 'attest') throw conflict('frames_not_needed', 'This check needs no camera pictures: your identity is verified by a staff member.');
   if (now > check.expiresAt.getTime()) {
     await settleAbandonedChecks(ctx, sessionId, 'expired', [check.id]);
     throw gone('check_expired', 'The check expired. Please start it again.');
@@ -979,6 +984,8 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
     };
   }
 
+  if (check.mode === 'attest') return completeAttestCheck(ctx, sessionId, instanceId, check);
+
   // ---- heavy, lock-free preparation
   const prepared = await prepareFrames(ctx, check.id);
   const [s0] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, sessionId));
@@ -1446,6 +1453,86 @@ async function applyInitial(a: ApplyCtx): Promise<Outcome> {
   return needsLook ? { ...outcome, review: true } : outcome;
 }
 
+/* ------------------------------------------------------------------ identity verified by staff ('attest' checks) */
+
+/**
+ * A check of a session whose identity is verified by staff (policy.identity.verification 'staff'; an accommodation):
+ * no frames, no automated face processing. At check-in it records the camera check (or that no camera is used) and
+ * puts the session on a 'staff_verification' hold — releasing it (session-actions.ts releaseHold) records the staff
+ * verification. After a pause or reconnection the exam continues, behind another such hold when the rules ask staff
+ * to verify again (identity.staffReverifyOnContinue).
+ */
+async function completeAttestCheck(ctx: Ctx, sessionId: string, instanceId: string, check: Check): Promise<CompleteCheckResponse> {
+  const response = await withSession(ctx, sessionId, async (m) => {
+    const [cur] = await m.tx.select().from(checks).where(eq(checks.id, check.id)).for('update');
+    if (!cur || cur.status !== 'open') throw conflict('check_closed', 'This check is no longer open. Start a new check.');
+    if (m.session.activeInstanceId !== instanceId) throw conflict('superseded', SUPERSEDED_MESSAGE);
+    if (requiredCheckFor(m.session, instanceId) !== check.purpose) throw conflict('check_not_required', 'This check is no longer needed.', { requiredCheck: requiredCheckFor(m.session, instanceId) });
+    const policy = await m.policy();
+    const out = check.purpose === 'initial' ? await attestInitial(m, check, instanceId, policy) : await attestContinuation(m, check, instanceId, policy);
+    const res = { outcome: out.outcome, message: out.message, guidance: [], liveness: null, attemptsRemaining: policy.identity.maxVerificationAttempts };
+    await m.tx
+      .update(checks)
+      .set({ status: out.outcome === 'held' ? 'held' : 'passed', completedAt: new Date(m.now), result: { ...res, identity: null, idPhoto: null, _meta: { mode: 'attest', camera: policy.camera.enabled } } })
+      .where(eq(checks.id, check.id));
+    return res;
+  });
+  return { ...response, state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
+}
+
+async function attestInitial(m: SessionMutation, check: Check, instanceId: string, policy: ProctoringPolicy): Promise<{ outcome: 'held'; message: string }> {
+  await m.addEvent({
+    type: 'checkin_completed',
+    observation: policy.camera.enabled
+      ? 'The camera was confirmed working. Identity is verified by a staff member instead of the automated face check.'
+      : 'No camera is used for this candidate. Identity is verified by a staff member.',
+    details: { checkId: check.id, livenessSteps: 0, liveness: 'off', mode: 'attest', camera: policy.camera.enabled },
+  });
+  m.set({ verifiedInstanceId: instanceId, checkAttemptsResetAt: new Date(m.now) });
+  await m.closeOpenPeriod(m.now);
+  m.set({ status: 'ready' });
+  await holdNow(m, { reason: 'staff_verification', details: { purpose: 'initial' } });
+  return { outcome: 'held', message: m.session.holdMessage ?? '' };
+}
+
+async function attestContinuation(m: SessionMutation, check: Check, instanceId: string, policy: ProctoringPolicy): Promise<{ outcome: 'passed' | 'held'; message: string }> {
+  const purpose = check.purpose;
+  const s = m.session;
+  const checkStart = check.issuedAt.getTime();
+  const open = await m.openPeriodRow();
+  const pauseStart = s.status === 'paused' && open?.kind === 'paused' ? open.startedAt.getTime() : null;
+  const gapStart = purpose === 'reconnect' ? reconnectGapStart(s, check) : null;
+  m.set({ verifiedInstanceId: instanceId, checkAttemptsResetAt: new Date(m.now), lastVerifiedHeartbeatAt: new Date(m.now), lastHeartbeatAt: new Date(m.now), lastHeartbeatInstanceId: instanceId, connection: 'online' });
+  const reverify = policy.identity.staffReverifyOnContinue;
+  const held = async () => {
+    await holdNow(m, { reason: 'staff_verification', details: { purpose } });
+    return { outcome: 'held' as const, message: m.session.holdMessage ?? '' };
+  };
+  const message = purpose === 'resume' ? 'Welcome back — your exam continues.' : 'Your exam continues.';
+
+  if (s.status === 'ready') return reverify ? held() : { outcome: 'passed', message: 'You can start the exam when you are ready.' };
+
+  await closeGapPeriods({ m, check, instanceId }, { checkStart, pauseStart, gapStart });
+
+  if (purpose === 'resume' && pauseStart != null && policy.pause.maxPauseDurationSec != null && checkStart - pauseStart > policy.pause.maxPauseDurationSec * 1000) {
+    m.set({ status: 'active' });
+    await holdNow(m, { reason: 'pause_limit', details: { pauseDurationMs: checkStart - pauseStart, maxPauseDurationSec: policy.pause.maxPauseDurationSec } });
+    return { outcome: 'held', message: m.session.holdMessage ?? '' };
+  }
+  // A staff re-verification holds the exam where it is (the hold keeps the clock stopped); releasing it resumes.
+  if (reverify) return held();
+
+  const next = m.session.status === 'on_hold' ? (m.session.holdPrevStatus === 'ready' ? 'ready' : 'active') : 'active';
+  m.set({ status: next, ...(m.session.status === 'on_hold' ? clearedHold() : {}) });
+  if (next === 'active') {
+    await m.insertPeriod('active', m.now, { reason: purpose });
+    m.clockStart();
+    m.resetIdentityCounters();
+    if (purpose === 'resume') await m.addEvent({ type: 'session_resumed', details: { pauseDurationMs: pauseStart != null ? checkStart - pauseStart : null, checkId: check.id, similarity: null } });
+  }
+  return { outcome: 'passed', message };
+}
+
 /* ------------------------------------------------------------------ resume / reconnect / reverify */
 
 async function environmentContext(a: ApplyCtx): Promise<{ cameraChanged: boolean; notes: string[] }> {
@@ -1780,7 +1867,7 @@ async function linkReferenceImages(a: ApplyCtx, eventId: string) {
 }
 
 /** Close the unobserved/active period that preceded the check and insert the (observed) resume_check period. */
-async function closeGapPeriods(a: ApplyCtx, t: { checkStart: number; pauseStart: number | null; gapStart: number | null }) {
+async function closeGapPeriods(a: Pick<ApplyCtx, 'm' | 'check' | 'instanceId'>, t: { checkStart: number; pauseStart: number | null; gapStart: number | null }) {
   const { m } = a;
   const open = await m.openPeriodRow();
   // Open episodes of the replaced browser end at the gap start (details.closedBy = 'instance_replaced').

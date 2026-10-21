@@ -511,10 +511,11 @@ export function sampleWatchdog(
 export function identitySampleRequest(
   status: SessionStatus,
   state: ({ sampleRequest?: { trigger: IdentityCheckTrigger; since: number } | null } & WatchdogState) | null | undefined,
-  policy: Pick<IdentityPolicy, 'burstSize' | 'routineBurstSize' | 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>,
+  policy: Pick<IdentityPolicy, 'burstSize' | 'routineBurstSize' | 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'> & Partial<Pick<IdentityPolicy, 'verification'>>,
   now: number,
 ): IdentitySampleRequestDTO | null {
-  if (status !== 'active' || !state) return null;
+  // Identity verified by staff: no face reference, so no samples are ever requested.
+  if (status !== 'active' || !state || policy.verification === 'staff') return null;
   const request = (trigger: IdentityCheckTrigger): IdentitySampleRequestDTO => ({ trigger, inMs: 0, burstSize: burstSizeFor(trigger, policy) });
   if (state.sampleRequest) return request(state.sampleRequest.trigger);
   const acc = state.evidence;

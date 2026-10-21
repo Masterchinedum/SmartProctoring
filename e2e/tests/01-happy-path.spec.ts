@@ -123,7 +123,7 @@ test('happy path: check-in, answers, pause with browser closed, resume, submit, 
     const detail = await staff.session(s.sessionId);
     expect(detail.identityChecks.some((ch) => ch.trigger === 'check_in' && ch.decision === 'match')).toBe(true);
     expect(detail.identityChecks.some((ch) => ch.trigger === 'resume' && ch.decision === 'match')).toBe(true);
-    expect(report.score).toEqual({ points: 5, maxPoints: 8, autoGraded: false });
+    expect(report.score).toEqual({ points: 5, maxPoints: 8, autoGraded: false, regrades: [] });
     // No behavioural observations are claimed inside the pause.
     const events = await staff.events(s.sessionId);
     const inPause = events.filter((e) => e.category !== 'neutral' && e.startedAt > paused.startedAt + 1000 && e.startedAt < paused.endedAt! - 1000);

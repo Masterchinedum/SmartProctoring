@@ -8,6 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import {
+  ACCOMMODATION_CATALOG,
   clockStart as clockStartFn,
   clockStop as clockStopFn,
   EVENT_CATALOG,
@@ -46,6 +47,7 @@ import {
 } from '../db/schema.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { sessionClock, staffVisibleKey } from './dto.js';
+import { refreshSessionAccommodations, withAccommodations } from './accommodations.js';
 import { loadVersion, versionForStart } from './exam-versions.js';
 import { gradeSession } from './grading.js';
 import { enqueueIntegrationNotifications } from './integration-events.js';
@@ -87,9 +89,14 @@ export function identityState(s: Pick<ExamSession, 'identityState'>): IdentityEn
 }
 
 /** Effective policy: snapshot taken at exam start, else org default merged with the exam policy. */
-export function effectivePolicy(session: Pick<ExamSession, 'policy'>, exam: Pick<Exam, 'policy'>, org: Pick<Organization, 'settings'> | null): ProctoringPolicy {
+/**
+ * The rules a session runs under: the snapshot taken at start (accommodations included); before that the exam's rules
+ * merged with the organisation default, with the session's approved accommodations applied (services/accommodations.ts).
+ */
+export function effectivePolicy(session: Pick<ExamSession, 'policy'> & Partial<Pick<ExamSession, 'accommodations'>>, exam: Pick<Exam, 'policy'>, org: Pick<Organization, 'settings'> | null): ProctoringPolicy {
   if (session.policy) return mergePolicy(undefined, session.policy as Record<string, unknown>);
-  return mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, exam.policy as Record<string, unknown>);
+  const examPolicy = mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, exam.policy as Record<string, unknown>);
+  return withAccommodations(examPolicy, session.accommodations).policy;
 }
 
 /** Which check (if any) THIS browser instance must pass before continuing. */
@@ -545,10 +552,22 @@ export async function startExam(m: SessionMutation): Promise<void> {
   const pinned = m.session.examVersionId ? await loadVersion(m.tx, m.session.examVersionId) : null;
   const version = pinned ?? (await versionForStart(m.tx, m.session.examId, m.now));
   const org = await m.org();
-  const policy = mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, version.policy as Record<string, unknown>);
+  // Approved accommodations as of now (a grant or revocation up to the very start counts), then frozen with the policy.
+  await refreshSessionAccommodations(m);
+  const examPolicy = mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, version.policy as Record<string, unknown>);
+  const acc = m.session.accommodations;
+  const { policy, exceptions } = withAccommodations(examPolicy, acc, m.session.durationMs);
   // Admission at exam start (candidate-actions.ts startSession) may have held the start back while the server was busy.
   const deferredMs = m.session.startDeferredSince ? Math.max(0, m.now - m.session.startDeferredSince.getTime()) : null;
-  m.set({ status: 'active', startedAt: m.session.startedAt ?? new Date(m.now), examVersionId: version.id, policy, currentQuestionIndex: m.session.currentQuestionIndex ?? 0, startDeferredSince: null });
+  m.set({
+    status: 'active',
+    startedAt: m.session.startedAt ?? new Date(m.now),
+    examVersionId: version.id,
+    policy,
+    accommodations: acc?.items.length ? { ...acc, exceptions } : null,
+    currentQuestionIndex: m.session.currentQuestionIndex ?? 0,
+    startDeferredSince: null,
+  });
   m.clockStart();
   await m.switchPeriod('active', m.now);
   m.resetIdentityCounters();
@@ -559,6 +578,14 @@ export async function startExam(m: SessionMutation): Promise<void> {
       ? { observation: `The exam was started. The start was held back ${Math.round(deferredMs / 1000)} s while the server was busy; the exam clock started only now.` }
       : {}),
   });
+  if (acc?.items.length) {
+    const labels = acc.items.map((i) => ACCOMMODATION_CATALOG[i.kind].label(i.params));
+    await m.addEvent({
+      type: 'accommodations_applied',
+      observation: `Approved accommodations were applied: ${labels.join('; ')}.`,
+      details: { items: acc.items.map((i, n) => ({ id: i.id, kind: i.kind, label: labels[n], params: i.params })), extraTimeMs: acc.extraTimeMs, exceptions },
+    });
+  }
 }
 
 /** active -> paused (formal pause). Monitoring stops; paused period (unobserved) opens. */
@@ -587,6 +614,7 @@ export const HOLD_MESSAGES: Record<HoldReason, string> = {
   staff: 'An administrator has put your exam on hold. Please wait for further instructions.',
   id_photo_unverifiable:
     'We could not compare you clearly with the identity photo on file (for example because of lighting or image quality). This is not a finding that you are a different person. An administrator will review this before you can start.',
+  staff_verification: 'A staff member will now verify your identity, as arranged with your organisation. Please keep this page open. The exam clock is stopped.',
 };
 
 /** Put the session on hold (clock stopped, on_hold period opens, candidate gets a 'hold' command). */

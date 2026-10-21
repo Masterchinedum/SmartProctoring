@@ -262,6 +262,16 @@ export class MonitoringRuntime {
     };
   }
 
+  /** policy.camera.enabled: false = an exam without a camera (an accommodation) — browser rules only. */
+  private get cameraOn(): boolean {
+    return this.deps.policy.camera?.enabled !== false;
+  }
+
+  /** Identity samples only exist with automatic verification (none when identity is verified by staff). */
+  private get identitySampling(): boolean {
+    return this.cameraOn && this.deps.policy.identity.verification !== 'staff';
+  }
+
   async start(): Promise<void> {
     if (this.running || this.stopped) return;
     this.running = true;
@@ -297,9 +307,16 @@ export class MonitoringRuntime {
     }
 
     this.attachBrowserSignals();
+    if (!this.cameraOn) {
+      // No camera (approved arrangement): only the browser rules are observed; nothing camera-based starts.
+      this.lastStatus = { state: 'ok', faces: 0, label: 'No camera (approved arrangement)', open: [] };
+      this.deps.onStatus?.(this.lastStatus);
+      this.scheduleLoop(0);
+      return;
+    }
     // Identity continuity matters most right after the exam starts / resumes / reconnects: sample at once.
     // (The server may ask for the same via CandidateSessionState.session.identitySample — deduplicated.)
-    this.bursts.request('exam_start', 'host');
+    if (this.identitySampling) this.bursts.request('exam_start', 'host');
     this.unsubCamera = this.deps.camera.subscribe((s) => this.onCamera(s));
     if (!this.deps.camera.state.wanted) void this.deps.camera.start();
     this.onCamera(this.deps.camera.state);
@@ -369,6 +386,7 @@ export class MonitoringRuntime {
 
     // Browser signal tracker runs regardless of the camera.
     this.pushEpisodes(this.tracker.tick(t));
+    if (!this.cameraOn) return;
     this.bursts.tick();
 
     const stale = nowMs - this.lastIngestAt >= MIN_INGEST_INTERVAL_MS;
@@ -490,6 +508,7 @@ export class MonitoringRuntime {
 
   /** Queue an identity sample; the burst is captured on the next analysed frames with one usable face. */
   private requestSample(trigger: IdentityCheckTrigger, source: 'engine' | 'host' | 'server' = 'engine'): void {
+    if (!this.identitySampling) return; // identity verified by staff: no face samples at all
     this.bursts.request(trigger, source);
   }
 

@@ -1,4 +1,5 @@
 import type {
+  AccommodationDTO,
   ApiError as ApiErrorBody,
   ApiKeyDTO,
   AssignmentDTO,
@@ -33,6 +34,7 @@ import type {
   SessionSummaryDTO,
   StaffRole,
   StaffUserDTO,
+  StaffVerificationMethod,
   TimelineItemDTO,
   WebhookDTO,
   WebhookDeliveryDTO,
@@ -180,7 +182,7 @@ export const api = {
   decidePause: (id: string, requestId: string, approve: boolean, note?: string) =>
     request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/pause-requests/${enc(requestId)}/decision`, { body: { approve, note: note || undefined } }),
   hold: (id: string, note?: string) => request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/hold`, { body: { note: note || undefined } }),
-  release: (id: string, body: { note?: string; requireCheck: boolean; reEnroll: boolean }) =>
+  release: (id: string, body: { note?: string; requireCheck: boolean; reEnroll: boolean; verification?: { method: StaffVerificationMethod; note?: string } }) =>
     request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/release`, { body: { ...body, note: body.note || undefined } }),
   terminate: (id: string, reason: string) => request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/terminate`, { body: { reason } }),
   staffSubmit: (id: string, note?: string) => request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/submit`, { body: { note: note || undefined } }),
@@ -218,6 +220,9 @@ export const api = {
   // ---- candidates
   candidates: (q?: string) => request<{ items: CandidateDTO[] }>('GET', `${A}/candidates`, { query: { q } }),
   candidate: (id: string) => request<CandidateDTO>('GET', `${A}/candidates/${enc(id)}`),
+  accommodations: (candidateId: string) => request<{ items: AccommodationDTO[] }>('GET', `${A}/candidates/${enc(candidateId)}/accommodations`),
+  grantAccommodation: (candidateId: string, body: Record<string, unknown>) => request<AccommodationDTO>('POST', `${A}/candidates/${enc(candidateId)}/accommodations`, { body }),
+  revokeAccommodation: (id: string, reason: string) => request<AccommodationDTO>('POST', `${A}/accommodations/${enc(id)}/revoke`, { body: { reason } }),
   createCandidate: (input: { name: string; email: string | null; externalId: string | null }) =>
     request<CandidateDTO>('POST', `${A}/candidates`, { body: input }),
   updateCandidate: (id: string, input: { name: string; email: string | null; externalId: string | null }) =>

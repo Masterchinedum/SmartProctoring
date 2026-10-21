@@ -11,7 +11,8 @@ import type { InjectOptions } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { Ctx } from '../src/context.js';
-import { auditLog, candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, webhooks } from '../src/db/schema.js';
+import { accommodations, auditLog, candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, webhooks } from '../src/db/schema.js';
+import { accommodationNoteAad } from '../src/services/accommodations.js';
 import { createKeyring, keyIdFor, sha256Hex, type Keyring } from '../src/lib/crypto.js';
 import { LocalBus } from '../src/realtime/bus.js';
 import { accessLinkFor } from '../src/services/dto.js';
@@ -50,6 +51,7 @@ async function assertAllDecrypt(keyring: Keyring) {
     ['check_frame_embeddings', (await env.ctx.db.select({ id: checkFrames.id, v: checkFrames.embeddingEnc }).from(checkFrames).where(isNotNull(checkFrames.embeddingEnc))).map((r) => ({ ...r, aad: frameAad(r.id) }))],
     ['sample_frame_embeddings', (await env.ctx.db.select({ id: identitySampleFrames.id, v: identitySampleFrames.embeddingEnc }).from(identitySampleFrames).where(isNotNull(identitySampleFrames.embeddingEnc))).map((r) => ({ ...r, aad: sampleFrameAad(r.id) }))],
     ['access_tokens', (await env.ctx.db.select({ id: examSessions.id, v: examSessions.accessTokenEnc }).from(examSessions).where(isNotNull(examSessions.accessTokenEnc))).map((r) => ({ ...r, aad: `access-token:${r.id}` }))],
+    ['accommodation_notes', (await env.ctx.db.select({ id: accommodations.id, v: accommodations.noteEnc }).from(accommodations).where(isNotNull(accommodations.noteEnc))).map((r) => ({ ...r, aad: accommodationNoteAad(r.id) }))],
   ] as const) {
     for (const r of rows) keyring.decrypt(r.v!, r.aad);
     n[name] = rows.length;
@@ -94,6 +96,7 @@ describe('rekey after rotating EVIDENCE_KEY', () => {
     const [p] = await env.ctx.db.select().from(evidence).where(eq(evidence.id, purgedId));
     await purgeEvidenceRows(env.ctx, env.ctx.db, [p], 'test');
     webhookId = json(await admin.post('/webhooks', { url: 'http://127.0.0.1:9/hook', events: ['session.held'], description: 'x' })).webhook.id;
+    json(await admin.post(`/candidates/${cand.id}/accommodations`, { kind: 'rest_breaks', basis: 'other', note: 'Rekey test note' }));
     json(await admin.put('/settings', { externalVerifier: { provider: 'aws-rekognition', region: 'eu-west-1', accessKeyId: 'AKIAREKEYTEST0000001', secretAccessKey: 'rekey-test-secret-0123456789abcdef' } }));
 
     const counts = await assertAllDecrypt(ring(K1));
