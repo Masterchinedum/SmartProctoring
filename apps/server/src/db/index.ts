@@ -16,10 +16,20 @@ export type DbOrTx = Db | Tx;
 // Return BIGINT (int8) as JS number (counts; values we store fit in 2^53).
 pg.types.setTypeParser(20, (v) => Number.parseInt(v, 10));
 
+/** Told about the pool's connections (buildApp: metrics and log lines). Must not throw. */
+export interface DatabaseObserver {
+  /** A pooled connection was handed out — pool.connect(), also behind every query outside a transaction — after `waitMs`. */
+  acquired(waitMs: number): void;
+  /** A connection could not be opened ('connect'), or an open one broke ('lost': idle in the pool or in use). */
+  connectionError(kind: 'connect' | 'lost', err: Error): void;
+}
+
 export interface Database {
   pool: pg.Pool;
   db: Db;
   close(): Promise<void>;
+  /** Watch the pool's connections; returns the function that stops it. */
+  observe(observer: Partial<DatabaseObserver>): () => void;
 }
 
 export interface DatabaseOptions {
@@ -30,6 +40,8 @@ export interface DatabaseOptions {
   statementTimeoutMs?: number;
 }
 
+type ConnectCallback = (err: Error | undefined, client: pg.PoolClient | undefined, release: (err?: unknown) => void) => void;
+
 export function createDatabase(url: string, opts: DatabaseOptions = {}): Database {
   const pool = new pg.Pool({
     connectionString: url,
@@ -38,16 +50,67 @@ export function createDatabase(url: string, opts: DatabaseOptions = {}): Databas
     idleTimeoutMillis: 30_000,
     ...(opts.statementTimeoutMs ? { statement_timeout: opts.statementTimeoutMs } : {}),
   });
-  pool.on('error', (err) => {
-    // Idle client errors (e.g. server restart) must not crash the process.
-    console.error('[db] idle client error', err.message);
+  const observers = new Set<Partial<DatabaseObserver>>();
+  const connectionError = (kind: 'connect' | 'lost', err: Error) => {
+    if (!observers.size) console.error(`[db] ${kind === 'connect' ? 'connection failed' : 'connection lost'}:`, err.message);
+    for (const o of observers) o.connectionError?.(kind, err);
+  };
+  // The pool re-emits errors of idle clients (Postgres restarted, the connection was killed): a listener is required,
+  // or the process crashes. They are reported by the client listener below.
+  pool.on('error', () => {});
+  // A connection that breaks while it is checked out — between or during the statements of a transaction: Postgres
+  // restarted or failed over, pg_terminate_backend, idle_in_transaction_session_timeout, a network cut — emits 'error'
+  // on the client, where pg-pool listens only while the client is idle. Without this listener that error is unhandled
+  // and takes the whole process down with every request in flight. With it, the transaction's statements fail (its
+  // request answers 500 and the client retries), Postgres has rolled it back, and the pool discards the client when
+  // it is released (pg-pool drops clients that are no longer queryable). Reported once per connection.
+  const broken = new WeakSet<pg.PoolClient>();
+  pool.on('connect', (client) => {
+    client.on('error', (err) => {
+      if (broken.has(client)) return;
+      broken.add(client);
+      connectionError('lost', err);
+    });
   });
+  // How long a request waits for a connection, and connections that cannot be opened (pool.query() goes through
+  // pool.connect() too).
+  const rawConnect = pool.connect.bind(pool) as (cb?: ConnectCallback) => Promise<pg.PoolClient> | void;
+  const observedConnect = (cb?: ConnectCallback): Promise<pg.PoolClient> | void => {
+    const t0 = performance.now();
+    const settled = (err: Error | undefined) => {
+      if (err) connectionError('connect', err);
+      else if (observers.size) for (const o of observers) o.acquired?.(performance.now() - t0);
+    };
+    if (cb) {
+      return rawConnect((err, client, release) => {
+        settled(err);
+        cb(err, client, release);
+      });
+    }
+    return (rawConnect() as Promise<pg.PoolClient>).then(
+      (client) => {
+        settled(undefined);
+        return client;
+      },
+      (err: Error) => {
+        settled(err);
+        throw err;
+      },
+    );
+  };
+  pool.connect = observedConnect as pg.Pool['connect'];
   const db = drizzle(pool, { schema });
   return {
     pool,
     db,
     async close() {
       await pool.end();
+    },
+    observe(observer) {
+      observers.add(observer);
+      return () => {
+        observers.delete(observer);
+      };
     },
   };
 }

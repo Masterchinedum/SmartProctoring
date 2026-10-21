@@ -304,7 +304,8 @@ backups until they expire; align backup retention with the privacy notice.
 * **Prometheus metrics**: set `METRICS_TOKEN` (≥ 24 characters, e.g. `openssl rand -hex 24`) and scrape `GET /metrics`
   with `Authorization: Bearer <token>` (Prometheus `authorization: { credentials: … }`). Without the variable the
   endpoint does not exist. Instance metrics describe one process; `sp_cluster_*` metrics are read from Postgres and
-  are the same on every instance (aggregate with `max`, not `sum`).
+  are the same on every instance (aggregate with `max`, not `sum`). The slow-moving ones (background job status,
+  retention backlog, privacy requests) are read at most every 30 s, one query each.
 
   | Metric | What it tells you |
   |---|---|
@@ -316,26 +317,44 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_vision_remote_overhead_seconds` (histogram) | dedicated vision workers: time per analysis beyond the worker's own queue wait and analysis (the HTTP hop; p50 ≈ 2–5 ms measured on one host, PERFORMANCE §8) |
   | `sp_vision_remote_failures_total{reason}` | dedicated vision workers: failed requests / load polls (`connect`, `timeout`, `reset`, `unauthorized`, `bad_response`, `server_error`) |
   | `sp_capacity_accepting`, `sp_capacity_limited{reason}` | `/api/health/capacity` as numbers |
+  | `sp_exam_starts_deferred_total`, `sp_identity_sampling_pressure`, `sp_identity_samples_spaced_out_total` | exam starts held back at capacity; how far routine identity samples are spaced out because of the face-analysis queue (§2) |
   | `sp_identity_decisions_total{kind,trigger,decision}` | identity outcomes (`kind` check / sample; `decision` match, inconclusive, mismatch, unable_to_verify): check completion, *unable to verify* and mismatch rates |
   | `sp_identity_model_info{calibration,embedding_model}` | the decision calibration and face-template model running (a change between deploys changes decisions) |
+  | `sp_checks_completed_total{purpose,outcome}` | readiness / identity checks finished (`purpose` initial, resume, reconnect, reverify; `outcome` passed, retry, held, failed, or abandoned — expired or replaced by a new check without being completed): check-in pass rate, how often candidates end on hold |
   | `sp_http_requests_total`, `sp_http_request_duration_seconds` `{method,route,status}` | request rate, errors and latency per route pattern |
   | `sp_db_pool_connections{state}` | Postgres pool: total / idle / waiting |
+  | `sp_db_pool_acquire_seconds` (histogram) | how long requests wait for a pooled Postgres connection (opening a new one included): saturation shows here before requests queue |
+  | `sp_db_connection_errors_total{kind}` | `connect`: a connection could not be opened (Postgres down, refusing connections, max_connections reached); `lost`: an open connection was closed by Postgres or the network (restart, failover, killed session) — each request it was serving failed with 500 and was retried by the client |
   | `sp_staff_websockets` | open staff dashboards |
   | `sp_job_runs_total{job,result}`, `sp_job_duration_seconds`, `sp_job_last_success_timestamp_seconds` `{job}` | background jobs (`retention`, `webhooks`, `email-alerts`, `abandoned-sessions`, `api-idempotency`, `sweeper`): ok / failed / skipped (another instance ran it) |
   | `sp_retention_failures_total` | sessions retention could not purge (retried next hour) |
   | `sp_evidence_storage_errors_total{op,location}` | evidence store put / get / delete failures (disk, S3), per storage location (§2) |
+  | `sp_evidence_storage_seconds{op,location}` (histogram) | evidence store latency per operation and storage location (failures included); a check frame or identity sample holds its database transaction while its image is written |
   | `sp_cluster_sessions{status}`, `sp_cluster_sessions_reporting_interrupted` | sessions in progress; how many browsers stopped reporting |
   | `sp_cluster_webhook_deliveries_pending`, `sp_cluster_webhook_oldest_pending_seconds`, `sp_cluster_webhook_deliveries_failed_24h`, `sp_cluster_webhooks_disabled` | webhook backlog, retry age, dead letters, disabled endpoints |
   | `sp_cluster_email_alerts_pending`, `sp_cluster_email_alert_oldest_pending_seconds` | alert-email backlog |
   | `sp_cluster_review_holds_overdue`, `sp_cluster_review_flags_undecided`, `sp_cluster_review_oldest_undecided_flag_seconds`, `sp_cluster_reviews_escalated` | review backlog: exams on hold past the organisation's review target, undecided flags and the oldest one's age, open escalations |
   | `sp_cluster_api_keys_expiring_soon` | integration API keys (not revoked) that expire within 14 days — rotate them (§7) |
+  | `sp_cluster_job_last_success_timestamp_seconds{job}`, `sp_cluster_job_last_run_failed{job}` | background jobs that record their runs in the database (`retention`): the last success on any instance (kept across restarts, unlike `sp_job_last_success_timestamp_seconds`), and whether the last run failed — Privacy → Deletion schedule shows the same |
+  | `sp_cluster_retention_overdue_sessions`, `sp_cluster_retention_overdue_oldest_seconds` | ended sessions whose images are past their deletion date and still stored (legal holds excluded), and how long the oldest is overdue — Privacy → Operational checks "Deletion on schedule" |
+  | `sp_cluster_privacy_requests_open{kind}`, `sp_cluster_privacy_requests_overdue` | data-subject requests open or in progress, by kind, and those past their response deadline |
   | `sp_cluster_metrics_up` | 0 = the `sp_cluster_*` values could not be read in this scrape |
   | `process_*`, `nodejs_*` | CPU, memory, heap, GC, event-loop lag |
 
   Suggested alerts, as a Prometheus rules file to adapt: [`docs/prometheus-alerts.yml`](prometheus-alerts.yml)
-  (face-analysis latency and refusals, capacity, reporting outage, retention, evidence storage, webhook backlog,
-  identity mismatch and *unable to verify* rates, no vision worker, a dedicated vision worker down, API keys about to
-  expire). `rekey` (key rotation) is a command, not a service: it reports progress on stderr and in its exit code (§3).
+  (face-analysis latency and refusals, capacity, reporting outage, check-ins ending on hold, retention not running or
+  failing, images past their deletion date, overdue privacy requests, evidence storage errors and latency, Postgres
+  unreachable / dropping connections / pool saturated, webhook backlog, identity mismatch and *unable to verify*
+  rates, no vision worker, a dedicated vision worker down, API keys about to expire); `runbook_url` points at the runbook in §7. A test
+  (`apps/server/test/alert-rules.test.ts`) checks the file's structure, that every series it uses exists, that its
+  runbook links resolve and that every series is listed above (`promtool check rules` is not needed in CI).
+  `rekey` (key rotation) is a command, not a service: it reports progress on stderr and in its exit code (§3).
+* Postgres restarts and failovers: open connections are closed by Postgres; each request using one at that moment
+  fails with 500 (its transaction rolled back) and the candidate app resends it; the pool reconnects by itself and
+  `/api/health/ready` reports `db: "error"` while no connection can be opened (runbook in §7). Background jobs that
+  failed retry on their next run. Redis going away (with `REDIS_URL`) affects nothing but the shared rate-limit
+  counters (requests are let through, `redis rate-limit store error` is logged) and live staff updates across
+  instances (`redis bus error`); both reconnect by themselves.
 * Capacity: a `server overloaded (event loop lagging | database pool exhausted | face analysis queue long)`
   warning (at most one a minute, with the numbers under `loadMonitor`) means this instance is at its limit —
   requests are queuing. Occasional warnings during check-in bursts are expected; sustained ones mean add an
@@ -383,6 +402,13 @@ hold pending your institution's process. Mark the event reviewed or dismissed.
 **Candidate cannot pass “unable to verify”.** The candidate sees guidance (lighting, distance,
 camera). After the configured number of attempts the session is routed to review automatically.
 Contact the candidate, then release with a fresh check.
+
+<a id="runbook-check-ins-held"></a>**Many check-ins end on hold** (`SmartProctoringCheckInsHeldOften`,
+`sp_checks_completed_total{purpose="initial",outcome="held"}`). Candidates cannot start until staff decide, so work
+the Review queue first (the entries above). Then find the cause: Detection quality → *Identity decisions by
+condition* (lighting, camera resolution, browser) for "could not verify" after every attempt, *Drift* and
+`sp_identity_model_info` for a change of the check itself, failed live-person steps in the sessions' check details.
+A real rise in different-person holds is rare; compare a few cases before suspecting candidates.
 
 **Candidate's browser crashed / they switched devices.** Nothing to do: reopening the same link
 triggers a reconnect check (readiness, live-person, identity) and the exam continues with answers
@@ -488,7 +514,8 @@ changes). Compare the segments (lighting, browser, resolution) to see whether it
 Organisation thresholds can compensate only temporarily; report it with the Quality page figures. Roll back the
 deployment only per §1 *Upgrades and rollback* (face templates are tied to the model).
 
-**A data-subject request arrives** (a candidate asks for a copy of their data, its deletion, a correction…).
+<a id="runbook-privacy-requests-overdue"></a>**A data-subject request arrives** (a candidate asks for a copy of their data, its deletion, a correction…;
+`SmartProctoringPrivacyRequestsOverdue` when one is past its deadline).
 Privacy → *Record a request…* the day it arrives, with the date received (the one-month deadline counts from it) and
 the candidate record. Access: open the request → *Export the candidate's data (ZIP)*, check it, send it through a
 secure channel, then *Completed* with how it was sent. Erasure: *Erase the candidate…* (refused while an exam of
@@ -501,11 +528,38 @@ open *Consent withdrawn* request linked to the session. Contact them about an al
 *identity verified by staff*, or *no camera*, and a new assignment), decide whether their approved ID photo is still
 needed, and complete the request with what was agreed.
 
-**Operational checks show "Retention job — Failing" or "Deletion on schedule — Failing".** The server log has the
+<a id="runbook-retention-failing"></a>**Operational checks show "Retention job — Failing" or "Deletion on schedule — Failing"**
+(`SmartProctoringRetentionNotRunning`, `SmartProctoringRetentionLastRunFailed`,
+`SmartProctoringEvidencePastDeletionDate[Day]`). The server log has the
 error (`retention run failed` / `retention: evidence purge failed`). Usual causes: the evidence store is unreachable
 or refuses deletes (S3 permissions), or the database was unavailable. Once fixed, run
 `pnpm --filter @sp/server retention:run` (or wait for the next hour) and check the page again. "No successful run for
 over 3 hours" with no error means no server runs background jobs: at least one must have `SWEEPER_ENABLED` on.
+
+<a id="runbook-database-unreachable"></a>**Postgres is unreachable or keeps dropping connections**
+(`SmartProctoringDatabaseUnreachable`, `SmartProctoringDatabaseConnectionsDropped`; `/api/health/ready` answers 503 with
+`db: "error"` or `"timeout"`; log lines `cannot connect to the database`, `database connection lost`). While Postgres
+is down every request that needs it fails with 500: candidates' browsers keep answers, events and images and resend
+them when it is back (answers by `clientSeq`, events by id and version, images and identity samples by id — a resend
+never duplicates anything, also when the original request was in fact committed); staff pages show an error. No
+restart is needed: a connection lost in the middle of a request fails only that request (Postgres rolls its
+transaction back, and images it had already written are deleted again), the pool discards broken connections and
+opens new ones as soon as Postgres answers. Check the Postgres server or managed service, its disk (Postgres stops
+writing on a full disk), `max_connections` (the sum of `PG_POOL_MAX` over all instances plus headroom for
+migrations, `rekey` and backups) and the network or proxy in between. Repeated drops without an outage: a proxy or
+PgBouncer closing connections, or an `idle_in_transaction_session_timeout` shorter than a slow evidence upload.
+
+<a id="runbook-database-pool"></a>**Requests wait for a database connection** (`SmartProctoringDatabasePoolSlow`,
+`SmartProctoringDatabasePoolExhausted`, capacity reason `database_pool_exhausted`; `sp_db_pool_acquire_seconds`). The
+instance has more concurrent work than its pool (`PG_POOL_MAX`, default 20): add an instance (keep the sum of pools
+below `max_connections`) or raise `PG_POOL_MAX`. If the load is normal, look for slow statements (`pg_stat_activity`,
+`pg_stat_statements`) and for transactions held open by a slow evidence store (next entry).
+
+<a id="runbook-evidence-storage-slow"></a>**Storing images is slow** (`SmartProctoringEvidenceStorageSlow`,
+`sp_evidence_storage_seconds{op="put"}`). A check frame or identity sample keeps its database transaction open while
+its image is written, so a slow disk or S3 endpoint slows check-ins and can exhaust the Postgres pool. Check the
+volume (I/O wait, nearly full disk) or the S3 endpoint's latency and throttling (region, VPC endpoint, request
+rate); `sp_evidence_storage_errors_total` rising alongside means it is failing, not only slow.
 
 **An API key was leaked.** Integrations → API keys → **Revoke** (effective immediately), create a new key with the
 same access and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) shows what the key did.

@@ -11,7 +11,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { and, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import type { DbOrTx } from '../db/index.js';
+import type { DbOrTx, Tx } from '../db/index.js';
 import { candidates, checkFrames, evidence, identityReferences, identitySampleFrames, organizations, type EvidenceKind, type EvidenceRow } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { sha256Hex } from '../lib/crypto.js';
@@ -78,6 +78,76 @@ async function deleteQuietly(ctx: EvidenceCtx, location: string | null, key: str
   }
 }
 
+/**
+ * Blobs storeEvidence wrote inside a transaction run by transactionWithEvidence, by transaction handle. The blob is
+ * written before its row, so a transaction that rolls back (an error after the upload, a lost database connection)
+ * would leave an encrypted image no row points to — one retention can never find and delete.
+ */
+const uncommittedBlobs = new WeakMap<object, StoredBlob[]>();
+
+/** A blob written by storeEvidence: its evidence id, key and the storage location it went to (null = default). */
+interface StoredBlob {
+  id: string;
+  key: string;
+  location: string | null;
+}
+
+/**
+ * ctx.db.transaction() for work that stores evidence: blobs written in a transaction that rolled back are deleted
+ * again. When the transaction failed at COMMIT (the connection was lost: the outcome is unknown), only the blobs
+ * whose rows did not make it are deleted; if that cannot be checked, they are kept (a blob without a row is
+ * recoverable; a row without its blob is not).
+ */
+export async function transactionWithEvidence<T>(ctx: EvidenceCtx & Pick<Ctx, 'db'>, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  const blobs: StoredBlob[] = [];
+  let reachedCommit = false;
+  try {
+    return await ctx.db.transaction(async (tx) => {
+      uncommittedBlobs.set(tx, blobs);
+      const out = await fn(tx);
+      reachedCommit = true;
+      return out;
+    });
+  } catch (err) {
+    if (blobs.length) await discardUncommittedBlobs(ctx, blobs, reachedCommit);
+    throw err;
+  }
+}
+
+async function discardUncommittedBlobs(ctx: EvidenceCtx & Pick<Ctx, 'db'>, blobs: StoredBlob[], commitUnknown: boolean): Promise<void> {
+  let orphans = blobs;
+  if (commitUnknown) {
+    try {
+      const kept = await ctx.db
+        .select({ key: evidence.storageKey })
+        .from(evidence)
+        .where(inArray(evidence.storageKey, blobs.map((b) => b.key)));
+      const committed = new Set(kept.map((r) => r.key));
+      orphans = blobs.filter((b) => !committed.has(b.key));
+    } catch (err) {
+      ctx.log.warn({ err, blobs: blobs.length }, 'evidence blobs of a transaction whose commit failed are kept (cannot check whether it committed)');
+      return;
+    }
+  }
+  for (const b of orphans) await deleteQuietly(ctx, b.location, b.key, b.id, 'failed to delete the evidence blob of a rolled-back transaction');
+}
+
+/** The evidence row of a stored blob could not be inserted: the blob must not outlive it (deleted where it was written). */
+async function discardFailedInsert(ctx: EvidenceCtx, db: DbOrTx, blob: StoredBlob): Promise<void> {
+  // Inside transactionWithEvidence the failed statement aborted the transaction: nothing was written. Elsewhere the
+  // statement may have committed although its answer was lost (connection failure): delete only once that is ruled
+  // out (in an aborted transaction the check fails, and the blob is kept).
+  if (!uncommittedBlobs.has(db)) {
+    try {
+      const [row] = await db.select({ id: evidence.id }).from(evidence).where(eq(evidence.storageKey, blob.key));
+      if (row) return;
+    } catch {
+      return;
+    }
+  }
+  await deleteQuietly(ctx, blob.location, blob.key, blob.id, 'failed to delete the blob of an evidence row that was not written');
+}
+
 /** Encrypt + store. Idempotent on `id` (a second upload with the same id returns duplicate=true). */
 export async function storeEvidence(ctx: EvidenceCtx, db: DbOrTx, input: StoreEvidenceInput): Promise<StoreEvidenceResult> {
   const id = input.id ?? randomUUID();
@@ -93,29 +163,37 @@ export async function storeEvidence(ctx: EvidenceCtx, db: DbOrTx, input: StoreEv
   const storageLocation = await evidenceLocationFor(ctx, db, input.orgId);
   const store = storageAt(ctx, storageLocation);
   await store.put(storageKey, blob);
-  const inserted = await db
-    .insert(evidence)
-    .values({
-      id,
-      orgId: input.orgId,
-      sessionId: input.sessionId ?? null,
-      candidateId: input.candidateId ?? null,
-      eventId: input.eventId ?? null,
-      identityCheckId: input.identityCheckId ?? null,
-      kind: input.kind,
-      reason: input.reason ?? null,
-      capturedAt: new Date(input.capturedAt),
-      storageKey,
-      storageLocation,
-      byteSize: input.data.length,
-      sha256: sha256Hex(input.data),
-      keyId: ctx.keyring.currentKeyId,
-      contentType: input.contentType ?? 'image/jpeg',
-      clientInstanceId: input.clientInstanceId ?? null,
-      createdAt: new Date(ctx.now()),
-    })
-    .onConflictDoNothing({ target: evidence.id })
-    .returning();
+  let inserted: EvidenceRow[];
+  try {
+    inserted = await db
+      .insert(evidence)
+      .values({
+        id,
+        orgId: input.orgId,
+        sessionId: input.sessionId ?? null,
+        candidateId: input.candidateId ?? null,
+        eventId: input.eventId ?? null,
+        identityCheckId: input.identityCheckId ?? null,
+        kind: input.kind,
+        reason: input.reason ?? null,
+        capturedAt: new Date(input.capturedAt),
+        storageKey,
+        storageLocation,
+        byteSize: input.data.length,
+        sha256: sha256Hex(input.data),
+        keyId: ctx.keyring.currentKeyId,
+        contentType: input.contentType ?? 'image/jpeg',
+        clientInstanceId: input.clientInstanceId ?? null,
+        createdAt: new Date(ctx.now()),
+      })
+      .onConflictDoNothing({ target: evidence.id })
+      .returning();
+  } catch (err) {
+    await discardFailedInsert(ctx, db, { id, key: storageKey, location: storageLocation });
+    throw err;
+  }
+  // Written in a transaction that may still roll back: transactionWithEvidence deletes the blob again if it does.
+  uncommittedBlobs.get(db)?.push({ id, key: storageKey, location: storageLocation });
   if (!inserted[0]) {
     // Lost a race with a concurrent upload of the same id.
     await store.delete(storageKey).catch(() => {});

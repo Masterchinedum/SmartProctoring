@@ -28,8 +28,9 @@ import { currentCapacity } from './capacity.js';
 import { sessionExamContent } from './exam-versions.js';
 import { identitySampleRequest, sampleWatchdog } from './identity-evidence.js';
 import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
+import { applyOfflineLimit } from './recovery.js';
 import { assertWindowAllows } from './scheduling.js';
-import { assertStatus, finalizeSession, identityState, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession, type SessionMutation } from './session-state.js';
+import { assertStatus, finalizeSession, identityState, pauseNow, pendingPauseRequest, recordReportingTimeout, requiredCheckFor, startExam, TERMINAL, withSession, type SessionMutation } from './session-state.js';
 import { clockExpired } from '@sp/shared';
 
 export const OUTBOX_DELAY_MS = 30_000;
@@ -239,6 +240,8 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
   // Identity samples overdue long enough for an observation: the locked path records it.
   if (inControl && noSamplesObservationDue(s, (loaded.policy ?? DEFAULT_POLICY).identity, body, now)) return null;
   if ((s.status === 'active' || s.status === 'paused') && clockExpired(sessionClock(s), now)) return null;
+  // Silent for longer than the timeout with no sweeper having noticed: the locked path records the outage.
+  if (inControl && reportingTimedOut(s, loaded.policy ?? DEFAULT_POLICY, now)) return null;
   const usage = client ? evaluateInstanceUsage(s, instanceId, { ...client, seq: body.seq, at: now, refresh: true }) : null;
   if (usage?.signal) return null;
 
@@ -271,6 +274,11 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
     commands: [],
     identitySample: inControl ? identitySampleRequest(s.status, s.identityState, (loaded.policy ?? DEFAULT_POLICY).identity, now) : null,
   };
+}
+
+/** An active exam whose browser has been silent past the heartbeat timeout, and no outage is recorded yet. */
+function reportingTimedOut(s: ExamSession, policy: ProctoringPolicy, now: number): boolean {
+  return s.status === 'active' && s.connection === 'online' && !s.reportingEventId && s.lastHeartbeatAt != null && now - s.lastHeartbeatAt.getTime() > policy.connection.heartbeatTimeoutSec * 1000;
 }
 
 /**
@@ -349,6 +357,17 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
       return { serverTime: now, status: s.status, remainingMs: remainingMs(s, now), timerRunning: s.runningSince != null, requiredCheck: requiredCheckFor(s, instanceId), commands };
     }
 
+    // The browser was silent for longer than the timeout and no sweeper recorded it (every instance was down or
+    // restarting): record the outage as the sweeper would have — the event from the last heartbeat and, under
+    // disconnect policy 'stop', the clock stopped there; then the resume policy's offline limit, as the sweeper's
+    // next step would (services/recovery.ts) — so it is closed below exactly as after a noticed outage.
+    if (instanceInControl(s, instanceId)) {
+      const policy = await m.policy();
+      if (reportingTimedOut(s, policy, now)) {
+        await recordReportingTimeout(m, policy, s.lastHeartbeatAt!.getTime(), 'late_heartbeat');
+        await applyOfflineLimit(m, policy);
+      }
+    }
     m.set({ lastHeartbeatAt: new Date(now), lastHeartbeatInstanceId: instanceId, connection: 'online' });
     // Same verified instance id used from two places at once (copied id): IP/UA/seq (services/instance-usage.ts).
     // A signal clears verifiedInstanceId, so the block below is skipped and a reconnect check is required.

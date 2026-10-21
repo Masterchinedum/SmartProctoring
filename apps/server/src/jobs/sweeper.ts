@@ -21,7 +21,7 @@ import { sessionClock } from '../services/dto.js';
 import { settleAbandonedChecks } from '../services/checks.js';
 import { decideStaleBurstsForAll, eraseOrphanFrameEmbeddingsForAll } from '../services/identity-samples.js';
 import { enforceOfflineLimits } from '../services/recovery.js';
-import { finalizeSession, withSession } from '../services/session-state.js';
+import { finalizeSession, recordReportingTimeout, withSession } from '../services/session-state.js';
 
 const MIN_HEARTBEAT_TIMEOUT_MS = 10_000;
 const BATCH = 200;
@@ -45,17 +45,7 @@ export async function sweepOnce(ctx: Ctx): Promise<{ timedOut: number; expired: 
         const policy = await m.policy();
         const last = s.lastHeartbeatAt.getTime();
         if (m.now - last <= policy.connection.heartbeatTimeoutSec * 1000) return false;
-        m.set({ connection: 'offline' });
-        if (s.status === 'active') {
-          const ev = await m.addEvent({
-            type: 'reporting_interrupted',
-            open: true,
-            startedAt: last,
-            details: { lastHeartbeatAt: last, instanceId: s.lastHeartbeatInstanceId, timerBehavior: policy.connection.disconnectTimerBehavior },
-          });
-          m.set({ reportingEventId: ev.id, reportingInterruptedSince: new Date(Math.min(last, s.reportingInterruptedSince?.getTime() ?? Infinity)) });
-          if (policy.connection.disconnectTimerBehavior === 'stop') m.clockStop(Math.max(last, s.runningSince?.getTime() ?? last));
-        }
+        await recordReportingTimeout(m, policy, last, 'sweeper');
         return true;
       });
       if (changed) timedOut++;

@@ -26,7 +26,7 @@ import { candidates, evidence, examSessions, exams, type Candidate } from '../..
 import { audit } from '../../lib/audit.js';
 import { isJpeg } from '../../lib/crypto.js';
 import { conflict, HttpError, notFound, unsupportedMedia } from '../../lib/errors.js';
-import { purgeCandidateIdPhoto, purgeEvidenceRows, storeEvidence } from '../../services/evidence.js';
+import { purgeCandidateIdPhoto, purgeEvidenceRows, storeEvidence, transactionWithEvidence } from '../../services/evidence.js';
 import { eraseCandidate } from '../../services/privacy-requests.js';
 import { serializeEmbeddings } from '../../vision/embeddings.js';
 import { processIdPhoto } from '../../vision/id-photo.js';
@@ -211,7 +211,7 @@ export const candidatesRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const embedding = result.analysis.embedding;
-    await ctx.db.transaction(async (tx) => {
+    await transactionWithEvidence(ctx, async (tx) => {
       await loadScopedCandidate(tx, staff.orgId, id, true);
       const { row } = await storeEvidence(ctx, tx, { orgId: staff.orgId, candidateId: id, kind: 'id_photo', reason: 'id_photo', capturedAt: now, data: body });
       const previous = await tx

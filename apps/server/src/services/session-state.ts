@@ -48,6 +48,7 @@ import {
 import { HttpError, notFound } from '../lib/errors.js';
 import { sessionClock, staffVisibleKey } from './dto.js';
 import { refreshSessionAccommodations, withAccommodations } from './accommodations.js';
+import { transactionWithEvidence } from './evidence.js';
 import { loadVersion, versionForStart } from './exam-versions.js';
 import { gradeSession } from './grading.js';
 import { enqueueIntegrationNotifications } from './integration-events.js';
@@ -519,7 +520,8 @@ export interface SessionPreload {
  */
 export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: SessionMutation) => Promise<T>, preload?: SessionPreload): Promise<T> {
   let mutation: SessionMutation | null = null;
-  const result = await ctx.db.transaction(async (tx) => {
+  // Evidence stored in a transaction that rolls back is deleted again (services/evidence.ts).
+  const result = await transactionWithEvidence(ctx, async (tx) => {
     // The lock query also tells whether the organisation has active webhooks (the integration outbox hook can
     // then skip its savepoint and lookups for the common "no webhooks" case).
     const [locked] = await tx
@@ -542,6 +544,26 @@ export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: Sessio
 }
 
 /* =================================================================== transitions */
+
+/**
+ * The browser stopped reporting at `last` (its last heartbeat) and the heartbeat timeout has passed: the connection is
+ * offline; during an active exam a `reporting_interrupted` event opens at `last` and, under disconnect policy 'stop',
+ * the clock stops there. Recorded by the sweeper, or by the browser's next heartbeat when no sweeper saw the silence
+ * (every instance was down or restarting) — the outcome must not depend on which comes first.
+ */
+export async function recordReportingTimeout(m: SessionMutation, policy: ProctoringPolicy, last: number, detectedBy: 'sweeper' | 'late_heartbeat'): Promise<void> {
+  const s = m.session;
+  m.set({ connection: 'offline' });
+  if (s.status !== 'active') return;
+  const ev = await m.addEvent({
+    type: 'reporting_interrupted',
+    open: true,
+    startedAt: last,
+    details: { lastHeartbeatAt: last, instanceId: s.lastHeartbeatInstanceId, timerBehavior: policy.connection.disconnectTimerBehavior, ...(detectedBy === 'sweeper' ? {} : { detectedBy }) },
+  });
+  m.set({ reportingEventId: ev.id, reportingInterruptedSince: new Date(Math.min(last, s.reportingInterruptedSince?.getTime() ?? Infinity)) });
+  if (policy.connection.disconnectTimerBehavior === 'stop') m.clockStop(Math.max(last, s.runningSince?.getTime() ?? last));
+}
 
 export function assertStatus(m: SessionMutation, allowed: SessionStatus[], message?: string): void {
   if (!allowed.includes(m.session.status)) {

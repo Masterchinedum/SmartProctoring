@@ -9,8 +9,9 @@
  *    the candidate app reloads its state and shows the hold / ended screen).
  *  - maxOfflineMinutes: no heartbeat from any browser for longer than this, measured from the last heartbeat or from
  *    when the exam last continued (the open active period's start: a release, a passed check), whichever is later.
- *    Applied by the sweeper (`enforceOfflineLimits`, jobs/sweeper.ts) and again when the candidate comes back
- *    (`enforceReconnectLimits`). Only active exams: a formal pause has its own limit (pause.maxPauseDurationSec), and a
+ *    Applied by the sweeper (`enforceOfflineLimits`, jobs/sweeper.ts), again when the candidate comes back
+ *    (`enforceReconnectLimits`), and by the browser's next heartbeat when no sweeper saw the silence (`applyOfflineLimit`:
+ *    every instance was down or restarting). Only active exams: a formal pause has its own limit (pause.maxPauseDurationSec), and a
  *    held exam waits for staff anyway.
  *  - onLimit 'hold' (default): `holdNow` with reason 'resume_limit' (clock stopped; staff release it — the reconnect
  *    allowance then starts again — or terminate). 'end': `finalizeSession(m, 'resume_limit')` — submitted, graded,
@@ -99,6 +100,19 @@ async function offlineLimit(m: SessionMutation, policy: ProctoringPolicy): Promi
   const since = await offlineSince(m);
   const offlineMs = m.now - since;
   return offlineMs > max * 60_000 ? { kind: 'offline', offlineSince: since, offlineMs, maxOfflineMinutes: max } : null;
+}
+
+/**
+ * The offline limit for a heartbeat that finds its browser silent past the heartbeat timeout with no sweeper having
+ * noticed (every instance was down or restarting; candidate-actions.ts heartbeat, right after it recorded the outage):
+ * applied as the sweeper's offline step would have, so the outcome does not depend on which of the two comes first.
+ * True when the limit held or ended the exam.
+ */
+export async function applyOfflineLimit(m: SessionMutation, policy: ProctoringPolicy): Promise<boolean> {
+  const limit = await offlineLimit(m, policy);
+  if (!limit) return false;
+  await applyResumeLimit(m, policy, limit);
+  return true;
 }
 
 /**

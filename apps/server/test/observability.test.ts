@@ -2,13 +2,17 @@
  * Prometheus metrics (/metrics, lib/metrics.ts) and log correlation (request ids, session / staff ids on log lines).
  */
 import { Writable } from 'node:stream';
+import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
+import { examSessions } from '../src/db/schema.js';
 import { appLoggerOptions } from '../src/lib/log-redact.js';
 import { AppMetrics } from '../src/lib/metrics.js';
 import { MemoryStorage } from '../src/lib/storage.js';
-import { sample, startedSession } from './flow.js';
+import { recordJobFinish, recordJobStart } from '../src/services/job-status.js';
+import { createPrivacyRequest } from '../src/services/privacy-requests.js';
+import { consent, runCheck, sample, startCheck, startedSession } from './flow.js';
 import { createTestEnv, type TestEnv } from './helpers.js';
 
 const TOKEN = 'metrics-token-0123456789abcdef';
@@ -121,6 +125,97 @@ describe('/metrics', () => {
     const text = await m.registry.metrics();
     expect(value(text, 'sp_evidence_storage_errors_total{op="put",location="default"}')).toBe(1);
     expect(value(text, 'sp_evidence_storage_errors_total{op="put",location="eu"}')).toBe(2);
+  });
+
+  it('measures evidence-store latency per operation and storage location, failures included', async () => {
+    const m = new AppMetrics();
+    const store = new MemoryStorage();
+    const failing = new MemoryStorage();
+    failing.delete = async () => {
+      throw new Error('S3 unreachable');
+    };
+    const s = m.instrumentStorage(store);
+    await s.put('a/b', Buffer.from('x'));
+    expect((await s.get('a/b'))?.toString()).toBe('x');
+    await expect(m.instrumentStorage(failing, 'eu').delete('a/b')).rejects.toThrow('S3 unreachable');
+    const text = await m.registry.metrics();
+    expect(value(text, 'sp_evidence_storage_seconds_count{op="put",location="default"}')).toBe(1);
+    expect(value(text, 'sp_evidence_storage_seconds_count{op="get",location="default"}')).toBe(1);
+    expect(value(text, 'sp_evidence_storage_seconds_count{op="delete",location="eu"}')).toBe(1);
+    expect(value(text, 'sp_evidence_storage_errors_total{op="delete",location="eu"}')).toBe(1);
+  });
+
+  it('measures the wait for a Postgres connection and counts connection errors (pool observer)', async () => {
+    // The app's own pool reports every checkout.
+    await app.inject({ method: 'GET', url: '/api/health/ready' });
+    const text = await scrape().then((r) => r.body);
+    expect(value(text, 'sp_db_pool_acquire_seconds_count')).toBeGreaterThan(0);
+    const m = new AppMetrics();
+    m.databaseObserver.acquired(30);
+    m.databaseObserver.connectionError('lost', new Error('terminating connection due to administrator command'));
+    m.databaseObserver.connectionError('connect', new Error('connect ECONNREFUSED'));
+    m.databaseObserver.connectionError('connect', new Error('connect ECONNREFUSED'));
+    const own = await m.registry.metrics();
+    expect(value(own, 'sp_db_pool_acquire_seconds_bucket{le="0.025"}')).toBe(0);
+    expect(value(own, 'sp_db_pool_acquire_seconds_bucket{le="0.05"}')).toBe(1);
+    expect(value(own, 'sp_db_connection_errors_total{kind="lost"}')).toBe(1);
+    expect(value(own, 'sp_db_connection_errors_total{kind="connect"}')).toBe(2);
+  });
+
+  it('counts finished checks by purpose and outcome', async () => {
+    const s = await env.newSession();
+    const c = env.candidateClient(s.token);
+    await consent(c);
+    expect((await runCheck(env, c, 'initial', { spec: { person: 'alice' }, wrongTurns: true })).complete!.outcome).toBe('retry');
+    expect((await runCheck(env, c, 'initial', { spec: { person: 'alice' } })).complete!.outcome).toBe('passed');
+    // A check abandoned for a new one (a page reload) is counted as abandoned.
+    await c.req('POST', '/api/candidate/start');
+    await c.req('POST', '/api/candidate/pause', {});
+    await startCheck(c, 'resume');
+    await startCheck(c, 'resume');
+    const text = await env.ctx.metrics.registry.metrics();
+    expect(value(text, 'sp_checks_completed_total{purpose="initial",outcome="passed"}')).toBeGreaterThanOrEqual(1);
+    expect(value(text, 'sp_checks_completed_total{purpose="initial",outcome="retry"}')).toBeGreaterThanOrEqual(1);
+    expect(value(text, 'sp_checks_completed_total{purpose="resume",outcome="abandoned"}')).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reads cluster-wide job status, privacy requests and the retention backlog from Postgres, cached for 30 s', async () => {
+    const now = env.clock.t;
+    const db = env.ctx.db;
+    const actor = { id: env.users.admin.id, orgId: env.org.id };
+    // The retention job (any instance): last success two hours ago, the run after it failed.
+    await recordJobStart(db, 'retention', now - 2 * 3600_000);
+    await recordJobFinish(db, 'retention', now - 2 * 3600_000, { summary: { sessionsEvidencePurged: 0, evidenceItemsPurged: 0, sessionsEventMetadataPurged: 0, skippedLegalHold: 0, failures: 0 } });
+    await recordJobStart(db, 'retention', now - 3600_000);
+    await recordJobFinish(db, 'retention', now - 3600_000, { error: 'evidence store unreachable' });
+    // Privacy register: one access request received 40 days ago (overdue), one erasure received today.
+    await createPrivacyRequest(env.ctx, db, actor, { kind: 'access', subject: 'Overdue Person', channel: 'email', receivedAt: now - 40 * 86_400_000 }, now);
+    await createPrivacyRequest(env.ctx, db, actor, { kind: 'erasure', subject: 'Fresh Person', channel: 'email' }, now);
+    // A session that ended 40 days ago still has its images (30-day default retention): 10 days overdue.
+    const old = await env.newSession();
+    await db.update(examSessions).set({ status: 'submitted', endedAt: new Date(now - 40 * 86_400_000) }).where(eq(examSessions.id, old.id));
+
+    app.ctx.metrics.clearClusterCache(); // the scraped app (its own metrics)
+    let text = (await scrape()).body;
+    expect(value(text, 'sp_cluster_metrics_up')).toBe(1);
+    expect(value(text, 'sp_cluster_job_last_success_timestamp_seconds{job="retention"}')).toBe(Math.round((now - 2 * 3600_000) / 1000));
+    expect(value(text, 'sp_cluster_job_last_run_failed{job="retention"}')).toBe(1);
+    expect(value(text, 'sp_cluster_privacy_requests_open{kind="access"}')).toBe(1);
+    expect(value(text, 'sp_cluster_privacy_requests_open{kind="erasure"}')).toBe(1);
+    expect(value(text, 'sp_cluster_privacy_requests_open{kind="objection"}')).toBe(0);
+    expect(value(text, 'sp_cluster_privacy_requests_overdue')).toBe(1);
+    expect(value(text, 'sp_cluster_retention_overdue_sessions')).toBe(1);
+    expect(value(text, 'sp_cluster_retention_overdue_oldest_seconds')).toBe(10 * 86_400);
+
+    // Within the cache lifetime a new request does not cost another query...
+    await createPrivacyRequest(env.ctx, db, actor, { kind: 'access', subject: 'Third Person', channel: 'letter', receivedAt: now - 35 * 86_400_000 }, now);
+    text = (await scrape()).body;
+    expect(value(text, 'sp_cluster_privacy_requests_overdue')).toBe(1);
+    // ...the next refresh shows it.
+    app.ctx.metrics.clearClusterCache(); // the scraped app (its own metrics)
+    text = (await scrape()).body;
+    expect(value(text, 'sp_cluster_privacy_requests_overdue')).toBe(2);
+    expect(value(text, 'sp_cluster_privacy_requests_open{kind="access"}')).toBe(2);
   });
 
   it('records face-analysis queue waits, analysis times and refusals from the worker pool', async () => {

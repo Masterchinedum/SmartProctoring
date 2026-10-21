@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { DEFAULT_PRIVACY_RESPONSE_DAYS, type OpsChecksDTO, type PrivacyRequestDTO, type PrivacyRequestsDTO, type RetentionPreviewDTO } from '@sp/shared';
 import { and, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auditLog, candidates, evidence, examSessions, identityReferences, jobStatus, privacyRequests, webhookDeliveries } from '../src/db/schema.js';
 import { FakeVisionService } from '../src/vision/fake.js';
 import { DAY_MS, runRetention } from '../src/services/retention.js';
@@ -32,6 +32,9 @@ async function finished(name: string, opts: { submit?: boolean } = {}) {
   const cand = await env.newCandidate(name);
   const s = await env.newSession({ candidateId: cand.id });
   const c = await startedSession(env, env.candidateClient(s.token));
+  // The passed check's frame images are purged after its response (afterCommit): let that finish before the test
+  // looks at the session's images (under load it could otherwise race a withdrawal or an erasure).
+  await vi.waitFor(async () => expect((await evidenceOf(s.id)).filter((e) => e.kind === 'liveness_frame' && !e.purgedAt)).toHaveLength(0), { timeout: 15_000, interval: 50 });
   env.clock.advance(MIN);
   const ev = await clientEvent(c, { type: 'multiple_people', startedAt: env.clock.t - 20_000, endedAt: env.clock.t - 10_000 });
   const shot = await screenshot(c, ev, env.clock.t - 15_000, { person: 'alice', faces: 2 });
@@ -239,10 +242,7 @@ describe('consent withdrawal (candidate)', () => {
     expect(files.some((f) => existsSync(f))).toBe(false);
     const after = await evidenceOf(session.id);
     expect(after.every((e) => e.purgedAt)).toBe(true);
-    // The passed check-in's surplus frame images are deleted after its commit, in the background (checks.ts
-    // purgePassedCheckImages): that may still happen after `live` was read. Everything else goes for the withdrawal.
-    const reasons = after.filter((e) => live.some((l) => l.id === e.id)).map((e) => (e.kind === 'liveness_frame' && e.purgeReason === 'check_passed' ? 'consent_withdrawn' : e.purgeReason));
-    expect(new Set(reasons)).toEqual(new Set(['consent_withdrawn']));
+    expect(after.filter((e) => live.some((l) => l.id === e.id)).every((e) => e.purgeReason === 'consent_withdrawn')).toBe(true);
     const refs = await env.ctx.db.select().from(identityReferences).where(eq(identityReferences.sessionId, session.id));
     expect(refs.length).toBeGreaterThan(0);
     expect(refs.every((r) => r.embeddingsEnc === null && r.purgedAt != null)).toBe(true);

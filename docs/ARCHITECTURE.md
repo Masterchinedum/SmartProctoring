@@ -377,11 +377,29 @@ lost). Tuning evidence: packages/detection/src/engine/detectors/continuity.ts.
 * Offline: the client keeps an IndexedDB **outbox** (events latest-version-wins, evidence blobs,
   answers, identity samples) and flushes with backoff. Original timestamps are preserved; server sets
   `deliveredLate` when received > 30 s after the event's last change. Heartbeat every 5 s; server
-  marks `offline` after `heartbeatTimeoutSec` and opens `reporting_interrupted` (closed on return).
+  marks `offline` after `heartbeatTimeoutSec` and opens `reporting_interrupted` (closed on return). When no sweeper
+  saw the silence (every instance was down or restarting), the browser's next heartbeat records the outage exactly as
+  the sweeper would have (from the last heartbeat; under disconnect policy `stop` the clock stopped there; then the
+  resume policy's `maxOfflineMinutes`, `recovery.ts` `applyOfflineLimit`), so a server restart shows in the timeline
+  once, does not cost the candidate time, and meets the same resume rules whichever comes first
+  (`session-state.ts` `recordReportingTimeout`).
   Candidate UI shows a banner while the outbox cannot be delivered; admin UI shows
   "reporting interrupted since …".
 * Clock skew: client computes `offset = serverTime − midpoint(rtt)` from heartbeats and stamps
   observations with `Date.now() + offset`.
+* Failures in the middle of a request (tested in `apps/server/test/chaos.test.ts`): every write of a candidate request
+  is one transaction, so a request that fails — its Postgres connection lost before COMMIT, the process stopped —
+  leaves nothing behind, and the client's resend applies once; when the connection is lost right after COMMIT (the
+  client cannot know it was stored) the resend is recognised (events by id + version, answers by `clientSeq`,
+  identity samples by `sampleId`, evidence by id). An evidence blob is written before its row: `storeEvidence` deletes
+  it again when the row insert fails, and `transactionWithEvidence` (used by `withSession`, check frames, ID photos)
+  when the transaction rolls back — when COMMIT itself failed, only blobs whose rows did not commit. A connection that
+  breaks while checked out is reported and discarded by the pool (`db/index.ts`; without a client error listener
+  node-postgres would end the process). Checks, pending identity bursts and second-opinion requests live in Postgres:
+  another instance (after a restart) continues a check on the frames received, or settles it when it expired, and
+  its sweeper decides bursts left incomplete. The frame images of a passed check are purged after COMMIT
+  (delete blob, then tombstone the row): a crash in between leaves the row without its blob until retention purges
+  the session (`readEvidence` returns null).
 
 ## 7. Staff side
 

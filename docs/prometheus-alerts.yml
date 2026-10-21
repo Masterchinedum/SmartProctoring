@@ -1,7 +1,9 @@
 # SmartProctoring — suggested Prometheus alerting rules (docs/OPERATIONS.md §5).
 # Scrape GET /metrics with `Authorization: Bearer $METRICS_TOKEN`. Thresholds are starting points: tune them to your
 # deployment once you have a few exam days of data. `sp_cluster_*` series are the same on every instance (max, not sum).
+# `runbook_url` points at the runbook in docs/OPERATIONS.md (prefix it with your repository or wiki URL).
 #   promtool check rules docs/prometheus-alerts.yml
+# (apps/server/test/alert-rules.test.ts checks the structure, that every series exists and every runbook link resolves.)
 groups:
   - name: smartproctoring-face-analysis
     rules:
@@ -100,15 +102,63 @@ groups:
           summary: More than 15 % of identity checks end as "unable to verify"
           description: Candidates' images are too poor to compare (lighting, cameras). They get guidance and retries, then human review; staff workload rises.
 
+      - alert: SmartProctoringCheckInsHeldOften
+        expr: |
+          sum(increase(sp_checks_completed_total{purpose="initial",outcome="held"}[1h]))
+            / clamp_min(sum(increase(sp_checks_completed_total{purpose="initial"}[1h])), 1) > 0.1
+          and sum(increase(sp_checks_completed_total{purpose="initial"}[1h])) > 50
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: More than 10 % of check-ins end on hold (candidates cannot start until staff decide)
+          description: Usually lighting or cameras ("unable to verify" after every attempt) or a change in the check (sp_identity_model_info); occasionally a different person. Staff workload rises.
+          runbook_url: docs/OPERATIONS.md#runbook-check-ins-held
+
   - name: smartproctoring-data
     rules:
       - alert: SmartProctoringRetentionNotRunning
-        expr: (time() - max(sp_job_last_success_timestamp_seconds{job="retention"}) > 3 * 3600) or absent(sp_job_last_success_timestamp_seconds{job="retention"})
+        # job_status in Postgres: the last success on any instance, kept across restarts and deploys.
+        expr: (time() - max(sp_cluster_job_last_success_timestamp_seconds{job="retention"}) > 3 * 3600) or absent(sp_cluster_job_last_success_timestamp_seconds{job="retention"})
         for: 2h
         labels: { severity: critical }
         annotations:
           summary: Evidence retention has not completed for more than 3 hours
-          description: Evidence may be kept longer than the privacy notice says (docs/PRIVACY.md §4). Check the "background job failed" log lines.
+          description: Evidence may be kept longer than the privacy notice says (docs/PRIVACY.md §4). Check the "background job failed" log lines; with no error at all, no instance runs background jobs (SWEEPER_ENABLED).
+          runbook_url: docs/OPERATIONS.md#runbook-retention-failing
+
+      - alert: SmartProctoringRetentionLastRunFailed
+        expr: max(sp_cluster_job_last_run_failed{job="retention"}) == 1
+        for: 90m
+        labels: { severity: warning }
+        annotations:
+          summary: The last evidence-retention runs failed as a whole (the next run is within the hour)
+          runbook_url: docs/OPERATIONS.md#runbook-retention-failing
+
+      - alert: SmartProctoringEvidencePastDeletionDate
+        expr: max(sp_cluster_retention_overdue_oldest_seconds) > 2 * 3600
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "Session images are still stored {{ $value | humanizeDuration }} after their deletion date"
+          description: Retention is behind or failing (Privacy → Deletion schedule lists them). Sessions under legal hold are not counted.
+          runbook_url: docs/OPERATIONS.md#runbook-retention-failing
+
+      - alert: SmartProctoringEvidencePastDeletionDateDay
+        expr: max(sp_cluster_retention_overdue_oldest_seconds) > 24 * 3600
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: Images have been kept more than a day past their deletion date (the privacy notice is not being met)
+          runbook_url: docs/OPERATIONS.md#runbook-retention-failing
+
+      - alert: SmartProctoringPrivacyRequestsOverdue
+        expr: max(sp_cluster_privacy_requests_overdue) > 0
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} data-subject request(s) in the privacy register are past their response deadline"
+          description: The legal deadline (one month, or as extended) has passed. Privacy → requests, sorted by deadline.
+          runbook_url: docs/OPERATIONS.md#runbook-privacy-requests-overdue
 
       - alert: SmartProctoringRetentionFailures
         expr: sum(increase(sp_retention_failures_total[2h])) > 0
@@ -124,6 +174,15 @@ groups:
         annotations:
           summary: 'The evidence store is failing (storage location {{ $labels.location }}: disk or S3)'
           description: Screenshots and identity images of the organisations using this storage location cannot be stored or read; check disk space, the volume or the bucket's credentials (STORAGE_* for "default", STORAGE_LOCATION_<NAME>_* for the others).
+
+      - alert: SmartProctoringEvidenceStorageSlow
+        expr: histogram_quantile(0.95, sum by (instance, location, le) (rate(sp_evidence_storage_seconds_bucket{op="put"}[5m]))) > 2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }}: storing an image in storage location {{ $labels.location }} takes more than 2 s (p95)"
+          description: Check frames and identity samples hold their database transaction while the image is written; a slow disk or S3 endpoint slows check-ins and exhausts the Postgres pool.
+          runbook_url: docs/OPERATIONS.md#runbook-evidence-storage-slow
 
       - alert: SmartProctoringBackgroundJobFailing
         expr: sum by (job) (increase(sp_job_runs_total{result="failed"}[30m])) > 0
@@ -197,6 +256,34 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "{{ $labels.instance }}: requests are waiting for a Postgres connection"
+          runbook_url: docs/OPERATIONS.md#runbook-database-pool
+
+      - alert: SmartProctoringDatabasePoolSlow
+        expr: histogram_quantile(0.95, sum by (instance, le) (rate(sp_db_pool_acquire_seconds_bucket[5m]))) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }}: requests wait more than 100 ms (p95) for a Postgres connection"
+          description: The pool is saturated before requests start to queue visibly (PG_POOL_MAX, slow queries, long transactions).
+          runbook_url: docs/OPERATIONS.md#runbook-database-pool
+
+      - alert: SmartProctoringDatabaseUnreachable
+        expr: sum by (instance) (rate(sp_db_connection_errors_total{kind="connect"}[5m])) > 0.05
+        for: 3m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }}: cannot open connections to Postgres"
+          description: Requests fail with 500 and /api/health/ready answers 503 (db error). Candidates' browsers keep answers, events and images and resend them once it is back.
+          runbook_url: docs/OPERATIONS.md#runbook-database-unreachable
+
+      - alert: SmartProctoringDatabaseConnectionsDropped
+        expr: sum by (instance) (increase(sp_db_connection_errors_total{kind="lost"}[15m])) > 10
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }}: Postgres keeps closing open connections"
+          description: Expected once per connection at a Postgres restart or failover; repeated drops point to a proxy / PgBouncer, a network problem or idle_in_transaction_session_timeout.
+          runbook_url: docs/OPERATIONS.md#runbook-database-unreachable
 
       - alert: SmartProctoringClusterMetricsDown
         expr: max(sp_cluster_metrics_up) == 0

@@ -17,7 +17,8 @@ import { loadJobStatus, RETENTION_JOB, toRetentionJobStatusDTO } from './job-sta
 import { OPEN_PRIVACY_STATUSES } from './privacy-requests.js';
 import { DAY_MS, evidenceDaysSql, eventDaysSql } from './retention.js';
 
-const evidenceDueSql = sql`(${examSessions.endedAt} + make_interval(days => (${evidenceDaysSql})::int))`;
+/** When a session's images are due for deletion (its end + the evidence retention days); joins exams and organizations. */
+export const evidenceDueSql = sql`(${examSessions.endedAt} + make_interval(days => (${evidenceDaysSql})::int))`;
 const eventsDueSql = sql`(${examSessions.endedAt} + make_interval(days => (${eventDaysSql})::int))`;
 /** Images of the session not deleted yet. */
 const liveEvidenceSql = sql<number>`(select count(*) from evidence where evidence.session_id = ${examSessions.id} and evidence.purged_at is null)::int`;

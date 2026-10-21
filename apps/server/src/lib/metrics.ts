@@ -3,16 +3,21 @@
  * docs/OPERATIONS.md §5 lists every metric and suggested alerts).
  *
  * Instance metrics describe this process: HTTP requests, the face-analysis queue (depth, waits, analysis time,
- * refusals), capacity, the Postgres pool, staff WebSockets, background jobs, evidence-storage errors and the identity
- * decisions made here. Cluster metrics (`sp_cluster_*`) are read from Postgres at scrape time and are the same on
- * every instance: aggregate them with max(), not sum().
+ * refusals), capacity, the Postgres pool (connections, acquisition wait, connection errors), staff WebSockets,
+ * background jobs, the evidence store (latency, errors), check outcomes and the identity decisions made here. Cluster
+ * metrics (`sp_cluster_*`) are read from Postgres at scrape time and are the same on every instance: aggregate them
+ * with max(), not sum(). Slow-moving ones (background job status, privacy requests, retention backlog) are read at most
+ * every SLOW_CLUSTER_TTL_MS.
  */
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from '@prometheus-io/client';
-import { API_KEY_EXPIRY_WARNING_DAYS, DEFAULT_REVIEW_SLA } from '@sp/shared';
+import { API_KEY_EXPIRY_WARNING_DAYS, DEFAULT_REVIEW_SLA, PRIVACY_REQUEST_KINDS } from '@sp/shared';
 import { and, count, eq, gt, gte, inArray, isNotNull, isNull, lte, min, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { apiKeys, emailAlerts, events, examSessions, organizations, sessionReviews, webhookDeliveries, webhooks } from '../db/schema.js';
+import type { DatabaseObserver } from '../db/index.js';
+import { apiKeys, emailAlerts, events, examSessions, exams, jobStatus, organizations, privacyRequests, sessionReviews, webhookDeliveries, webhooks } from '../db/schema.js';
 import { CAPACITY_REASONS, currentCapacity, samplingPressure } from '../services/capacity.js';
+import { evidenceDueSql } from '../services/privacy-ops.js';
+import { OPEN_PRIVACY_STATUSES } from '../services/privacy-requests.js';
 import { CALIBRATION } from '../vision/calibration.js';
 import { EMBEDDING_MODEL_CURRENT } from '../vision/embeddings.js';
 import type { VisionObserver, VisionPriority } from '../vision/types.js';
@@ -25,6 +30,21 @@ const LIVE_STATUSES = ['ready', 'active', 'paused', 'on_hold'] as const;
 const CLUSTER_QUERY_TIMEOUT_MS = 3_000;
 /** Gauges of one scrape share one cluster query. */
 const CLUSTER_SNAPSHOT_TTL_MS = 1_000;
+/** Job status, privacy requests and the retention backlog change slowly: read at most this often (one query each). */
+export const SLOW_CLUSTER_TTL_MS = 30_000;
+
+/** Outcome of a readiness / identity check (sp_checks_completed_total): /complete's answer, or abandoned (expired / superseded). */
+export type CheckOutcomeLabel = 'passed' | 'retry' | 'held' | 'failed' | 'abandoned';
+
+interface SlowClusterSnapshot {
+  /** job_status rows: background jobs that record their runs cluster-wide (retention). */
+  jobs: { name: string; lastSuccessAt: Date | null; lastFinishedAt: Date | null; failed: boolean }[];
+  privacyOpen: Record<string, number>;
+  privacyOverdue: number;
+  /** Sessions whose images are past their deletion date and not deleted (no legal hold), and the oldest due date. */
+  retentionOverdue: number;
+  retentionOldestDueAt: Date | null;
+}
 
 interface ClusterSnapshot {
   sessions: Record<string, number>;
@@ -48,6 +68,7 @@ export class AppMetrics {
   readonly registry = new Registry();
   private ctx: Ctx | null = null;
   private cluster: { at: number; snapshot: Promise<ClusterSnapshot | null> } | null = null;
+  private slowCluster: { at: number; snapshot: Promise<SlowClusterSnapshot | null> } | null = null;
   private defaultsOn = false;
 
   readonly httpRequests = new Counter({ name: 'sp_http_requests_total', help: 'HTTP requests by route pattern and status.', labelNames: ['method', 'route', 'status'] as const, registers: [this.registry] });
@@ -100,6 +121,31 @@ export class AppMetrics {
     name: 'sp_evidence_storage_errors_total',
     help: 'Evidence store operations that failed (put / get / delete), per storage location (default or a STORAGE_LOCATIONS name).',
     labelNames: ['op', 'location'] as const,
+    registers: [this.registry],
+  });
+  readonly storageDuration = new Histogram({
+    name: 'sp_evidence_storage_seconds',
+    help: 'Evidence store operation time (put / get / delete; disk or S3), failed operations included, per storage location.',
+    labelNames: ['op', 'location'] as const,
+    buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+    registers: [this.registry],
+  });
+  readonly dbAcquire = new Histogram({
+    name: 'sp_db_pool_acquire_seconds',
+    help: 'Time a request waited for a Postgres connection from this instance’s pool (a new connection included).',
+    buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    registers: [this.registry],
+  });
+  readonly dbConnectionErrors = new Counter({
+    name: 'sp_db_connection_errors_total',
+    help: 'Postgres connections that could not be opened (connect) or broke while open (lost: Postgres restarted, failed over or killed the connection).',
+    labelNames: ['kind'] as const,
+    registers: [this.registry],
+  });
+  readonly checksCompleted = new Counter({
+    name: 'sp_checks_completed_total',
+    help: 'Readiness / identity checks finished on this instance, by purpose (initial / resume / reconnect / reverify) and outcome (passed / retry / held / failed, or abandoned: expired or superseded without /complete).',
+    labelNames: ['purpose', 'outcome'] as const,
     registers: [this.registry],
   });
   readonly identitySamplesSpacedOut = new Counter({
@@ -236,7 +282,8 @@ export class AppMetrics {
       help: 'Whether the sp_cluster_* metrics could be read from Postgres in this scrape (1) or not (0).',
       registers: reg,
       async collect() {
-        this.set((await self.clusterSnapshot()) ? 1 : 0);
+        const [fast, slow] = await Promise.all([self.clusterSnapshot(), self.slowClusterSnapshot()]);
+        this.set(fast && slow ? 1 : 0);
       },
     });
     clusterGauge('sp_cluster_sessions', 'Exam sessions in progress, by status (all instances).', ['status'], (g, s) => {
@@ -259,6 +306,55 @@ export class AppMetrics {
       [],
       (g, s) => g.set(s.apiKeysExpiringSoon),
     );
+
+    // Cluster-wide and slow-moving (cached for SLOW_CLUSTER_TTL_MS).
+    const slowGauge = (name: string, help: string, labelNames: readonly string[], read: (g: Gauge<string>, s: SlowClusterSnapshot, now: number) => void) =>
+      new Gauge({
+        name,
+        help,
+        labelNames,
+        registers: reg,
+        async collect() {
+          const s = await self.slowClusterSnapshot();
+          this.reset();
+          if (s) read(this, s, self.ctx!.now());
+        },
+      });
+    slowGauge(
+      'sp_cluster_job_last_success_timestamp_seconds',
+      'When a background job that records its runs in the database (retention) last completed without error, on any instance (unix seconds; absent until its first success).',
+      ['job'],
+      (g, s) => {
+        for (const j of s.jobs) if (j.lastSuccessAt) g.set({ job: j.name }, Math.round(j.lastSuccessAt.getTime() / 1000));
+      },
+    );
+    slowGauge('sp_cluster_job_last_run_failed', 'Whether the last finished run of a background job that records its runs (retention) failed as a whole (1) or not (0).', ['job'], (g, s) => {
+      for (const j of s.jobs) if (j.lastFinishedAt) g.set({ job: j.name }, j.failed ? 1 : 0);
+    });
+    slowGauge('sp_cluster_privacy_requests_open', 'Data-subject requests in the privacy register that are open or in progress, by kind (all organisations).', ['kind'], (g, s) => {
+      for (const k of PRIVACY_REQUEST_KINDS) g.set({ kind: k }, s.privacyOpen[k] ?? 0);
+    });
+    slowGauge('sp_cluster_privacy_requests_overdue', 'Open data-subject requests past their response deadline (due date, extensions included).', [], (g, s) => g.set(s.privacyOverdue));
+    slowGauge('sp_cluster_retention_overdue_sessions', 'Ended sessions whose images are past their deletion date and not deleted yet (legal holds excluded).', [], (g, s) => g.set(s.retentionOverdue));
+    slowGauge('sp_cluster_retention_overdue_oldest_seconds', 'How long the oldest overdue session’s images have been past their deletion date (0 when none).', [], (g, s, now) =>
+      g.set(ageSec(s.retentionOldestDueAt, now)),
+    );
+  }
+
+  /** Forget the cached sp_cluster_* values (the next scrape reads Postgres). */
+  clearClusterCache(): void {
+    this.cluster = null;
+    this.slowCluster = null;
+  }
+
+  /** Pool observer (createDatabase): connection wait and connection errors. */
+  readonly databaseObserver: DatabaseObserver = {
+    acquired: (waitMs) => this.dbAcquire.observe(waitMs / 1000),
+    connectionError: (kind) => this.dbConnectionErrors.inc({ kind }),
+  };
+
+  checkCompleted(purpose: string, outcome: CheckOutcomeLabel): void {
+    this.checksCompleted.inc({ purpose, outcome });
   }
 
   /** Read gauges from this app's context at scrape time. */
@@ -306,20 +402,26 @@ export class AppMetrics {
     if (result === 'ok') this.jobLastSuccess.set({ job }, Math.round(at / 1000));
   }
 
-  /** The same store, with failed operations counted (per storage location). */
+  /** The same store, with operation times measured and failed operations counted (per storage location). */
   instrumentStorage(storage: BlobStorage, location = 'default'): BlobStorage {
-    const counted = <T>(op: 'put' | 'get' | 'delete', p: Promise<T>): Promise<T> =>
-      p.catch((err: unknown) => {
+    const counted = async <T>(op: 'put' | 'get' | 'delete', run: () => Promise<T>): Promise<T> => {
+      const t0 = performance.now();
+      try {
+        return await run();
+      } catch (err) {
         this.storageErrors.inc({ op, location });
         throw err;
-      });
+      } finally {
+        this.storageDuration.observe({ op, location }, (performance.now() - t0) / 1000);
+      }
+    };
     return {
       get driver() {
         return storage.driver;
       },
-      put: (key, data) => counted('put', storage.put(key, data)),
-      get: (key) => counted('get', storage.get(key)),
-      delete: (key) => counted('delete', storage.delete(key)),
+      put: (key, data) => counted('put', () => storage.put(key, data)),
+      get: (key) => counted('get', () => storage.get(key)),
+      delete: (key) => counted('delete', () => storage.delete(key)),
       ...(storage.close ? { close: () => storage.close!() } : {}),
     };
   }
@@ -385,18 +487,71 @@ export class AppMetrics {
       reviewsEscalated: escalated[0]?.n ?? 0,
       apiKeysExpiringSoon: keysExpiring[0]?.n ?? 0,
     }));
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), CLUSTER_QUERY_TIMEOUT_MS);
+    return withTimeout(ctx, read);
+  }
+
+  /** Cached for SLOW_CLUSTER_TTL_MS; a failed read is not cached (the next scrape tries again). */
+  private slowClusterSnapshot(): Promise<SlowClusterSnapshot | null> {
+    const now = Date.now();
+    if (this.slowCluster && now - this.slowCluster.at < SLOW_CLUSTER_TTL_MS) return this.slowCluster.snapshot;
+    const snapshot = this.readSlowCluster();
+    const entry = { at: now, snapshot };
+    this.slowCluster = entry;
+    void snapshot.then((s) => {
+      if (!s && this.slowCluster === entry) this.slowCluster = null;
     });
-    try {
-      return await Promise.race([read, timeout]);
-    } catch (err) {
-      ctx.log.warn({ err }, 'metrics: cluster query failed');
-      return null;
-    } finally {
-      clearTimeout(timer);
-    }
+    return snapshot;
+  }
+
+  private async readSlowCluster(): Promise<SlowClusterSnapshot | null> {
+    const ctx = this.ctx;
+    if (!ctx) return null;
+    const db = ctx.db;
+    const nowDate = new Date(ctx.now());
+    const read = Promise.all([
+      db.select({ name: jobStatus.name, lastSuccessAt: jobStatus.lastSuccessAt, lastFinishedAt: jobStatus.lastFinishedAt, lastError: jobStatus.lastError }).from(jobStatus),
+      db
+        .select({ kind: privacyRequests.kind, n: count(), overdue: sql<number>`count(*) filter (where ${privacyRequests.dueAt} < ${nowDate})::int` })
+        .from(privacyRequests)
+        .where(inArray(privacyRequests.status, OPEN_PRIVACY_STATUSES))
+        .groupBy(privacyRequests.kind),
+      // The retention preview's "past its date" (services/privacy-ops.ts), over all organisations.
+      db
+        .select({ n: count(), oldest: sql<Date | null>`min(${evidenceDueSql})` })
+        .from(examSessions)
+        .innerJoin(exams, eq(exams.id, examSessions.examId))
+        .innerJoin(organizations, eq(organizations.id, examSessions.orgId))
+        .where(and(isNotNull(examSessions.endedAt), isNull(examSessions.evidencePurgedAt), eq(examSessions.legalHold, false), lte(evidenceDueSql, nowDate))),
+    ]).then(([jobs, privacy, [overdue]]) => ({
+      jobs: jobs.map((j) => ({ name: j.name, lastSuccessAt: j.lastSuccessAt, lastFinishedAt: j.lastFinishedAt, failed: j.lastError != null })),
+      privacyOpen: Object.fromEntries(privacy.map((r) => [r.kind, r.n])),
+      privacyOverdue: privacy.reduce((a, r) => a + r.overdue, 0),
+      retentionOverdue: overdue?.n ?? 0,
+      retentionOldestDueAt: overdue?.oldest ? new Date(overdue.oldest) : null,
+    }));
+    return withTimeout(ctx, read);
+  }
+}
+
+/** A cluster query must not hold up a scrape: null after CLUSTER_QUERY_TIMEOUT_MS or on error (logged). */
+async function withTimeout<T>(ctx: Ctx, read: Promise<T>): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), CLUSTER_QUERY_TIMEOUT_MS);
+  });
+  // A query that fails after the timeout won must not become an unhandled rejection (that would end the process).
+  let raced = false;
+  read.catch((err: unknown) => {
+    if (raced) ctx.log.warn({ err }, 'metrics: cluster query failed after its timeout');
+  });
+  try {
+    return await Promise.race([read, timeout]);
+  } catch (err) {
+    ctx.log.warn({ err }, 'metrics: cluster query failed');
+    return null;
+  } finally {
+    raced = true;
+    clearTimeout(timer);
   }
 }
 

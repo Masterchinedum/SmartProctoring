@@ -77,7 +77,7 @@ import { assessCheck, CHECK_EVIDENCE, CLEAR_MATCH_LLR, periodBaseline, POOR_LIGH
 import { secondOpinion, secondOpinionDetails, type SecondOpinionRecord } from './identity-external.js';
 import { buildGallery, ENROL_TARGET_FRAMES, identityFrameIndexes, probeEvidence, scoreReference, type GalleryResult, type ProbeEvidence } from './identity-gallery.js';
 import { buildCandidateState, SUPERSEDED_MESSAGE } from './candidate-state.js';
-import { purgeEvidenceRows, readEvidence, storeEvidence } from './evidence.js';
+import { purgeEvidenceRows, readEvidence, storeEvidence, transactionWithEvidence } from './evidence.js';
 import { copyEvidence, frameAad, frameToAnalysis, idPhotoAad, loadActiveReference, precedingContext, referenceAad, summarizeAnalysis, toIdentityResultDTO, type ActiveReference } from './identity-common.js';
 import { clearedHold } from './session-actions.js';
 import { decisionStamp, orgThresholds, type DecisionStamp } from './org.js';
@@ -383,7 +383,7 @@ export async function submitCheckFrame(ctx: Ctx, sessionId: string, orgId: strin
   // transaction (the checks above only spare the analysis), so concurrent uploads cannot exceed them; frames of one
   // check are thus inserted one at a time, in `seq` order (checkFramesOf reads them incrementally).
   const frameId = randomUUID();
-  await ctx.db.transaction(async (tx) => {
+  await transactionWithEvidence(ctx, async (tx) => {
     const [locked] = await tx.select({ status: checks.status }).from(checks).where(eq(checks.id, check.id)).for('update');
     if (!locked || locked.status !== 'open') throw conflict('check_closed', 'This check is no longer open. Start a new check.');
     const n = await tx
@@ -629,19 +629,23 @@ export async function settleAbandonedChecks(ctx: Ctx, sessionId: string, how: Ab
     else {
       // No penalty: simply expired (as before), no session lock needed.
       const done = await ctx.db.update(checks).set({ status: 'expired', completedAt: new Date(ctx.now()) }).where(and(eq(checks.id, c.id), eq(checks.status, 'open'))).returning({ id: checks.id });
+      if (done.length) ctx.metrics.checkCompleted(c.purpose, 'abandoned');
       n += done.length;
     }
   }
   if (!judged.size) return n;
-  return withSession(ctx, sessionId, async (m) => {
+  const settled = await withSession(ctx, sessionId, async (m) => {
+    const purposes: string[] = [];
     for (const [id, j] of judged) {
       const [cur] = await m.tx.select().from(checks).where(eq(checks.id, id)).for('update');
       if (!cur || cur.status !== 'open') continue;
       await settleAbandoned(m, cur, how, j);
-      n++;
+      purposes.push(cur.purpose);
     }
-    return n;
+    return purposes;
   });
+  for (const p of settled) ctx.metrics.checkCompleted(p, 'abandoned');
+  return n + settled.length;
 }
 
 const ABANDONED_MESSAGE = 'The identity check was not finished. Please start it again.';
@@ -1139,6 +1143,7 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
     if (status === 'passed' && !out.review) purgePassedCheckImages(m, prepared);
     return response;
   });
+  ctx.metrics.checkCompleted(purpose, outcome.outcome);
   return { ...outcome, state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
 }
 
@@ -1493,6 +1498,7 @@ async function completeAttestCheck(ctx: Ctx, sessionId: string, instanceId: stri
       .where(eq(checks.id, check.id));
     return res;
   });
+  ctx.metrics.checkCompleted(check.purpose, response.outcome);
   return { ...response, state: await buildCandidateState(ctx, ctx.db, sessionId, instanceId) };
 }
 

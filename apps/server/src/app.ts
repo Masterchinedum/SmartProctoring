@@ -79,6 +79,8 @@ declare module 'fastify' {
 }
 
 export const JPEG_BODY_LIMIT = 1024 * 1024;
+/** "cannot connect to the database" is logged at most this often. */
+const DB_CONNECT_LOG_INTERVAL_MS = 10_000;
 
 const CSP = [
   "default-src 'self'",
@@ -119,6 +121,20 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   }
 
   const metrics = new AppMetrics();
+  // Connection wait and connection errors of the Postgres pool: counted, and logged (a failure to connect at most every
+  // DB_CONNECT_LOG_INTERVAL_MS — during an outage every request fails to connect and logs its own error anyway).
+  let lastConnectLog = 0;
+  const unobserveDatabase = database.observe({
+    acquired: metrics.databaseObserver.acquired,
+    connectionError: (kind, err) => {
+      metrics.databaseObserver.connectionError(kind, err);
+      if (kind === 'lost') app.log.warn({ err }, 'database connection lost (Postgres restarted, failed over or closed it)');
+      else if (Date.now() - lastConnectLog >= DB_CONNECT_LOG_INTERVAL_MS) {
+        lastConnectLog = Date.now();
+        app.log.error({ err }, 'cannot connect to the database');
+      }
+    },
+  });
   let vision = opts.vision;
   if (!vision && config.visionRemote) {
     // Dedicated vision workers over HTTP (VISION_DRIVER=remote): this process loads no models.
@@ -304,6 +320,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     await storageLocations.close();
     await ownedMailer?.close?.();
     if (!opts.verifiers) ctx.verifiers.close();
+    unobserveDatabase();
     await owned.database?.close();
   });
 
