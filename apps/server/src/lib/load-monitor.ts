@@ -9,6 +9,7 @@
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import type { FastifyBaseLogger } from 'fastify';
 import type pg from 'pg';
+import type { VisionLoad } from '../vision/types.js';
 
 export interface LoadSnapshot {
   eventLoopP99Ms: number;
@@ -32,7 +33,7 @@ export interface LoadMonitorOptions {
   thresholds?: { eventLoopP99Ms?: number; dbWaiting?: number; visionQueuedPerWorker?: number };
 }
 
-type VisionStatsLike = { stats?: { inFlight?: number; queued?: number; workers?: number } };
+type VisionStatsLike = { load?: VisionLoad; stats?: { inFlight?: number; queued?: number; workers?: number } };
 
 export class LoadMonitor {
   private readonly hist: ReturnType<typeof monitorEventLoopDelay>;
@@ -67,7 +68,9 @@ export class LoadMonitor {
   sample(): LoadSnapshot {
     const elu = performance.eventLoopUtilization(this.lastElu);
     this.lastElu = performance.eventLoopUtilization();
-    const v = (this.o.vision as VisionStatsLike | null)?.stats;
+    const vision = this.o.vision as VisionStatsLike | null;
+    const load = vision?.load;
+    const v = load ? { inFlight: load.inFlight, queued: load.queued.interactive + load.queued.background, workers: load.workers } : vision?.stats;
     const snap: LoadSnapshot = {
       eventLoopP99Ms: Math.round(this.hist.percentile(99) / 1e6),
       eventLoopMaxMs: Math.round(this.hist.max / 1e6),

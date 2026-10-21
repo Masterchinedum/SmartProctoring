@@ -117,7 +117,20 @@ backups until they expire; align backup retention with the privacy notice.
 
 ## 5. Health and monitoring
 
-* `GET /api/health` → `{ ok, db, vision }` for load-balancer checks.
+* Health probes (no authentication):
+
+  | Probe | Answers | Use it for |
+  |---|---|---|
+  | `GET /api/health/live` | 200 while the process answers (no database or vision check) | liveness (restart when it stops answering) |
+  | `GET /api/health/ready` (= `GET /api/health`) | `{ ok, db, vision }`; 503 when Postgres does not answer within 2 s (`db: "timeout"` / `"error"`) or face analysis has no worker (`vision: "unavailable"`) | load balancer / readiness, the Dockerfile `HEALTHCHECK` |
+  | `GET /api/health/capacity` | `{ accepting, reasons }`, always 200 | whether this instance should take more exam starts: alerting, autoscaling, admission |
+
+  `reasons`: `vision_queue_long` (a new identity sample would wait longer than `CAPACITY_MAX_VISION_WAIT_MS`, default
+  2 000 ms, in the face-analysis queue), `vision_unavailable`, `event_loop_lagging` (p99 >
+  `CAPACITY_MAX_EVENT_LOOP_MS`, default 200), `database_pool_exhausted` (more than `CAPACITY_MAX_DB_WAITING`, default
+  5, requests waiting for a connection). **Never route load-balancer traffic on capacity**: a busy instance still
+  serves its own candidates (heartbeats, answers and events stay fast), and taking it out of rotation at an exam-start
+  peak would push its load onto the others. Sustained `accepting: false` means add an instance or CPU.
 * Structured JSON logs (pino) on stdout; `LOG_LEVEL` controls verbosity.
 * Capacity: a `server overloaded (event loop lagging | database pool exhausted | face analysis queue long)`
   warning (at most one a minute, with the numbers under `loadMonitor`) means this instance is at its limit —

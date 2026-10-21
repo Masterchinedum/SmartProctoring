@@ -47,6 +47,13 @@ export interface Config {
   visionWorkers: number | null;
   /** In-process mode only (VISION_WORKERS=0): analyses in flight (VISION_CONCURRENCY). */
   visionConcurrency: number;
+  /**
+   * When this instance is too busy to take more exam starts (services/capacity.ts, docs/OPERATIONS.md §5):
+   * CAPACITY_MAX_VISION_WAIT_MS (2000) expected wait of a new identity sample in the face-analysis queue,
+   * CAPACITY_MAX_EVENT_LOOP_MS (200) event-loop delay p99, CAPACITY_MAX_DB_WAITING (5) requests waiting for a
+   * Postgres connection.
+   */
+  capacity: { maxVisionWaitMs: number; maxEventLoopP99Ms: number; maxDbWaiting: number };
   webDistDir: string;
   bootstrap: { email: string | null; password: string | null; orgName: string };
   logLevel: string;
@@ -286,6 +293,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     modelsDir: resolvePath(env.MODELS_DIR || 'models', root),
     visionWorkers: env.VISION_WORKERS != null && env.VISION_WORKERS !== '' ? Math.max(0, int(env.VISION_WORKERS, 0)) : null,
     visionConcurrency: int(env.VISION_CONCURRENCY, 0),
+    capacity: {
+      maxVisionWaitMs: Math.max(100, int(env.CAPACITY_MAX_VISION_WAIT_MS, 2000)),
+      maxEventLoopP99Ms: Math.max(10, int(env.CAPACITY_MAX_EVENT_LOOP_MS, 200)),
+      maxDbWaiting: Math.max(0, int(env.CAPACITY_MAX_DB_WAITING, 5)),
+    },
     webDistDir: resolvePath(env.WEB_DIST_DIR || '../web/dist', root),
     bootstrap: {
       email: env.BOOTSTRAP_ADMIN_EMAIL || null,

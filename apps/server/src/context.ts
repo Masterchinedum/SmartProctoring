@@ -3,6 +3,7 @@ import type { Config } from './config.js';
 import type { Database, Db } from './db/index.js';
 import type { JobRunner } from './jobs/runner.js';
 import type { Keyring } from './lib/crypto.js';
+import type { LoadMonitor } from './lib/load-monitor.js';
 import type { Mailer } from './lib/mailer.js';
 import type { BlobStorage } from './lib/storage.js';
 import type { RealtimeBus } from './realtime/bus.js';
@@ -33,4 +34,6 @@ export interface Ctx {
   mailer: Mailer | null;
   /** Optional external second-opinion face verifiers (src/verifiers; per-org settings, off by default). */
   verifiers: VerifierRegistry;
+  /** Event-loop / database-pool / vision-queue sampling of this instance (snapshot null until it has run). */
+  loadMonitor: LoadMonitor;
 }

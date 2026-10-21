@@ -261,7 +261,8 @@ continuous video. Candidate references are per-session and never reused across e
 `STORAGE_DRIVER` (`fs`|`s3`), `STORAGE_DIR`, `S3_*`, `REDIS_URL` (optional), `BOOTSTRAP_ADMIN_EMAIL` /
 `BOOTSTRAP_ADMIN_PASSWORD`, `WEB_DIST_DIR`. Capacity (docs/PERFORMANCE.md): `VISION_THREADS` (CPU threads
 for face analysis, default CPU count − 1), `VISION_WORKERS`, `VISION_NICE`, `PG_POOL_MAX` (20),
-`PG_STATEMENT_TIMEOUT_MS` (60 000). Integrations (optional):
+`PG_STATEMENT_TIMEOUT_MS` (60 000), `CAPACITY_MAX_VISION_WAIT_MS` / `CAPACITY_MAX_EVENT_LOOP_MS` / `CAPACITY_MAX_DB_WAITING`
+(when `/api/health/capacity` stops accepting exam starts; OPERATIONS §5). Integrations (optional):
 `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` (email alerts),
 `WEBHOOK_ALLOW_PRIVATE_NETWORKS` (dev only), `WEBHOOK_DISABLE_AFTER_FAILURES`, `API_RATE_LIMIT_PER_MINUTE`.
 

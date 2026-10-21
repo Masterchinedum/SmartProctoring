@@ -131,6 +131,8 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     log: app.log,
     mailer: opts.mailer !== undefined ? opts.mailer : ownedMailer,
     verifiers: opts.verifiers ?? createVerifierRegistry(),
+    // Warns (at most once a minute) when this instance is at its knee: event loop lagging, DB pool or vision queue.
+    loadMonitor: new LoadMonitor({ pool: database.pool, vision, log: app.log }),
   } as Omit<Ctx, 'live' | 'jobs'> as Ctx;
   ctx.live = new LiveNotifier(ctx);
   ctx.jobs = new JobRunner(ctx);
@@ -247,17 +249,15 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   });
 
   if (opts.bootstrap !== false) await bootstrapAdmin(ctx);
-  // Warns (at most once a minute) when this instance is at its knee: event loop lagging, DB pool or vision queue.
-  const loadMonitor = new LoadMonitor({ pool: database.pool, vision, log: app.log });
   if (opts.jobs ?? config.sweeperEnabled) {
     app.addHook('onReady', async () => {
       ctx.jobs.start();
-      loadMonitor.start();
+      ctx.loadMonitor.start();
     });
   }
 
   app.addHook('onClose', async () => {
-    loadMonitor.stop();
+    ctx.loadMonitor.stop();
     await ctx.jobs.stop();
     ctx.live.close();
     await owned.bus?.close();
