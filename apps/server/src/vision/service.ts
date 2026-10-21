@@ -11,7 +11,7 @@
  * FIFO queue; more than `maxQueue` waiting analyses are refused with VisionBusyError (map to HTTP 503).
  */
 import { availableParallelism } from 'node:os';
-import { VisionEngine } from './engine';
+import { disableOrtTelemetry, VisionEngine } from './engine';
 import { processIdPhoto } from './id-photo';
 import { resolveModelsDir } from './models';
 import { VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
@@ -189,6 +189,8 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
   static async create(options: VisionServiceOptions = {}): Promise<OnnxVisionService> {
     const modelsDir = resolveModelsDir(options.modelsDir);
     const threading = resolveVisionThreading(options);
+    disableOrtTelemetry(); // before the workers start: they inherit the environment
+
     const engineOpts = {
       modelsDir,
       threads: threading.threadsPerWorker,

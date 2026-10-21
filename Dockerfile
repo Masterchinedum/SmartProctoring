@@ -25,7 +25,8 @@ ENV NODE_ENV=production \
     PORT=8080 \
     WEB_DIST_DIR=/app/web \
     MODELS_DIR=/app/server/models \
-    STORAGE_DIR=/data/evidence
+    STORAGE_DIR=/data/evidence \
+    ORT_DISABLE_TELEMETRY=1
 WORKDIR /app/server
 COPY --from=build /out/node_modules ./node_modules
 COPY --from=build /out/package.json ./package.json

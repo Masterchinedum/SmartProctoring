@@ -11,6 +11,7 @@ import { poseFromFivePoints } from '@sp/shared';
 import * as ort from 'onnxruntime-node';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { isMainThread } from 'node:worker_threads';
 import { alignFace, type AlignedFace } from './align';
 import { DEFAULT_DETECT_THRESHOLD, YUNET_INPUT_SIZE, decodeToDetectedFaces, interEyeDistance, packBgrPlanar, planDetectorInput } from './detect';
 import { DEFAULT_MAX_DECODE_SIDE, DETECT_ENHANCE_BLUR_SIGMA, blurRgb, decodeImage, decodeRegion, encodeJpegRegion, enhanceForDetection, resizeRgb, wholeImageStats, type RgbImage } from './image';
@@ -60,6 +61,16 @@ const MAX_ALIGN_INTER_EYE = 120;
 const FACE_CROP_MARGIN = 0.4;
 const FACE_CROP_MAX_SIDE = 256;
 const FACE_CROP_QUALITY = 85;
+
+/**
+ * onnxruntime's Linux build carries a usage-telemetry uploader that initialises with the first session unless
+ * ORT_DISABLE_TELEMETRY is non-empty. Nothing may leave the server without an administrator's choice
+ * (docs/PRIVACY.md §7), so it is switched off whenever the variable is unset or empty. Call on the MAIN thread
+ * before workers start: native code reads the real environment, and a worker's process.env is only a copy.
+ */
+export function disableOrtTelemetry(env: NodeJS.ProcessEnv = process.env): void {
+  env.ORT_DISABLE_TELEMETRY ||= '1';
+}
 
 /**
  * Load a model with its weights treated as constants (onnx-model.ts): the SFace file lists its initializers as
@@ -166,6 +177,7 @@ export class VisionEngine {
   }
 
   static async create(opts: VisionEngineOptions): Promise<VisionEngine> {
+    if (isMainThread) disableOrtTelemetry();
     const sessionOptions: ort.InferenceSession.SessionOptions = {
       logSeverityLevel: 3,
       intraOpNumThreads: Math.max(1, Math.floor(opts.threads)),

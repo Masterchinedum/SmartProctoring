@@ -206,4 +206,5 @@ Customer-facing documentation of the API and webhooks: `docs/INTEGRATION_API.md`
 
 Outbound network: allow egress to your SMTP server and to the webhook receivers (and, if an organisation enables
 the external face verifier, to `rekognition.<region>.amazonaws.com`). Webhook requests come
-from the server's own IP with `User-Agent: SmartProctoring-Webhooks/1.0`.
+from the server's own IP with `User-Agent: SmartProctoring-Webhooks/1.0`. Nothing else calls out: the face-analysis
+runtime's own usage telemetry (onnxruntime) is switched off (`ORT_DISABLE_TELEMETRY=1`, set by the server when unset).
