@@ -15,6 +15,7 @@ import { SEVERITIES, type EventCategory, type EventType, type Severity } from '.
 import type { SessionEndReason, SessionStatus } from './session';
 import type { AccommodationKind } from './accommodations';
 import type { SessionReviewOutcome, SessionReviewState } from './review';
+import { sessionWindowInputSchema, type SessionWindow } from './scheduling';
 
 /* =================================================================== API keys */
 
@@ -55,6 +56,8 @@ export const WEBHOOK_EVENT_TYPES = [
   'session.terminated', // ended without submission (staff, or closed automatically after inactivity)
   'identity.mismatch', // convenience: a possible different person was observed (sent regardless of minSeverity)
   'session.reviewed', // staff completed the review of the exam — includes the outcome (never the staff note)
+  'session.rescheduled', // the window in which the candidate can start the exam was set or changed — includes the window
+  'session.reopened', // staff reopened an ended exam for recovery — includes how it had ended (never the staff reason)
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 /** Sent only by POST /api/admin/webhooks/:id/test. */
@@ -71,6 +74,8 @@ export const WEBHOOK_EVENT_LABELS: Record<WebhookEventType, string> = {
   'session.terminated': 'Exam ended without submission',
   'identity.mismatch': 'Possible different person',
   'session.reviewed': 'Review completed (with the outcome)',
+  'session.rescheduled': 'Exam rescheduled (with the new window)',
+  'session.reopened': 'Exam reopened for recovery',
 };
 
 export const WEBHOOK_SIGNATURE_HEADER = 'X-SmartProctoring-Signature';
@@ -190,7 +195,11 @@ export interface WebhookSessionData extends WebhookPartyRefs {
   at: number;
   /** The timeline event that recorded the change. */
   eventId: string;
-  /** session.held / session.released: the hold reason; session.terminated: 'abandoned_after_inactivity', 'consent_withdrawn' or null. */
+  /**
+   * session.held / session.released: the hold reason; session.terminated: 'abandoned_after_inactivity', 'consent_withdrawn'
+   * or null; session.submitted: 'too_many_reconnects' / 'offline_too_long' when the resume policy ended the exam
+   * (endReason 'resume_limit'), else null; session.reopened: the end reason it had before it was reopened.
+   */
   reason: string | null;
   /** session.pause_requested only. */
   pauseRequest?: { id: string | null; reason: string | null };
@@ -198,6 +207,11 @@ export interface WebhookSessionData extends WebhookPartyRefs {
   requireCheck?: boolean;
   /** session.submitted only (null when nothing could be graded). */
   score?: { points: number; maxPoints: number; autoGraded: boolean } | null;
+  /** session.rescheduled: the new window (and the previous one). */
+  window?: SessionWindow | null;
+  previousWindow?: SessionWindow | null;
+  /** session.reopened: minutes added to the exam time. */
+  addedMinutes?: number;
 }
 
 /* =================================================================== email alerts & status */
@@ -238,6 +252,8 @@ export const integrationAssignSchema = z
   .object({
     candidateIds: z.array(z.string().max(100)).max(1000).optional(),
     externalIds: z.array(z.string().trim().min(1).max(200)).max(1000).optional(),
+    /** Scheduling window for the new sessions (epoch ms or ISO 8601 with a time zone); existing unfinished sessions keep theirs. */
+    window: sessionWindowInputSchema.optional(),
   })
   .refine((v) => (v.candidateIds?.length ?? 0) + (v.externalIds?.length ?? 0) > 0, { message: 'Provide candidateIds and/or externalIds' });
 
@@ -268,6 +284,8 @@ export interface IntegrationSessionDTO {
   hold: HoldDTO | null;
   /** The candidate's access link — GET /sessions/:id only (null in lists and once unavailable). */
   accessLink: string | null;
+  /** The scheduling window (null: none — the exam can be started any time). */
+  window: SessionWindow | null;
   /**
    * Staff review of the attempt: 'none' (not picked up), 'open', 'escalated' or 'resolved' with the outcome
    * (no_concerns | concerns | inconclusive | technical_issues; also sent as the session.reviewed webhook).

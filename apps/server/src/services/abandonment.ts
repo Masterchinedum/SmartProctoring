@@ -8,7 +8,9 @@
  *   status invited | ready | paused | on_hold, or active with the exam clock stopped (e.g. stopped by a
  *   disconnect under disconnectTimerBehavior 'stop', so it can never run out)
  *   AND last activity < now - abandonAfterDays, where last activity = the latest of the session's last change
- *   (any candidate, staff or system action), its last heartbeat and — for holds — the start of the hold.
+ *   (any candidate, staff or system action), its last heartbeat, — for holds — the start of the hold, and the opening
+ *   and closing of its scheduling window (services/scheduling.ts): a session scheduled far ahead is not closed before
+ *   its window, and one whose window closed unused is closed abandonAfterDays after the closing.
  *
  * Closing = finalizeSession(m, 'abandoned'): status 'terminated', endReason 'abandoned', no score (answers are
  * kept), open periods/events closed, a neutral `session_terminated` event with
@@ -38,9 +40,16 @@ const STATUS_TEXT_FOR_ABANDON: Partial<Record<ExamSession['status'], string>> = 
   active: 'in progress with the exam clock stopped and no connection from the candidate',
 };
 
-/** Latest sign of life (epoch ms). */
-export function lastActivityAt(s: Pick<ExamSession, 'updatedAt' | 'lastHeartbeatAt' | 'holdSince' | 'createdAt'>): number {
-  return Math.max(s.createdAt.getTime(), s.updatedAt.getTime(), s.lastHeartbeatAt?.getTime() ?? 0, s.holdSince?.getTime() ?? 0);
+/** Latest sign of life (epoch ms); a scheduling window counts as activity until it closes. */
+export function lastActivityAt(s: Pick<ExamSession, 'updatedAt' | 'lastHeartbeatAt' | 'holdSince' | 'createdAt' | 'windowStartsAt' | 'windowEndsAt'>): number {
+  return Math.max(
+    s.createdAt.getTime(),
+    s.updatedAt.getTime(),
+    s.lastHeartbeatAt?.getTime() ?? 0,
+    s.holdSince?.getTime() ?? 0,
+    s.windowStartsAt?.getTime() ?? 0,
+    s.windowEndsAt?.getTime() ?? 0,
+  );
 }
 
 export function isAbandonable(s: Pick<ExamSession, 'status' | 'runningSince'>): boolean {
@@ -57,7 +66,8 @@ export async function closeAbandonedSessions(ctx: Ctx, opts: { maxSessions?: num
   const out: AbandonSummary = { closed: 0, sessionIds: [] };
   const max = opts.maxSessions ?? 5000;
   const orgs = await ctx.db.select({ id: organizations.id, settings: organizations.settings }).from(organizations);
-  const lastActivity = sql`greatest(${examSessions.createdAt}, ${examSessions.updatedAt}, coalesce(${examSessions.lastHeartbeatAt}, ${examSessions.updatedAt}), coalesce(${examSessions.holdSince}, ${examSessions.updatedAt}))`;
+  // (greatest() ignores NULLs: sessions without a window are unaffected.)
+  const lastActivity = sql`greatest(${examSessions.createdAt}, ${examSessions.updatedAt}, coalesce(${examSessions.lastHeartbeatAt}, ${examSessions.updatedAt}), coalesce(${examSessions.holdSince}, ${examSessions.updatedAt}), ${examSessions.windowStartsAt}, ${examSessions.windowEndsAt})`;
   for (const org of orgs) {
     const days = orgSettings(org).abandonAfterDays;
     const cutoff = ctx.now() - days * DAY_MS;

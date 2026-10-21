@@ -117,6 +117,25 @@ export const connectionPolicySchema = z.object({
   heartbeatTimeoutSec: z.number().int().min(10).max(300).default(20),
 });
 
+/**
+ * Resume policy: how often and how long an exam in progress may be interrupted WITHOUT a formal pause before staff
+ * have to decide (formal pauses follow pausePolicySchema). The defaults (no limits) keep the behaviour from before.
+ *  - maxReconnects: times the exam may be reopened in a new browser window during the exam (a reload, a crash, another
+ *    device: each needs a reconnect check). Checked when the next reconnect check starts; counted when one passes.
+ *    Reloading before the exam starts does not count. null = unlimited; 0 = none allowed.
+ *  - maxOfflineMinutes: how long the candidate's browser may be disconnected during the exam (no heartbeat), measured
+ *    from the last heartbeat (or from when the exam last continued). Enforced by the sweeper and when the candidate
+ *    returns. Paused or held exams are not counted. null = unlimited.
+ *  - onLimit: 'hold' (default, the less harsh choice) puts the exam on hold for staff review (hold reason
+ *    'resume_limit'; releasing it gives the allowance again); 'end' ends it and submits the saved answers (end reason
+ *    'resume_limit'). Either way staff can let the candidate continue (release, or reopen for recovery).
+ */
+export const resumePolicySchema = z.object({
+  maxReconnects: z.number().int().min(0).max(100).nullable().default(null),
+  maxOfflineMinutes: z.number().int().min(1).max(1440).nullable().default(null),
+  onLimit: z.enum(['hold', 'end']).default('hold'),
+});
+
 export const browserPolicySchema = z.object({
   requireFullscreen: z.boolean().default(true),
   blockClipboard: z.boolean().default(true),
@@ -225,6 +244,7 @@ export const proctoringPolicySchema = z
     camera: cameraPolicySchema.default({}),
     pause: pausePolicySchema.default({}),
     connection: connectionPolicySchema.default({}),
+    resume: resumePolicySchema.default({}),
     browser: browserPolicySchema.default({}),
     detection: detectionPolicySchema.default({}),
     evidence: evidencePolicySchema.default({}),
@@ -252,6 +272,7 @@ function enforceModes<P extends { identity: { verification: 'automatic' | 'staff
 export type IdentityPolicy = z.infer<typeof identityPolicySchema>;
 export type PausePolicy = z.infer<typeof pausePolicySchema>;
 export type ConnectionPolicy = z.infer<typeof connectionPolicySchema>;
+export type ResumePolicy = z.infer<typeof resumePolicySchema>;
 export type BrowserPolicy = z.infer<typeof browserPolicySchema>;
 export type DetectionPolicy = z.infer<typeof detectionPolicySchema>;
 export type EvidencePolicy = z.infer<typeof evidencePolicySchema>;

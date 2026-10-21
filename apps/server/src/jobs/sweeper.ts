@@ -7,7 +7,9 @@
  *  - stale checks        => judged on the frames they received (a check trending to a different person counts as a
  *                           failed attempt), otherwise expired;
  *  - identity bursts whose remaining frames never arrived => decided on the frames received (identity-samples.ts);
- *    embeddings of burst frames that will never be decided (any session) => erased.
+ *    embeddings of burst frames that will never be decided (any session) => erased;
+ *  - resume policy   => an active exam disconnected for longer than policy.resume.maxOfflineMinutes is held for staff
+ *                       review or ended (services/recovery.ts).
  * Runs via JobRunner (one instance at a time, pg advisory lock); each session change runs under its row lock.
  */
 import { clockExpired } from '@sp/shared';
@@ -18,12 +20,13 @@ import { checks, examSessions } from '../db/schema.js';
 import { sessionClock } from '../services/dto.js';
 import { settleAbandonedChecks } from '../services/checks.js';
 import { decideStaleBurstsForAll, eraseOrphanFrameEmbeddingsForAll } from '../services/identity-samples.js';
+import { enforceOfflineLimits } from '../services/recovery.js';
 import { finalizeSession, withSession } from '../services/session-state.js';
 
 const MIN_HEARTBEAT_TIMEOUT_MS = 10_000;
 const BATCH = 200;
 
-export async function sweepOnce(ctx: Ctx): Promise<{ timedOut: number; expired: number; checksExpired: number; burstsDecided: number }> {
+export async function sweepOnce(ctx: Ctx): Promise<{ timedOut: number; expired: number; checksExpired: number; burstsDecided: number; resumeLimits: number }> {
   const now = ctx.now();
   let timedOut = 0;
   let expired = 0;
@@ -113,7 +116,16 @@ export async function sweepOnce(ctx: Ctx): Promise<{ timedOut: number; expired: 
     ctx.log.error({ err }, 'sweeper: erasing orphan burst-frame embeddings failed');
   }
 
-  return { timedOut, expired, checksExpired, burstsDecided };
+  // 5. Resume policy: active exams disconnected for longer than their maxOfflineMinutes (after expiry, step 2: an exam
+  // whose time ran out meanwhile is submitted as expired, not held).
+  let resumeLimits = 0;
+  try {
+    resumeLimits = await enforceOfflineLimits(ctx);
+  } catch (err) {
+    ctx.log.error({ err }, 'sweeper: resume policy failed');
+  }
+
+  return { timedOut, expired, checksExpired, burstsDecided, resumeLimits };
 }
 
 /** The sweeper as a JobRunner job (registered by app.ts). */
@@ -124,7 +136,7 @@ export function sweeperJob(intervalMs: number): JobDefinition {
     runAtStart: true,
     async run(ctx) {
       const r = await sweepOnce(ctx);
-      if (r.timedOut || r.expired) ctx.log.info(r, 'sweeper');
+      if (r.timedOut || r.expired || r.resumeLimits) ctx.log.info(r, 'sweeper');
     },
   };
 }

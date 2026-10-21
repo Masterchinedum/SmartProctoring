@@ -85,6 +85,8 @@ export const EVENT_TYPES = [
   'identity_verified_by_staff',
   'review_completed',
   'review_reopened',
+  'session_rescheduled',
+  'session_reopened',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -439,6 +441,24 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
     title: 'Review reopened',
     observation: 'Staff reopened the review of this exam.',
     reviewerNote: 'Details include the previous outcome and why it was reopened.',
+    sources: ['staff'],
+    span: false,
+  },
+  session_rescheduled: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Exam rescheduled',
+    observation: 'The window in which the candidate can start the exam was changed.',
+    reviewerNote: 'Details include the previous and the new window. Rescheduling is possible only before the exam starts.',
+    sources: ['staff'],
+    span: false,
+  },
+  session_reopened: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Exam reopened for recovery',
+    observation: 'An administrator reopened the exam after it had ended, so the candidate can continue.',
+    reviewerNote: 'Details include how the exam had ended, the reason given, any minutes added and the score before reopening. The candidate continues only after a fresh identity check.',
     sources: ['staff'],
     span: false,
   },

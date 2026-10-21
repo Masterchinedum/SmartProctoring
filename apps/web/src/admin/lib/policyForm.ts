@@ -218,6 +218,43 @@ export const POLICY_GROUPS: PolicyGroup[] = [
     ],
   },
   {
+    id: 'resume',
+    title: 'Interruptions and recovery',
+    description:
+      'Limits on interruptions that are not a pause: the exam reopened in a new browser window (after a reload, a crash or on another device) or the connection lost. When a limit is reached, staff decide whether the candidate continues. Pauses follow the pausing rules above.',
+    fields: [
+      {
+        path: 'resume.maxReconnects',
+        label: 'Times the exam may be reopened in a new browser window',
+        kind: 'nullableInteger',
+        min: 0,
+        max: 100,
+        nullLabel: 'Unlimited',
+        help: 'Each time, the candidate repeats the camera and identity check. Reloading the page before the exam starts does not count. 0 = not allowed at all.',
+      },
+      {
+        path: 'resume.maxOfflineMinutes',
+        label: 'Longest time the exam may be disconnected',
+        kind: 'nullableInteger',
+        min: 1,
+        max: 1440,
+        unit: 'min',
+        nullLabel: 'Unlimited',
+        help: 'Counted from the last sign of the candidate’s browser during the exam. Paused exams and exams on hold are not counted.',
+      },
+      {
+        path: 'resume.onLimit',
+        label: 'When a limit is reached',
+        kind: 'enum',
+        options: [
+          { value: 'hold', label: 'Put the exam on hold for staff to decide (recommended)' },
+          { value: 'end', label: 'End the exam and submit the saved answers' },
+        ],
+        help: 'Either way staff can let the candidate continue: release the hold, or reopen the ended exam for recovery.',
+      },
+    ],
+  },
+  {
     id: 'browser',
     title: 'Browser rules',
     description: 'Signals available from the exam page. The system cannot observe other monitors, devices or applications.',

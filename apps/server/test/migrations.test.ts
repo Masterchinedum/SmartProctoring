@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, findMigrationsDir, migrate, type Database } from '../src/db/index.js';
-import { DEFAULT_IDENTITY_THRESHOLDS } from '@sp/shared';
+import { DEFAULT_IDENTITY_THRESHOLDS, resolvePolicy } from '@sp/shared';
 import { decisionConfigs, eventReviews, events, evidence, examSessions, exams, examVersions, organizations, privacyRequests } from '../src/db/schema.js';
 import { calibrationBreakdown } from '../src/services/calibration.js';
 import { ensureDecisionConfigs, listDecisionConfigs } from '../src/services/decision-configs.js';
@@ -23,6 +23,7 @@ import { MemoryStorage } from '../src/lib/storage.js';
 import { readEvidence } from '../src/services/evidence.js';
 import { assertStorageLocationsConfigured, evidenceCountsByLocation, evidenceLocationsInUse } from '../src/services/evidence-storage.js';
 import { orgSettings } from '../src/services/org.js';
+import { sessionWindow, windowColumns } from '../src/services/scheduling.js';
 import { sessionExamContent, versionForStart } from '../src/services/exam-versions.js';
 import { dbUrl, TEST_ADMIN_URL } from './global-setup.js';
 
@@ -297,5 +298,37 @@ describe('0013_data_residency', () => {
     await sql(`UPDATE evidence SET storage_location = 'eu' WHERE id = $1`, [ids[0]]);
     expect(await evidenceLocationsInUse(db)).toEqual(['eu']);
     await expect(assertStorageLocationsConfigured(db, ['default'])).rejects.toThrow(/evidence images are stored in "eu"/);
+  });
+});
+
+describe('0014_scheduling_recovery', () => {
+  it('adds the scheduling window and the reconnect count to existing sessions: no window, nothing counted', async () => {
+    const database = await databaseAt('0013_data_residency');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    const org = (await one(`INSERT INTO organizations (name) VALUES ('Old Org') RETURNING id`)).id;
+    const cand = (await one(`INSERT INTO candidates (org_id, name) VALUES ($1, 'Old Candidate') RETURNING id`, [org])).id;
+    const exam = (await one(`INSERT INTO exams (org_id, title, duration_sec, status, policy) VALUES ($1, 'Old', 600, 'published', '{}') RETURNING id`, [org])).id;
+    const invited = (await one(`INSERT INTO exam_sessions (org_id, exam_id, candidate_id, access_token_hash, duration_ms) VALUES ($1, $2, $3, 'h1', 600000) RETURNING id`, [org, exam, cand])).id;
+    const active = (
+      await one(
+        `INSERT INTO exam_sessions (org_id, exam_id, candidate_id, access_token_hash, duration_ms, status, connection, started_at, policy) VALUES ($1, $2, $3, 'h2', 600000, 'active', 'offline', now(), '{"pause":{"allowed":true}}') RETURNING id`,
+        [org, exam, cand],
+      )
+    ).id;
+
+    await migrate(database);
+
+    const rows = await database.db.select().from(examSessions);
+    for (const r of rows) expect(r).toMatchObject({ windowStartsAt: null, windowEndsAt: null, reconnectCount: 0 });
+    expect(sessionWindow(rows.find((r) => r.id === invited)!)).toBeNull();
+    // An old policy snapshot has no resume policy: no limit applies to the exam in progress.
+    expect(resolvePolicy(rows.find((r) => r.id === active)!.policy).resume).toEqual({ maxReconnects: null, maxOfflineMinutes: null, onLimit: 'hold' });
+    const startsAt = Date.parse('2026-11-02T09:00:00Z');
+    await database.db.update(examSessions).set(windowColumns({ startsAt, endsAt: null })).where(eq(examSessions.id, invited));
+    const [after] = await database.db.select().from(examSessions).where(eq(examSessions.id, invited));
+    expect(sessionWindow(after)).toEqual({ startsAt, endsAt: null });
+    const idx = await one(`SELECT indexdef FROM pg_indexes WHERE indexname = 'exam_sessions_offline_idx'`);
+    expect(idx.indexdef).toMatch(/WHERE \(connection = 'offline'::text\)/);
   });
 });

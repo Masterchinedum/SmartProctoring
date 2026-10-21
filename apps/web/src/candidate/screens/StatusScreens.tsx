@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { formatDuration, type EndReason } from '@sp/shared';
-import { errorMessage, formatDateTime, formatTime, useController, useSnapshot } from '../context';
+import { formatDuration, type CandidateEndReason } from '@sp/shared';
+import { CandidateApiError } from '../api';
+import { errorMessage, formatDateTime, formatTime, useController, useNow, useSnapshot } from '../context';
+import { formatWhen, startOpensAt, windowScreenText } from '../window';
 import { BrandHeader, CameraPreview, ContactLine, CountdownDisplay, Page, PrivacyNoticeDialog, ReportingBanner, ScreenHeading, Spinner, Toasts, TraceDownload } from '../components/common';
 import { enterFullscreen } from './exam/ExamScreen';
 
@@ -15,6 +17,10 @@ export function ReadyScreen() {
   const [error, setError] = useState<string | null>(null);
   const [showNotice, setShowNotice] = useState(false);
   const p = state.exam.policy;
+  // Checked in before the scheduling window opened: the exam can be started at the opening (./window.ts). The page
+  // ticks every second only while an opening time is ahead.
+  useNow(state.session.window?.startsAt != null && state.session.window.startsAt > ctrl.serverNow() ? 1000 : 3_600_000);
+  const opensAt = startOpensAt(state, ctrl.serverNow());
 
   // Keep the camera on so monitoring can start immediately with the exam (never for an exam without a camera).
   const cameraOn = p.camera?.enabled !== false;
@@ -33,6 +39,8 @@ export function ReadyScreen() {
       setError(errorMessage(e));
       setBusy(false);
       setDeferred(false);
+      // Outside the scheduling window: the state shows when it opens / that it closed.
+      if (e instanceof CandidateApiError && (e.code === 'exam_window_not_open' || e.code === 'exam_window_closed')) void ctrl.load();
     }
   };
 
@@ -82,13 +90,19 @@ export function ReadyScreen() {
               </ul>
             </div>
           </div>
+          {opensAt != null && (
+            <div className="banner banner-info" data-testid="opens-at">
+              The exam opens on {formatWhen(opensAt)} (your time). You can start it then — in {formatDuration(opensAt - ctrl.serverNow())}. Keep this page open; the button
+              becomes available by itself.
+            </div>
+          )}
           {error && (
             <div className="banner banner-danger" role="alert">
               {error}
             </div>
           )}
           <div className="row">
-            <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy} data-testid="start-exam">
+            <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy || opensAt != null} data-testid="start-exam">
               {busy ? (deferred ? 'Waiting to start…' : 'Starting…') : 'Start exam'}
             </button>
           </div>
@@ -172,13 +186,15 @@ export function HoldScreen({ onReverify }: { onReverify: () => void }) {
   const state = snap.state!;
   const hold = state.session.hold;
   const [refreshing, setRefreshing] = useState(false);
+  // Reopened for recovery by an administrator: not a hold the candidate has to wait out.
+  const recovery = hold?.reason === 'recovery';
   return (
     <Page>
       <BrandHeader title={state.exam.title} />
       <main className="stack">
         <ReportingBanner />
-        <section className="card stack" data-testid="hold-screen">
-          <ScreenHeading>Your exam is on hold</ScreenHeading>
+        <section className="card stack" data-testid="hold-screen" data-reason={hold?.reason ?? ''}>
+          <ScreenHeading>{recovery ? 'Your exam has been reopened' : 'Your exam is on hold'}</ScreenHeading>
           {/* Blocking state: announced assertively when the screen appears (the heading also gets the focus). */}
           <p className="cand-lead" role="alert">
             {hold?.message ?? 'Your exam is on hold while an administrator reviews it.'}
@@ -192,15 +208,19 @@ export function HoldScreen({ onReverify }: { onReverify: () => void }) {
             )}
             <div>
               <dt>Exam clock</dt>
-              <dd>Stopped while on hold</dd>
+              <dd>{recovery ? 'Stopped until you pass the check' : 'Stopped while on hold'}</dd>
             </div>
           </dl>
           <CountdownDisplay />
-          <p>Your answers and remaining time are saved. This page updates automatically when the administrator responds; you can also close it and open the exam link later.</p>
+          <p>
+            {recovery
+              ? 'Your answers and remaining time are saved. When you are ready, start the camera and identity check; your exam continues right after it.'
+              : 'Your answers and remaining time are saved. This page updates automatically when the administrator responds; you can also close it and open the exam link later.'}
+          </p>
           <div className="row">
             {hold?.canReverify && (
               <button type="button" className="btn btn-primary btn-lg" onClick={onReverify} data-testid="reverify-button">
-                Verify again
+                {recovery ? 'Continue to the identity check' : 'Verify again'}
               </button>
             )}
             <button
@@ -226,13 +246,14 @@ export function HoldScreen({ onReverify }: { onReverify: () => void }) {
 
 /* ------------------------------------------------------------------ ended */
 
-const END_TEXT: Record<EndReason | 'abandoned', string> = {
+const END_TEXT: Record<CandidateEndReason | 'abandoned', string> = {
   candidate_submitted: 'You submitted your exam.',
   time_expired: 'The exam time ran out, and your saved answers were submitted automatically.',
   staff_submitted: 'Your exam was submitted by the exam administrator.',
   staff_terminated: 'Your exam was ended by the exam administrator.',
   candidate_withdrew: 'You withdrew your consent, so your exam has ended. Your face images were deleted. The exam provider will contact you about another way to take the exam.',
   abandoned: 'This exam was closed because it was not continued for a long time. Your saved answers are kept.',
+  resume_limit: 'Your exam was interrupted more often or for longer than the exam rules allow, so it ended. Your saved answers were submitted.',
 };
 
 function endText(reason: string | null, terminated: boolean): string {
@@ -272,6 +293,67 @@ export function EndedScreen() {
           )}
           <ContactLine />
           {ctrl.trace && <TraceDownload />}
+        </section>
+      </main>
+    </Page>
+  );
+}
+
+/* ------------------------------------------------------------------ scheduling window */
+
+/**
+ * The exam has not started and its scheduling window does not allow going further now: it opens later (before the
+ * check-in may begin) or it has closed. Times in the candidate's own time zone. The page refreshes every minute (an
+ * administrator may reschedule) and at the opening (the router re-renders at window boundaries).
+ */
+export function WindowScreen({ phase }: { phase: 'before_check_in' | 'closed' }) {
+  const ctrl = useController();
+  const snap = useSnapshot();
+  const state = snap.state!;
+  const [checking, setChecking] = useState(false);
+  useEffect(() => ctrl.releaseIdleCamera(), [ctrl]);
+  useEffect(() => {
+    const id = setInterval(() => void ctrl.load(), 60_000);
+    return () => clearInterval(id);
+  }, [ctrl]);
+  const text = windowScreenText(state.session.window, phase);
+  return (
+    <Page>
+      <BrandHeader title={state.exam.title} />
+      <main className="stack">
+        <section className="card stack" data-testid="window-screen" data-phase={phase}>
+          <ScreenHeading>{text.heading}</ScreenHeading>
+          <p className="cand-lead">{text.lead}</p>
+          <ul>
+            {text.lines.map((l) => (
+              <li key={l}>{l}</li>
+            ))}
+          </ul>
+          <dl className="cand-facts">
+            <div>
+              <dt>Exam</dt>
+              <dd>{state.exam.title}</dd>
+            </div>
+            <div>
+              <dt>Duration</dt>
+              <dd>{formatDuration(state.session.durationMs)}</dd>
+            </div>
+          </dl>
+          <div className="row">
+            <button
+              type="button"
+              className="btn"
+              disabled={checking}
+              onClick={async () => {
+                setChecking(true);
+                await ctrl.load();
+                setChecking(false);
+              }}
+            >
+              {checking ? 'Checking…' : 'Check again'}
+            </button>
+          </div>
+          <ContactLine />
         </section>
       </main>
     </Page>

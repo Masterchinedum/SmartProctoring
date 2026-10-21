@@ -620,10 +620,16 @@ export const HOLD_MESSAGES: Record<HoldReason, string> = {
   id_photo_unverifiable:
     'We could not compare you clearly with the identity photo on file (for example because of lighting or image quality). This is not a finding that you are a different person. An administrator will review this before you can start.',
   staff_verification: 'A staff member will now verify your identity, as arranged with your organisation. Please keep this page open. The exam clock is stopped.',
+  resume_limit:
+    'Your exam was interrupted more often or for longer than the exam rules allow, so it is on hold. An administrator needs to approve before you can continue. Your answers and remaining time are saved.',
+  recovery: 'An administrator has reopened your exam. Complete the camera and identity check to continue where you stopped. Your answers are saved, and the exam clock starts again only after the check.',
 };
 
 /** Put the session on hold (clock stopped, on_hold period opens, candidate gets a 'hold' command). */
-export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; message?: string; canReverify?: boolean; source?: EventSource; details?: Record<string, unknown>; by?: string | null }): Promise<void> {
+export async function holdNow(
+  m: SessionMutation,
+  opts: { reason: HoldReason; message?: string; canReverify?: boolean; source?: EventSource; details?: Record<string, unknown>; by?: string | null; /** Timeline wording (default: the catalog's). */ observation?: string },
+): Promise<void> {
   assertStatus(m, ['invited', 'ready', 'active', 'paused', 'on_hold']);
   const at = m.now;
   const prev = m.session.status;
@@ -650,7 +656,7 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
     reEnrollAuthorizedBy: null,
   });
   m.resetIdentityCounters();
-  await m.addEvent({ type: 'session_held', source: opts.source ?? 'server_system', details: { reason: opts.reason, previousStatus: prev, by: opts.by ?? null, ...(opts.details ?? {}) } });
+  await m.addEvent({ type: 'session_held', source: opts.source ?? 'server_system', observation: opts.observation, details: { reason: opts.reason, previousStatus: prev, by: opts.by ?? null, ...(opts.details ?? {}) } });
   await m.enqueueCommand({ kind: 'hold', hold: { reason: opts.reason, since: m.session.holdSince?.getTime() ?? at, message, canReverify: opts.canReverify ?? false } });
 }
 
@@ -660,7 +666,7 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
 export async function finalizeSession(
   m: SessionMutation,
   endReason: SessionEndReason,
-  opts: { by?: string | null; note?: string | null; /** 'abandoned' / 'candidate_withdrew' only */ observation?: string; details?: Record<string, unknown>; candidateMessage?: string } = {},
+  opts: { by?: string | null; note?: string | null; /** 'abandoned' / 'candidate_withdrew' / 'resume_limit' only */ observation?: string; details?: Record<string, unknown>; candidateMessage?: string } = {},
 ): Promise<void> {
   if (TERMINAL.includes(m.session.status)) return;
   // Time expiry is recorded at the moment the clock ran out (the sweeper may run a few seconds later).
@@ -706,7 +712,8 @@ export async function finalizeSession(
     });
     await m.enqueueCommand({ kind: 'terminated', message: opts.candidateMessage ?? 'You withdrew your consent, so your exam has ended.' });
   } else {
-    await m.addEvent({ type: 'session_submitted', startedAt: at, source: 'server_system', details: { endReason, by: opts.by ?? null, note: opts.note ?? null } });
+    // 'resume_limit' (services/recovery.ts): the resume policy ended the exam; submitted and graded like a time expiry.
+    await m.addEvent({ type: 'session_submitted', startedAt: at, source: 'server_system', observation: opts.observation, details: { endReason, by: opts.by ?? null, note: opts.note ?? null, ...(opts.details ?? {}) } });
     if (endReason !== 'candidate_submitted') await m.enqueueCommand({ kind: 'submitted', reason: endReason });
   }
   if (wasStarted && endReason !== 'abandoned' && endReason !== 'candidate_withdrew') {

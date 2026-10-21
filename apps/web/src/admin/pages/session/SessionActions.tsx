@@ -8,8 +8,12 @@ import { useAuth } from '../../auth';
 import { CopyButton } from '../../components/Common';
 import { ConfirmDialog, Modal } from '../../components/Modal';
 import { Clock, RelativeTime } from '../../components/Time';
+import { WindowFields } from '../../components/WindowFields';
+import { END_REASON_LABELS } from '../../lib/labels';
+import { formatDuration } from '../../lib/format';
+import { parseReopenMinutes, parseWindowForm, toLocalInput, type WindowFormValues } from '../../lib/scheduling';
 
-type Dialog = null | 'hold' | 'release' | 'terminate' | 'submit' | 'extend' | 'regenerate' | 'legal';
+type Dialog = null | 'hold' | 'release' | 'terminate' | 'submit' | 'extend' | 'regenerate' | 'legal' | 'reschedule' | 'reopen';
 
 /** Staff actions for a session, filtered by role and session state. */
 export function SessionActions({ d }: { d: SessionDetailDTO }) {
@@ -41,6 +45,8 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
 
   const canHold = s.status === 'active' || s.status === 'paused' || s.status === 'ready' || s.status === 'invited';
   const canSubmit = s.status === 'active' || s.status === 'paused' || s.status === 'on_hold';
+  // The window can change until the exam starts (services/scheduling.ts); an ended exam may be reopened (services/recovery.ts).
+  const canReschedule = !terminal && s.startedAt == null;
 
   return (
     <div className="actions-bar no-print">
@@ -63,6 +69,16 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
         {isAdmin && canSubmit ? (
           <button type="button" className="btn" onClick={() => setDialog('submit')}>
             Submit on behalf…
+          </button>
+        ) : null}
+        {isAdmin && canReschedule ? (
+          <button type="button" className="btn" onClick={() => setDialog('reschedule')}>
+            Reschedule…
+          </button>
+        ) : null}
+        {isAdmin && terminal ? (
+          <button type="button" className="btn" onClick={() => setDialog('reopen')}>
+            Reopen for recovery…
           </button>
         ) : null}
         {isAdmin && !terminal ? (
@@ -116,6 +132,8 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
       ) : null}
       {dialog === 'release' ? <ReleaseDialog d={d} onDone={done} onCancel={() => setDialog(null)} /> : null}
       {dialog === 'extend' ? <ExtendDialog sessionId={s.id} onDone={done} onCancel={() => setDialog(null)} /> : null}
+      {dialog === 'reschedule' ? <RescheduleDialog d={d} onDone={done} onCancel={() => setDialog(null)} /> : null}
+      {dialog === 'reopen' ? <ReopenDialog d={d} onDone={done} onCancel={() => setDialog(null)} /> : null}
       {dialog === 'terminate' ? (
         <ConfirmDialog
           title="Terminate this exam?"
@@ -332,6 +350,133 @@ function ExtendDialog({ sessionId, onDone, onCancel }: { sessionId: string; onDo
           Reason (e.g. accommodation, technical problem)
           <textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} rows={2} />
         </label>
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/** Set, change or clear the window in which the candidate can start the exam (before it starts). */
+function RescheduleDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
+  const w = d.summary.window ?? null;
+  const [form, setForm] = useState<WindowFormValues>({ opens: toLocalInput(w?.startsAt), closes: toLocalInput(w?.endsAt) });
+  const [note, setNote] = useState('');
+  const parsed = parseWindowForm(form, Date.now());
+  const m = useMutation({ mutationFn: () => api.reschedule(d.summary.id, parsed.ok ? parsed.window : null, note.trim()), onSuccess: onDone });
+  return (
+    <Modal
+      title="Reschedule the exam"
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn" onClick={onCancel} disabled={m.isPending}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-primary" onClick={() => m.mutate()} disabled={!parsed.ok || m.isPending}>
+            {m.isPending ? 'Saving…' : parsed.ok && !parsed.window ? 'Remove the window' : 'Save window'}
+          </button>
+        </>
+      }
+    >
+      <div className="stack">
+        <p className="small">
+          {d.summary.candidate.name} can start the exam only inside this window. The access link stays the same; tell the candidate about the new time. The change is recorded
+          in the timeline and the audit log.
+        </p>
+        <WindowFields idPrefix="reschedule-window" legend="When the candidate can start" value={form} onChange={setForm} error={parsed.ok ? null : { field: parsed.field, message: parsed.error }} />
+        <label>
+          Note (optional; recorded in the timeline)
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} rows={2} placeholder="e.g. Moved after the candidate reported illness." />
+        </label>
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Reopen an ended exam for recovery. The server decides whether it may (SessionDetailDTO.reopen, shared
+ * reopenEligibility): when it may not, the dialog says why and offers nothing else.
+ */
+function ReopenDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
+  const e = d.reopen;
+  const [reason, setReason] = useState('');
+  const [minutes, setMinutes] = useState(e && e.started && e.remainingMs < 60_000 ? '10' : '0');
+  const mins = parseReopenMinutes(minutes, e?.remainingMs ?? 0, e?.started ?? true);
+  const reasonOk = reason.trim().length >= 5;
+  const m = useMutation({ mutationFn: () => api.reopen(d.summary.id, reason.trim(), mins.ok ? mins.minutes : 0), onSuccess: onDone });
+  const allowed = e?.allowed === true;
+  const endedHow = d.summary.endReason ? END_REASON_LABELS[d.summary.endReason] : 'Ended';
+  return (
+    <Modal
+      title="Reopen the exam for recovery"
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn" onClick={onCancel} disabled={m.isPending}>
+            {allowed ? 'Cancel' : 'Close'}
+          </button>
+          {allowed ? (
+            <button type="button" className="btn btn-primary" data-testid="confirm-reopen" onClick={() => m.mutate()} disabled={!reasonOk || !mins.ok || m.isPending}>
+              {m.isPending ? 'Reopening…' : 'Reopen exam'}
+            </button>
+          ) : null}
+        </>
+      }
+    >
+      <div className="stack">
+        <p className="small">
+          How it ended: <strong>{endedHow}</strong>.
+          {e?.started ? <> Exam time left: {formatDuration(e.remainingMs)}.</> : null}
+        </p>
+        {!e ? (
+          <div className="banner banner-info small">The server did not say whether this exam can be reopened. Reload the page and try again.</div>
+        ) : !allowed ? (
+          <div className="banner banner-warning small" data-testid="reopen-refused">
+            {e.message}
+          </div>
+        ) : (
+          <>
+            <div className="banner banner-info small">
+              {e.message} Ask the candidate to open their exam link again (or reload the exam page). The reopening is recorded in the timeline, the report and the audit log,
+              and integrations are notified.
+            </div>
+            <label htmlFor="reopen-reason">
+              Reason (required; recorded in the timeline and the audit log, not sent to integrations)
+              <textarea
+                id="reopen-reason"
+                value={reason}
+                onChange={(ev) => setReason(ev.target.value)}
+                maxLength={1000}
+                rows={3}
+                placeholder="e.g. Power cut at the test centre; the candidate continues from where they stopped."
+                aria-describedby="reopen-reason-hint"
+              />
+            </label>
+            <div className="muted small" id="reopen-reason-hint">
+              At least 5 characters. Describe what happened factually.
+            </div>
+            <label htmlFor="reopen-minutes">
+              Minutes to add to the exam time
+              <input
+                id="reopen-minutes"
+                type="number"
+                min={0}
+                max={1440}
+                step={1}
+                value={minutes}
+                onChange={(ev) => setMinutes(ev.target.value)}
+                aria-invalid={!mins.ok}
+                aria-describedby={!mins.ok ? 'reopen-minutes-error' : undefined}
+              />
+            </label>
+            {!mins.ok ? (
+              <div className="text-danger small" id="reopen-minutes-error">
+                {mins.error}
+              </div>
+            ) : null}
+          </>
+        )}
         {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
       </div>
     </Modal>

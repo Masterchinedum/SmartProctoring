@@ -6,7 +6,7 @@
  *  - returns the fresh SessionSummaryDTO (after commit; realtime is published automatically).
  */
 import { randomUUID } from 'node:crypto';
-import type { CheckPurpose, SessionSummaryDTO, StaffVerificationMethod } from '@sp/shared';
+import type { CheckPurpose, SessionSummaryDTO, SessionWindow, StaffVerificationMethod } from '@sp/shared';
 import { and, desc, eq } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
@@ -49,9 +49,10 @@ export interface CreatedSession {
 
 /**
  * Create an exam session (assignment) for a candidate. The access token is returned once in clear;
- * only its sha256 (and an encrypted copy for staff re-display) is stored.
+ * only its sha256 (and an encrypted copy for staff re-display) is stored. `window`: the scheduling window, already
+ * validated by the caller (services/scheduling.ts acceptWindow).
  */
-export async function createExamSession(ctx: Ctx, db: DbOrTx, input: { orgId: string; examId: string; candidateId: string }): Promise<CreatedSession> {
+export async function createExamSession(ctx: Ctx, db: DbOrTx, input: { orgId: string; examId: string; candidateId: string; window?: SessionWindow | null }): Promise<CreatedSession> {
   const [exam] = await db.select().from(exams).where(and(eq(exams.id, input.examId), eq(exams.orgId, input.orgId)));
   if (!exam) throw notFound('Exam not found', 'exam_not_found');
   const token = randomToken(32);
@@ -70,6 +71,8 @@ export async function createExamSession(ctx: Ctx, db: DbOrTx, input: { orgId: st
       accessTokenEnc: ctx.keyring.encryptString(token, `access-token:${id}`),
       durationMs: exam.durationSec * 1000 + (acc?.extraTimeMs ?? 0),
       accommodations: acc,
+      windowStartsAt: input.window?.startsAt != null ? new Date(input.window.startsAt) : null,
+      windowEndsAt: input.window?.endsAt != null ? new Date(input.window.endsAt) : null,
       createdAt: new Date(now),
       updatedAt: new Date(now),
     })
@@ -167,6 +170,8 @@ export async function releaseHold(
       .where(and(eq(identityReferences.sessionId, sessionId), eq(identityReferences.active, true)));
     const prev = m.session.holdPrevStatus ?? 'active';
     const details = { requireCheck, reEnroll, note: opts.note ?? null, by: actor.id, reason: m.session.holdReason };
+    // Staff decided the candidate may continue after a resume-policy limit (policy.resume): the allowance starts again.
+    if (m.session.holdReason === 'resume_limit') m.set({ reconnectCount: 0 });
     if (verificationHold) {
       const [held] = await m.tx
         .select({ details: events.details })

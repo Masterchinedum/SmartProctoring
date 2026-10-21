@@ -82,6 +82,8 @@ import { copyEvidence, frameAad, frameToAnalysis, idPhotoAad, loadActiveReferenc
 import { clearedHold } from './session-actions.js';
 import { decisionStamp, orgThresholds, type DecisionStamp } from './org.js';
 import { assertCheckRate, assertSessionEvidenceCapacity } from './session-limits.js';
+import { enforceReconnectLimits } from './recovery.js';
+import { assertWindowAllows } from './scheduling.js';
 import { effectivePolicy, holdNow, identityState, requiredCheckFor, withSession, type SessionMutation } from './session-state.js';
 
 export const CHECK_TTL_MS = 3 * 60_000;
@@ -181,6 +183,12 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
   // towards "different person"). Its own transaction (it may put the session on hold); only when this request is
   // going to start the check the session requires.
   const [s0] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, sessionId));
+  // A new browser window during the exam: the exam's resume policy decides first (services/recovery.ts) — offline too
+  // long, or no reconnections left, holds or ends the exam instead of starting the check.
+  if (s0 && body.purpose === 'reconnect' && s0.status === 'active' && requiredCheckFor(s0, instanceId) === 'reconnect') {
+    const limited = await enforceReconnectLimits(ctx, sessionId, instanceId);
+    if (limited) throw conflict('resume_limit_reached', limited.message);
+  }
   if (s0 && requiredCheckFor(s0, instanceId) === body.purpose) await settleAbandonedChecks(ctx, sessionId, 'superseded');
   return withSession(ctx, sessionId, async (m) => {
     const s = m.session;
@@ -190,6 +198,8 @@ export async function startCheck(ctx: Ctx, sessionId: string, instanceId: string
       throw invalidState('No check is needed right now', { status: s.status });
     }
     if (body.purpose !== required) throw conflict('wrong_check_purpose', `A ${required} check is required`, { requiredCheck: required });
+    // The check-in may begin a little before the scheduling window opens, never after it closed (services/scheduling.ts).
+    if (required === 'initial') assertWindowAllows(s, 'check_in', m.now);
     const policy = await m.policy();
     const max = policy.identity.maxVerificationAttempts;
     const failed = await failedAttempts(m.tx, s, required);
@@ -1517,6 +1527,8 @@ async function attestContinuation(m: SessionMutation, check: Check, instanceId: 
   const message = purpose === 'resume' ? 'Welcome back — your exam continues.' : 'Your exam continues.';
 
   if (s.status === 'ready') return reverify ? held() : { outcome: 'passed', message: 'You can start the exam when you are ready.' };
+  // The exam reopened in a new browser window during the exam: counts against policy.resume.maxReconnects.
+  if (purpose === 'reconnect' && s.status === 'active') m.set({ reconnectCount: s.reconnectCount + 1 });
 
   await closeGapPeriods({ m, check, instanceId }, { checkStart, pauseStart, gapStart });
 
@@ -1920,6 +1932,9 @@ async function continueAfterPass(
     if (t.reEnrolled) m.setIdentityState({ ...identityState(m.session), normalisation: 'continuous', periodBaseline: null });
     return base;
   }
+
+  // The exam reopened in a new browser window during the exam: counts against policy.resume.maxReconnects.
+  if (purpose === 'reconnect' && m.session.status === 'active') m.set({ reconnectCount: m.session.reconnectCount + 1 });
 
   if (t.reEnrolled) {
     // A new reference was just enrolled: its own baseline, same session.

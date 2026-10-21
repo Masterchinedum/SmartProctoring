@@ -336,6 +336,31 @@ Contact the candidate, then release with a fresh check.
 triggers a reconnect check (readiness, live-person, identity) and the exam continues with answers
 and remaining time preserved. The gap appears in the timeline as an unobserved “disconnected” period.
 
+**A candidate missed their window / needs another time.** An exam assigned with a scheduling window can be started
+only inside it (the check-in opens 30 minutes earlier); outside it the candidate's link shows when it opens or that it
+has closed. While the exam has not started: session page → *Reschedule…* (admin) with the new opening / closing time
+in your time zone (empty = no window) and an optional note; the same link keeps working — tell the candidate the new
+time. An exam that started is never cut off by its window, so nothing is needed for candidates already writing. A
+session whose window closed unused is closed as abandoned after the organisation's inactivity period, counted from
+the closing.
+
+**An exam is on hold under the interruption rules** (hold reason *Interrupted more often or longer than the exam rules
+allow*: the exam's *Interruptions and recovery* rules limit reopening it in a new browser window and the time
+disconnected). The timeline entry says which limit and the numbers. Contact the candidate; if the interruptions were
+outside their control (network, power), *Release hold* (keep the fresh identity check on) — the reconnection allowance
+starts again; otherwise *Terminate* per your process. With *End the exam* in those rules the exam was submitted
+instead (end reason *Ended by the interruption rules*): reopen it for recovery if it should continue.
+
+**Reopen an exam for recovery** (power cut at a test centre, an exam terminated or submitted by mistake, time lost to
+a technical problem, an exam closed after inactivity). Session page → *Reopen for recovery…* (admin): the dialog says
+whether it can be reopened and why not — never an exam the candidate submitted themselves, nor one whose consent was
+withdrawn or whose images were deleted under the retention policy; a completed review must be reopened first. Give
+the reason (timeline and audit log; not sent to integrations) and add minutes if no time is left (e.g. after the time
+ran out). The candidate opens the same link, passes a fresh camera and identity check and continues with their answers
+and remaining time; the exam clock stays stopped until then. An exam that never started returns to the check-in
+(reschedule it too if its window closed). Integrations receive `session.reopened`; the score is computed again when
+the exam ends again.
+
 **A candidate needs more time (accommodation or technical loss).** Open the session → *Extend time*
 and enter the minutes and a reason. The extension applies to that session only, is shown on the
 timeline as a neutral "Time extended" entry and is audit-logged.

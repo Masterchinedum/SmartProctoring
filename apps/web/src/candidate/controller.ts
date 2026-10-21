@@ -756,6 +756,11 @@ export class CandidateController {
     return this.countdown.remaining(this.clock.now());
   }
 
+  /** Best estimate of the server's clock now (scheduling windows are server instants). */
+  serverNow(): number {
+    return this.clock.now();
+  }
+
   private checkTimeUp(): boolean {
     const s = this.snap.state;
     if (!s || s.session.status !== 'active' || !this.countdown.running) return false;

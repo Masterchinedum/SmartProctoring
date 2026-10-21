@@ -84,6 +84,8 @@ export const HOLD_REASON_LABELS: Record<HoldReason, string> = {
   staff: 'Placed on hold by staff',
   id_photo_unverifiable: 'Could not be verified against the approved ID photo (image unclear — not a mismatch)',
   staff_verification: 'Waiting for staff to verify identity (accommodation)',
+  resume_limit: 'Interrupted more often or longer than the exam rules allow',
+  recovery: 'Reopened for recovery — waiting for the candidate’s identity check',
 };
 
 export const END_REASON_LABELS: Record<SessionEndReason, string> = {
@@ -93,6 +95,7 @@ export const END_REASON_LABELS: Record<SessionEndReason, string> = {
   staff_terminated: 'Terminated by staff',
   candidate_withdrew: 'Candidate withdrew consent (no score)',
   abandoned: 'Closed after inactivity (no score)',
+  resume_limit: 'Ended by the interruption rules (auto-submitted)',
 };
 
 export const CATEGORY_SHORT: Record<EventCategory, string> = {

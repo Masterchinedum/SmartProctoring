@@ -28,6 +28,7 @@ import { currentCapacity } from './capacity.js';
 import { sessionExamContent } from './exam-versions.js';
 import { identitySampleRequest, sampleWatchdog } from './identity-evidence.js';
 import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
+import { assertWindowAllows } from './scheduling.js';
 import { assertStatus, finalizeSession, identityState, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession, type SessionMutation } from './session-state.js';
 import { clockExpired } from '@sp/shared';
 
@@ -57,10 +58,14 @@ export const START_RETRY_AFTER_SEC = Object.freeze({ min: 5, max: 30 });
  * room staggers them by itself and keeps swap detection prompt for those already writing. The exam clock does not run
  * while a start is deferred, and no candidate waits longer than `examStartAdmission.maxDeferMs` in total (from the
  * first deferral); the start then goes ahead whatever the load. The delay is noted on the "Exam started" timeline entry.
+ *
+ * Outside the session's scheduling window the start is refused (409 exam_window_not_open / exam_window_closed,
+ * services/scheduling.ts); a start the server deferred counts from the first request.
  */
 export async function startSession(ctx: Ctx, sessionId: string, instanceId: string): Promise<{ deferred: { retryAfterSec: number } | null }> {
   return withSession(ctx, sessionId, async (m) => {
     assertInControl(m.session, instanceId);
+    if (m.session.status === 'ready') assertWindowAllows(m.session, 'start', m.now, m.session.startDeferredSince?.getTime() ?? m.now);
     const deferred = examStartDeferral(m);
     if (deferred) return { deferred };
     await startExam(m);

@@ -10,6 +10,7 @@ import { formatDateTime, formatSimilarity } from '../../lib/format';
 import { formatScore } from '../../lib/examVersions';
 import { kindsSummary } from '../../lib/accommodations';
 import { END_REASON_LABELS, HOLD_REASON_LABELS } from '../../lib/labels';
+import { describeWindow } from '../../lib/scheduling';
 import { ConnectionBadge, DecisionBadge, StatusBadge } from '../../components/Badges';
 import { ErrorState, Loading } from '../../components/Common';
 import { AccommodationsCard } from '../../components/AccommodationsCard';
@@ -165,7 +166,13 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
       </div>
       {s.reportingInterruptedSince ? <ReportingInterrupted since={s.reportingInterruptedSince} /> : null}
       {s.hold ? (
-        s.hold.canReverify ? (
+        s.hold.reason === 'recovery' ? (
+          <div className="banner banner-warning" data-testid="recovery-banner">
+            <strong>Reopened for recovery</strong> {formatDateTime(s.hold.since)}. The exam continues once the candidate passes a fresh camera and identity check with the same link; the
+            exam clock stays stopped until then.
+            {s.hold.message ? <div className="small">Message shown to the candidate: “{s.hold.message}”</div> : null}
+          </div>
+        ) : s.hold.canReverify ? (
           <div className="banner banner-warning">
             <strong>Waiting for the candidate to re-verify.</strong> The exam stays on hold until the candidate passes a fresh camera and identity check (original hold:{' '}
             {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason}, since {formatDateTime(s.hold.since)}).
@@ -182,9 +189,20 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
         <Fact label="Time remaining">
           {terminal ? <span className="muted">—</span> : <Countdown remainingMs={s.remainingMs} timerRunning={s.timerRunning} receivedAt={receivedAt || Date.now()} />}
         </Fact>
+        {s.startedAt == null && !terminal ? (
+          <Fact label="Can be started">
+            <span data-testid="session-window">{describeWindow(s.window ?? null, receivedAt || Date.now())}</span>
+          </Fact>
+        ) : null}
         <Fact label="Started">{s.startedAt ? formatDateTime(s.startedAt) : <span className="muted">Not started</span>}</Fact>
         {s.endedAt ? <Fact label="Ended">{formatDateTime(s.endedAt)}</Fact> : null}
         <Fact label="Pauses">{s.pauseCount}</Fact>
+        {s.reconnectCount ? (
+          <Fact label="Reopened in a new window">
+            {s.reconnectCount}
+            {d.policy.resume.maxReconnects != null ? <span className="muted small"> of {d.policy.resume.maxReconnects} allowed</span> : null}
+          </Fact>
+        ) : null}
         <Fact label="Score">
           {d.score ? (
             <>

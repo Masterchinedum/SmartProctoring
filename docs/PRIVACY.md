@@ -89,7 +89,13 @@ and deleted there. Data that must stay in one region in full needs the database 
   are removed earlier, together with the evidence.
 * **Sessions that never end** (not started, paused or on hold and then forgotten) are closed automatically
   after `abandonAfterDays` without activity (default 30; status terminated, no score, answers kept), so the
-  retention periods above start running.
+  retention periods above start running. A scheduling window counts as activity until it closes, so a session
+  scheduled weeks ahead is not closed before its window.
+* **Reopening an exam for recovery** (staff, `POST /api/admin/sessions/:id/reopen`) keeps the session's evidence: the
+  candidate is verified again against the original identity reference. While reopened the session has no end time,
+  so retention waits until it ends again (from the new end). It is refused once the evidence was deleted under the
+  retention policy, after a consent withdrawal, and for an exam the candidate submitted themselves; it never brings
+  deleted data back. The staff member's reason is kept in the timeline and the audit log, not sent to integrations.
 * Deleting a candidate removes their ID photo and template immediately.
 * **Withdrawal of consent** (`POST /api/candidate/consent/withdraw`, from the exam app): the exam ends at once
   (status terminated, end reason `candidate_withdrew`, no score; answers and the event timeline are kept), the

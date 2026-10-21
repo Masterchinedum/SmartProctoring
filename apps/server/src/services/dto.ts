@@ -18,6 +18,7 @@ import {
   type CheckPurpose,
   type SessionScoreDTO,
   type SessionSummaryDTO,
+  type SessionWindow,
   type StaffUserDTO,
   type StaffVerificationDTO,
   type StaffVerificationMethod,
@@ -114,6 +115,12 @@ export function toPauseRequestDTO(row: PauseRequest): PauseRequestDTO {
     decidedBy: row.decidedBy ?? null,
     decisionNote: row.decisionNote ?? null,
   };
+}
+
+/** The session's scheduling window (services/scheduling.ts), or null when it has none. */
+export function sessionWindow(s: Pick<ExamSession, 'windowStartsAt' | 'windowEndsAt'>): SessionWindow | null {
+  if (!s.windowStartsAt && !s.windowEndsAt) return null;
+  return { startsAt: ms(s.windowStartsAt), endsAt: ms(s.windowEndsAt) };
 }
 
 export function toHoldDTO(s: Pick<ExamSession, 'status' | 'holdReason' | 'holdSince' | 'holdMessage' | 'holdCanReverify'>): HoldDTO | null {
@@ -486,6 +493,8 @@ export function toSessionSummaryDTO(
     hold: toHoldDTO(s),
     accessLink: input.includeAccessLink ? accessLinkFor(ctx, s) : null,
     legalHold: s.legalHold,
+    window: sessionWindow(s),
+    reconnectCount: s.reconnectCount,
   };
 }
 
@@ -517,6 +526,9 @@ export function staffVisibleKey(s: ExamSession): string {
     s.holdMessage ?? null,
     s.holdCanReverify,
     s.legalHold,
+    ms(s.windowStartsAt),
+    ms(s.windowEndsAt),
+    s.reconnectCount,
   ]);
 }
 

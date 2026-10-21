@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import type { CheckPurpose } from '@sp/shared';
+import { nextWindowBoundary, type CheckPurpose, type SessionWindow } from '@sp/shared';
 import { LiveAnnouncer } from '../lib/LiveAnnouncer';
 import { useCandidateAnnouncements } from './announcements';
 import { CandidateController, isVerifiedInstance } from './controller';
@@ -8,7 +8,8 @@ import { ControllerProvider, useController, useSnapshot } from './context';
 import { CheckFlow } from './check/CheckFlow';
 import { DebugOverlay } from './DebugOverlay';
 import { ExamScreen } from './screens/exam/ExamScreen';
-import { EndedScreen, FatalScreen, HoldScreen, LoadingScreen, PausedScreen, ReadyScreen } from './screens/StatusScreens';
+import { EndedScreen, FatalScreen, HoldScreen, LoadingScreen, PausedScreen, ReadyScreen, WindowScreen } from './screens/StatusScreens';
+import { blockingPhase } from './window';
 import { WelcomeScreen } from './screens/Welcome';
 import './candidate.css';
 
@@ -71,6 +72,9 @@ function CandidateRouter() {
   const status = snap.state?.session.status;
   const pendingFor = (key: string, purpose: CheckPurpose) => (pending: boolean) => ctrl.setAwaitingContinue(pending ? { key, purpose, from: status } : null);
 
+  // Re-render when the scheduling window opens or closes (only while the exam has not started).
+  useWindowBoundaries(ctrl, snap.state?.session.window ?? null, status === 'invited' || status === 'ready');
+
   useEffect(() => {
     // A started check is only meaningful for the status it was started from.
     if (checkRequest === 'resume' && status !== 'paused') setCheckRequest(null);
@@ -83,6 +87,9 @@ function CandidateRouter() {
   const s = snap.state;
   const st = s.session.status;
   if (st === 'submitted' || st === 'terminated') return <EndedScreen />;
+  // Outside its scheduling window an exam that has not started shows when it opens / that it closed (./window.ts).
+  const blocked = blockingPhase(s, ctrl.serverNow());
+  if (blocked) return <WindowScreen phase={blocked} />;
   if (!s.consent.accepted) return <WelcomeScreen />;
   if (passedCheck && st === 'active') {
     return <CheckFlow key={passedCheck.key} purpose={passedCheck.purpose} onPassedPending={pendingFor(passedCheck.key, passedCheck.purpose)} />;
@@ -111,4 +118,20 @@ function CandidateRouter() {
     default:
       return <LoadingScreen error={`Unknown exam status: ${String(st)}`} onRetry={() => void ctrl.load()} />;
   }
+}
+
+/** Re-renders at the next scheduling-window boundary (check-in opens, the window opens / closes) while `active`. */
+function useWindowBoundaries(ctrl: CandidateController, win: SessionWindow | null, active: boolean): void {
+  const [tick, setTick] = useState(0);
+  const startsAt = win?.startsAt ?? null;
+  const endsAt = win?.endsAt ?? null;
+  useEffect(() => {
+    if (!active) return;
+    const now = ctrl.serverNow();
+    const next = nextWindowBoundary({ startsAt, endsAt }, now);
+    if (next == null) return;
+    // setTimeout holds at most ~24.8 days: a later boundary just reschedules.
+    const id = setTimeout(() => setTick((t) => t + 1), Math.min(next - now + 250, 2 ** 31 - 1));
+    return () => clearTimeout(id);
+  }, [ctrl, active, startsAt, endsAt, tick]);
 }

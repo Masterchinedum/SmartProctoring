@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { EVENT_CATEGORIES, EVENT_TYPES, REVIEW_STATUSES, type EventCategory, type EventSource, type EventType, type ReviewStatus, type Severity } from './events';
 import type { ProctoringPolicy } from './policy';
-import type { CheckPurpose, ConnectionStatus, EndReason, HoldReason, PeriodKind, SessionEndReason, SessionStatus } from './session';
+import type { CandidateEndReason, CheckPurpose, ConnectionStatus, HoldReason, PeriodKind, SessionEndReason, SessionStatus } from './session';
+import { sessionWindowInputSchema, type ReopenEligibilityDTO, type SessionWindow } from './scheduling';
 import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityResultDTO, LivenessChallengeDTO, LivenessResultDTO } from './identity';
 import type { MonitoringStatus } from './observation';
 import { IDENTITY_CHECK_TRIGGERS } from './identity';
@@ -149,7 +150,8 @@ export interface CandidateSessionState {
   session: {
     id: string;
     status: SessionStatus;
-    endReason: EndReason | null;
+    /** Why the exam ended; housekeeping reasons (e.g. 'abandoned') are not included (null). */
+    endReason: CandidateEndReason | null;
     remainingMs: number;
     timerRunning: boolean;
     durationMs: number;
@@ -166,6 +168,11 @@ export interface CandidateSessionState {
      * passed resume / reconnect / reverify check). Same semantics as HeartbeatResponse.identitySample.
      */
     identitySample?: IdentitySampleRequestDTO | null;
+    /**
+     * The scheduling window (./scheduling.ts; null: none). The exam can be started only inside it; the check-in may
+     * begin CHECK_IN_LEAD_MS before it opens. An exam in progress is never cut off when it closes.
+     */
+    window: SessionWindow | null;
   };
   exam: {
     id: string;
@@ -280,7 +287,14 @@ export interface CompleteCheckResponse {
   state: CandidateSessionState;
 }
 
-/** POST /api/candidate/start  (status ready -> active) => CandidateSessionState */
+/**
+ * POST /api/candidate/start  (status ready -> active) => CandidateSessionState.
+ * Outside the session's scheduling window: 409 `exam_window_not_open` / `exam_window_closed` (details.window); the
+ * initial check (POST /api/candidate/checks, purpose 'initial') answers the same before the check-in may begin
+ * (CHECK_IN_LEAD_MS before the opening) and after the closing.
+ * A reconnect check started when the exam's resume policy limit is reached (policy.resume): 409 `resume_limit_reached`
+ * after the exam was put on hold or ended (reload the state).
+ */
 
 /** PUT /api/candidate/answers/:questionId */
 export const saveAnswerRequestSchema = z.object({
@@ -324,7 +338,7 @@ export type CandidateCommand =
   | { kind: 'hold'; hold: HoldDTO }
   | { kind: 'hold_released'; requiresCheck: boolean }
   | { kind: 'terminated'; message: string }
-  | { kind: 'submitted'; reason: EndReason }
+  | { kind: 'submitted'; reason: CandidateEndReason }
   | { kind: 'require_check'; purpose: CheckPurpose; message: string }
   | { kind: 'superseded'; message: string }; // another browser instance took over
 
@@ -504,6 +518,10 @@ export interface SessionSummaryDTO {
   accommodations?: AccommodationKind[];
   /** Review work on this session (queue state, assignee, outcome, service-level target). */
   review?: SessionReviewSummaryDTO;
+  /** Scheduling window (./scheduling.ts; null: none — the exam can be started any time). */
+  window?: SessionWindow | null;
+  /** Times the exam was reopened in a new browser window during the exam, since the start / last staff decision (policy.resume.maxReconnects). */
+  reconnectCount?: number;
 }
 
 /** GET /api/admin/review-queue?view=&examId=&limit= */
@@ -603,6 +621,8 @@ export interface SessionDetailDTO {
   staffVerifications: StaffVerificationDTO[];
   /** The session's review (queue state, escalation, outcome). */
   review: SessionReviewDTO;
+  /** Whether staff may reopen the exam for recovery now (POST /sessions/:id/reopen), and why (not). */
+  reopen?: ReopenEligibilityDTO;
 }
 
 export const STAFF_VERIFICATION_METHODS = ['video_call', 'in_person', 'id_document_on_camera', 'other'] as const;
@@ -887,7 +907,11 @@ export interface CandidateDTO {
 }
 
 /** POST /api/admin/exams/:id/assignments */
-export const assignRequestSchema = z.object({ candidateIds: z.array(z.string()).min(1).max(1000) });
+export const assignRequestSchema = z.object({
+  candidateIds: z.array(z.string()).min(1).max(1000),
+  /** Scheduling window for the new sessions (./scheduling.ts). A candidate's existing unfinished session keeps its own window. */
+  window: sessionWindowInputSchema.optional(),
+});
 export interface AssignmentDTO {
   sessionId: string;
   candidateId: string;
@@ -895,6 +919,8 @@ export interface AssignmentDTO {
   accessLink: string;
   /** true when the candidate already had a not-yet-finished session for this exam (no new session was created; its link is returned). */
   existing?: boolean;
+  /** The session's scheduling window (an existing session keeps its own; null: none). */
+  window?: SessionWindow | null;
 }
 
 /** PUT /api/admin/candidates/:id/id-photo  body image/jpeg  => { accepted, quality, guidance } */
@@ -1040,6 +1066,8 @@ export type { IdentityCheckTrigger };
  *   POST /sessions/:id/legal-hold {enabled}        -> SessionSummaryDTO   (suspends retention purge) [admin]
  *   POST /sessions/:id/regenerate-link             -> { accessLink }                                [admin]
  *   POST /sessions/:id/extend {minutes,note?}      -> SessionSummaryDTO   (adds exam time; accommodations) [admin]
+ *   POST /sessions/:id/reschedule {window:{startsAt,endsAt},note?} -> SessionSummaryDTO (not started yet; 409 already_started) [admin]
+ *   POST /sessions/:id/reopen {reason,addMinutes}  -> SessionSummaryDTO   (ended exam, for recovery; 409 + ReopenRefusal code) [admin]
  *   GET  /events?category=&severity=&review=&since=&limit= -> { items: LiveEventDTO[] }  (org-wide feed) [reviewer]
  *   GET  /events/:id                               -> EventDTO                                      [reviewer]
  *   POST /events/:id/review {status,note?}         -> EventDTO                                      [reviewer]
@@ -1053,7 +1081,7 @@ export type { IdentityCheckTrigger };
  *   PUT  /exams/:id  ExamInput                     -> ExamDTO                                       [admin]
  *   POST /exams/:id/publish | /exams/:id/archive   -> ExamDTO                                       [admin]
  *   GET  /exams/:id/sessions                       -> { items: SessionSummaryDTO[] }                [reviewer]
- *   POST /exams/:id/assignments {candidateIds}     -> { items: AssignmentDTO[] }                    [admin]
+ *   POST /exams/:id/assignments {candidateIds,window?} -> { items: AssignmentDTO[] }                [admin]
  *   GET  /candidates?q=                            -> { items: CandidateDTO[] }                     [reviewer]
  *   POST /candidates  CandidateInput               -> CandidateDTO                                  [admin]
  *   GET  /candidates/:id                           -> CandidateDTO                                  [reviewer]

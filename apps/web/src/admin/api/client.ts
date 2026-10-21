@@ -53,6 +53,7 @@ import type {
   SessionDetailDTO,
   SessionReportDTO,
   SessionSummaryDTO,
+  SessionWindow,
   StaffRole,
   StaffSecurityDTO,
   StaffUserDTO,
@@ -235,6 +236,9 @@ export const api = {
   regenerateLink: (id: string) => request<{ accessLink: string }>('POST', `${A}/sessions/${enc(id)}/regenerate-link`),
   extendTime: (id: string, minutes: number, note?: string) =>
     request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/extend`, { body: { minutes, note: note || undefined } }),
+  reschedule: (id: string, window: SessionWindow | null, note?: string) =>
+    request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/reschedule`, { body: { window: window ?? { startsAt: null, endsAt: null }, note: note || undefined } }),
+  reopen: (id: string, reason: string, addMinutes: number) => request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/reopen`, { body: { reason, addMinutes } }),
 
   // ---- events
   events: (p: { category?: string; severity?: string; review?: string; since?: number; limit?: number }) =>
@@ -269,7 +273,8 @@ export const api = {
   exportExam: (id: string, versionId?: string) => request<ExamExport>('GET', `${A}/exams/${enc(id)}/export`, { query: { versionId } }),
   importExam: (doc: unknown) => request<ExamDTO>('POST', `${A}/exams/import`, { body: doc }),
   regradeExam: (id: string, body: RegradeRequest) => request<RegradeResultDTO>('POST', `${A}/exams/${enc(id)}/regrade`, { body }),
-  assign: (id: string, candidateIds: string[]) => request<{ items: AssignmentDTO[] }>('POST', `${A}/exams/${enc(id)}/assignments`, { body: { candidateIds } }),
+  assign: (id: string, candidateIds: string[], window?: SessionWindow | null) =>
+    request<{ items: AssignmentDTO[] }>('POST', `${A}/exams/${enc(id)}/assignments`, { body: { candidateIds, ...(window ? { window } : {}) } }),
 
   // ---- candidates
   candidates: (q?: string) => request<{ items: CandidateDTO[] }>('GET', `${A}/candidates`, { query: { q } }),

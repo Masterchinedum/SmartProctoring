@@ -13,6 +13,8 @@ import { CopyButton, EmptyState, ErrorState, Loading, PageHeader } from '../../c
 import { ConfirmDialog } from '../../components/Modal';
 import { downloadJson, exportFileName } from '../../lib/examVersions';
 import { TimeOfDay } from '../../components/Time';
+import { WindowFields } from '../../components/WindowFields';
+import { describeWindow, parseWindowForm, type WindowFormValues } from '../../lib/scheduling';
 import { EXAM_STATUS_CLASS, EXAM_STATUS_LABEL } from './ExamsPage';
 import { ExamVersionsPanel } from './ExamVersions';
 
@@ -232,6 +234,8 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [results, setResults] = useState<AssignmentDTO[] | null>(null);
+  const [windowForm, setWindowForm] = useState<WindowFormValues>({ opens: '', closes: '' });
+  const parsedWindow = parseWindowForm(windowForm, Date.now());
   const candidates = useQuery({ queryKey: qk.candidates(''), queryFn: () => api.candidates(), retry: shouldRetry });
   const sessions = useQuery({ queryKey: qk.examSessions(exam.id), queryFn: () => api.examSessions(exam.id), retry: shouldRetry });
   const assigned = useMemo(() => new Set((sessions.data?.items ?? []).map((s) => s.candidate.id)), [sessions.data]);
@@ -242,7 +246,7 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
     );
   }, [candidates.data, search]);
   const m = useMutation({
-    mutationFn: () => api.assign(exam.id, [...selected]),
+    mutationFn: () => api.assign(exam.id, [...selected], parsedWindow.ok ? parsedWindow.window : null),
     onSuccess: (r) => {
       setResults(r.items);
       setSelected(new Set());
@@ -300,7 +304,10 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
                       </span>
                     ) : null}
                   </td>
-                  <td className="mono small break">{r.accessLink}</td>
+                  <td className="mono small break">
+                    {r.accessLink}
+                    {r.window ? <div className="muted">Window: {describeWindow(r.window, Date.now())}</div> : null}
+                  </td>
                   <td>
                     <CopyButton text={r.accessLink} />
                   </td>
@@ -310,6 +317,14 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
           </table>
         </div>
       ) : null}
+      <WindowFields
+        idPrefix="assign-window"
+        legend="Scheduling window (optional)"
+        value={windowForm}
+        onChange={setWindowForm}
+        error={parsedWindow.ok ? null : { field: parsedWindow.field, message: parsedWindow.error }}
+        disabled={exam.status !== 'published'}
+      />
       <div className="row">
         <input type="text" placeholder="Filter candidates…" value={search} onChange={(e) => setSearch(e.target.value)} className="grow" aria-label="Filter candidates" />
         <label className="inline">
@@ -321,7 +336,7 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
           />
           Select all shown
         </label>
-        <button type="button" className="btn btn-primary" disabled={selected.size === 0 || m.isPending || exam.status === 'archived'} onClick={() => m.mutate()}>
+        <button type="button" className="btn btn-primary" disabled={selected.size === 0 || m.isPending || exam.status === 'archived' || !parsedWindow.ok} onClick={() => m.mutate()}>
           {m.isPending ? 'Assigning…' : `Assign ${selected.size || ''} selected`}
         </button>
       </div>

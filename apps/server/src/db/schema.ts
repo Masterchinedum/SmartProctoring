@@ -543,6 +543,17 @@ export const examSessions = pgTable(
      * candidate-actions.ts); cleared when the exam starts. Bounds how long a candidate can be kept waiting.
      */
     startDeferredSince: ts('start_deferred_since'),
+    /**
+     * Scheduling window (packages/shared/src/scheduling.ts; either bound may be null = open): the exam can be started
+     * only inside it, the check-in may begin CHECK_IN_LEAD_MS earlier. Changed only before the exam starts.
+     */
+    windowStartsAt: ts('window_starts_at'),
+    windowEndsAt: ts('window_ends_at'),
+    /**
+     * Reconnect checks passed during the exam (the exam reopened in a new browser window) since it started, or since
+     * staff released a resume-limit hold / reopened the exam (policy.resume.maxReconnects).
+     */
+    reconnectCount: integer('reconnect_count').notNull().default(0),
     endedAt: ts('ended_at'),
     legalHold: boolean('legal_hold').notNull().default(false),
     evidencePurgedAt: ts('evidence_purged_at'),
@@ -562,6 +573,8 @@ export const examSessions = pgTable(
     // (last_heartbeat_at, monitoring, ...), so heartbeat updates stay HOT (no index maintenance per heartbeat).
     index('exam_sessions_online_idx').on(t.status).where(sql`${t.connection} = 'online'`),
     index('exam_sessions_running_idx').on(t.status).where(sql`${t.runningSince} is not null`),
+    // Resume-policy look-up of disconnected exams (jobs/sweeper.ts, maxOfflineMinutes); same HOT-friendly shape.
+    index('exam_sessions_offline_idx').on(t.status).where(sql`${t.connection} = 'offline'`),
   ],
 );
 

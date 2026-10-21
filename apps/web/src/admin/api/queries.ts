@@ -72,6 +72,7 @@ const PERIOD_EVENT_TYPES = new Set<string>([
   'unobserved_period',
   'reporting_interrupted',
   'checkin_completed',
+  'session_reopened',
 ]);
 
 function refreshSessionStructure(qc: QueryClient, sessionId: string): void {

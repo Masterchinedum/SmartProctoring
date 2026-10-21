@@ -38,6 +38,8 @@ export const HOLD_REASON_SENTENCES: Record<HoldReason, string> = {
   staff: 'a staff member placed it on hold',
   id_photo_unverifiable: 'the live image could not be compared dependably with the approved ID photo (image quality; not evidence of a different person)',
   staff_verification: 'the candidate is waiting for a staff member to verify their identity (an approved arrangement instead of the automated face check)',
+  resume_limit: 'the exam was interrupted more often or for longer than the exam rules allow and needs a staff decision',
+  recovery: 'an administrator reopened the exam for recovery and the candidate has to pass a fresh identity check',
 };
 
 export function alertKindEnabled(s: Pick<OrgSettings, 'emailAlerts'>, kind: EmailAlertKind): boolean {

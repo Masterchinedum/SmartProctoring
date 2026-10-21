@@ -66,6 +66,12 @@ No code copied from third parties. See `THIRD_PARTY_NOTICES.md`.
 * **on_hold**: clock stopped. Staff release (optionally requiring a fresh check, optionally authorising
   re-enrolment of the reference) or terminate.
 * **expiry**: server sweeper auto-submits when the clock hits zero.
+* **scheduling window** (optional): the exam can be *started* only inside the session's window; the check-in may begin
+  30 minutes earlier. Only the start is bounded — an exam in progress is never cut off when the window closes.
+* **resume policy** (`policy.resume`): too many reconnections or too long disconnected during the exam → `on_hold`
+  (reason `resume_limit`) or ended (`resume_limit`, submitted), per the exam's rules.
+* **reopen for recovery**: staff put an ended exam back (`on_hold`, reason `recovery`, `holdCanReverify`) so the
+  candidate continues after a fresh identity check.
 
 **Periods** partition the timeline: `check_in`, `active`, `resume_check` (observed) and `paused`,
 `disconnected`, `on_hold` (unobserved). Unobserved periods produce an `unobserved_period` marker and
@@ -116,6 +122,51 @@ the candidate (`identity_verified_by_staff` event + audit). No face reference ex
 requested or accepted, and the no-samples watchdog is off. After a pause or reconnection the exam continues, behind
 another verification hold when `identity.staffReverifyOnContinue`. Without a camera the candidate client skips the
 camera step and never opens a camera; its monitoring runtime observes the browser rules only.
+
+### Scheduling windows, resume policy and recovery (`packages/shared/src/scheduling.ts`, `services/scheduling.ts`, `services/recovery.ts`)
+
+* **Windows.** `exam_sessions.window_starts_at` / `window_ends_at` (either may be null = open-ended). Set on assignment
+  (staff `POST /exams/:id/assignments {window}`, integration `POST /api/v1/exams/:id/assignments {window}`; a
+  candidate's existing unfinished session keeps its own) and changed until the exam starts (`POST
+  /sessions/:id/reschedule`, `PUT /api/v1/sessions/:id/window`; 409 `already_started`): audited, a neutral
+  `session_rescheduled` event (→ `session.rescheduled` webhook, without the staff note). `windowPhase(window, now)`:
+  `before_check_in` (more than `CHECK_IN_LEAD_MS` = 30 min before the opening) → `check_in` → `open` → `closed`. The
+  initial check is refused in `before_check_in` and `closed`, the start (`candidate-actions.ts startSession`) outside
+  `open`: 409 `exam_window_not_open` / `exam_window_closed` with `details.window` (a start deferred by the busy-server
+  admission counts from its first request). Consent and reconnect checks before the start are not restricted, and
+  nothing after the start looks at the window: **an exam in progress is never cut off**, it runs until its clock runs
+  out. `CandidateSessionState.session.window` lets the candidate app show "This exam opens on … / is closed" in the
+  candidate's own time zone instead of the check-in, and keep Start disabled until the opening after an early check-in
+  (it re-renders at the window boundaries and reloads every minute in case staff reschedule). Abandonment counts
+  inactivity from the end of the window at the earliest (`abandonment.ts lastActivityAt`).
+* **Resume policy** (`policy.resume`, defaults = no limits): `maxReconnects` counts reconnect checks *passed during the
+  exam* (`exam_sessions.reconnect_count`; a reload before the start does not count); when the count has reached the
+  limit the next reconnect check is not started — `enforceReconnectLimits` applies the limit and `startCheck` answers
+  409 `resume_limit_reached` (the candidate app reloads its state and shows the hold / ended screen).
+  `maxOfflineMinutes`: no heartbeat from any browser for longer than this, counted from the last heartbeat or from
+  when the exam last continued (the open active period's start), whichever is later; applied by the sweeper
+  (`enforceOfflineLimits`, after clock expiry; the pre-filter reads the start-time policy snapshot, older snapshots
+  have no limit) and again when the candidate comes back (`enforceReconnectLimits`). Only `active` exams: a formal
+  pause has its own limit, a held exam waits for staff. `onLimit` `hold` (default): `holdNow` reason `resume_limit`
+  (releasing it resets the reconnect count); `end`: `finalizeSession(m, 'resume_limit')` — status `submitted`, graded
+  like a time expiry, the candidate is told why (`CandidateEndReason`), webhook `session.submitted` with `reason`
+  `too_many_reconnects` / `offline_too_long`.
+* **Reopen for recovery** (`POST /sessions/:id/reopen {reason, addMinutes}`, admin). `reopenEligibility` (shared; the
+  session page shows it as `SessionDetailDTO.reopen`): only an ended exam whose end reason is in
+  `REOPENABLE_END_REASONS` (`time_expired`, `staff_submitted`, `staff_terminated`, `abandoned`, `resume_limit` — never
+  the candidate's own submission nor a consent withdrawal), whose evidence was not purged by retention, whose review is
+  not resolved (reopen the review first) and — if it started with automatic identity — that still has its identity
+  reference; and (`no_time_left`) the remaining time plus the added minutes must be at least a minute. A started exam
+  becomes `on_hold` with `holdReason 'recovery'`, `holdCanReverify` and `holdPrevStatus 'active'`: the candidate passes
+  the **reverify** check (readiness, live-person, identity against the ORIGINAL reference — a reconnect check would be
+  tied to replacing a browser window and count against `maxReconnects`), then `continueAfterPass` resumes the exam
+  with its answers and remaining time. The interval from the old end to the check is an `on_hold` period (reason
+  `recovery`, unobserved). `endReason`, `endedAt` and `score` are cleared (the event keeps the previous score; grading
+  runs again at the next end), the reconnect count resets, retention stops applying (no end time). An exam that never
+  started returns to `invited`. Recorded as a neutral `session_reopened` event (→ `session.reopened` webhook with the
+  previous end reason, never the staff reason), a `session.reopened` audit entry and a report observation. Like a hold
+  released with a required check, the recovery hold counts towards the held-exam review target (`reviewSla`) until
+  the candidate passes the check.
 
 ## 4. Identity pipeline (server)
 
@@ -425,6 +476,6 @@ for face analysis, default CPU count − 1), `VISION_WORKERS`, `VISION_NICE`, `P
   5 minutes (digest), plain text + simple HTML with a link to the staff app, never images.
 * **Abandoned sessions**: the hourly `abandoned-sessions` job closes sessions that can never end on
   their own (invited / ready / paused / on hold, or active with the clock stopped) after the org's
-  `abandonAfterDays` without activity: status `terminated`, endReason `abandoned` (staff-facing
+  `abandonAfterDays` without activity (a scheduling window counts as activity until it closes): status `terminated`, endReason `abandoned` (staff-facing
   `SessionEndReason`), no score, a neutral `session_terminated` event, audit `session.abandoned`;
   retention then applies from the end time.

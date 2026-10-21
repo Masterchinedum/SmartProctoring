@@ -116,3 +116,19 @@ describe('sampling intensity', () => {
     expect(validatePolicy(balanced).ok).toBe(true);
   });
 });
+
+describe('interruptions and recovery (resume policy)', () => {
+  const field = (path: string) => ALL_POLICY_FIELDS.find((f) => f.path === path)!;
+  it('offers the limits with plain-language defaults and validation', () => {
+    expect(formatPolicyValue(field('resume.maxReconnects'), null)).toBe('Unlimited');
+    expect(formatPolicyValue(field('resume.maxOfflineMinutes'), 10)).toBe('10 min');
+    expect(formatPolicyValue(field('resume.onLimit'), 'hold')).toBe('Put the exam on hold for staff to decide (recommended)');
+    expect(parsePolicyNumber(field('resume.maxReconnects'), '0')).toEqual({ value: 0 });
+    expect(parsePolicyNumber(field('resume.maxReconnects'), '-1')).toEqual({ error: 'Minimum 0' });
+    expect(parsePolicyNumber(field('resume.maxOfflineMinutes'), '0')).toEqual({ error: 'Minimum 1' });
+    expect(parsePolicyNumber(field('resume.maxOfflineMinutes'), '')).toEqual({ value: null });
+    const p = applyPolicyChange(applyPolicyChange(DEFAULT_POLICY, 'resume.maxOfflineMinutes', 15), 'resume.onLimit', 'end');
+    expect(validatePolicy(p)).toMatchObject({ ok: true, policy: { resume: { maxReconnects: null, maxOfflineMinutes: 15, onLimit: 'end' } } });
+    expect(changedFromDefault(p).sort()).toEqual(['resume.maxOfflineMinutes', 'resume.onLimit']);
+  });
+});

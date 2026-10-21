@@ -122,6 +122,19 @@ server-side identity match, read other sessions, or change category/severity (th
   their browser is the one in control: it can only end the exam and delete data, never extend access. Rate-limited
   (10 per minute per token).
 
+### Scheduling and recovery
+* Rescheduling (`POST /api/admin/sessions/:id/reschedule`) and reopening for recovery (`POST /sessions/:id/reopen`) are
+  administrator actions (reviewers 403), organisation-scoped (404 otherwise), run under the session row lock and are
+  audited (`session.rescheduled`, `session.reopened` with the reason). Integrations reschedule with
+  `PUT /api/v1/sessions/:id/window` (audit `api.session.rescheduled`, actor the API key). Neither can extend what a
+  link holder can do beyond the exam rules: the window bounds only the start; a reopened exam continues only after a
+  fresh live-person and identity check against the original reference (the `reverify` check, with its attempt limit
+  and check rate limit), and reopening is refused once that reference was purged or the candidate withdrew consent.
+* The resume policy cannot be bypassed by opening more windows: the limit is checked under the row lock when a
+  reconnect check would start (409 `resume_limit_reached`), and the time disconnected also by the sweeper. Staff notes
+  and reasons for reschedules and reopenings never leave through webhooks (`session.rescheduled` carries the window,
+  `session.reopened` the previous end reason).
+
 ### Authorisation
 * Every `/api/admin/*` route has `requireStaff(<role>)`; every query is scoped by the staff member's
   organisation (other organisations' ids return 404). Only owners create/modify owners and admins; the last

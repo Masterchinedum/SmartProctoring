@@ -94,6 +94,7 @@ class FakeServer {
         verifiedInstanceId: verified,
         hold: null,
         pauseRequest: null,
+        window: null,
         ...overrides,
       },
       exam: {

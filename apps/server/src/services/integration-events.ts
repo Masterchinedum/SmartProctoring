@@ -13,6 +13,7 @@
  *   pause_requested, first seen                  -> session.pause_requested
  *   session_submitted / session_terminated       -> session.submitted / session.terminated
  *   review_completed                             -> session.reviewed (outcome only)
+ *   session_rescheduled / session_reopened       -> session.rescheduled (window) / session.reopened (previous end reason)
  *   session_held | pause_requested | high-severity non-neutral event -> email alert (org toggles)
  *
  * The inserts run in a SAVEPOINT: if anything here fails, the integration rows are rolled back and logged, but
@@ -23,7 +24,7 @@
  * EVENT_CATALOG title/observation, never the client-supplied `observation`; other user-controlled text (the
  * candidate's pause reason) has links removed (lib/text-safety.ts). Event `details` are never forwarded.
  */
-import { EVENT_CATALOG, isFlagCategory, type EventSource, type EventType, type HoldReason, type SessionStatus } from '@sp/shared';
+import { EVENT_CATALOG, isFlagCategory, type EventSource, type EventType, type HoldReason, type SessionStatus, type WebhookSessionData } from '@sp/shared';
 import { and, eq, inArray } from 'drizzle-orm';
 import { events, webhooks, type EventRow } from '../db/schema.js';
 import { stripUrls } from '../lib/text-safety.js';
@@ -40,6 +41,8 @@ const SESSION_NOTIFICATIONS: Partial<Record<EventRow['type'], WebhookNotificatio
   session_terminated: 'session.terminated',
   score_regraded: 'session.regraded',
   review_completed: 'session.reviewed',
+  session_rescheduled: 'session.rescheduled',
+  session_reopened: 'session.reopened',
 };
 
 function str(v: unknown): string | null {
@@ -159,6 +162,17 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           if (ev.type === 'review_completed') data.outcome = str(d.outcome);
           // Free-text staff notes are never forwarded; only the structured automatic reason.
           if (ev.type === 'session_terminated') data.reason = AUTOMATIC_TERMINATION_REASONS.has(str(d.reason) ?? '') ? str(d.reason) : null;
+          // The resume policy ended the exam (services/recovery.ts): which limit, as a structured reason.
+          if (ev.type === 'session_submitted' && d.endReason === 'resume_limit') data.reason = d.limit === 'reconnects' ? 'too_many_reconnects' : d.limit === 'offline' ? 'offline_too_long' : null;
+          if (ev.type === 'session_rescheduled') {
+            data.window = (d.window as WebhookSessionData['window']) ?? null;
+            data.previousWindow = (d.previousWindow as WebhookSessionData['previousWindow']) ?? null;
+          }
+          // The staff reason stays in the staff app; how the exam had ended is structured.
+          if (ev.type === 'session_reopened') {
+            data.reason = str(d.previousEndReason);
+            data.addedMinutes = typeof d.addMinutes === 'number' ? d.addMinutes : 0;
+          }
           notifications.push({ type: sessionType, dedupeKey: `${sessionType}:${ev.id}`, sessionId: s.id, data });
         }
 

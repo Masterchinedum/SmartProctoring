@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { CheckPurpose, CompleteCheckResponse, StartCheckResponse } from '@sp/shared';
+import { classifyApiError } from '../api';
 import { errorMessage, useController, useSnapshot } from '../context';
 import { ScreenHeading } from '../components/common';
 import { deviceInfo } from './VerifyStep';
@@ -32,6 +33,8 @@ export function AttestStep({ purpose, onResult }: { purpose: CheckPurpose; onRes
     } catch (e) {
       setError(errorMessage(e));
       setBusy(false);
+      // The session moved on (e.g. held or ended under the resume rules, or outside its window): refresh and let the app route.
+      if (classifyApiError(e) === 'invalid_state') void ctrl.load();
     }
   };
 

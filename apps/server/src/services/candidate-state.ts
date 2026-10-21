@@ -1,10 +1,10 @@
-import { END_REASONS, type CandidateAnswerDTO, type CandidateQuestionDTO, type CandidateSessionState, type EndReason } from '@sp/shared';
+import { CANDIDATE_END_REASONS, type CandidateAnswerDTO, type CandidateEndReason, type CandidateQuestionDTO, type CandidateSessionState } from '@sp/shared';
 import { and, desc, eq, gte } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
 import { answers, candidates, examSessions, exams, organizations, pauseRequests, sessionPeriods, type ExamSession } from '../db/schema.js';
 import { conflict, notFound } from '../lib/errors.js';
-import { ms, remainingMs, toHoldDTO, toPauseRequestDTO } from './dto.js';
+import { ms, remainingMs, sessionWindow, toHoldDTO, toPauseRequestDTO } from './dto.js';
 import { candidateAccommodationLabels } from './accommodations.js';
 import { sessionExamContent } from './exam-versions.js';
 import { identitySampleRequest } from './identity-evidence.js';
@@ -76,7 +76,7 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
       id: s.id,
       status: s.status,
       // Housekeeping end reasons (e.g. 'abandoned') are not part of the candidate contract: the candidate sees a terminated exam.
-      endReason: s.endReason && (END_REASONS as readonly string[]).includes(s.endReason) ? (s.endReason as EndReason) : null,
+      endReason: s.endReason && (CANDIDATE_END_REASONS as readonly string[]).includes(s.endReason) ? (s.endReason as CandidateEndReason) : null,
       remainingMs: remainingMs(s, now),
       timerRunning: s.runningSince != null,
       durationMs: s.durationMs,
@@ -89,6 +89,7 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
       hold: toHoldDTO(s),
       pauseRequest,
       identitySample: instanceInControl(s, instanceId) ? identitySampleRequest(s.status, s.identityState, policy.identity, now) : null,
+      window: sessionWindow(s),
     },
     exam: {
       id: exam.id,

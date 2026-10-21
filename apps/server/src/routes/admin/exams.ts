@@ -12,7 +12,7 @@
  *   GET  /exams/:id/export?versionId=        -> ExamExport (attachment; incl. answer keys) [admin]
  *   POST /exams/:id/regrade  RegradeRequest  -> RegradeResultDTO                         [admin]
  *   GET  /exams/:id/sessions                 -> { items: SessionSummaryDTO[] }           [reviewer]
- *   POST /exams/:id/assignments {candidateIds} -> { items: AssignmentDTO[] }             [admin]
+ *   POST /exams/:id/assignments {candidateIds, window?} -> { items: AssignmentDTO[] }    [admin]  (window: services/scheduling.ts)
  *
  * Versions (services/exam-versions.ts). Publishing an exam, and every later edit of a published exam, writes an
  * immutable version; an attempt keeps the version it started with (questions, options, answer keys, points). An edit
@@ -45,7 +45,8 @@ import type { DbOrTx, Tx } from '../../db/index.js';
 import { candidates, examSessions, examVersions, exams, questions, staffUsers, type Exam, type ExamVersion, type Organization, type Question } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { conflict, notFound, validationFailed } from '../../lib/errors.js';
-import { accessLinkFor, loadSessionSummaries } from '../../services/dto.js';
+import { accessLinkFor, loadSessionSummaries, sessionWindow } from '../../services/dto.js';
+import { acceptWindow } from '../../services/scheduling.js';
 import { listVersions, loadVersion, recordExamVersion, snapshotOf, totalPoints, versionSnapshot, type ExamSnapshot } from '../../services/exam-versions.js';
 import { createExam, loadQuestions } from '../../services/exams.js';
 import { regradeExam } from '../../services/regrade.js';
@@ -447,6 +448,7 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
     const body = assignRequestSchema.parse(req.body ?? {});
     const requested = [...new Set(body.candidateIds.map((c) => c.trim().toLowerCase()))];
     const now = ctx.now();
+    const window = acceptWindow(body.window, now);
     const items = await ctx.db.transaction(async (tx) => {
       const exam = await loadScopedExam(tx, staff.orgId, id, true); // row lock serialises concurrent assignment requests
       if (exam.status !== 'published') {
@@ -472,14 +474,24 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
       for (const candidateId of requested) {
         const existing = existingByCandidate.get(candidateId);
         if (existing) {
-          out.push({ sessionId: existing.id, candidateId, candidateName: names.get(candidateId)!, accessLink: accessLinkFor(ctx, existing) ?? '', existing: true });
+          out.push({ sessionId: existing.id, candidateId, candidateName: names.get(candidateId)!, accessLink: accessLinkFor(ctx, existing) ?? '', existing: true, window: sessionWindow(existing) });
           continue;
         }
-        const s = await createExamSession(ctx, tx, { orgId: staff.orgId, examId: id, candidateId });
-        out.push({ sessionId: s.session.id, candidateId, candidateName: names.get(candidateId)!, accessLink: s.accessLink, existing: false });
+        const s = await createExamSession(ctx, tx, { orgId: staff.orgId, examId: id, candidateId, window });
+        out.push({ sessionId: s.session.id, candidateId, candidateName: names.get(candidateId)!, accessLink: s.accessLink, existing: false, window });
         created++;
       }
-      await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'exam.assigned', targetType: 'exam', targetId: id, meta: { requested: requested.length, created, existing: requested.length - created }, ip: req.ip, at: now });
+      await audit(tx, {
+        orgId: staff.orgId,
+        actorType: 'staff',
+        actorId: staff.id,
+        action: 'exam.assigned',
+        targetType: 'exam',
+        targetId: id,
+        meta: { requested: requested.length, created, existing: requested.length - created, ...(window ? { window } : {}) },
+        ip: req.ip,
+        at: now,
+      });
       return out;
     });
     for (const a of items) if (!a.existing) ctx.live.sessionChanged(a.sessionId, { orgId: staff.orgId });

@@ -10,9 +10,10 @@
  *   GET  /exams?status=                                   -> { items: IntegrationExamDTO[] }
  *   POST /candidates {name, email?, externalId?}          -> { candidate, created }  201 created | 200 updated (upsert by externalId)
  *   GET  /candidates?externalId=&email=&limit=&offset=    -> { items: IntegrationCandidateDTO[], total }
- *   POST /exams/:examId/assignments {candidateIds?, externalIds?} -> { items: IntegrationAssignmentDTO[] }
+ *   POST /exams/:examId/assignments {candidateIds?, externalIds?, window?} -> { items: IntegrationAssignmentDTO[] }
  *   GET  /sessions?examId=&externalId=&candidateId=&status=&limit=&offset= -> { items: IntegrationSessionDTO[], total }
  *   GET  /sessions/:id                                    -> IntegrationSessionDTO
+ *   PUT  /sessions/:id/window {window, note?}             -> IntegrationSessionDTO  (before the exam starts; services/scheduling.ts)
  *   GET  /sessions/:id/report?tz=                         -> IntegrationSessionReportDTO
  *   GET  /sessions/:id/events?category=&type=&severity=&since= -> { items: IntegrationEventDTO[] }
  */
@@ -20,6 +21,7 @@ import {
   EVENT_CATALOG,
   integrationAssignSchema,
   integrationCandidateSchema,
+  rescheduleRequestSchema,
   SESSION_STATUSES,
   TERMINAL_STATUSES,
   type EventDTO,
@@ -42,7 +44,8 @@ import { candidates, examSessions, examVersions, exams, type Candidate } from '.
 import { audit } from '../../lib/audit.js';
 import { sha256Hex } from '../../lib/crypto.js';
 import { conflict, notFound, validationFailed } from '../../lib/errors.js';
-import { accessLinkFor, loadSessionSummaries } from '../../services/dto.js';
+import { accessLinkFor, loadSessionSummaries, sessionWindow } from '../../services/dto.js';
+import { acceptWindow, rescheduleSession } from '../../services/scheduling.js';
 import { sessionStaffUrl } from '../../services/email-alerts.js';
 import { buildSessionReport } from '../../services/reports.js';
 import { resolveTimeZone } from '../../services/reports-format.js';
@@ -124,6 +127,7 @@ async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSu
       counts: s.counts,
       hold: s.hold,
       accessLink: s.accessLink,
+      window: s.window ?? null,
       review: { state: s.review?.state ?? 'none', outcome: s.review?.outcome ?? null },
       staffUrl: sessionStaffUrl(ctx.config.publicUrl, s.id),
     };
@@ -248,6 +252,7 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     const examId = idParam(req, 'examId', 'Exam', 'exam_not_found');
     const body = integrationAssignSchema.parse(req.body ?? {});
     const now = ctx.now();
+    const window = acceptWindow(body.window, now);
     const items = await ctx.db.transaction(async (tx) => {
       const [exam] = await tx
         .select()
@@ -314,14 +319,14 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
       for (const c of ordered) {
         const prev = existing.get(c.id);
         if (prev) {
-          out.push({ sessionId: prev.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: accessLinkFor(ctx, prev) ?? '', existing: true });
+          out.push({ sessionId: prev.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: accessLinkFor(ctx, prev) ?? '', existing: true, window: sessionWindow(prev) });
           continue;
         }
-        const s = await createExamSession(ctx, tx, { orgId: key.orgId, examId, candidateId: c.id });
-        out.push({ sessionId: s.session.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: s.accessLink, existing: false });
+        const s = await createExamSession(ctx, tx, { orgId: key.orgId, examId, candidateId: c.id, window });
+        out.push({ sessionId: s.session.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: s.accessLink, existing: false, window });
         created++;
       }
-      await apiAudit(tx, key, now, 'api.exam.assigned', 'exam', examId, { requested: ordered.length, created, existing: ordered.length - created });
+      await apiAudit(tx, key, now, 'api.exam.assigned', 'exam', examId, { requested: ordered.length, created, existing: ordered.length - created, ...(window ? { window } : {}) });
       return out;
     });
     for (const a of items) if (!a.existing) ctx.live.sessionChanged(a.sessionId, { orgId: key.orgId });
@@ -366,6 +371,17 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     const id = idParam(req, 'id', 'Session', 'session_not_found');
     // The candidate's link is returned for a single session (like the staff detail view), never in lists.
     const summaries = await loadSessionSummaries(ctx, ctx.db, { orgId: key.orgId, sessionIds: [id], includeAccessLink: true });
+    if (summaries.length === 0) throw notFound('Session not found', 'session_not_found');
+    return (await integrationSessions(ctx, key.orgId, summaries))[0];
+  });
+
+  /** Set, change or clear the scheduling window of a session that has not started (409 already_started / invalid_state). */
+  app.put('/sessions/:id/window', auth, async (req): Promise<IntegrationSessionDTO> => {
+    const key = getApiKey(req);
+    const id = idParam(req, 'id', 'Session', 'session_not_found');
+    const body = rescheduleRequestSchema.parse(req.body ?? {});
+    await rescheduleSession(ctx, id, { type: 'api_key', id: key.id, orgId: key.orgId, ip: key.ip, name: key.name }, body.window, body.note ?? null);
+    const summaries = await loadSessionSummaries(ctx, ctx.db, { orgId: key.orgId, sessionIds: [id] });
     if (summaries.length === 0) throw notFound('Session not found', 'session_not_found');
     return (await integrationSessions(ctx, key.orgId, summaries))[0];
   });

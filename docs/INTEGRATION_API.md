@@ -82,8 +82,8 @@ curl -s -X POST "$SP/api/v1/candidates" -H "Authorization: Bearer $SP_KEY" \
 
 ### Assignments (exam links)
 
-`POST /api/v1/exams/:examId/assignments` `{ candidateIds?: string[], externalIds?: string[] }` (together at
-most 1000) → `{ items: [{ sessionId, candidateId, candidateName, externalId, accessLink, existing }] }`.
+`POST /api/v1/exams/:examId/assignments` `{ candidateIds?: string[], externalIds?: string[], window?: { startsAt?, endsAt? } }`
+(together at most 1000 candidates) → `{ items: [{ sessionId, candidateId, candidateName, externalId, accessLink, existing, window }] }`.
 
 * The exam must be **published** (`409 exam_not_published` otherwise).
 * Unknown candidates → `400 validation_failed` naming them (nothing is created).
@@ -91,11 +91,27 @@ most 1000) → `{ items: [{ sessionId, candidateId, candidateName, externalId, a
   it — the existing `sessionId` and link are returned with `existing: true`. Retrying a request is safe.
 * `accessLink` is the candidate's personal link (`https://…/take/<token>`). Treat it like a password: send
   it only to that candidate (e.g. show it behind your LMS login).
+* `window` (optional) is a **scheduling window** for the new sessions: `startsAt` / `endsAt` as epoch milliseconds or
+  ISO 8601 date-times with a time zone (`"2026-11-02T09:00:00+01:00"`); either may be omitted or `null` (open-ended).
+  The candidate can **start** the exam only inside it; the camera and identity check-in may begin **30 minutes before**
+  `startsAt`. An exam that started inside its window is **never cut off** when the window closes (it runs until its
+  clock runs out, through pauses and reconnections). Outside the window the candidate's link shows when the exam
+  opens / that it has closed, in the candidate's own time zone. Rules: `endsAt` after `startsAt`, at least 5 minutes
+  long, `endsAt` not in the past, at most two years ahead (`400 validation_failed` otherwise). A candidate's existing
+  unfinished session keeps its own window (the response shows it): change it with `PUT /sessions/:id/window`.
 
 ```bash
 curl -s -X POST "$SP/api/v1/exams/$EXAM_ID/assignments" -H "Authorization: Bearer $SP_KEY" \
-  -H 'Content-Type: application/json' -d '{"externalIds":["S-10442","S-10443"]}'
+  -H 'Content-Type: application/json' \
+  -d '{"externalIds":["S-10442","S-10443"],"window":{"startsAt":"2026-11-02T09:00:00Z","endsAt":"2026-11-02T12:00:00Z"}}'
 ```
+
+### Rescheduling
+
+`PUT /api/v1/sessions/:id/window` `{ window: { startsAt?, endsAt? }, note? }` → the session (below). Sets, changes or
+clears (both `null`) the window of a session **that has not started**; `409 already_started` once the candidate
+started, `409 invalid_state` once the session ended. The same rules as on assignment. Recorded in the audit log
+(actor: the API key) and on the session's timeline, and sent as `session.rescheduled`.
 
 ### Sessions
 
@@ -118,15 +134,28 @@ A *session* is one candidate's attempt at one exam.
   "score": { "points": 17, "maxPoints": 20, "autoGraded": true, "regraded": 0 },
   "counts": { "integrity": 2, "uncertain": 1, "technical": 0, "unreviewed": 3, "open": 0, "highSeverity": 1 },
   "hold": null,
+  "window": { "startsAt": 1790240400000, "endsAt": 1790251200000 },
   "accessLink": "https://proctor.example.com/take/…",
   "staffUrl": "https://proctor.example.com/admin/sessions/5f0c…"
 }
 ```
 
-* `status` / `endReason`: `submitted` with `candidate_submitted`, `time_expired` or `staff_submitted`;
+* `status` / `endReason`: `submitted` with `candidate_submitted`, `time_expired`, `staff_submitted` or
+  `resume_limit` (the exam was interrupted — reopened in a new browser window, or disconnected — more often or for
+  longer than the exam's resume rules allow, and the rules say to end it; the saved answers are graded);
   `terminated` with `staff_terminated`, `candidate_withdrew` (the candidate withdrew consent in the exam app; no
   score, its images deleted) or `abandoned` (closed automatically after the organisation's
-  inactivity period — no score is implied). `hold` is set while the exam is `on_hold` (reason, since, message).
+  inactivity period — no score is implied). `hold` is set while the exam is `on_hold` (reason, since, message;
+  `resume_limit` = held under the resume rules for a staff decision, `recovery` = staff reopened the ended exam and
+  the candidate has to pass a fresh identity check before it continues).
+* `window`: the scheduling window (null: the exam can be started any time). Abandoned-session housekeeping counts
+  inactivity from the end of the window at the earliest.
+* **Reopened exams**: staff may reopen an exam that ended by time, by staff, after inactivity or under the resume
+  rules (never one the candidate submitted, nor after a consent withdrawal or once its images were deleted under the
+  retention policy). It then goes back to `on_hold` (`hold.reason` `recovery`; `endReason`, `endedAt` and `score` are
+  cleared until it ends again) — or to `invited` if it had never started — and `session.reopened` is sent. Treat a
+  `session.submitted` / `session.terminated` as final only together with the review outcome if your process allows
+  recovery.
 * `counts` are observations awaiting or after human review — not a verdict. Dismissed events are not
   counted in the category totals.
 * `accommodations`: the kinds of approved accommodations applied to the attempt (`extra_time`, `rest_breaks`,
@@ -187,10 +216,12 @@ delivers a `ping` immediately.
 | `session.held` | The exam was put on hold (identity review, pause limit, staff, `staff_verification` = waiting for a staff member to verify identity under that accommodation…) | session fields, `reason` = hold reason |
 | `session.released` | Staff released a hold | session fields, `reason`, `requireCheck` |
 | `session.pause_requested` | The candidate asked for a pause that needs approval | session fields, `pauseRequest { id, reason }` |
-| `session.submitted` | Submitted by the candidate, on time expiry or by staff | session fields, `endReason`, `score` |
+| `session.submitted` | Submitted by the candidate, on time expiry, by staff, or ended under the exam's resume rules | session fields, `endReason`, `score`, `reason` (`too_many_reconnects` / `offline_too_long` when `endReason` is `resume_limit`, else null) |
 | `session.terminated` | Ended by staff, by the candidate withdrawing consent, or closed automatically after inactivity | session fields, `endReason`, `reason` (`abandoned_after_inactivity`, `consent_withdrawn` or null) |
 | `session.regraded` | An administrator regraded the finished attempt with corrected answer keys / points (sent only when its score or a question's result changed) | session fields, `score` (the new one), `reason` (the administrator's) |
 | `session.reviewed` | Staff completed the review of the attempt (sent again if a reopened review is completed again) | session fields, `outcome` (`no_concerns` \| `concerns` \| `inconclusive` \| `technical_issues`; never the reviewer's note) |
+| `session.rescheduled` | The scheduling window was set, changed or cleared (staff app or `PUT /sessions/:id/window`), before the exam started | session fields, `window` and `previousWindow` (`{ startsAt, endsAt }` or null; never the staff note) |
+| `session.reopened` | Staff reopened an ended exam for recovery | session fields (`status` `on_hold` or `invited`, `endReason` null), `reason` = how it had ended (e.g. `time_expired`), `addedMinutes`; never the staff reason |
 | `ping` | “Send test” in the staff app | `{ webhookId, message, sentBy }` |
 
 Event fields: `id, sessionId, type, category, severity, title, observation, status, startedAt, endedAt,
@@ -298,13 +329,16 @@ app.post('/hooks/smartproctoring', express.raw({ type: 'application/json' }), (r
 ## 4. Typical LMS flow
 
 1. Nightly or on enrolment: `POST /api/v1/candidates` for each student (upsert by your student id).
-2. When the exam window opens: `POST /api/v1/exams/:examId/assignments` with the students' `externalIds`;
-   show each student their `accessLink` inside the LMS.
+2. When the exam is scheduled: `POST /api/v1/exams/:examId/assignments` with the students' `externalIds` and the
+   `window` in which they may start; show each student their `accessLink` inside the LMS (before the window the link
+   shows when the exam opens). A student who has to move: `PUT /api/v1/sessions/:id/window`.
 3. Subscribe a webhook to `session.submitted`, `session.terminated`, `session.held` and (optionally)
    `event.created` with minimum severity `high`.
 4. On `session.submitted`: fetch `GET /api/v1/sessions/:id` (score, counts) and, after staff review,
    `GET /api/v1/sessions/:id/report` to archive the report with the grade.
 5. On `session.regraded` (subscribe to it if you store grades): replace the stored grade with the new `score`.
+6. On `session.reopened` (subscribe to it if staff may reopen exams for recovery, e.g. after a power cut): the attempt
+   is in progress again; expect a new `session.submitted` / `session.terminated` (and a new score) later.
 
 Candidates that should not be able to start any more (e.g. withdrew) can be handled by staff (terminate).
 Sessions nobody touches are closed automatically after the organisation's inactivity period

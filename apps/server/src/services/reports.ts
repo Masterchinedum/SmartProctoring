@@ -66,6 +66,7 @@ const END_REASON_TEXT: Record<SessionEndReason, string> = {
   staff_terminated: 'ended by an administrator',
   candidate_withdrew: 'ended when the candidate withdrew their consent (no score is recorded; the face images and templates were deleted)',
   abandoned: 'closed automatically after a long period without activity (no score is recorded)',
+  resume_limit: 'ended under the exam’s resume rules after too many or too long interruptions (the saved answers were submitted)',
 };
 
 const HOLD_REASON_TEXT: Record<HoldReason, string> = {
@@ -76,6 +77,8 @@ const HOLD_REASON_TEXT: Record<HoldReason, string> = {
   staff: 'a staff member placed it on hold',
   id_photo_unverifiable: 'the live image could not be compared dependably with the approved ID photo (not evidence of a different person)',
   staff_verification: 'the candidate waited for a staff member to verify their identity',
+  resume_limit: 'the exam was interrupted more often or for longer than the exam rules allow',
+  recovery: 'an administrator reopened the ended exam and the candidate had to pass a fresh identity check',
 };
 
 const DETECTOR_LABELS: Record<keyof ProctoringPolicy['detection']['enabled'], string> = {
@@ -537,6 +540,15 @@ export function buildObservations(input: ObservationInput): string[] {
     const note = str(e.details.note);
     out.push(`An administrator extended the exam time${minutes != null ? ` by ${plural(minutes, 'minute')}` : ''} at ${clock.time(e.startedAt)}${note ? ` (“${note}”)` : ''}.`);
   }
+  // Scheduling and recovery (services/scheduling.ts, services/recovery.ts). The staff reason stays on the timeline.
+  for (const e of evs.filter((x) => x.type === 'session_rescheduled')) out.push(`The window for starting the exam was changed at ${clock.time(e.startedAt)}.`);
+  for (const e of evs.filter((x) => x.type === 'session_reopened')) {
+    const prev = str(e.details.previousEndReason) as SessionEndReason | null;
+    const minutes = typeof e.details.addMinutes === 'number' && e.details.addMinutes > 0 ? e.details.addMinutes : null;
+    out.push(
+      `An administrator reopened the exam for recovery at ${clock.time(e.startedAt)}${prev && END_REASON_TEXT[prev] ? ` (it had been ${END_REASON_TEXT[prev]})` : ''}${minutes ? ` and added ${plural(minutes, 'minute')}` : ''}.`,
+    );
+  }
 
   const active = periods.filter((p) => p.kind === 'active');
   const monitored = active.filter((p) => periodDuration(p, endAt) > 0);
@@ -659,8 +671,11 @@ function holdResolution(p: PeriodDTO, evs: EventDTO[], checks: IdentityCheckDTO[
   const end = p.endedAt ?? endAt;
   const within = (e: EventDTO) => e.startedAt >= p.startedAt && e.startedAt <= end + 1000;
   const released = evs.find((e) => e.type === 'hold_released' && within(e));
-  const terminated = evs.find((e) => e.type === 'session_terminated' && within(e));
-  const submitted = evs.find((e) => (e.type === 'session_submitted' || e.type === 'session_expired') && within(e));
+  // A recovery hold (services/recovery.ts) starts where the exam had ended: only an end after the reopening counts.
+  const reopened = evs.find((e) => e.type === 'session_reopened' && within(e));
+  const after = (e: EventDTO) => within(e) && (!reopened || e.startedAt > reopened.startedAt);
+  const terminated = evs.find((e) => e.type === 'session_terminated' && after(e));
+  const submitted = evs.find((e) => (e.type === 'session_submitted' || e.type === 'session_expired') && after(e));
   const parts: string[] = [];
   if (released) {
     const reEnroll = released.details.reEnroll === true;
@@ -670,6 +685,11 @@ function holdResolution(p: PeriodDTO, evs: EventDTO[], checks: IdentityCheckDTO[
     );
     const reverify = checks.find((c) => (c.trigger === 'reverify' || c.trigger === 'check_in') && c.at >= released.startedAt && c.at <= end + 60_000);
     if (reverify) parts.push(reverify.decision === 'match' ? `the candidate passed the identity check at ${clock.time(reverify.at)}` : `the identity check at ${clock.time(reverify.at)} returned “${reverify.decision.replace(/_/g, ' ')}”`);
+  }
+  if (reopened) {
+    parts.push(`an administrator had reopened the exam for recovery at ${clock.time(reopened.startedAt)}`);
+    const check = checks.find((c) => c.trigger === 'reverify' && c.at >= reopened.startedAt && c.at <= end + 60_000);
+    if (check) parts.push(check.decision === 'match' ? `the candidate passed the identity check at ${clock.time(check.at)}` : `the identity check at ${clock.time(check.at)} returned “${check.decision.replace(/_/g, ' ')}”`);
   }
   if (terminated) parts.push(`the exam was ended by an administrator at ${clock.time(terminated.startedAt)}`);
   else if (submitted) parts.push(`the exam was submitted at ${clock.time(submitted.startedAt)}`);
