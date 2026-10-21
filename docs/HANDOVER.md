@@ -141,6 +141,18 @@ A higher chance of accepting an impostor outweighs a usability gain, so **produc
 tooling is in the repository. With consented real webcam captures (§4, item 1), the hybrid can be re-validated and
 shipped.
 
+## 3b. Round 3 — launch reliability (October 2026)
+
+| Area | Change | Where |
+|---|---|---|
+| Runtime | **Node 24 only**: `engines >=24` with `engine-strict` (pnpm install refuses older Node), the server refuses to start on Node < 24, Docker `node:24-bookworm-slim`, CI Node 24 | `package.json`, `.npmrc`, `Dockerfile`, `apps/server/src/main.ts` |
+| Privacy | onnxruntime's usage telemetry is switched off (`ORT_DISABLE_TELEMETRY=1` unless set) | `vision/engine.ts`, `Dockerfile` |
+| Busy server | `Retry-After` = the queue's estimated drain time (was a fixed 2 s); the candidate app waits that long plus a random 0–50 % and says the server is busy, not "check your internet connection" | `vision/pool.ts`, `app.ts`, `candidate/check/sendRetry.ts`, `outbox.ts` |
+| Health | `/api/health/live`, `/api/health/ready` (= `/api/health`; database within 2 s and a vision worker — vision was hard-coded "ok"), `/api/health/capacity` (whether to take more exam starts; never for load-balancer routing) | `routes/public.ts`, `services/capacity.ts` |
+| Observability | Prometheus `/metrics` behind `METRICS_TOKEN` (vision queue and latency, capacity, identity decisions, jobs, retention, evidence-store errors, webhook / email backlogs, HTTP, Postgres pool, WebSockets, the running calibration); 18 alert rules; request ids on every response and log line; session / staff / API-key ids on authenticated log lines | `lib/metrics.ts`, `docs/prometheus-alerts.yml`, `lib/request-log.ts`, OPERATIONS §5 |
+| Peak protection | **Admission at exam start** (starts deferred while at capacity, clock not running, ≤ 5 min) and **load-aware sampling** (routine samples spaced out, never beyond the Balanced intensity; triggered and evidence-building samples untouched) — measured: identity sample p95 12.0 → 3.7 s, check-in frame p95 8.6 → 3.0 s at a synchronised start of 136 on 4 vCPU (PERFORMANCE §7.8) | `services/candidate-actions.ts`, `services/identity-evidence.ts` |
+| Tests | CI fetches the public face photos at pinned commits (SHA-256 checked, never committed) so the real-model tests run; `E2E_NO_SKIP` / `SP_REQUIRE_TEST_IMAGES` turn a missing image into a failure; core e2e (01–18) on every PR; the Docker image built and booted on every PR; the whole e2e suite nightly | `.github/workflows/`, `e2e/scripts/fetch-faces.ts` |
+
 ## 4. Known limitations / before launch
 
 1. **Accuracy on your population.** The v2 calibration was fitted on public photos rendered through a laptop-webcam
@@ -168,7 +180,9 @@ shipped.
      ≈ 70 candidates in the start-up window and ≈ 175 in steady state. Scheduled exams start everyone together, so
      the start-up window is the peak: plan ≈ 45 candidates per 4-vCPU instance, or stagger starts (§6).
    - **Beyond capacity:** identity bursts wait seconds, then frames are refused (503) and check-ins slow to
-     minutes. Heartbeats, answers and events stay fast.
+     minutes. Heartbeats, answers and events stay fast. Since round 3 (§3b) admission at exam start and load-aware
+     sampling step in first: starts are held back (clock not running, at most 5 minutes) and identity samples keep
+     waiting about 2 s (PERFORMANCE §7.8). That smooths a peak; it does not add capacity.
    - **Levers:**
      - accuracy-neutral: flip the packed detector tensor for the mirrored pass (−2…−6 % per frame);
        `VISION_THREADS=4` on a dedicated host (+23 % in isolation);
@@ -192,7 +206,7 @@ shipped.
 6. **Legal**: `PRIVACY.md` and the candidate notice are written to support GDPR/BIPA-style obligations but must be reviewed by counsel for your jurisdictions; define your sub-processors and data-processing agreements.
 7. **English only** (strings are centralised enough to localise).
 8. Per-session answer conflict: if two devices edit the same answer, the later client sequence wins; superseded devices are blocked from writing.
-9. **Docker image** — no Docker daemon was available in the build environment, so `docker build` itself was not executed. The image's runtime layout (`pnpm deploy --prod` node_modules + bundled `dist/` incl. the vision worker + migrations + models + web build) was reproduced by hand and booted with `NODE_ENV=production`: migrations, owner bootstrap, SPA/WASM/model serving, check-ins and identity samples through the worker pool all worked. Run `docker compose up --build` once in CI/staging before launch.
+9. **Docker image** — built and booted on Node 24 (round 3): locally, and by CI on every pull request (`docker` job: migrations, vision workers, web app, health probes). `docker compose up --build` with Redis and S3 still deserves one staging run before launch.
 10. **Not exercised against real external services here**: a real SMTP provider (TLS/auth/SPF/DKIM), S3-compatible storage (retention and `rekey` were verified on local storage), webhook delivery to a public endpoint with the private-network guard on (e2e had to allow a local receiver). Multi-instance realtime and rate limits over Redis are covered by integration tests with a local Redis, not by a multi-host deployment.
 11. **Staff MFA, SSO (SAML/OIDC), per-candidate accommodations beyond time extension and policy variants, and localisation** are the most likely next feature requests.
 

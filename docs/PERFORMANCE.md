@@ -276,7 +276,9 @@ of face analysis long before that, so grow by vision workers (a bigger instance)
   - *Check-ins:* a check-in is small (≈ 5.5 frames) next to the 90 frames of the start-up window after it. So one
     4-vCPU instance on its own absorbs only ≈ 14 new candidates per minute (≈ 34 with Balanced), not ≈ 8 check-ins
     per second as with v1.
-* **Beyond capacity** (measured, §7.2):
+* **Beyond capacity** — by default admission at exam start and load-aware sampling now step in first (§7.8): starts
+  are held back (clock not running, at most 5 minutes) and routine samples are spaced out to the Balanced intensity, so
+  identity samples keep waiting about 2 s instead of 10 s or more. Without them (both switched off, as measured in §7.2):
   - `server overloaded (face analysis queue long)` appears in the log first;
   - identity bursts then wait seconds (the client's cadence stretches);
   - then frames answer 503 `vision_busy` with a `Retry-After` estimated from the queue (retried after it, with a
@@ -616,3 +618,38 @@ With real client crops (1.2× per frame) the knees are ≈ 110 (synchronised sta
 ≤ 75 %:
 - **≈ 80 candidates per 4-vCPU instance when everyone starts together** (≈ 20 per vCPU; Maximum ≈ 45);
 - **≈ 280 in steady state** (≈ 70 per vCPU; Maximum ≈ 110).
+
+### 7.8 Admission at exam start and load-aware sampling (measured 2026-10-21)
+
+Both are on by default (OPERATIONS §2 "Built-in protection at the peak"). Same method as §7.1: N=150, a 30-s check-in
+ramp (a synchronised start), 300 s, Maximum profile, a fresh database and server per run, Node 24.22.0, one 4-vCPU /
+16 GB VM with Postgres and the load generator on it. This VM analyses ≈ 25 frames/s at saturation (§7.2's: ≈ 35), so
+compare the two runs with each other, not with the tables above. 136 of 150 checked in (the photo set; §7.1).
+
+| p50 / p95 / max (ms) | both off (`EXAM_START_ADMISSION=false LOAD_AWARE_SAMPLING=false`) | both on (default) |
+|---|---|---|
+| identity frame, whole run | 7,819 / 11,989 / 33,328 | **2,491 / 3,677 / 5,459** |
+| identity frame, start-up phase | 9,915 / 12,578 / 33,328 | — (starts spread over ≈ 3 min: no common start-up phase) |
+| check frame (check-ins) | 4,471 / 8,585 / 8,881 | **2,180 / 3,046 / 3,380** |
+| "Start exam" until admitted | 26 / 54 / 75 | 19,749 / 171,709 / 188,262 (clock not running; cap 300 s) |
+| heartbeat / answer / events p95 | 19 / 28 / 32 | 18 / 24 / 28 |
+| identity frames refused (503) and retried | 70 | 0 |
+| routine sample interval p50 / p95 | 6,000 / 15,000 | 12,000 / 30,000 |
+
+- **Admission** deferred 115 of the 136 starts (734 deferrals of 5–30 s); the longest waited 188 s, within the 300-s
+  cap. The queue settled near the capacity limit (`CAPACITY_MAX_VISION_WAIT_MS`, 2 s), which is what identity
+  samples then waited: lower it for faster samples at the cost of longer start waits.
+- **Load-aware sampling** answered 2,003 bursts with a longer routine interval (`sp_identity_samples_spaced_out_total`),
+  never beyond the Balanced spacing (12 s / 30 s). Every candidate's exam-start sample was taken and matched (136 of
+  136 in both runs).
+- **No side effects found**: no "no samples" or other identity observation in either run (the watchdog waits for the
+  interval it told the client), no server error, the request path as fast as without.
+- **What it does not change**: capacity. The same instance analysed about the same frames per second (25.1 vs 23.5);
+  the work was spread out instead of queued. A start held back for minutes means the instance is under-sized: plan
+  capacity with §6 and treat `sp_exam_starts_deferred_total` as a signal to add instances.
+
+```bash
+# server: EXAM_START_ADMISSION=false LOAD_AWARE_SAMPLING=false for the "off" run
+cd e2e && BASE=http://127.0.0.1:8097 STAFF_EMAIL=perf@example.com STAFF_PASSWORD=PerfTest12345 \
+  N=150 RAMP_SEC=30 DURATION_SEC=300 FACES_DIR=/path/to/face/jpegs npx tsx scripts/load-test.ts
+```
