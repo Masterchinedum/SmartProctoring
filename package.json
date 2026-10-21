@@ -6,7 +6,7 @@
   "license": "UNLICENSED",
   "packageManager": "pnpm@10.33.0",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=24"
   },
   "scripts": {
     "build": "pnpm --filter @sp/web run build && pnpm --filter @sp/server run build",

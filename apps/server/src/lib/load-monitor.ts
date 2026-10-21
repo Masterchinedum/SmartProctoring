@@ -6,7 +6,7 @@
  *   {"loadMonitor":{"eventLoopP99Ms":312,"dbWaiting":14,"visionQueued":180,...},"msg":"server overloaded ..."}
  * Sustained warnings mean this instance is at its knee: add an instance (Redis + load balancer) or CPU.
  */
-import { monitorEventLoopDelay, performance, type IntervalHistogram } from 'node:perf_hooks';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import type { FastifyBaseLogger } from 'fastify';
 import type pg from 'pg';
 
@@ -35,7 +35,7 @@ export interface LoadMonitorOptions {
 type VisionStatsLike = { stats?: { inFlight?: number; queued?: number; workers?: number } };
 
 export class LoadMonitor {
-  private readonly hist: IntervalHistogram;
+  private readonly hist: ReturnType<typeof monitorEventLoopDelay>;
   private timer: NodeJS.Timeout | null = null;
   private lastElu = performance.eventLoopUtilization();
   private lastWarnAt = 0;

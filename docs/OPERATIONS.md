@@ -17,7 +17,7 @@ Database migrations run automatically at start-up. On first start, if no staff u
 organisation owner is created from `BOOTSTRAP_ADMIN_*`.
 
 ### Without Docker
-Node ≥ 20.11 (22 recommended), pnpm 10, Postgres 14+.
+Node 24 or later (required: `pnpm install` refuses older versions), pnpm 10, Postgres 14+.
 ```bash
 pnpm install --frozen-lockfile
 pnpm --filter @sp/web build

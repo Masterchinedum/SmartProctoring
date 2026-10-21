@@ -23,7 +23,7 @@ include their own server starts. Global setup adds ~15 s (plus ~1 minute the fir
 
 ## Prerequisites
 
-* Node 22, `pnpm install` done, Chromium for Playwright 1.56.1 available (`PLAYWRIGHT_BROWSERS_PATH`;
+* Node 24, `pnpm install` done, Chromium for Playwright 1.56.1 available (`PLAYWRIGHT_BROWSERS_PATH`;
   the suite never runs `playwright install`).
 * Postgres reachable at `postgres://postgres@127.0.0.1:5432` (trust auth, like the server's unit tests).
   The database **`proctor_e2e` is dropped and re-created on every run** (global setup refuses to reset a

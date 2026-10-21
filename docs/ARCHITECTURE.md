@@ -7,7 +7,7 @@ component is built against. **`packages/shared` is the source of truth for types
 ## 1. Components
 
 ```
-apps/web  (React + Vite)                     apps/server (Node 22 + Fastify 5 + Postgres)
+apps/web  (React + Vite)                     apps/server (Node 24 + Fastify 5 + Postgres)
  ├─ candidate app  /take/:token               ├─ REST API  /api/candidate/*  /api/admin/*  /api/auth/*
  │   ├─ MediaPipe FaceLandmarker (5 fps)      ├─ WebSocket /api/admin/live  (staff realtime)
  │   ├─ MediaPipe ObjectDetector (~1 fps)     ├─ vision/  YuNet (face detect) + SFace (face embedding) via onnxruntime-node

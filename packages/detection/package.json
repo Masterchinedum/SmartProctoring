@@ -12,5 +12,5 @@
     "eval": "tsx src/eval/cli.ts"
   },
   "dependencies": { "@sp/shared": "workspace:*" },
-  "devDependencies": { "typescript": "^5.9.2", "vitest": "^3.2.4", "tsx": "^4.20.5", "@types/node": "^22.18.0" }
+  "devDependencies": { "typescript": "^5.9.2", "vitest": "^3.2.4", "tsx": "^4.20.5", "@types/node": "^24.0.0" }
 }

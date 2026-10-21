@@ -81,7 +81,7 @@ reviewer decisions. See [docs/accuracy/](docs/accuracy/README.md).
 ## Architecture
 
 ```
-Candidate browser                         Server (Node 22, Fastify, Postgres)
+Candidate browser                         Server (Node 24, Fastify, Postgres)
  MediaPipe face mesh + object detector     Candidate API ─ session state machine, exam clock, periods
  @sp/detection engine → episodes           Identity engine ─ YuNet + SFace (ONNX) verification vs protected reference
  IndexedDB outbox (offline-safe)  ──────▶  Evidence store (AES-256-GCM) · retention · audit log
@@ -99,7 +99,7 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Repository layout:
 
 ## Quick start (development)
 
-Requirements: Node 22, pnpm 10, Postgres 14+.
+Requirements: Node 24 (older versions are refused), pnpm 10, Postgres 14+.
 
 ```bash
 pnpm install
@@ -114,11 +114,11 @@ the seed script and can be created from Exams → Assign.
 ### First-time setup on macOS (Homebrew)
 
 ```bash
-# 1. Node 22 + pnpm
-brew install node@22
-echo 'export PATH="$(brew --prefix node@22)/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+# 1. Node 24 + pnpm
+brew install node@24
+echo 'export PATH="$(brew --prefix node@24)/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 corepack enable && corepack prepare pnpm@10.33.0 --activate     # or: npm install -g pnpm@10
-node -v && pnpm -v                                               # expect v22.x and 10.x
+node -v && pnpm -v                                               # expect v24.x and 10.x
 
 # 2. Postgres 16 (the app connects as role "postgres" on 127.0.0.1:5432 by default)
 brew install postgresql@16

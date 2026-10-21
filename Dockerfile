@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # ---------- build ----------
-FROM node:22-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 WORKDIR /app
@@ -20,7 +20,7 @@ RUN pnpm --filter @sp/web build \
            /out/node_modules/.pnpm/onnxruntime-node@*/node_modules/onnxruntime-node/bin/napi-v*/win32
 
 # ---------- runtime ----------
-FROM node:22-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     PORT=8080 \
     WEB_DIST_DIR=/app/web \
