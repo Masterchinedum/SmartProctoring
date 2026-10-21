@@ -239,7 +239,10 @@ describe('consent withdrawal (candidate)', () => {
     expect(files.some((f) => existsSync(f))).toBe(false);
     const after = await evidenceOf(session.id);
     expect(after.every((e) => e.purgedAt)).toBe(true);
-    expect(after.filter((e) => live.some((l) => l.id === e.id)).every((e) => e.purgeReason === 'consent_withdrawn')).toBe(true);
+    // The passed check-in's surplus frame images are deleted after its commit, in the background (checks.ts
+    // purgePassedCheckImages): that may still happen after `live` was read. Everything else goes for the withdrawal.
+    const reasons = after.filter((e) => live.some((l) => l.id === e.id)).map((e) => (e.kind === 'liveness_frame' && e.purgeReason === 'check_passed' ? 'consent_withdrawn' : e.purgeReason));
+    expect(new Set(reasons)).toEqual(new Set(['consent_withdrawn']));
     const refs = await env.ctx.db.select().from(identityReferences).where(eq(identityReferences.sessionId, session.id));
     expect(refs.length).toBeGreaterThan(0);
     expect(refs.every((r) => r.embeddingsEnc === null && r.purgedAt != null)).toBe(true);
