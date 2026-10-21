@@ -38,6 +38,8 @@ describe('P0-3: candidate access tokens never reach the logs', () => {
     expect(redactUrl('/take/AbC_123-xyz/?x=1#f')).toBe('/take/[redacted]/?x=1#f');
     expect(redactUrl('/api/public/privacy-notice?token=secret&x=1')).toBe('/api/public/privacy-notice?token=[redacted]&x=1');
     expect(redactUrl('/assets/app.js')).toBe('/assets/app.js');
+    // The single sign-on callback's authorization code and state (single-use credentials).
+    expect(redactUrl('/api/auth/sso/oidc/x/callback?code=abc&state=def&iss=https%3A%2F%2Fidp')).toBe('/api/auth/sso/oidc/x/callback?code=[redacted]&state=[redacted]&iss=https%3A%2F%2Fidp');
   });
 
   it('logs requests without the bearer token (web app route, query parameter, Authorization header)', async () => {

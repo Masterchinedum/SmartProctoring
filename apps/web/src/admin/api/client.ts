@@ -10,6 +10,7 @@ import type {
   CalibrationDTO,
   CandidateDTO,
   CreatedApiKeyDTO,
+  CreatedScimTokenDTO,
   CreatedWebhookDTO,
   DashboardDTO,
   DecisionConfigDTO,
@@ -30,6 +31,8 @@ import type {
   ExternalVerifierUpdate,
   ExamInput,
   IdentityComparisonDTO,
+  IdentityProviderDTO,
+  IdentityProviderInput,
   IdPhotoUploadResponse,
   IdentityTestResponse,
   IntegrationStatusDTO,
@@ -55,6 +58,10 @@ import type {
   SessionReportDTO,
   SessionSummaryDTO,
   SessionWindow,
+  ScimStatusDTO,
+  SsoDiscoverResponse,
+  SsoOverviewDTO,
+  SsoTestResultDTO,
   StaffRole,
   StaffSecurityDTO,
   StaffUserDTO,
@@ -358,6 +365,17 @@ export const api = {
   // ---- external second-opinion face verifier (settings: updateSettings({ externalVerifier }))
   verifierInfo: () => request<ExternalVerifierInfoDTO>('GET', `${A}/verifiers`),
   testVerifier: (jpeg: Blob) => request<ExternalVerifierTestResultDTO>('POST', `${A}/verifiers/test`, { blob: jpeg }),
+  // ---- single sign-on and SCIM (requireSso: updateSettings({ requireSso }))
+  ssoOverview: () => request<SsoOverviewDTO>('GET', `${A}/sso`),
+  createSsoProvider: (input: IdentityProviderInput) => request<IdentityProviderDTO>('POST', `${A}/sso/providers`, { body: input }),
+  updateSsoProvider: (id: string, input: IdentityProviderInput) => request<IdentityProviderDTO>('PUT', `${A}/sso/providers/${enc(id)}`, { body: input }),
+  deleteSsoProvider: (id: string) => request<{ ok: true }>('DELETE', `${A}/sso/providers/${enc(id)}`),
+  testSsoProvider: (id: string) => request<SsoTestResultDTO>('POST', `${A}/sso/providers/${enc(id)}/test`),
+  createScimToken: () => request<CreatedScimTokenDTO>('POST', `${A}/scim/token`),
+  revokeScimToken: () => request<ScimStatusDTO>('DELETE', `${A}/scim/token`),
+  unlinkUserSso: (id: string) => request<StaffUserDTO>('POST', `${A}/users/${enc(id)}/sso/unlink`),
+  /** Sign-in page: which identity provider signs in this address (404 sso_not_configured). */
+  ssoDiscover: (email: string, next?: string) => request<SsoDiscoverResponse>('POST', '/api/auth/sso/discover', { body: { email, next }, noAuthRedirect: true }),
 };
 
 /** Resolve a relative evidence/API URL against the current origin (for new-tab links). */

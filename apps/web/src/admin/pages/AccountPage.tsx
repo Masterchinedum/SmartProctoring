@@ -37,6 +37,12 @@ function TwoStepSection({ account, org, security }: { account: string; org: stri
         {security.mfaEnabled ? <span className="badge badge-success">On</span> : <span className="badge">Off</span>}
         {security.mfaRequired ? <span className="badge badge-info">Required by your organisation</span> : null}
       </div>
+      {security.signInMethod === 'sso' ? (
+        <p className="small" data-testid="signed-in-with-sso">
+          You signed in with single sign-on: your organisation’s identity provider checks the second step, so SmartProctoring does not ask for a code.
+          {security.ssoRequired ? ' Your organisation requires single sign-on.' : ' The settings below apply when you sign in with your password.'}
+        </p>
+      ) : null}
       {security.mfaEnabled ? (
         <>
           <p className="small">

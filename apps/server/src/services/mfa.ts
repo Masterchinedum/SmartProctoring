@@ -36,8 +36,10 @@ export async function requireMfaFor(db: DbOrTx, orgId: string): Promise<ReturnTy
   return orgSettings(o ?? null).requireMfa;
 }
 
-export async function securityDTO(db: DbOrTx, user: Pick<StaffUser, 'id' | 'orgId' | 'role' | 'mfaEnabledAt'>): Promise<StaffSecurityDTO> {
-  const required = mfaRequiredFor(await requireMfaFor(db, user.orgId), user.role as StaffRole);
+export async function securityDTO(db: DbOrTx, user: Pick<StaffUser, 'id' | 'orgId' | 'role' | 'mfaEnabledAt'>, signInMethod: 'password' | 'sso' = 'password'): Promise<StaffSecurityDTO> {
+  const [o] = await db.select({ settings: organizations.settings }).from(organizations).where(eq(organizations.id, user.orgId));
+  const settings = orgSettings(o ?? null);
+  const required = mfaRequiredFor(settings.requireMfa, user.role as StaffRole);
   const enabled = user.mfaEnabledAt != null;
   let left: number | null = null;
   if (enabled) {
@@ -47,7 +49,16 @@ export async function securityDTO(db: DbOrTx, user: Pick<StaffUser, 'id' | 'orgI
       .where(and(eq(staffRecoveryCodes.staffUserId, user.id), isNull(staffRecoveryCodes.usedAt)));
     left = r?.n ?? 0;
   }
-  return { mfaEnabled: enabled, mfaEnabledAt: user.mfaEnabledAt?.getTime() ?? null, recoveryCodesLeft: left, mfaRequired: required, enrollmentRequired: required && !enabled };
+  return {
+    mfaEnabled: enabled,
+    mfaEnabledAt: user.mfaEnabledAt?.getTime() ?? null,
+    recoveryCodesLeft: left,
+    mfaRequired: required,
+    // After single sign-on the identity provider is responsible for the second factor.
+    enrollmentRequired: required && !enabled && signInMethod !== 'sso',
+    signInMethod,
+    ssoRequired: settings.requireSso && user.role !== 'owner',
+  };
 }
 
 /* ------------------------------------------------------------------ set-up */

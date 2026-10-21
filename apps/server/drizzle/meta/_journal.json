@@ -113,6 +113,13 @@
       "when": 1792616941753,
       "tag": "0015_integration_api_maturity",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1792630285658,
+      "tag": "0016_sso_scim",
+      "breakpoints": true
     }
   ]
 }

@@ -496,6 +496,71 @@ It ends the account's sessions, lifts its sign-in backoff, writes `user.mfa_rese
 through a trusted channel; they change it on their account page. Exit codes: 0 done, 2 bad arguments, 4 no such
 address. Afterwards, add a second owner so this is not needed again.
 
+**Setting up single sign-on** (Settings → Single sign-on; owners only, administrators can view and test). The
+organisation is found from the **email domain** staff type on the sign-in page ("Sign in with your organisation"), so
+claim every domain your staff sign in with; a domain can belong to one provider on the whole server (ask the operator
+if one is already claimed). Each provider also has its own sign-in link to bookmark or put on an intranet page.
+Order of work: add the provider **disabled** → copy the redirect URI (OIDC) or the service-provider metadata URL
+(SAML) into the identity provider → finish the provider form → **Test connection** → enable → sign in yourself in a
+private window → only then consider **Require single sign-on**. After single sign-on SmartProctoring does not ask for
+its own two-step sign-in: **require MFA in the identity provider** for this application.
+
+* **Microsoft Entra ID (OpenID Connect).** Entra admin centre → App registrations → New registration (single tenant),
+  redirect URI type *Web* = the redirect URI shown in SmartProctoring. Certificates & secrets → new client secret.
+  Issuer = `https://login.microsoftonline.com/<tenant-id>/v2.0` (the tenant-specific issuer, never `common` or
+  `organizations`); client ID = the application (client) ID. Token configuration → optional claim `email` (ID
+  token), or set the email claim in SmartProctoring to `preferred_username` when your sign-in names are email
+  addresses. Entra does not send `email_verified`: switch off "Only accept email addresses the provider marks as
+  verified" (safe with a single-tenant issuer: only your tenant can sign in, and only your claimed domains are
+  accepted). Groups for roles of new accounts: Token configuration → groups claim (object IDs; map them by ID).
+  Conditional Access: require MFA for the app.
+* **Okta (OpenID Connect).** Applications → Create App Integration → OIDC, *Web application*, grant type
+  authorization code, sign-in redirect URI = the redirect URI. Issuer = `https://<your-org>.okta.com` (org
+  authorization server) or `https://<your-org>.okta.com/oauth2/default`; client ID / secret from the app. Okta sends
+  `email_verified`; keep the check on. Groups: add a `groups` claim (filter, e.g. starts with `proctoring-`) to the ID
+  token. Sign-on policy: require MFA.
+* **Google Workspace (OpenID Connect).** Google Cloud console → APIs & Services → Credentials → OAuth client ID,
+  *Web application*, authorised redirect URI = the redirect URI; consent screen *Internal*. Issuer
+  `https://accounts.google.com`. Google signs in any Google account, so the **email domains are what restrict it to
+  your staff** — claim only your Workspace domains. Google sends no groups claim: create accounts on the Users page or
+  by SCIM, or keep just-in-time accounts as reviewers. Enforce 2-step verification in the Admin console.
+* **SAML 2.0 (Entra ID enterprise app, Okta SAML app, ADFS, Shibboleth…).** Give the identity provider the
+  service-provider metadata URL (or: entity ID / identifier = the metadata URL, reply / ACS URL = the URL shown). In
+  SmartProctoring enter the identity provider's entity ID (issuer), its single sign-on URL (HTTP-Redirect binding) and
+  its signing certificate (PEM; from its metadata). Send the email as the NameID (format emailAddress) or as an
+  attribute (`email`, `mail` or Entra's `…/claims/emailaddress`); prefer a persistent NameID if your provider
+  offers one. Sign the assertion or the whole response (SHA-256). SmartProctoring does not sign its requests and
+  does not accept encrypted assertions (TLS protects the browser leg), and only SP-initiated sign-in works: start
+  from SmartProctoring's sign-in page or sign-in link, not from the identity provider's app tile.
+* **New staff.** Either add them on the Users page / by SCIM (they are linked at their first single sign-on), or
+  turn on *Create an account at the first sign-in* with a default role (reviewer is the safe choice) and optional
+  group → role mappings. Accounts are never created as owners; roles of existing accounts are not changed at sign-in.
+
+**Setting up SCIM provisioning.** Settings → Single sign-on → *Staff provisioning (SCIM)* → **Create SCIM token**
+(owner; shown once). Entra ID: the enterprise application → Provisioning → Automatic, tenant URL = the SCIM base URL,
+secret token = the token; map `userPrincipalName` (or `mail`) → `userName`, `displayName`, `Switch([IsSoftDeleted]…)`
+→ `active` (the default mapping), and for roles an app role → `roles[primary eq "True"].value` with the values
+`reviewer` / `admin`. Okta: the app → Provisioning → SCIM 2.0, base URL and *HTTP Header* authentication with the
+token; enable create / update / deactivate. Deactivating or unassigning someone disables the account here and signs
+them out everywhere; SCIM never changes owners (manage them on the Users page). Rotate the token with **Replace token**
+(the old one stops at once — update the identity provider immediately); **Revoke token** stops provisioning.
+
+**Single sign-on is down** (the identity provider is unavailable or misconfigured; staff see "Your organisation's
+identity provider could not be reached" or "Single sign-on did not complete"). The audit log has the precise reason
+under `auth.sso_failed` (e.g. `discovery_failed`, `token_rejected` with the library's message, `wrong_recipient`,
+`replayed`). **Owners can always sign in with their password and two-step sign-in**: an owner can turn off *Require
+single sign-on* so administrators and reviewers can use passwords (an administrator sets them on the Users page —
+accounts created by SCIM or at first sign-in have none), fix the provider, then turn it on again. If no owner can sign
+in at all, the operator uses the `staff-access` CLI (above).
+
+**A certificate rollover at the SAML identity provider.** Add the new signing certificate next to the old one in the
+provider form (up to three), save, let the identity provider switch, then remove the old one. The provider card warns
+30 days before the last certificate expires.
+
+**Someone's address was given to a new person** (a re-used mailbox), or they moved to a new account at the identity
+provider: their next single sign-on is refused ("linked to a different identity"). Check who it is, then Users →
+**Unlink single sign-on**; the next sign-in links the account to the identity that signs in with that address.
+
 **Changing the identity thresholds.** Only on evidence: an offline evaluation on your own consented data
 (`docs/accuracy/`), a pilot, or the Quality page's *Identity decisions by condition*. An administrator opens
 **Detection quality → Identity decision configuration → Propose new thresholds…**, enters the complete set and the
@@ -600,6 +665,9 @@ for a different request within 24 hours — it must send a new key per new reque
 | `EXTERNAL_VERIFIERS` | `aws-rekognition` | External second-opinion face verifiers organisations may switch on (each organisation still opts in; off by default). `none` = face images never leave this server. `docs/EXTERNAL_VERIFIER.md`. |
 | `EXTERNAL_VERIFIER_ENV_CREDENTIALS` | `false` | Let organisations use this server's AWS credentials (IAM role / `AWS_*` environment) instead of storing their own access key. Single-tenant deployments only. |
 | `EXTERNAL_VERIFIER_TIMEOUT_MS` | 4000 | Deadline per external comparison (retry included); afterwards the internal decision stands alone. |
+| `SSO_ALLOW_PRIVATE_NETWORKS` | the `WEBHOOK_ALLOW_PRIVATE_NETWORKS` value | Allow identity providers (OIDC discovery, JWKS, token endpoint) on localhost / private networks. Leave off in production unless your identity provider is only reachable on a private network you trust; requests are otherwise checked like webhooks (public addresses only, DNS pinned at connect time, no redirects). `https://` is required in production either way. |
+| `SSO_TIMEOUT_MS` | 10000 | Deadline per request to an identity provider. |
+| `SCIM_RATE_LIMIT_PER_MINUTE` | 600 | SCIM requests per minute per token (429 above; shared across instances with `REDIS_URL`). |
 
 Background jobs (advisory-lock guarded, one instance at a time): `webhooks` every 5 s (plus immediately
 after a change), `email-alerts` every 10 s, `abandoned-sessions` hourly, `api-idempotency` hourly (deletes stored
@@ -613,6 +681,7 @@ regenerate it with `pnpm --filter @sp/server openapi -- --out ../../docs/openapi
 only checks).
 
 Outbound network: allow egress to your SMTP server and to the webhook receivers (and, if an organisation enables
-the external face verifier, to `rekognition.<region>.amazonaws.com`). Webhook requests come
+the external face verifier, to `rekognition.<region>.amazonaws.com`; with OpenID Connect single sign-on, to the
+identity providers' issuer, JWKS and token endpoints — SAML needs no outbound call). Webhook requests come
 from the server's own IP with `User-Agent: SmartProctoring-Webhooks/1.0`. Nothing else calls out: the face-analysis
 runtime's own usage telemetry (onnxruntime) is switched off (`ORT_DISABLE_TELEMETRY=1`, set by the server when unset).

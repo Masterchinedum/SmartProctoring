@@ -37,6 +37,10 @@ export interface StaffPrincipal {
    * endpoints (requireStaff(…, { allowMfaEnrollment: true })) admit them (403 mfa_enrollment_required otherwise).
    */
   mfaEnrollmentRequired: boolean;
+  /** How this session was signed in (single sign-on sessions never need SmartProctoring's own two-step sign-in). */
+  authMethod: 'password' | 'sso';
+  /** The identity provider of a single sign-on session. */
+  ssoProviderId: string | null;
 }
 
 declare module 'fastify' {
@@ -60,13 +64,28 @@ export async function authenticateStaffToken(ctx: Ctx, rawCookie: string | undef
     .where(and(eq(staffSessions.tokenHash, tokenHash), gt(staffSessions.expiresAt, new Date(now))));
   const row = rows[0];
   if (!row || row.user.disabled) return null;
+  // The organisation requires single sign-on: a password session of anyone but an owner (break-glass) is no longer
+  // accepted (owner settings change, services/sso; the staff app returns to the sign-in page).
+  if (row.orgSettings?.requireSso === true && row.user.role !== 'owner' && row.sess.authMethod !== 'sso') return null;
   // Sliding expiry, written at most once a minute.
   if (now - row.sess.lastSeenAt.getTime() > 60_000) {
     const expiresAt = Math.min(now + ctx.config.staffSessionIdleMs, row.sess.createdAt.getTime() + ctx.config.staffSessionMaxMs);
     await ctx.db.update(staffSessions).set({ lastSeenAt: new Date(now), expiresAt: new Date(expiresAt) }).where(eq(staffSessions.id, row.sess.id));
   }
-  const mfaEnrollmentRequired = row.user.mfaEnabledAt == null && mfaRequiredFor(row.orgSettings?.requireMfa, row.user.role);
-  return { user: row.user, id: row.user.id, orgId: row.user.orgId, role: row.user.role, name: row.user.name, staffSessionId: row.sess.id, ip, mfaEnrollmentRequired };
+  // After single sign-on the identity provider is responsible for the second factor (docs/SECURITY.md §2).
+  const mfaEnrollmentRequired = row.sess.authMethod !== 'sso' && row.user.mfaEnabledAt == null && mfaRequiredFor(row.orgSettings?.requireMfa, row.user.role);
+  return {
+    user: row.user,
+    id: row.user.id,
+    orgId: row.user.orgId,
+    role: row.user.role,
+    name: row.user.name,
+    staffSessionId: row.sess.id,
+    ip,
+    mfaEnrollmentRequired,
+    authMethod: row.sess.authMethod,
+    ssoProviderId: row.sess.ssoProviderId ?? null,
+  };
 }
 
 function allowedOrigins(ctx: Ctx, req: FastifyRequest): string[] {
@@ -133,8 +152,8 @@ export function getStaff(req: FastifyRequest): StaffPrincipal {
   return req.staff;
 }
 
-/** Create a staff session and set the cookie. */
-export async function startStaffSession(ctx: Ctx, reply: FastifyReply, user: StaffUser, req: FastifyRequest): Promise<void> {
+/** Create a staff session and set the cookie (a new token every time: no session fixation). */
+export async function startStaffSession(ctx: Ctx, reply: FastifyReply, user: StaffUser, req: FastifyRequest, via: { method: 'password' | 'sso'; ssoProviderId?: string } = { method: 'password' }): Promise<void> {
   const token = randomToken(32);
   const now = ctx.now();
   await ctx.db.insert(staffSessions).values({
@@ -145,6 +164,8 @@ export async function startStaffSession(ctx: Ctx, reply: FastifyReply, user: Sta
     expiresAt: new Date(now + ctx.config.staffSessionIdleMs),
     ip: req.ip,
     userAgent: (req.headers['user-agent'] ?? '').slice(0, 500),
+    authMethod: via.method,
+    ssoProviderId: via.ssoProviderId ?? null,
   });
   reply.setCookie(STAFF_COOKIE, token, {
     signed: true,
@@ -174,4 +195,10 @@ export async function revokeStaffSessions(ctx: Pick<Ctx, 'db'>, userId: string, 
 export async function loadOrgName(ctx: Pick<Ctx, 'db'>, orgId: string): Promise<string> {
   const [o] = await ctx.db.select({ name: organizations.name }).from(organizations).where(eq(organizations.id, orgId));
   return o?.name ?? '';
+}
+
+/** End every single sign-on session made through an identity provider (provider disabled, re-pointed or deleted). */
+export async function revokeProviderSessions(ctx: Pick<Ctx, 'db'>, providerId: string): Promise<number> {
+  const rows = await ctx.db.delete(staffSessions).where(eq(staffSessions.ssoProviderId, providerId)).returning({ id: staffSessions.id });
+  return rows.length;
 }

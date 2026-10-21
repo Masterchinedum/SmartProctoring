@@ -11,6 +11,7 @@ import { orgRoutes } from './org.js';
 import { privacyRoutes } from './privacy.js';
 import { reviewRoutes } from './review.js';
 import { sessionRoutes } from './sessions.js';
+import { ssoAdminRoutes } from './sso.js';
 import { toolRoutes } from './tools.js';
 import { verifierRoutes } from './verifiers.js';
 
@@ -36,6 +37,7 @@ import { verifierRoutes } from './verifiers.js';
  *   integrations.ts  API keys, webhooks (+ deliveries), email-alert test, integration status
  *   tools.ts       staff camera self-test of the identity pipeline (transient, nothing stored)
  *   verifiers.ts   external second-opinion face verifier: providers offered, test connection
+ *   sso.ts         single sign-on identity providers (OIDC / SAML), SCIM token, unlinking accounts
  */
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(sessionRoutes);
@@ -52,6 +54,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(integrationRoutes);
   await app.register(toolRoutes);
   await app.register(verifierRoutes);
+  await app.register(ssoAdminRoutes);
 };
 
 export default adminRoutes;

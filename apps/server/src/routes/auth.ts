@@ -3,9 +3,9 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { endStaffSession, getStaff, isSameOriginRequest, loadOrgName, requireSameOrigin, requireStaff, revokeStaffSessions, startStaffSession } from '../auth/staff.js';
-import { staffUsers } from '../db/schema.js';
+import { organizations, staffUsers } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
-import { dummyPasswordHash, hashPassword, passwordNeedsRehash, verifyPassword } from '../lib/crypto.js';
+import { dummyPasswordHash, hashPassword, isUsablePasswordHash, passwordNeedsRehash, verifyPassword } from '../lib/crypto.js';
 import { badRequest, forbidden, HttpError, unauthorized } from '../lib/errors.js';
 import { toStaffUserDTO } from '../services/dto.js';
 import { admitLoginAttempt, clearLoginFailures, purgeStaleLoginThrottles, type ThrottleScope } from '../services/login-throttle.js';
@@ -25,6 +25,7 @@ import {
   verifySecondFactor,
   verifyTotpCode,
 } from '../services/mfa.js';
+import { orgSettings } from '../services/org.js';
 import { notifySecurityChange } from '../services/security-notices.js';
 
 /** "45 seconds" / "2 minutes" for the per-account backoff message. */
@@ -54,13 +55,21 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     },
   });
 
-  const signedInResponse = async (user: typeof staffUsers.$inferSelect) => ({
+  const signedInResponse = async (user: typeof staffUsers.$inferSelect, signInMethod: 'password' | 'sso' = 'password') => ({
     user: toStaffUserDTO(user),
     org: { id: user.orgId, name: await loadOrgName(ctx, user.orgId) },
-    security: await securityDTO(ctx.db, user),
+    security: await securityDTO(ctx.db, user, signInMethod),
   });
   const auditAuth = (user: { id: string; orgId: string } | null, action: string, meta: Record<string, unknown>, ip: string) =>
     audit(ctx.db, { orgId: user?.orgId ?? null, actorType: 'staff', actorId: user?.id ?? null, action, targetType: 'staff_user', targetId: user?.id ?? null, meta, ip, at: ctx.now() });
+
+  const assertPasswordSignInAllowed = async (user: typeof staffUsers.$inferSelect, ip: string) => {
+    if (user.role === 'owner') return;
+    const [o] = await ctx.db.select({ settings: organizations.settings }).from(organizations).where(eq(organizations.id, user.orgId));
+    if (!orgSettings(o ?? null).requireSso) return;
+    await auditAuth(user, 'auth.login_failed', { email: user.email, reason: 'sso_required' }, ip);
+    throw forbidden('Your organisation signs in with single sign-on. Choose “Sign in with your organisation”.', 'sso_required');
+  };
 
   /**
    * Re-authentication on a signed-in account (the current password, a code) is charged to a per-account backoff like
@@ -101,7 +110,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       throw new HttpError(429, 'too_many_attempts', `Too many failed sign-in attempts for this account. Try again in ${waitText(sec)}.`, { retryAfterSec: sec });
     }
     const user = await findUser();
-    const ok = user ? await verifyPassword(body.password, user.passwordHash) : (await verifyPassword(body.password, await dummyPasswordHash()), false);
+    // Accounts without a password (created by SCIM or single sign-on) cost the same derivation as any other.
+    const ok = user && isUsablePasswordHash(user.passwordHash) ? await verifyPassword(body.password, user.passwordHash) : (await verifyPassword(body.password, await dummyPasswordHash()), false);
     if (!user || !ok || user.disabled) {
       // Never the password itself; the attempted address, the reason and the backoff state.
       await audit(ctx.db, {
@@ -111,12 +121,20 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         action: 'auth.login_failed',
         targetType: 'staff_user',
         targetId: user?.id ?? null,
-        meta: { email, reason: !user ? 'unknown_user' : user.disabled ? 'disabled' : 'bad_password', failures: admission.failures, ...(admission.lockedUntil ? { lockedUntil: admission.lockedUntil } : {}) },
+        meta: {
+          email,
+          reason: !user ? 'unknown_user' : user.disabled ? 'disabled' : isUsablePasswordHash(user.passwordHash) ? 'bad_password' : 'no_password',
+          failures: admission.failures,
+          ...(admission.lockedUntil ? { lockedUntil: admission.lockedUntil } : {}),
+        },
         ip: req.ip,
         at: ctx.now(),
       });
       throw unauthorized('Invalid email or password');
     }
+    // The organisation signs in with single sign-on: only owners keep password sign-in (break-glass). Said only after
+    // the right password, so it does not reveal which addresses have accounts.
+    await assertPasswordSignInAllowed(user, req.ip);
     // Hashes made with older (weaker) scrypt parameters are upgraded transparently while we have the password.
     if (passwordNeedsRehash(user.passwordHash)) {
       const upgraded = await hashPassword(body.password);
@@ -162,6 +180,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       await deleteChallenge(ctx.db, taken.challengeId);
       throw expired();
     }
+    await assertPasswordSignInAllowed(user, req.ip);
     // Every code attempt also counts toward the account's backoff (as a password attempt would).
     const admission = await admitLoginAttempt(ctx.db, user.email.toLowerCase(), now);
     if (!admission.admitted) {
@@ -195,7 +214,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
-  app.get('/me', signedIn, async (req) => signedInResponse(getStaff(req).user));
+  app.get('/me', signedIn, async (req) => {
+    const staff = getStaff(req);
+    return signedInResponse(staff.user, staff.authMethod);
+  });
 
   /* ---------------------------------------------------------------- two-step sign-in */
 

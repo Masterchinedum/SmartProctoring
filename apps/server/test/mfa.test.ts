@@ -93,7 +93,7 @@ describe('set-up and sign-in', () => {
     expect(new Set(codes).size).toBe(10);
 
     const me = json<{ security: StaffSecurityDTO }>(await inject('GET', '/api/auth/me', cookie));
-    expect(me.security).toEqual({ mfaEnabled: true, mfaEnabledAt: env.clock.t, recoveryCodesLeft: 10, mfaRequired: false, enrollmentRequired: false });
+    expect(me.security).toEqual({ mfaEnabled: true, mfaEnabledAt: env.clock.t, recoveryCodesLeft: 10, mfaRequired: false, enrollmentRequired: false, signInMethod: 'password', ssoRequired: false });
     expect((await inject('GET', '/api/auth/me', other)).statusCode).toBe(401); // other browser signed out
     const stored = await env.ctx.db.select().from(staffRecoveryCodes).where(eq(staffRecoveryCodes.staffUserId, user.id));
     expect(stored.map((s) => s.codeHash).join()).not.toContain(codes[0].replace('-', ''));

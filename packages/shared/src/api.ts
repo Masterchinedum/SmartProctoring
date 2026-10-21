@@ -484,6 +484,13 @@ export interface StaffUserDTO {
   createdAt: number;
   /** Two-step sign-in set up (time it was turned on; null: not set up). */
   mfaEnabledAt?: number | null;
+  /** Linked to an organisation identity provider (single sign-on; ./sso.ts). */
+  ssoLinked?: boolean;
+  /**
+   * Created by SCIM provisioning or at a first single sign-on (just-in-time); null: created in SmartProctoring.
+   * Such accounts have no password until an administrator sets one.
+   */
+  provisionedVia?: 'scim' | 'sso' | null;
 }
 
 export const loginRequestSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
@@ -963,6 +970,11 @@ export interface OrgSettingsDTO {
    * server's locations, GET /evidence-storage). Only an owner can change it.
    */
   evidenceLocation: string;
+  /**
+   * Staff other than owners must sign in with single sign-on (./sso.ts); password sessions of other staff end. Only an
+   * owner can change it, and only while an identity provider is enabled.
+   */
+  requireSso: boolean;
 }
 
 export interface EmailAlertToggles {
@@ -1012,7 +1024,7 @@ export interface AuditLogEntryDTO {
   id: string;
   at: number;
   /** 'api_key': an organisation API key used on the integration API (/api/v1); actorId is the key id. */
-  actorType: 'staff' | 'candidate' | 'system' | 'api_key';
+  actorType: 'staff' | 'candidate' | 'system' | 'api_key' | 'scim';
   actorId: string | null;
   actorName: string | null;
   action: string;
@@ -1135,6 +1147,27 @@ export type { IdentityCheckTrigger };
  *   External second-opinion face verifier (types in ./verifiers.ts; settings = OrgSettingsDTO.externalVerifier):
  *   GET  /verifiers                                -> ExternalVerifierInfoDTO                       [admin]
  *   POST /verifiers/test  (image/jpeg)             -> ExternalVerifierTestResultDTO (image vs itself, saved settings) [admin]
+ *
+ *   Single sign-on and SCIM (types in ./sso.ts; requireSso = OrgSettingsDTO.requireSso via PUT /settings, owner only):
+ *   GET  /sso                                      -> SsoOverviewDTO (providers, requireSso, SCIM status)   [admin]
+ *   POST /sso/providers  IdentityProviderInput     -> IdentityProviderDTO  (409 sso_domain_taken)  [owner]
+ *   PUT  /sso/providers/:id  IdentityProviderInput -> IdentityProviderDTO  (kind fixed; clientSecret omitted = kept, null = removed) [owner]
+ *   DELETE /sso/providers/:id                      -> { ok }  (ends its sessions; 409 while it is the last one and SSO is required) [owner]
+ *   POST /sso/providers/:id/test                   -> SsoTestResultDTO  (OIDC: discovery + JWKS; SAML: certificates) [admin]
+ *   GET  /scim/token                               -> ScimStatusDTO                                 [admin]
+ *   POST /scim/token                               -> CreatedScimTokenDTO (secret shown once; replaces the active token) [owner]
+ *   DELETE /scim/token                             -> ScimStatusDTO                                 [owner]
+ *   POST /users/:id/sso/unlink                     -> StaffUserDTO  (removes its identity-provider links, signs it out) [admin]
+ *   Public, no staff session (prefix /api/auth/sso):
+ *   POST /discover {email, next?}                  -> SsoDiscoverResponse | 404 sso_not_configured
+ *   GET  /:providerId/start?next=&login_hint=      -> 302 to the identity provider (sp_sso browser-binding cookie)
+ *   GET  /oidc/:providerId/callback                -> 303 to `next` (signed in) or /admin/login?sso_error=<SsoErrorCode>
+ *   POST /saml/:providerId/acs  (form: SAMLResponse) -> 303 /api/auth/sso/complete?attempt=…  (the only cross-site form post)
+ *   GET  /complete?attempt=                        -> 303 to `next` (signed in, same browser only) or /admin/login?sso_error=…
+ *   GET  /saml/:providerId/metadata                -> SP metadata (application/samlmetadata+xml)
+ *   SCIM 2.0 (prefix /scim/v2, `Authorization: Bearer sp_scim_…`, application/scim+json): GET /ServiceProviderConfig,
+ *   /ResourceTypes, /Schemas; GET /Users?filter=userName eq "…"&startIndex=&count=, POST /Users, GET|PUT|PATCH|DELETE /Users/:id
+ *   POST /api/auth/login answers 403 sso_required (after the right password) for non-owners when SSO is required.
  */
 
 export interface Paged<T> {
@@ -1195,6 +1228,8 @@ export const settingsUpdateSchema = z.object({
   externalVerifier: externalVerifierUpdateSchema.optional(),
   /** Owner only. */
   requireMfa: z.enum(MFA_REQUIREMENTS).optional(),
+  /** Owner only; needs an enabled identity provider. */
+  requireSso: z.boolean().optional(),
   reviewSla: reviewSlaSchema.partial().optional(),
   /** Owner only: one of the server's storage locations (GET /evidence-storage); 400 unknown_storage_location otherwise. */
   evidenceLocation: evidenceLocationSchema.optional(),

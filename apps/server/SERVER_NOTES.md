@@ -35,6 +35,8 @@ src/
   services/grading.ts  isAnswerCorrect, gradeSession
   services/privacy.ts  noticeFor(org, policy, candidate)
   routes/auth.ts       /api/auth/login|logout|me|password
+  routes/sso.ts        /api/auth/sso/* single sign-on (OIDC callback, SAML ACS + metadata, completion); services/sso/*
+  routes/scim.ts       /scim/v2/* SCIM 2.0 staff provisioning (SCIM token); services/scim.ts
   routes/public.ts     /api/health, /api/public/privacy-notice
   routes/candidate/*   /api/candidate/*
   routes/admin/*       /api/admin/* staff API (sessions, events, evidence, exams, candidates, org, metrics)
@@ -110,7 +112,7 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
   idPhotoEvidenceId, idPhotoQuality, idPhotoApprovedAt/By. The candidate check decrypts with the same AAD.
 * Access link display: `accessLinkFor(ctx, sessionRow)`.
 * Encrypted AADs in use: `evidence:<evidenceId>`, `access-token:<sessionId>`, `idphoto:<candidateId>`,
-  `reference:<referenceId>`, `frame:<frameId>`, `sample-frame:<frameId>`, `webhook-secret:<webhookId>`, `accommodation-note:<accommodationId>`, `totp:<staffUserId>`, `totp-pending:<staffUserId>`, `privacy-request:<requestId>`, `external-verifier:<orgId>` (base64
+  `reference:<referenceId>`, `frame:<frameId>`, `sample-frame:<frameId>`, `webhook-secret:<webhookId>`, `accommodation-note:<accommodationId>`, `totp:<staffUserId>`, `totp-pending:<staffUserId>`, `privacy-request:<requestId>`, `sso-client-secret:<providerId>`, `external-verifier:<orgId>` (base64
   inside organizations.settings.externalVerifier.credentialsEnc; rekey target `external_verifier_credentials`).
   A NEW encrypted column must be
   added to services/rekey.ts `COLUMN_TARGETS` (test/rekey.test.ts fails for an uncovered bytea column).

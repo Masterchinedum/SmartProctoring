@@ -61,6 +61,10 @@ import type {
   SessionReviewState,
   SessionStatus,
   Severity,
+  SsoAssignableRole,
+  SsoClaimMapping,
+  SsoProviderKind,
+  SsoRoleMapping,
   StaffRole,
   WebhookDeliveryStatus,
   WebhookDeliveryType,
@@ -107,6 +111,8 @@ export interface OrgSettings {
    * when unset). Owner only. Existing images stay where they are until `storage:move` moves them.
    */
   evidenceLocation: string;
+  /** Staff other than owners must sign in with single sign-on (services/sso/*). */
+  requireSso: boolean;
 }
 
 export const organizations = pgTable('organizations', {
@@ -139,6 +145,12 @@ export const staffUsers = pgTable(
     /** A secret being set up, not active until confirmed (AAD totp-pending:<userId>). */
     totpPendingEnc: bytea('totp_pending_enc'),
     totpPendingAt: ts('totp_pending_at'),
+    /** Created by SCIM provisioning or at a first single sign-on (just-in-time); null = created in the staff app. */
+    provisionedVia: text('provisioned_via').$type<'scim' | 'sso'>(),
+    /** The SCIM client's own identifier for this account (SCIM `externalId`). */
+    scimExternalId: text('scim_external_id'),
+    /** Deleted through SCIM (the account is disabled and SCIM answers 404 for it; re-created by a SCIM POST). */
+    scimDeletedAt: ts('scim_deleted_at'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -194,6 +206,10 @@ export const staffSessions = pgTable(
     expiresAt: ts('expires_at').notNull(),
     ip: text('ip'),
     userAgent: text('user_agent'),
+    /** How the session was signed in: password (+ two-step sign-in) or single sign-on. */
+    authMethod: text('auth_method').$type<'password' | 'sso'>().notNull().default('password'),
+    /** The identity provider of a single sign-on session. */
+    ssoProviderId: uuid('sso_provider_id'),
   },
   (t) => [uniqueIndex('staff_sessions_token_uq').on(t.tokenHash), index('staff_sessions_user_idx').on(t.staffUserId)],
 );
@@ -215,6 +231,158 @@ export const loginThrottle = pgTable(
     lockedUntil: ts('locked_until'),
   },
   (t) => [index('login_throttle_last_failure_idx').on(t.lastFailureAt)],
+);
+
+/* ------------------------------------------------------------------ single sign-on and SCIM (services/sso/*, services/scim.ts) */
+
+/** An organisation's identity provider (OpenID Connect or SAML 2.0). Changed by owners only. */
+export const identityProviders = pgTable(
+  'identity_providers',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<SsoProviderKind>().notNull(),
+    name: text('name').notNull(),
+    enabled: boolean('enabled').notNull().default(false),
+    oidcIssuer: text('oidc_issuer'),
+    oidcClientId: text('oidc_client_id'),
+    /** OIDC client secret, AES-GCM encrypted (AAD `sso-client-secret:<id>`); null for a public client (PKCE only). */
+    oidcClientSecretEnc: bytea('oidc_client_secret_enc'),
+    oidcScopes: text('oidc_scopes').notNull().default('openid email profile'),
+    /** Refuse ID tokens whose email_verified claim is not true. */
+    oidcRequireVerifiedEmail: boolean('oidc_require_verified_email').notNull().default(true),
+    samlEntityId: text('saml_entity_id'),
+    samlSsoUrl: text('saml_sso_url'),
+    /** The identity provider's signing certificates (PEM). */
+    samlCertificates: jsonb('saml_certificates').$type<string[]>().notNull().default([]),
+    claimMapping: jsonb('claim_mapping').$type<SsoClaimMapping>().notNull().default({}),
+    /** Just-in-time accounts at the first sign-in of an unknown address of a claimed domain. */
+    jitEnabled: boolean('jit_enabled').notNull().default(false),
+    jitDefaultRole: text('jit_default_role').$type<SsoAssignableRole>().notNull().default('reviewer'),
+    /** Group (claim / attribute value) -> role for just-in-time accounts; the highest matching role wins. */
+    roleMappings: jsonb('role_mappings').$type<SsoRoleMapping[]>().notNull().default([]),
+    createdBy: uuid('created_by'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('identity_providers_org_idx').on(t.orgId)],
+);
+
+/** Email domains claimed by identity providers: a domain signs in through one provider on the whole server. */
+export const ssoDomains = pgTable(
+  'sso_domains',
+  {
+    /** Lower case, e.g. `example.edu`. */
+    domain: text('domain').primaryKey(),
+    providerId: uuid('provider_id')
+      .notNull()
+      .references(() => identityProviders.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id').notNull(),
+  },
+  (t) => [index('sso_domains_provider_idx').on(t.providerId)],
+);
+
+/** The identity (OIDC `sub` / SAML NameID) a staff account is linked to at a provider: set at the first single sign-on. */
+export const staffSsoIdentities = pgTable(
+  'staff_sso_identities',
+  {
+    id: id(),
+    staffUserId: uuid('staff_user_id')
+      .notNull()
+      .references(() => staffUsers.id, { onDelete: 'cascade' }),
+    providerId: uuid('provider_id')
+      .notNull()
+      .references(() => identityProviders.id, { onDelete: 'cascade' }),
+    subject: text('subject').notNull(),
+    /** The address the provider asserted at the last sign-in. */
+    email: text('email').notNull(),
+    createdAt: createdAt(),
+    lastLoginAt: ts('last_login_at'),
+  },
+  (t) => [uniqueIndex('staff_sso_identities_subject_uq').on(t.providerId, t.subject), uniqueIndex('staff_sso_identities_user_uq').on(t.staffUserId, t.providerId)],
+);
+
+/** What the identity provider asserted (mapped through the provider's claim mapping). */
+export interface SsoAttemptIdentity {
+  subject: string;
+  email: string | null;
+  emailVerified: boolean | null;
+  name: string | null;
+  groups: string[];
+}
+
+/**
+ * A single sign-on in progress (10 minutes): created when the browser is sent to the provider, bound to that browser by
+ * a signed cookie (sha256 stored), used once. OIDC: state (sha256), nonce, PKCE verifier. SAML: the AuthnRequest ID;
+ * the ACS (a cross-site POST that carries no cookies) stores the validated identity and the browser then completes the
+ * sign-in with its cookie (GET /api/auth/sso/complete).
+ */
+export const ssoLoginAttempts = pgTable(
+  'sso_login_attempts',
+  {
+    id: id(),
+    providerId: uuid('provider_id')
+      .notNull()
+      .references(() => identityProviders.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id').notNull(),
+    status: text('status').$type<'pending' | 'validated' | 'done' | 'failed'>().notNull().default('pending'),
+    browserHash: text('browser_hash').notNull(),
+    stateHash: text('state_hash'),
+    nonce: text('nonce'),
+    codeVerifier: text('code_verifier'),
+    samlRequestId: text('saml_request_id'),
+    /** The SAML identity validated at the ACS, waiting for the browser (status 'validated'). */
+    identity: jsonb('identity').$type<SsoAttemptIdentity>(),
+    returnTo: text('return_to').notNull().default('/admin'),
+    ip: text('ip'),
+    createdAt: createdAt(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('sso_login_attempts_state_uq').on(t.stateHash),
+    uniqueIndex('sso_login_attempts_saml_request_uq').on(t.samlRequestId),
+    index('sso_login_attempts_expires_idx').on(t.expiresAt),
+  ],
+);
+
+/** SAML assertion IDs already used (replay protection), kept until the assertion would have expired. */
+export const ssoSamlAssertions = pgTable(
+  'sso_saml_assertions',
+  {
+    providerId: uuid('provider_id')
+      .notNull()
+      .references(() => identityProviders.id, { onDelete: 'cascade' }),
+    assertionId: text('assertion_id').notNull(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.assertionId] }), index('sso_saml_assertions_expires_idx').on(t.expiresAt)],
+);
+
+/** SCIM bearer token of an organisation (only sha256 stored; at most one active token per organisation). */
+export const scimTokens = pgTable(
+  'scim_tokens',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** Display prefix: `sp_scim_` + the first 6 characters of the random part. */
+    prefix: text('prefix').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    createdBy: uuid('created_by'),
+    createdAt: createdAt(),
+    lastUsedAt: ts('last_used_at'),
+    revokedAt: ts('revoked_at'),
+    revokedBy: uuid('revoked_by'),
+  },
+  (t) => [
+    uniqueIndex('scim_tokens_hash_uq').on(t.tokenHash),
+    uniqueIndex('scim_tokens_active_org_uq')
+      .on(t.orgId)
+      .where(sql`${t.revokedAt} IS NULL`),
+  ],
 );
 
 /* ------------------------------------------------------------------ exams */
@@ -1025,7 +1193,7 @@ export const auditLog = pgTable(
     id: id(),
     orgId: uuid('org_id'),
     at: ts('at').notNull(),
-    actorType: text('actor_type').$type<'staff' | 'candidate' | 'system' | 'api_key'>().notNull(),
+    actorType: text('actor_type').$type<'staff' | 'candidate' | 'system' | 'api_key' | 'scim'>().notNull(),
     actorId: uuid('actor_id'),
     action: text('action').notNull(),
     targetType: text('target_type').notNull(),
@@ -1367,3 +1535,6 @@ export type ApiIdempotencyKey = typeof apiIdempotencyKeys.$inferSelect;
 export type Webhook = typeof webhooks.$inferSelect;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 export type EmailAlert = typeof emailAlerts.$inferSelect;
+export type IdentityProvider = typeof identityProviders.$inferSelect;
+export type SsoLoginAttempt = typeof ssoLoginAttempts.$inferSelect;
+export type ScimToken = typeof scimTokens.$inferSelect;

@@ -4,7 +4,7 @@
  *   GET  /settings                                  -> OrgSettingsDTO               [admin]
  *   PUT  /settings  Partial<OrgSettingsDTO>         -> OrgSettingsDTO               [admin]
  *        (externalVerifier takes ExternalVerifierUpdate: write-only key pair, see src/verifiers/settings.ts;
- *         requireMfa and evidenceLocation: owner only)
+ *         requireMfa, requireSso and evidenceLocation: owner only)
  *   GET  /evidence-storage                          -> EvidenceStorageDTO           [admin]
  *   GET  /users                                     -> { items: StaffUserDTO[] }    [admin]
  *   POST /users {email,name,role,password}          -> StaffUserDTO                 [admin; only an owner may create owners/admins]
@@ -33,7 +33,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { getStaff, requireStaff, revokeStaffSessions } from '../../auth/staff.js';
 import type { DbOrTx } from '../../db/index.js';
-import { apiKeys, auditLog, organizations, staffUsers, type Organization, type OrgSettings } from '../../db/schema.js';
+import { apiKeys, auditLog, organizations, staffSsoIdentities, staffUsers, type Organization, type OrgSettings } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { hashPassword } from '../../lib/crypto.js';
 import { badRequest, conflict, forbidden, notFound, validationFailed } from '../../lib/errors.js';
@@ -43,6 +43,7 @@ import { mergePolicy, orgSettings } from '../../services/org.js';
 import { clearLoginFailures } from '../../services/login-throttle.js';
 import { disableMfa } from '../../services/mfa.js';
 import { notifySecurityChange } from '../../services/security-notices.js';
+import { enabledProviderCount } from '../../services/sso/providers.js';
 import { applyExternalVerifierUpdate, externalVerifierAuditMeta, toExternalVerifierDTO } from '../../verifiers/settings.js';
 import { blankToUndefined, escapeLike, idParam, loadOrgRow, noStore, pagingSchema, sanitizePolicyInput } from './common.js';
 import { CSV_BOM, csvRow } from '../../services/reports-csv.js';
@@ -76,6 +77,7 @@ export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
     externalVerifier: toExternalVerifierDTO(s.externalVerifier),
     requireMfa: s.requireMfa,
     reviewSla: { ...s.reviewSla },
+    requireSso: s.requireSso,
     decisionConfigVersion: s.decisionConfigVersion,
     evidenceLocation: s.evidenceLocation,
   };
@@ -140,6 +142,12 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         if (staff.role !== 'owner') throw forbidden('Only an owner can change who must use two-step sign-in', 'owner_required');
         stored.requireMfa = body.requireMfa;
       }
+      // Single sign-on for everyone but owners: an owner's decision, and only with an enabled identity provider.
+      if (body.requireSso !== undefined && body.requireSso !== cur.requireSso) {
+        if (staff.role !== 'owner') throw forbidden('Only an owner can change whether single sign-on is required', 'owner_required');
+        if (body.requireSso && (await enabledProviderCount(tx, staff.orgId)) === 0) throw conflict('sso_not_configured', 'Enable an identity provider before requiring single sign-on.');
+        stored.requireSso = body.requireSso;
+      }
       if (body.reviewSla !== undefined) {
         const provided = Object.fromEntries(Object.entries(body.reviewSla).filter(([, v]) => v !== undefined));
         stored.reviewSla = { ...cur.reviewSla, ...provided };
@@ -189,6 +197,7 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
           ...(changed.includes('alertRecipients') ? { alertRecipients: { count: next.alertRecipients.length } } : {}),
           ...(changed.includes('emailAlerts') ? { emailAlerts: next.emailAlerts } : {}),
           ...(changed.includes('requireMfa') ? { requireMfa: { from: cur.requireMfa, to: next.requireMfa } } : {}),
+          ...(changed.includes('requireSso') ? { requireSso: { from: cur.requireSso, to: next.requireSso } } : {}),
           ...(changed.includes('reviewSla') ? { reviewSla: { from: cur.reviewSla, to: next.reviewSla } } : {}),
           ...(changed.includes('evidenceLocation') ? { evidenceLocation: { from: cur.evidenceLocation, to: next.evidenceLocation } } : {}),
           ...(changed.includes('externalVerifier') && verifier ? { externalVerifier: externalVerifierAuditMeta(cur.externalVerifier, next.externalVerifier, verifier.credentials) } : {}),
@@ -196,6 +205,12 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         ip: req.ip,
         at: now,
       });
+      // Password sessions of everyone but owners end now (authenticateStaffToken also refuses them from here on).
+      if (changed.includes('requireSso') && next.requireSso) {
+        await tx.execute(
+          sql`DELETE FROM staff_sessions s USING staff_users u WHERE s.staff_user_id = u.id AND u.org_id = ${staff.orgId} AND u.role <> 'owner' AND s.auth_method <> 'sso'`,
+        );
+      }
       return row;
     });
     return toOrgSettingsDTO(updated);
@@ -212,7 +227,16 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
   app.get('/users', admin, async (req) => {
     const staff = getStaff(req);
     const rows = await ctx.db.select().from(staffUsers).where(eq(staffUsers.orgId, staff.orgId)).orderBy(staffUsers.createdAt, staffUsers.id);
-    return { items: rows.map(toStaffUserDTO) };
+    const linked = new Set(
+      (
+        await ctx.db
+          .select({ id: staffSsoIdentities.staffUserId })
+          .from(staffSsoIdentities)
+          .innerJoin(staffUsers, eq(staffUsers.id, staffSsoIdentities.staffUserId))
+          .where(eq(staffUsers.orgId, staff.orgId))
+      ).map((r) => r.id),
+    );
+    return { items: rows.map((u) => toStaffUserDTO(u, { ssoLinked: linked.has(u.id) })) };
   });
 
   app.post('/users', admin, async (req) => {
@@ -280,6 +304,8 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       if (body.disabled !== undefined && body.disabled !== target.disabled) {
         patch.disabled = body.disabled;
         changed.push('disabled');
+        // Enabled again in the app: SCIM sees the account again (it was hidden after a SCIM delete).
+        if (!body.disabled) patch.scimDeletedAt = null;
       }
       if (passwordHash !== undefined) {
         patch.passwordHash = passwordHash;
@@ -334,7 +360,8 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       at: entry.at.getTime(),
       actorType: entry.actorType,
       actorId: entry.actorId ?? null,
-      actorName: entry.actorType === 'system' ? 'System' : entry.actorType === 'api_key' ? (apiKeyName ? `API key “${apiKeyName}”` : 'API key') : (actorName ?? null),
+      actorName:
+        entry.actorType === 'system' ? 'System' : entry.actorType === 'scim' ? 'SCIM provisioning' : entry.actorType === 'api_key' ? (apiKeyName ? `API key “${apiKeyName}”` : 'API key') : (actorName ?? null),
       action: entry.action,
       targetType: entry.targetType,
       targetId: entry.targetId ?? null,

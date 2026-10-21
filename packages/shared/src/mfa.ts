@@ -32,6 +32,13 @@ export interface StaffSecurityDTO {
   mfaRequired: boolean;
   /** Required but not set up: the staff API answers 403 mfa_enrollment_required until it is. */
   enrollmentRequired: boolean;
+  /**
+   * How this session was signed in. After single sign-on the organisation's identity provider is responsible for the
+   * second factor: SmartProctoring's own two-step sign-in is neither asked nor required (enrollmentRequired false).
+   */
+  signInMethod?: 'password' | 'sso';
+  /** The organisation requires single sign-on for this user's role (everyone except owners). */
+  ssoRequired?: boolean;
 }
 
 /** POST /api/auth/login when the account uses two-step sign-in: no session yet (an httpOnly challenge cookie). */

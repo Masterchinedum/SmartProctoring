@@ -73,7 +73,7 @@ export function IntegrationsPage() {
 
 /* ------------------------------------------------------------------ shared */
 
-function SecretModal({ title, secret, children, onClose }: { title: string; secret: string; children: React.ReactNode; onClose: () => void }) {
+export function SecretModal({ title, secret, children, onClose }: { title: string; secret: string; children: React.ReactNode; onClose: () => void }) {
   return (
     <Modal
       title={title}

@@ -38,6 +38,7 @@ export const qk = {
   settings: ['settings'] as const,
   evidenceStorage: ['settings', 'evidence-storage'] as const,
   users: ['users'] as const,
+  sso: ['sso'] as const,
   audit: (p: object) => ['audit', p] as const,
   quality: (p: object) => ['quality', p] as const,
   integrationStatus: ['integrations', 'status'] as const,

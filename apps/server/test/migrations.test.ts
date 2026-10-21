@@ -12,8 +12,25 @@ import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, findMigrationsDir, migrate, type Database } from '../src/db/index.js';
 import { API_KEY_SCOPES, DEFAULT_IDENTITY_THRESHOLDS, resolvePolicy } from '@sp/shared';
-import { apiIdempotencyKeys, apiKeys, decisionConfigs, eventReviews, events, evidence, examSessions, exams, examVersions, organizations, privacyRequests } from '../src/db/schema.js';
+import {
+  apiIdempotencyKeys,
+  apiKeys,
+  decisionConfigs,
+  eventReviews,
+  events,
+  evidence,
+  examSessions,
+  exams,
+  examVersions,
+  organizations,
+  privacyRequests,
+  staffSessions,
+  staffSsoIdentities,
+  staffUsers,
+} from '../src/db/schema.js';
 import { authenticateApiKey, generateApiKey } from '../src/auth/api-key.js';
+import { resolveSsoUser } from '../src/services/sso/login.js';
+import { createProvider } from '../src/services/sso/providers.js';
 import { calibrationBreakdown } from '../src/services/calibration.js';
 import { ensureDecisionConfigs, listDecisionConfigs } from '../src/services/decision-configs.js';
 import { gradeSession } from '../src/services/grading.js';
@@ -357,5 +374,36 @@ describe('0015_integration_api_maturity', () => {
     expect(fresh.scopes).toEqual([]);
     await db.insert(apiIdempotencyKeys).values({ orgId: org, key: 'k-1', apiKeyId: old, method: 'POST', path: '/api/v1/candidates', requestHash: 'x', createdAt: new Date() });
     await expect(db.insert(apiIdempotencyKeys).values({ orgId: org, key: 'k-1', method: 'POST', path: '/api/v1/candidates', requestHash: 'y' })).rejects.toThrow();
+  });
+});
+
+describe('0016_sso_scim', () => {
+  it('keeps existing staff accounts and sessions as password accounts; they can be linked to a new identity provider', async () => {
+    const database = await databaseAt('0015_integration_api_maturity');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    const org = (await one(`INSERT INTO organizations (name) VALUES ('Old Org') RETURNING id`)).id;
+    const user = (await one(`INSERT INTO staff_users (org_id, email, name, role, password_hash) VALUES ($1, 'Old.Admin@uni.example', 'Old Admin', 'admin', 'scrypt$x') RETURNING id`, [org])).id;
+    await sql(`INSERT INTO staff_sessions (token_hash, staff_user_id, expires_at) VALUES ('h1', $1, now() + interval '1 hour')`, [user]);
+
+    await migrate(database);
+
+    const db = database.db;
+    const [u] = await db.select().from(staffUsers).where(eq(staffUsers.id, user));
+    expect(u).toMatchObject({ provisionedVia: null, scimExternalId: null, scimDeletedAt: null });
+    const [s] = await db.select().from(staffSessions).where(eq(staffSessions.staffUserId, user));
+    expect(s).toMatchObject({ authMethod: 'password', ssoProviderId: null });
+
+    const now = Date.now();
+    const keyring = createKeyring(Buffer.alloc(32, 3));
+    const ctx = { db, keyring, now: () => now, config: { sso: { requireHttps: true, allowPrivateNetworks: false, timeoutMs: 1000 } } } as unknown as Parameters<typeof createProvider>[0]['ctx'];
+    const p = await createProvider(
+      { ctx, orgId: org, actorId: user, ip: '127.0.0.1' },
+      { kind: 'oidc', name: 'Uni', enabled: true, domains: ['uni.example'], oidc: { issuer: 'https://login.uni.example', clientId: 'c', clientSecret: 's' } },
+    );
+    const linked = await resolveSsoUser({ db, now: () => now }, p.row, { subject: 'sub-1', email: 'old.admin@UNI.example', emailVerified: true, name: null, groups: [] }, '127.0.0.1');
+    expect(linked).toMatchObject({ created: false, linked: true });
+    expect(linked.user.id).toBe(user);
+    expect(await db.select().from(staffSsoIdentities)).toHaveLength(1);
   });
 });

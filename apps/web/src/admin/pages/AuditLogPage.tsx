@@ -22,6 +22,7 @@ const COMMON_ACTIONS = [
   'auth.mfa_replaced',
   'auth.password_changed',
   'auth.recovery_code_used',
+  'auth.sso_failed',
   'audit_log.exported',
   'candidate.consent',
   'candidate.consent_withdrawn',
@@ -54,6 +55,9 @@ const COMMON_ACTIONS = [
   'privacy_request.updated',
   'reference.re_enrolled',
   'retention.purge',
+  'scim.token_created',
+  'scim.token_revoked',
+  'scim.token_rotated',
   'review.assigned',
   'review.escalated',
   'review.reopened',
@@ -71,8 +75,14 @@ const COMMON_ACTIONS = [
   'session.terminate',
   'session.time_extended',
   'settings.updated',
+  'sso.provider_created',
+  'sso.provider_deleted',
+  'sso.provider_tested',
+  'sso.provider_updated',
   'user.created',
   'user.mfa_reset',
+  'user.sso_linked',
+  'user.sso_unlinked',
   'user.updated',
 ];
 
@@ -135,7 +145,7 @@ export function AuditLogPage() {
                   <tr key={e.id}>
                     <td className="nowrap small">{formatDateTime(e.at)}</td>
                     <td>
-                      {e.actorName ?? (e.actorType === 'system' ? 'System' : e.actorType === 'candidate' ? 'Candidate' : e.actorType === 'api_key' ? 'API key' : '—')}
+                      {e.actorName ?? (e.actorType === 'system' ? 'System' : e.actorType === 'candidate' ? 'Candidate' : e.actorType === 'api_key' ? 'API key' : e.actorType === 'scim' ? 'SCIM provisioning' : '—')}
                       <div className="muted small">{e.actorType}</div>
                     </td>
                     <td>

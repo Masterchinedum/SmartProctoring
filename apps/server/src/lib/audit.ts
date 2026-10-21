@@ -3,8 +3,8 @@ import { auditLog } from '../db/schema.js';
 
 export interface AuditEntry {
   orgId: string | null;
-  /** 'api_key': an organisation API key on the integration API (actorId = api_keys.id). */
-  actorType: 'staff' | 'candidate' | 'system' | 'api_key';
+  /** 'api_key': an organisation API key on the integration API (actorId = api_keys.id). 'scim': the SCIM token (scim_tokens.id). */
+  actorType: 'staff' | 'candidate' | 'system' | 'api_key' | 'scim';
   actorId?: string | null;
   action: string;
   targetType: string;

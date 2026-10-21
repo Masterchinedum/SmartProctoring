@@ -195,6 +195,18 @@ export function passwordNeedsRehash(stored: string): boolean {
   return h.N < SCRYPT_PARAMS.N || h.r !== SCRYPT_PARAMS.r || h.p !== SCRYPT_PARAMS.p || h.salt.length < SCRYPT_SALT_LEN || h.hash.length < SCRYPT_KEYLEN;
 }
 
+/**
+ * Stored instead of a password hash for accounts created by SCIM or at a first single sign-on: no password verifies
+ * against it (routes/auth.ts still spends a dummy derivation, so timing does not tell such accounts apart). An
+ * administrator can set a password later.
+ */
+export const NO_PASSWORD_HASH = '!no-password';
+
+/** Whether a stored hash is a real password hash (false for NO_PASSWORD_HASH and anything unparseable). */
+export function isUsablePasswordHash(stored: string): boolean {
+  return parsePasswordHash(stored) != null;
+}
+
 /** A hash to compare against when the user does not exist (keeps login timing uniform). */
 let dummyHash: Promise<string> | null = null;
 export function dummyPasswordHash(): Promise<string> {

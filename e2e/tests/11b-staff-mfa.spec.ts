@@ -58,7 +58,7 @@ test.describe('two-step sign-in', () => {
     await page.goto('/admin/login');
     await page.getByLabel('Email').fill(email);
     await page.getByLabel('Password').fill(password);
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   }
 
   /** A code for a time step after `usedStep` (each step's code works once): waits for the next step if needed. */

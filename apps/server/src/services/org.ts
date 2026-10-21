@@ -26,6 +26,7 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   reviewSla: { ...DEFAULT_REVIEW_SLA },
   decisionConfigVersion: 1,
   evidenceLocation: 'default',
+  requireSso: false,
 };
 
 /** Organisation settings with every field filled from defaults. */
@@ -45,6 +46,7 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
     reviewSla: reviewSlaSchema.safeParse({ ...DEFAULT_REVIEW_SLA, ...(s.reviewSla ?? {}) }).data ?? { ...DEFAULT_REVIEW_SLA },
     decisionConfigVersion: Number.isInteger(s.decisionConfigVersion) && s.decisionConfigVersion! >= 1 ? s.decisionConfigVersion! : 1,
     evidenceLocation: typeof s.evidenceLocation === 'string' && s.evidenceLocation ? s.evidenceLocation : DEFAULT_ORG_SETTINGS.evidenceLocation,
+    requireSso: s.requireSso === true,
   };
 }
 

@@ -495,9 +495,21 @@ Candidates that should not be able to start any more (e.g. withdrew) can be hand
 Sessions nobody touches are closed automatically after the organisation's inactivity period
 (Settings → Retention, default 30 days) with `endReason: "abandoned"`.
 
+## 5. Staff provisioning (SCIM 2.0) and single sign-on
+
+Staff accounts (not candidates) can be provisioned by your identity provider over **SCIM 2.0** at
+`<PUBLIC_URL>/scim/v2` with the organisation's SCIM token (`Authorization: Bearer sp_scim_…`, created by an owner in
+Settings → Single sign-on; it is not an API key and API keys do not work there). Supported: `GET /ServiceProviderConfig`,
+`/ResourceTypes`, `/Schemas`; `GET /Users` (filters `userName eq`, `externalId eq`, `id eq`, `emails.value eq`;
+`startIndex` / `count` ≤ 200), `POST /Users`, `GET` / `PUT` / `PATCH` / `DELETE /Users/:id`. `userName` is the staff
+member's email; the role comes from `roles` (`reviewer` or `admin`); `active: false` or `DELETE` disables the account
+and signs it out everywhere; owners are never changed. No Groups resource, no bulk, no passwords. Errors use the SCIM
+error schema; 600 requests per minute per token. Staff sign in with the organisation's OpenID Connect or SAML 2.0
+identity provider. Set-up runbooks for Microsoft Entra ID, Okta and Google: `docs/OPERATIONS.md` §7.
+
 ---
 
-## 5. Changelog
+## 6. Changelog
 
 The API version is `info.version` of the OpenAPI document. Within version 1, changes are additive: new endpoints,
 new optional request fields, new response fields and new enumeration values.

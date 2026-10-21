@@ -94,6 +94,14 @@ export interface Config {
   webhooks: WebhookConfig;
   /** Integration API /api/v1 (API-key authenticated). */
   integrationApi: { rateLimitPerMinute: number };
+  /**
+   * Single sign-on (services/sso/*): requests to identity providers (OIDC discovery, JWKS, token endpoint) go through
+   * the SSRF guard (lib/net-guard.ts). SSO_ALLOW_PRIVATE_NETWORKS defaults to the webhook policy
+   * (WEBHOOK_ALLOW_PRIVATE_NETWORKS: off in production); https:// is required in production. SSO_TIMEOUT_MS (10 s).
+   */
+  sso: { allowPrivateNetworks: boolean; requireHttps: boolean; timeoutMs: number };
+  /** SCIM 2.0 provisioning /scim/v2 (SCIM token): SCIM_RATE_LIMIT_PER_MINUTE per token (default 600). */
+  scim: { rateLimitPerMinute: number };
   /** Optional external second-opinion face verifiers (src/verifiers, docs/EXTERNAL_VERIFIER.md). */
   externalVerifiers: ExternalVerifiersConfig;
   /** Warnings produced while loading (printed at startup). */
@@ -455,6 +463,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const allowPrivateNetworks = bool(env.WEBHOOK_ALLOW_PRIVATE_NETWORKS, !isProduction);
   if (isProduction && allowPrivateNetworks) warnings.push('WEBHOOK_ALLOW_PRIVATE_NETWORKS=true in production: webhooks may target internal network addresses (SSRF protection off).');
+  const ssoAllowPrivateNetworks = bool(env.SSO_ALLOW_PRIVATE_NETWORKS, allowPrivateNetworks);
+  if (isProduction && ssoAllowPrivateNetworks) warnings.push('SSO_ALLOW_PRIVATE_NETWORKS=true in production: identity provider requests may target internal network addresses (SSRF protection off).');
   const webhooks: WebhookConfig = {
     allowPrivateNetworks,
     requireHttps: isProduction,
@@ -520,6 +530,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     smtp,
     webhooks,
     integrationApi: { rateLimitPerMinute: Math.max(1, int(env.API_RATE_LIMIT_PER_MINUTE, 600)) },
+    sso: {
+      allowPrivateNetworks: ssoAllowPrivateNetworks,
+      requireHttps: isProduction,
+      timeoutMs: Math.min(60_000, Math.max(1_000, int(env.SSO_TIMEOUT_MS, 10_000))),
+    },
+    scim: { rateLimitPerMinute: Math.max(1, int(env.SCIM_RATE_LIMIT_PER_MINUTE, 600)) },
     externalVerifiers: {
       allowedProviders: parseProviderList(env.EXTERNAL_VERIFIERS),
       allowEnvCredentials: bool(env.EXTERNAL_VERIFIER_ENV_CREDENTIALS, false),

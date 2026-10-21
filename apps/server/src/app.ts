@@ -26,6 +26,8 @@ import { authRoutes } from './routes/auth.js';
 import { metricsRoute } from './routes/metrics.js';
 import { candidateRoutes } from './routes/candidate/index.js';
 import { publicRoutes } from './routes/public.js';
+import { scimRoutes } from './routes/scim.js';
+import { ssoRoutes } from './routes/sso.js';
 import { bootstrapAdmin } from './services/bootstrap.js';
 import { assertStorageLocationsConfigured } from './services/evidence-storage.js';
 import { JobRunner } from './jobs/runner.js';
@@ -268,6 +270,9 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await app.register(metricsRoute);
   await app.register(publicRoutes, { prefix: '/api' });
   await app.register(authRoutes, { prefix: '/api/auth' });
+  // Single sign-on (its SAML ACS is the one cross-site, form-encoded POST: see routes/sso.ts) and SCIM provisioning.
+  await app.register(ssoRoutes, { prefix: '/api/auth/sso' });
+  await app.register(scimRoutes, { prefix: '/scim/v2' });
   await app.register(candidateRoutes, { prefix: '/api/candidate' });
   await app.register(liveRoute);
   await app.register(adminRoutes, { prefix: '/api/admin' });
@@ -294,7 +299,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
 
   app.setNotFoundHandler((req, reply) => {
     const path = req.url.split('?')[0];
-    if (path.startsWith('/api/') || path === '/api' || !serveWeb || (req.method !== 'GET' && req.method !== 'HEAD')) {
+    if (path.startsWith('/api/') || path === '/api' || path.startsWith('/scim/') || !serveWeb || (req.method !== 'GET' && req.method !== 'HEAD')) {
       return reply.status(404).send({ error: 'not_found', message: `Route ${req.method} ${path} not found` });
     }
     // SPA fallback: client-side routes (/take/:token, /admin/...) get index.html.

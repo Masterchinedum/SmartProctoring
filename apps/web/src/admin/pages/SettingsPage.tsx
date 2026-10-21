@@ -9,6 +9,7 @@ import { normalizePolicy, validatePolicy } from '../lib/policyForm';
 import { ErrorState, Loading, PageHeader } from '../components/Common';
 import { PolicyEditor } from '../components/PolicyEditor';
 import { EvidenceStorageSection } from './EvidenceStorageSection';
+import { SingleSignOnSection } from './SsoSection';
 
 export function SettingsPage() {
   const q = useQuery({ queryKey: qk.settings, queryFn: api.settings, retry: shouldRetry });
@@ -20,6 +21,7 @@ export function SettingsPage() {
       <ReviewTargetsSection key={`sla-${JSON.stringify(q.data.reviewSla)}`} settings={q.data} />
       <SecuritySection settings={q.data} />
       <EvidenceStorageSection />
+      <SingleSignOnSection />
     </div>
   );
 }
@@ -93,7 +95,7 @@ function SecuritySection({ settings }: { settings: OrgSettingsDTO }) {
       <h2 id="security-title">Two-step sign-in</h2>
       <p className="small muted">
         Staff who must use it and have not set it up can only set it up at their next request — nothing else is available to them until they have. Everyone can turn it on for
-        themselves under Account &amp; security.
+        themselves under Account &amp; security. It applies to password sign-in: after single sign-on your identity provider handles the second step.
       </p>
       <label>
         Requirement

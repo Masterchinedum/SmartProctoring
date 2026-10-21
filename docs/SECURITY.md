@@ -19,7 +19,9 @@ observed).
 |---|---|---|
 | Candidate (browser) | Access link token (256-bit, bearer) + `X-Client-Instance` | Nothing beyond its own session. The client is assumed hostile: it may be modified, replayed or scripted. |
 | Accomplice | The candidate's link, if shared | Nothing — must not be able to act as the verified browser or skip identity checks. |
-| Reviewer / admin / owner | Password + (when on, or required by the organisation) a TOTP / recovery code → staff session cookie (`sp_session`) | Their own organisation only, by role (reviewer < admin < owner). |
+| Reviewer / admin / owner | Password + (when on, or required by the organisation) a TOTP / recovery code, **or** single sign-on through the organisation's identity provider (OIDC / SAML) → staff session cookie (`sp_session`) | Their own organisation only, by role (reviewer < admin < owner). |
+| Organisation identity provider (optional) | Its signature on ID tokens / SAML assertions (keys / certificates configured by an owner) | Asserting who a staff member of *its* organisation is, for the email domains the organisation claimed — never accounts of other organisations, never the owner role, never a disabled account. |
+| SCIM client (the identity provider's provisioning) | The organisation's SCIM token (`sp_scim_…`) | Creating, updating and disabling its organisation's reviewer / admin accounts — never owners. |
 | Integration (LMS/HR) | Organisation API key (`sp_live_…`) | Its organisation's exams, candidates, sessions, reports and events — never images or face data. |
 | Webhook receiver | Verifies our HMAC signature | Receives notifications only; never images, templates or similarity scores. |
 | External face verifier (optional, e.g. AWS Rekognition) | Our request, signed with the organisation's IAM key or the server's role | Off by default. When an admin enables it: receives face images for the selected identity checks; its answer is advisory — combined by a fixed table, it never records a "possible different person" on its own (`docs/EXTERNAL_VERIFIER.md`). |
@@ -100,6 +102,60 @@ server-side identity match, read other sessions, or change category/severity (th
   scope check runs before any replay. The OpenAPI document (`GET /api/v1/openapi.json`) is public: it describes the
   contract only (no organisation data) and is rate-limited per address.
 
+### Single sign-on and SCIM (staff)
+* **Who configures it.** Identity providers, "require single sign-on" and the SCIM token are changed by owners only
+  (403 `owner_required` for administrators, who can view the configuration and test a connection); every change is
+  audited (`sso.provider_created|updated|deleted|tested`, `settings.updated` with `requireSso`,
+  `scim.token_created|rotated|revoked`). The OIDC client secret is write-only (responses say `clientSecretSet`),
+  AES-GCM encrypted (AAD `sso-client-secret:<providerId>`, a `rekey` target) and never logged or audited.
+* **Finding the organisation.** By the email domain typed on the sign-in page: each domain is claimed by one
+  identity provider on the whole server (first come; public mailbox domains such as gmail.com are refused), and only
+  addresses of the provider's claimed domains are accepted from it. Every provider also has its own sign-in link.
+  Residual risk: on a shared server an organisation could claim a domain that is not its own and so receive other
+  staff's sign-in attempts at its provider (it can never sign them in: accounts of other organisations are never
+  matched). Operators of multi-tenant servers should review claimed domains (`sso_domains`); domain verification by
+  DNS is a possible hardening.
+* **OIDC.** Authorization code flow with PKCE (S256), `state` and `nonce` (`openid-client`, MIT): per-provider redirect
+  URI (no mix-up between providers); the ID token's signature is verified against the provider's JWKS even though it
+  comes from the token endpoint (asymmetric algorithms only; `alg: none` and HS256 are refused), with `iss` (= the
+  configured issuer, which must match its discovery document), `aud` / `azp`, `exp` / `iat` (60 s tolerance) and the
+  attempt's nonce. Discovery and JWKS are cached for an hour (refreshed on an unknown key id). `email_verified` must
+  be true unless the owner turns that off for providers that do not send it (Microsoft Entra ID with a single-tenant
+  issuer). Requests to the provider go through the SSRF guard below.
+* **SAML 2.0.** SP-initiated only (HTTP-Redirect AuthnRequest, HTTP-POST response; unsolicited / IdP-initiated
+  responses are refused). The XML signature is verified by `@node-saml/node-saml` / `xml-crypto` (never by our
+  code): the Response (covering its only assertion) or the Assertion must be signed by one of the configured
+  certificates; multiple or encrypted assertions are refused; only the signed content is read. Then: Conditions
+  NotBefore / NotOnOrAfter (60 s skew), assertion at most 10 minutes old, AudienceRestriction = our SP entity ID,
+  assertion Issuer = the configured entity ID, a bearer SubjectConfirmation whose Recipient is our ACS URL, whose
+  InResponseTo is a request we sent for this provider and which has not expired, and each assertion ID used once
+  (remembered until it would have expired).
+* **The sign-in attempt** (10 minutes, one use) is bound to the browser that started it by the signed, httpOnly
+  `sp_sso` cookie (SameSite=Lax, path `/api/auth/sso`, sha256 stored): the OIDC callback and the SAML completion
+  step refuse another browser (no login CSRF, no replay into another browser). Failures return to the sign-in page
+  with a general message and are audited as `auth.sso_failed` with the precise reason; the callback's `code` and
+  `state` are redacted from logs.
+* **Accounts.** A linked identity (provider + subject) signs in its account; otherwise the account with the asserted
+  email (case-insensitive) in the provider's organisation is linked — refused when that account is already linked to
+  another subject at the provider (a re-used address; an administrator unlinks it, `user.sso_unlinked`) — or, only
+  when the owner switched on just-in-time accounts, created with the mapped / default role (never owner) and no
+  password. Disabled accounts never sign in. Roles of existing accounts are not changed at sign-in.
+* **Second factor.** After single sign-on the identity provider is responsible for multi-factor authentication:
+  SmartProctoring's own two-step sign-in is neither asked nor required (the organisation's `requireMfa` applies to
+  password sign-ins). Settings and the account page say so; owners must require MFA in their identity provider.
+* **Require single sign-on** (owner): password sign-in of administrators and reviewers is refused after the right
+  password (403 `sso_required`; said only then, so it does not reveal accounts) and their password sessions end.
+  **Owners keep password + two-step sign-in as break-glass access**, and the operator's `staff-access` CLI remains.
+  The last enabled provider cannot be disabled or deleted while it is required.
+* **Provider changes.** Disabling a provider, pointing it at another issuer / entity ID, or deleting it ends every
+  session signed in through it; a new issuer also removes its account links.
+* **SCIM 2.0** (`/scim/v2`): bearer token per organisation (256 bits, `sp_scim_` prefix, shown once, sha256 stored and
+  compared in constant time, one active token, rotation and revocation effective on the next request), rate limit
+  per token (`SCIM_RATE_LIMIT_PER_MINUTE`, 600), organisation-scoped (other organisations' accounts are 404, an
+  address used elsewhere is a 409). `active: false` / DELETE disables the account and ends its sessions and pending
+  sign-in steps at once. SCIM cannot read or set passwords, cannot give the owner role and cannot change, disable or
+  delete owners (403). Every change is audited with actor type `scim`. It carries no cookie authority (no CSRF).
+
 ### Review decisions
 * Reviewer decisions are structured (resolution taxonomy) and kept as a history (`event_reviews`); changing another
   reviewer's decision requires a reason and is recorded as an override (shown as a disagreement in the staff app and
@@ -162,6 +218,11 @@ server-side identity match, read other sessions, or change category/severity (th
   own host): `Origin` decides; without it, `Sec-Fetch-Site` (cross-site/same-site refused) and `Referer` are
   checked. Logout is protected the same way. Only JSON bodies are parsed for these routes (form posts get
   415, `text/plain` fails validation), and there is no CORS.
+* The one exception is the SAML assertion consumer service (`POST /api/auth/sso/saml/<id>/acs`): the identity
+  provider's page posts the response cross-site by design. It is the only route with a form-encoded body parser
+  (its own plugin scope, 512 KB), it uses no cookie (SameSite=Lax cookies are not sent with it) and only records the
+  validated identity on its sign-in attempt; the sign-in is completed by a same-site GET that must present the
+  browser-binding cookie of the browser that started it.
 * Response headers on every response: `Content-Security-Policy` (`default-src 'self'`, `script-src 'self'
   'wasm-unsafe-eval'` for self-hosted MediaPipe, `object-src 'none'`, `frame-ancestors 'none'`),
   `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` (the candidate URL contains the token),
@@ -183,7 +244,8 @@ server-side identity match, read other sessions, or change category/severity (th
 ### Cryptography
 * AES-256-GCM for every blob and template, random 96-bit IV per object, AAD binding each ciphertext to its
   row (`evidence:<id>`, `reference:<id>`, `idphoto:<candidateId>`, `access-token:<sessionId>`,
-  `webhook-secret:<id>`, `frame:<id>`, `external-verifier:<orgId>`, `totp:<userId>`, `totp-pending:<userId>`), key id embedded for rotation (`EVIDENCE_KEYS_OLD`). After a rotation
+  `webhook-secret:<id>`, `frame:<id>`, `external-verifier:<orgId>`, `totp:<userId>`, `totp-pending:<userId>`,
+  `sso-client-secret:<providerId>`), key id embedded for rotation (`EVIDENCE_KEYS_OLD`). After a rotation
   the `rekey` CLI re-encrypts every encrypted column and evidence blob under the current key (batched,
   resumable, compare-and-set per row, `--dry-run`, audit `keys.rekeyed`), so old keys can be retired
   (`docs/OPERATIONS.md` §3).
@@ -204,6 +266,9 @@ server-side identity match, read other sessions, or change category/severity (th
   loopback, link-local/metadata, CGNAT, NAT64/6to4-embedded and documentation ranges refused), checked when
   saved and again at connect time through a pinned DNS lookup (no DNS rebinding); redirects are never
   followed; 10 s timeout; at most 64 KB of the response is read and 200 characters kept.
+* Identity providers (OIDC discovery, JWKS, token endpoint): the same guard (`guardedFetch`): public addresses only
+  unless `SSO_ALLOW_PRIVATE_NETWORKS` (default: the webhook setting, off in production), DNS pinned at connect time,
+  `https://` in production, redirects never followed, 10 s deadline (`SSO_TIMEOUT_MS`), at most 1 MB read.
 * External face verifier (optional): requests go only through the AWS SDK to the Rekognition endpoint of the
   configured region — no administrator-supplied URLs; deadline `EXTERNAL_VERIFIER_TIMEOUT_MS` (4 s), one retry when
   throttled, a per-organisation circuit breaker (5 failures ⇒ 60 s pause), failures fall back to the internal
@@ -230,8 +295,9 @@ server-side identity match, read other sessions, or change category/severity (th
 
 ### Abuse and availability
 * Rate limits: candidate endpoints per access token (30–600/min per endpoint), privacy notice 60/min/IP,
-  login and password change 10/min/IP, integration API 600/min/key, webhook test/redeliver, test email and
-  external-verifier test (10/min).
+  login and password change 10/min/IP, single sign-on discovery 10/min/IP, start / callback / completion 20/min/IP,
+  SAML ACS 30/min/IP, integration API 600/min/key, SCIM 600/min/token, webhook test/redeliver, test email,
+  external-verifier and identity-provider tests (10/min).
   With `REDIS_URL` the counters are kept in Redis and shared by all instances (a Redis outage lets requests
   through and is logged); without it they are in memory per instance.
 * Vision work is bounded (concurrency + queue of 256); overload returns `503 vision_busy` with `Retry-After`
@@ -264,7 +330,7 @@ against a running instance and with integration tests (`apps/server/test/securit
 | 6 | Low | CSRF defence relied on `Origin` only when present; logout had no check (cross-origin logout worked). | Fixed (`Sec-Fetch-Site`/`Referer` fallback; logout same-origin only) |
 | 7 | Medium | A colluding candidate can still copy their own instance id (DevTools) to a second device. | Fixed (detection) — UA change, networks alternating within 60 s or interleaved heartbeat `seq` for the verified instance → `multiple_instances` event (hashed IPs) + mandatory reconnect check; binding the instance to a server-issued secret remains a possible hardening |
 | 8 | Medium | Key rotation is incomplete: no re-encryption tool, and long-lived ciphertexts (ID-photo templates, access tokens, webhook secrets, legal-hold evidence) keep needing old keys indefinitely. | Fixed — `rekey` CLI re-encrypts every encrypted column and evidence blob (batched, resumable, `--dry-run`, audited); retire an old key once `rekey --dry-run` reports nothing under it |
-| 9 | Low | Login throttling is per IP only (no per-account backoff); no MFA/SSO for staff who can view biometric evidence; scrypt N=2^15 is below current guidance (2^17). | Fixed — scrypt N=2^17 (old hashes upgraded at sign-in), per-account backoff 30 s → 15 min after 5 failures (IP-independent, no enumeration), failed logins audited; two-step sign-in (TOTP + recovery codes, organisation-wide requirement, admin reset, security emails); SSO still open |
+| 9 | Low | Login throttling is per IP only (no per-account backoff); no MFA/SSO for staff who can view biometric evidence; scrypt N=2^15 is below current guidance (2^17). | Fixed — scrypt N=2^17 (old hashes upgraded at sign-in), per-account backoff 30 s → 15 min after 5 failures (IP-independent, no enumeration), failed logins audited; two-step sign-in (TOTP + recovery codes, organisation-wide requirement, admin reset, security emails); single sign-on (OIDC, SAML 2.0) with SCIM provisioning and an owner break-glass (§2) |
 | 10 | Low | Candidate-controlled text (event `observation` ≤ 500 chars, camera label) is forwarded into staff alert emails (escaped) and webhooks — phishing from a trusted sender. | Fixed — catalog wording for client-reported events; links stripped from pause reasons and other user-controlled text in webhooks and emails |
 | 11 | Low | Rate-limit counters are in memory per instance (not shared through Redis). | Fixed — Redis store for all rate limits when `REDIS_URL` is set |
 | 12 | Low | Default staff session lifetime is long (8 h idle / 7 days absolute). | Fixed — defaults 60 min idle / 12 h absolute (env overridable); the staff app returns to the sign-in page with a return path |
@@ -331,7 +397,9 @@ fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, 
       instance); add rate limiting at the proxy/WAF as well, e.g. `/api/auth/login` ≤ 10/min per IP,
       `/api/candidate/*` ≤ 20 req/s per IP, request bodies ≤ 5 MB.
 - [ ] Alert on bursts of `auth.login_failed` (reason `throttled` = an account under attack), `evidence.view` by one user, `api_key.created`,
-      `user.updated` (role changes), `auth.mfa_disabled`, `user.mfa_reset`, `auth.recovery_code_used`, `webhook.auto_disabled`, and on `503 vision_busy` rates.
+      `user.updated` (role changes), `auth.mfa_disabled`, `user.mfa_reset`, `auth.recovery_code_used`, `webhook.auto_disabled`, and on `503 vision_busy` rates;
+      with single sign-on also on bursts of `auth.sso_failed` (reasons `token_rejected`, `replayed`, `wrong_recipient`), `sso.provider_*`,
+      `scim.token_*`, `user.created` by actor `scim` / just-in-time, and `settings.updated` turning `requireSso` off.
 - [ ] Ship logs to central storage with restricted access; they contain staff emails and IP addresses but
       never tokens.
 - [ ] Keep dependencies patched (`pnpm audit --prod` in CI).
@@ -340,7 +408,12 @@ fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, 
 - [ ] Give most staff the reviewer role; limit owners/admins; disable accounts on departure (revokes sessions
       immediately).
 - [ ] Require two-step sign-in (Settings → Two-step sign-in): at least for administrators and owners, preferably for
-      everyone who can see candidate evidence. Configure SMTP so staff are emailed about changes to their
+      everyone who can see candidate evidence.
+- [ ] With single sign-on: require MFA for the application **in the identity provider** (SmartProctoring does not ask
+      for its own code after single sign-on); use a single-tenant issuer (Entra ID: `…/<tenant-id>/v2.0`); claim only
+      your own email domains; keep just-in-time accounts off or at the reviewer role; keep at least two owners with a
+      password and two-step sign-in as break-glass; store the SCIM token only in the identity provider and rotate it on
+      staff turnover. Configure SMTP so staff are emailed about changes to their
       two-step sign-in; verify the caller's identity out of band before resetting someone's two-step sign-in.
 - [ ] Keep staff session lifetimes short (defaults `STAFF_SESSION_IDLE_MIN=60`, `STAFF_SESSION_MAX_HOURS=12`;
       shorten further where staff use shared or unmanaged devices).

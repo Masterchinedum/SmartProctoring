@@ -44,6 +44,18 @@ All runtime dependencies are MIT / Apache-2.0 / BSD / ISC. ML models:
 
 No code copied from third parties. See `THIRD_PARTY_NOTICES.md`.
 
+Single sign-on libraries (round 4, task #16; chosen after checking licence and maintenance):
+
+| Library | Version | License | Why this one |
+|---|---|---|---|
+| `openid-client` (+ `oauth4webapi`, `jose`, same author) | 6.8 | MIT | OpenID Certified relying-party library, actively maintained, no native code, Node 24 supported; accepts a custom `fetch`, so every request to an identity provider goes through our SSRF guard |
+| `@node-saml/node-saml` | 5.1 | MIT | the SAML core behind passport-saml (widely deployed); 5.1.0 contains the fix for CVE-2025-54419 (signature verification read the unsigned document) and reads only the signed assertion; XML signatures verified by `xml-crypto` 6.4 (MIT), XML parsed by `@xmldom/xmldom` 0.8 (MIT), `xml2js` (MIT, `sax` ISC), `xmlbuilder` (MIT), `xml-encryption` (MIT, unused: encrypted assertions are refused) |
+
+Alternatives considered: `samlify` (MIT, very active, but a history of signature-wrapping advisories and a larger
+surface), hand-written XML signature checks (never: canonicalisation and wrapping attacks are where SAML
+implementations fail). `pnpm audit --prod` reported no advisory for any of these at the time of adding them. Test-only:
+`jose` signs the fake provider's ID tokens and `xml-crypto` signs the test SAML assertions.
+
 ## 3. Session lifecycle
 
 `invited → ready → active ⇄ paused → submitted`, plus `on_hold` and `terminated` (see `shared/src/session.ts`).
@@ -411,6 +423,47 @@ Review language is observational. Reports list every active period, pause, resum
 hold, identity-check outcomes, event counts per category, notable events, reviewer notes and the
 system's limitations.
 
+### Staff sign-in: passwords, two-step sign-in, single sign-on, SCIM (`routes/auth.ts`, `routes/sso.ts`, `routes/scim.ts`, `services/sso/*`, `services/scim.ts`)
+
+* **Password + two-step sign-in** (`docs/SECURITY.md` §2) creates a staff session (`staff_sessions.auth_method =
+  'password'`).
+* **Single sign-on.** An organisation's owners configure identity providers (`identity_providers`: OIDC issuer /
+  client / encrypted secret / scopes, or SAML entity ID / SSO URL / signing certificates; claim mapping; just-in-time
+  accounts with a default role and group → role mappings, never owner). Each provider claims email domains
+  (`sso_domains`, one provider per domain on the whole server): **the sign-in page identifies the organisation from
+  the email domain** (`POST /api/auth/sso/discover`); each provider also has its own sign-in link
+  (`/api/auth/sso/<id>/start`, shown in Settings). Every URL carries the provider id (per-provider redirect URI, ACS
+  and SP entity ID, so responses cannot be mixed up between providers).
+  * Start: an `sso_login_attempts` row (10 minutes, one use) bound to the browser by the signed, httpOnly `sp_sso`
+    cookie (sha256 stored). OIDC: authorization code + PKCE (S256) + state + nonce through `openid-client`; discovery
+    and JWKS cached per provider for an hour; ID-token signature (JWKS, asymmetric algorithms only), `iss`, `aud` /
+    `azp`, `exp` / `iat` (60 s tolerance) and nonce validated by the library; all requests through
+    `lib/net-guard.ts` `guardedFetch` (`SSO_ALLOW_PRIVATE_NETWORKS`, https in production). SAML: an AuthnRequest by
+    HTTP-Redirect; the HTTP-POST ACS verifies the signature (`@node-saml/node-saml`: Response or Assertion signed by a
+    configured certificate), conditions, audience, then here the issuer, a bearer subject confirmation for our ACS
+    answering our request (InResponseTo; unsolicited responses refused) and the assertion ID once
+    (`sso_saml_assertions`). The ACS cannot set cookies cross-site (SameSite=Lax), so it stores the validated
+    identity on the attempt and redirects to `/api/auth/sso/complete`, which finishes the sign-in only with the
+    browser-binding cookie (no login CSRF).
+  * Account resolution (`services/sso/login.ts`): the asserted email must be in the provider's domains (OIDC: and
+    `email_verified`, unless the owner turned that off); an identity already linked (`staff_sso_identities`:
+    provider + subject) signs in its account; otherwise the account with that email in the provider's organisation is
+    linked (refused when it is linked to another subject at that provider — a re-used address — until an administrator
+    unlinks it), or a just-in-time account is created (no password). Disabled accounts never sign in; other
+    organisations' accounts are never touched.
+  * The session is a normal staff session with `auth_method = 'sso'` and `sso_provider_id`. The identity provider is
+    responsible for the second factor: `requireMfa` applies to password sessions only. Disabling a provider, pointing
+    it at another issuer / entity ID or deleting it ends its sessions (a new issuer also drops its links).
+  * `settings.requireSso` (owner): password sign-in of everyone but owners is refused after the right password
+    (403 `sso_required`) and their password sessions end (also refused by `authenticateStaffToken`). **Owners keep
+    password + two-step sign-in as break-glass access**; the `staff-access` CLI remains the operator's last resort.
+* **SCIM 2.0** (`/scim/v2`): one bearer token per organisation (`scim_tokens`, sha256 only, owner creates / rotates /
+  revokes); `Users` list (filters `userName` / `externalId` / `id` / `emails.value eq`), get, create, replace, patch
+  and delete (= disable + hidden from SCIM: `staff_users.scim_deleted_at`); `active: false` disables and ends every
+  session; roles via the core `roles` attribute (reviewer / admin); owners are never changed by SCIM; no Groups
+  resource. Audit actor type `scim`. Accounts created by SCIM or just in time have no password
+  (`NO_PASSWORD_HASH`) and `staff_users.provisioned_via` says how they were created.
+
 ### Reviewer workflow (`packages/shared/src/{review,incidents,explain}.ts`, `services/review.ts`, `routes/admin/review.ts`)
 
 Five event categories keep the distinction reviewers need: potential integrity issue, uncertain observation,
@@ -524,7 +577,9 @@ for face analysis, default CPU count − 1), `VISION_WORKERS`, `VISION_NICE`, `P
 (when `/api/health/capacity` stops accepting exam starts; OPERATIONS §5), `METRICS_TOKEN` (serves Prometheus
 `/metrics` to a scraper holding it; unset = not served). Integrations (optional):
 `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` (email alerts),
-`WEBHOOK_ALLOW_PRIVATE_NETWORKS` (dev only), `WEBHOOK_DISABLE_AFTER_FAILURES`, `API_RATE_LIMIT_PER_MINUTE`.
+`WEBHOOK_ALLOW_PRIVATE_NETWORKS` (dev only), `WEBHOOK_DISABLE_AFTER_FAILURES`, `API_RATE_LIMIT_PER_MINUTE`. Single sign-on
+and SCIM: `SSO_ALLOW_PRIVATE_NETWORKS` (default: the webhook setting; dev only), `SSO_TIMEOUT_MS` (10 000),
+`SCIM_RATE_LIMIT_PER_MINUTE` (600).
 
 ## 11. Integrations
 

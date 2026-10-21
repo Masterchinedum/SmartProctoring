@@ -305,3 +305,124 @@ export function postJson(target: URL, body: string, headers: Record<string, stri
     req.end(body);
   });
 }
+
+/* ------------------------------------------------------------------ guarded fetch (single sign-on) */
+
+export interface GuardedFetchOptions {
+  allowPrivateNetworks: boolean;
+  /** https:// only (production). */
+  requireHttps: boolean;
+  /** Connect + complete response. */
+  timeoutMs: number;
+  /** Largest response body accepted (default 1 MB); a larger one fails the request. */
+  maxBytes?: number;
+}
+
+/** The subset of fetch's RequestInit that the OIDC client uses. */
+export interface GuardedFetchInit {
+  method?: string;
+  headers?: Record<string, string> | Headers | [string, string][];
+  body?: string | URLSearchParams | Uint8Array | ArrayBuffer | ReadableStream | null;
+  signal?: AbortSignal | null;
+  redirect?: string;
+}
+
+export type GuardedFetch = (input: string | URL, init?: GuardedFetchInit) => Promise<Response>;
+
+const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+
+/**
+ * A fetch() for requests to administrator-configured servers (OIDC discovery, JWKS and token endpoints), with the
+ * same protection as webhook delivery: unless private networks are allowed, every resolved address must be public
+ * and the socket connects to the address that was checked (no DNS rebinding); literal private addresses are refused
+ * before connecting. Redirects are never followed (a 3xx is returned as is and fails the protocol step); the response
+ * body is limited to `maxBytes`; one deadline covers connect and response. Rejects (never resolves an error status)
+ * only for transport problems, with a message that contains no secrets.
+ */
+export function guardedFetch(opts: GuardedFetchOptions): GuardedFetch {
+  const maxBytes = opts.maxBytes ?? 1024 * 1024;
+  return async (input, init = {}) => {
+    // A streamed request body is read first (bounded): requests to identity providers are small forms.
+    const rawBody = init.body instanceof ReadableStream ? Buffer.from(await new Response(init.body).arrayBuffer()).subarray(0, maxBytes) : init.body;
+    return new Promise<Response>((resolve, reject) => {
+      let target: URL;
+      try {
+        target = new URL(String(input));
+      } catch {
+        reject(new Error('Invalid URL'));
+        return;
+      }
+      if (target.protocol !== 'https:' && target.protocol !== 'http:') return reject(new Error('Unsupported URL scheme'));
+      if (opts.requireHttps && target.protocol !== 'https:') return reject(new Error(`Only https:// is allowed (${target.origin})`));
+      if (target.username || target.password) return reject(new Error('Credentials in URLs are not allowed'));
+      const host = hostOf(target);
+      if (!opts.allowPrivateNetworks && net.isIP(host) && !isPublicAddress(host)) return reject(new BlockedAddressError(host, host));
+      if (init.signal?.aborted) return reject(new Error('Request aborted'));
+
+      const headers: Record<string, string> = {};
+      new Headers(init.headers ?? {}).forEach((v, k) => {
+        headers[k] = v;
+      });
+      let body: Buffer | undefined;
+      if (rawBody != null) {
+        body = typeof rawBody === 'string' ? Buffer.from(rawBody) : rawBody instanceof URLSearchParams ? Buffer.from(rawBody.toString()) : Buffer.from(rawBody as ArrayBuffer);
+        if (rawBody instanceof URLSearchParams && !headers['content-type']) headers['content-type'] = 'application/x-www-form-urlencoded;charset=UTF-8';
+        headers['content-length'] = String(body.length);
+      }
+
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        reject(new Error(describeError(err)));
+      };
+      const mod = target.protocol === 'https:' ? https : http;
+      let req: http.ClientRequest;
+      try {
+        req = mod.request(target, {
+          method: (init.method ?? 'GET').toUpperCase(),
+          headers,
+          agent: false,
+          ...(opts.allowPrivateNetworks ? {} : { lookup: guardedLookup as unknown as net.LookupFunction }),
+        });
+      } catch (err) {
+        fail(err);
+        return;
+      }
+      timer = setTimeout(() => req.destroy(Object.assign(new Error(`Timed out after ${Math.round(opts.timeoutMs / 1000)} s`), { code: 'ESPTIMEOUT' })), opts.timeoutMs);
+      timer.unref?.();
+      init.signal?.addEventListener('abort', () => req.destroy(new Error('Request aborted')), { once: true });
+      req.on('error', fail);
+      req.on('response', (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on('data', (c: Buffer) => {
+          size += c.length;
+          if (size > maxBytes) {
+            res.destroy();
+            fail(new Error(`Response larger than ${Math.round(maxBytes / 1024)} KB`));
+            return;
+          }
+          chunks.push(c);
+        });
+        res.on('error', fail);
+        res.on('end', () => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status > 599) {
+            reject(new Error(`Unexpected HTTP status ${status}`));
+            return;
+          }
+          const responseHeaders = new Headers();
+          for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) responseHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]);
+          resolve(new Response(NULL_BODY_STATUSES.has(status) ? null : Buffer.concat(chunks), { status, statusText: res.statusMessage ?? '', headers: responseHeaders }));
+        });
+      });
+      req.end(body);
+    });
+  };
+}

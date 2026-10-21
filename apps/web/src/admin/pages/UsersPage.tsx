@@ -27,6 +27,14 @@ export function UsersPage() {
   const [resetting, setResetting] = useState<StaffUserDTO | null>(null);
   const [toggling, setToggling] = useState<StaffUserDTO | null>(null);
   const [resettingMfa, setResettingMfa] = useState<StaffUserDTO | null>(null);
+  const [unlinking, setUnlinking] = useState<StaffUserDTO | null>(null);
+  const unlink = useMutation({
+    mutationFn: (id: string) => api.unlinkUserSso(id),
+    onSuccess: (u) => {
+      qc.setQueryData<{ items: StaffUserDTO[] }>(qk.users, (old) => (old ? { items: old.items.map((x) => (x.id === u.id ? u : x)) } : old));
+      setUnlinking(null);
+    },
+  });
   const resetMfa = useMutation({
     mutationFn: (id: string) => api.resetUserMfa(id),
     onSuccess: (u) => {
@@ -78,6 +86,7 @@ export function UsersPage() {
                 <th>Role</th>
                 <th>Status</th>
                 <th>Two-step sign-in</th>
+                <th>Single sign-on</th>
                 <th>Created</th>
                 <th />
               </tr>
@@ -118,6 +127,10 @@ export function UsersPage() {
                       <span className="badge">Off</span>
                     )}
                   </td>
+                  <td className="small">
+                    {u.ssoLinked ? <span className="badge badge-success">Linked</span> : <span className="muted">—</span>}
+                    {u.provisionedVia === 'scim' ? <span className="badge badge-info">SCIM</span> : u.provisionedVia === 'sso' ? <span className="badge badge-info">Created at sign-in</span> : null}
+                  </td>
                   <td className="small">{formatDate(u.createdAt)}</td>
                   <td>
                     {canManage(u) ? (
@@ -131,6 +144,11 @@ export function UsersPage() {
                         {u.mfaEnabledAt ? (
                           <button type="button" className="btn btn-sm" onClick={() => setResettingMfa(u)}>
                             Reset two-step sign-in
+                          </button>
+                        ) : null}
+                        {u.ssoLinked ? (
+                          <button type="button" className="btn btn-sm" onClick={() => setUnlinking(u)}>
+                            Unlink single sign-on
                           </button>
                         ) : null}
                       </div>
@@ -154,6 +172,18 @@ export function UsersPage() {
           error={resetMfa.isError ? errorMessage(resetMfa.error) : null}
           onConfirm={() => resetMfa.mutate(resettingMfa.id)}
           onCancel={() => setResettingMfa(null)}
+        />
+      ) : null}
+      {unlinking ? (
+        <ConfirmDialog
+          title={`Unlink single sign-on for ${unlinking.name}?`}
+          message="Use this when their address now belongs to a different identity at your identity provider (for example a re-used mailbox). They are signed out; at their next single sign-on the account is linked to whoever then signs in with this address. Recorded in the audit log."
+          confirmLabel="Unlink"
+          danger
+          busy={unlink.isPending}
+          error={unlink.isError ? errorMessage(unlink.error) : null}
+          onConfirm={() => unlink.mutate(unlinking.id)}
+          onCancel={() => setUnlinking(null)}
         />
       ) : null}
       {toggling ? (

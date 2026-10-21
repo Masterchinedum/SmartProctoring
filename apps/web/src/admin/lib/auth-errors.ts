@@ -13,6 +13,8 @@ export function loginErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
     // The second step's own messages (a wrong / used code, an expired sign-in) are specific and safe to show.
     if (err.code === 'invalid_mfa_code' || err.code === 'mfa_challenge_expired') return err.message;
+    // The organisation signs in with single sign-on (said only after the right password).
+    if (err.code === 'sso_required') return err.message;
     if (err.status === 401 || err.status === 400) return 'Incorrect email or password.';
     // Per-IP rate limit or per-account backoff: the server says how long to wait.
     if (err.status === 429) return err.message && !/^429\b/.test(err.message) ? err.message : 'Too many attempts. Wait a minute and try again.';

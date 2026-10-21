@@ -14,6 +14,7 @@
  *     staff_users.totp_pending_enc          totp-pending:<staffUserId>
  *     privacy_requests.details_enc          privacy-request:<requestId>
  *     api_idempotency_keys.response_enc     api-idempotency:<recordId>   (24 h: stored integration API responses)
+ *     identity_providers.oidc_client_secret_enc  sso-client-secret:<providerId>
  *   evidence blobs (storage; evidence.key_id)  evidence:<evidenceId>   (purged rows have no blob; each in its own
  *                                               storage location, evidence.storage_location)
  *   organizations.settings.externalVerifier.credentialsEnc (base64 in JSON)  external-verifier:<orgId>
@@ -30,7 +31,7 @@ import { and, asc, eq, gt, isNotNull, isNull, ne, sql, type SQL } from 'drizzle-
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import type { Ctx } from '../context.js';
 import type { Database, Db } from '../db/index.js';
-import { accommodations, apiIdempotencyKeys, candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, privacyRequests, staffUsers, webhooks } from '../db/schema.js';
+import { accommodations, apiIdempotencyKeys, candidates, checkFrames, evidence, examSessions, identityProviders, identityReferences, identitySampleFrames, organizations, privacyRequests, staffUsers, webhooks } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { storageAt } from '../lib/storage.js';
 import { verifierCredentialsAad } from '../verifiers/settings.js';
@@ -39,6 +40,7 @@ import { evidenceAtLocation } from './evidence.js';
 import { totpAad, totpPendingAad } from './mfa.js';
 import { idempotencyResponseAad } from './idempotency.js';
 import { privacyRequestDetailsAad } from './privacy-requests.js';
+import { ssoClientSecretAad } from './sso/providers.js';
 import { frameAad, idPhotoAad, referenceAad, sampleFrameAad } from './identity-common.js';
 
 /**
@@ -73,6 +75,7 @@ export const COLUMN_TARGETS: ColumnTarget[] = [
   { name: 'totp_pending_secrets', table: staffUsers, id: staffUsers.id, col: staffUsers.totpPendingEnc, aad: totpPendingAad },
   { name: 'privacy_request_details', table: privacyRequests, id: privacyRequests.id, col: privacyRequests.detailsEnc, aad: privacyRequestDetailsAad },
   { name: 'api_idempotency_responses', table: apiIdempotencyKeys, id: apiIdempotencyKeys.id, col: apiIdempotencyKeys.responseEnc, aad: idempotencyResponseAad },
+  { name: 'sso_client_secrets', table: identityProviders, id: identityProviders.id, col: identityProviders.oidcClientSecretEnc, aad: ssoClientSecretAad },
 ];
 export const EVIDENCE_TARGET = 'evidence_blobs';
 /** External verifier key pairs: base64 ciphertext inside organizations.settings (verifiers/settings.ts). */
