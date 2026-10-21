@@ -6,11 +6,17 @@ import type {
   AuditLogEntryDTO,
   BulkReviewRequest,
   BulkReviewResultDTO,
+  CalibrationDTO,
   CandidateDTO,
   CreatedApiKeyDTO,
   CreatedWebhookDTO,
   DashboardDTO,
+  DecisionConfigDTO,
+  DecisionConfigImpactDTO,
+  DecisionConfigsDTO,
+  DecisionThresholds,
   DetectionQualityDTO,
+  DriftDTO,
   EventDetailDTO,
   EventDTO,
   ExamDTO,
@@ -152,7 +158,9 @@ function httpCode(status: number): string {
 
 export function errorMessage(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 403) return 'You do not have permission to do this.';
+    // A missing role or a refused origin reads the same to staff; a specific refusal (four eyes, owner only, assign
+    // to yourself only…) says why in its message.
+    if (err.status === 403 && (err.code === 'forbidden' || err.code === 'bad_origin')) return 'You do not have permission to do this.';
     return err.message;
   }
   if (err instanceof Error) return err.message;
@@ -273,8 +281,8 @@ export const api = {
   // ---- org
   settings: () => request<OrgSettingsDTO>('GET', `${A}/settings`),
   updateSettings: (
-    patch: Partial<Omit<OrgSettingsDTO, 'identityThresholds' | 'externalVerifier'>> & {
-      identityThresholds?: Partial<OrgSettingsDTO['identityThresholds']>;
+    // Identity thresholds are changed through decision configurations (proposeDecisionConfig), not here.
+    patch: Partial<Omit<OrgSettingsDTO, 'identityThresholds' | 'decisionConfigVersion' | 'externalVerifier'>> & {
       externalVerifier?: ExternalVerifierUpdate;
     },
   ) => request<OrgSettingsDTO>('PUT', `${A}/settings`, { body: patch }),
@@ -289,6 +297,16 @@ export const api = {
     return `${A}/audit-log.csv${q.size ? `?${q}` : ''}`;
   },
   detectionQuality: (p: { from?: number; to?: number }) => request<DetectionQualityDTO>('GET', `${A}/metrics/detection-quality`, { query: { ...p } }),
+  calibration: (p: { from?: number; to?: number }) => request<CalibrationDTO>('GET', `${A}/metrics/calibration`, { query: { ...p } }),
+  drift: () => request<DriftDTO>('GET', `${A}/metrics/drift`),
+
+  // ---- model governance (versioned identity decision configurations)
+  decisionConfigs: () => request<DecisionConfigsDTO>('GET', `${A}/decision-configs`),
+  proposeDecisionConfig: (input: { thresholds: DecisionThresholds; note: string }) => request<DecisionConfigDTO>('POST', `${A}/decision-configs`, { body: input }),
+  decisionConfigImpact: (id: string) => request<DecisionConfigImpactDTO>('GET', `${A}/decision-configs/${enc(id)}/impact`),
+  decideDecisionConfig: (id: string, decision: 'approve' | 'reject' | 'withdraw', note?: string) =>
+    request<DecisionConfigDTO>('POST', `${A}/decision-configs/${enc(id)}/${decision}`, { body: note ? { note } : {} }),
+  rollbackDecisionConfig: (id: string, note: string) => request<DecisionConfigDTO>('POST', `${A}/decision-configs/${enc(id)}/rollback`, { body: { note } }),
 
   // ---- integrations (API keys, webhooks, email alerts)
   integrationStatus: () => request<IntegrationStatusDTO>('GET', `${A}/integrations/status`),

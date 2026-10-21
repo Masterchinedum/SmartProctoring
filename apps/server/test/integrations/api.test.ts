@@ -212,6 +212,9 @@ describe('integration API endpoints', () => {
     expect(report.incidents.length).toBeGreaterThan(0);
     expect(report.review).toMatchObject({ state: 'none' });
     expect(report.explanations).toBeUndefined();
+    // Nor the internal versions behind the identity decisions (staff report and Quality page only).
+    expect(report.identity.checks).toBeGreaterThan(0);
+    expect(report.identity.versions).toBeUndefined();
     // Events: EventDTO without evidence URLs, filterable.
     const evs = json(await v1(key, 'GET', `/sessions/${s.id}/events`)).items as { id: string; type: string; evidenceCount: number }[];
     expect(evs.map((e) => e.type)).toEqual(expect.arrayContaining(['session_started', 'multiple_people', 'looking_away', 'session_held', 'session_submitted']));

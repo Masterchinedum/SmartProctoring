@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ApiError } from '../api/client';
+import { ApiError, errorMessage } from '../api/client';
 import { isSessionEndedClose, LIVE_SESSION_ENDED_CLOSE_CODE, loginErrorMessage } from './auth-errors';
 
 describe('sign-in error messages', () => {
@@ -35,5 +35,18 @@ describe('live channel close codes', () => {
     expect(LIVE_SESSION_ENDED_CLOSE_CODE).toBe(4401);
     expect(isSessionEndedClose(4401)).toBe(true);
     for (const code of [1000, 1001, 1006, 1011, 4400, 4403]) expect(isSessionEndedClose(code)).toBe(false);
+  });
+});
+
+describe('staff API error messages', () => {
+  it('keeps a missing role generic and shows why a specific refusal happened', () => {
+    expect(errorMessage(new ApiError(403, 'forbidden', 'This action requires the admin role'))).toBe('You do not have permission to do this.');
+    expect(errorMessage(new ApiError(403, 'bad_origin', 'Cross-origin request refused'))).toBe('You do not have permission to do this.');
+    expect(errorMessage(new ApiError(403, 'four_eyes_required', 'Another administrator must approve or reject a change you proposed'))).toBe(
+      'Another administrator must approve or reject a change you proposed',
+    );
+    expect(errorMessage(new ApiError(409, 'proposal_open', 'Version 2 is waiting for approval.'))).toBe('Version 2 is waiting for approval.');
+    expect(errorMessage(new Error('Network down'))).toBe('Network down');
+    expect(errorMessage('?')).toBe('Something went wrong.');
   });
 });

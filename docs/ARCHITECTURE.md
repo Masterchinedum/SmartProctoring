@@ -323,6 +323,43 @@ continuous video. Candidate references are per-session and never reused across e
 * Production: reviewer decisions (reviewed vs dismissed) give per-detector precision on the
   "Detection quality" page.
 
+### Model governance (`packages/shared/src/governance.ts`, `services/decision-configs.ts`, `services/calibration.ts`, `routes/admin/governance.ts`)
+
+What decides, and who may change it:
+
+* **Decision configurations** — an organisation's identity thresholds (match / mismatch, ID-photo match / mismatch,
+  confirmations) are versioned (`decision_configs`). A change is *proposed* with a reason (≥ 10 characters), previewed
+  on the last 30 days of the organisation's identity samples (how many per-sample labels would change, and how), and
+  *approved* by a second administrator or owner (four eyes); the proposer may approve alone only when the
+  organisation has no other active administrator, recorded as `selfApproved`. Approval activates it at once: the
+  previous version is retired, and the thresholds and version are mirrored into the organisation settings that every
+  decision path already reads, so the next decision — including in exams in progress — uses it. One open proposal
+  and one active version per organisation (partial unique indexes; every transition locks the organisation row).
+  **Rollback** restores a retired version as a new version immediately (it was approved before), withdrawing an open
+  proposal. Version 1 is created on first use from what the organisation had (its stored thresholds, else the
+  release defaults); a version without its own thresholds follows the running server's defaults, so organisations
+  that never customised them keep getting improved defaults. `PUT /settings` no longer changes thresholds (409
+  `decision_config_required` for a different value).
+* **What the organisation cannot change**: the recogniser model and its calibration ship with the server (face
+  templates are tied to the model that made them, so a model is never rolled back on its own — see OPERATIONS.md §1).
+* **Stamps** — every identity decision records `decision_config_version`, `calibration_version` (`CALIBRATION.version`)
+  and `model_version` (`EMBEDDING_MODEL_VERSION`) from the same organisation row as its thresholds; every event raised
+  by the browser records `engine_version` (`DETECTION_ENGINE_VERSION`, sent with each event batch; a fingerprint test
+  fails when detector parameters change without a bump). Staff see the version on each identity check and in the
+  session report ("Decided under"); the integration API does not return them.
+* **Calibration by condition** (`GET /metrics/calibration`) — identity decisions broken down by face lighting
+  (brightness bands of the quality gate), camera resolution and browser / operating system (the session's latest
+  device record), and by decision configuration, calibration and model. Grouped in SQL, User-Agents folded into
+  families in code. No demographic attribute is collected or inferred; fairness across people is measured in consented
+  pilots (`docs/accuracy/`).
+* **Drift** (`GET /metrics/drift`) — the last 7 days against the 28 days before, per segment: identity
+  could-not-verify and mismatch rates (overall, lighting, resolution, browser), the share of started exams with each
+  kind of flag, and the share of decided flags reviewers found to be false detections. A signal is flagged only with
+  |z| ≥ 3 in a two-proportion z-test, a change of at least 2 percentage points and at least 50 trials on each side
+  (30 for the false-detection share) — conservative, so dozens of segments do not cry wolf. Version changes inside the
+  windows (a configuration activated, a calibration / model / detector version first seen) are listed with the
+  signals: they are the first suspects.
+
 ## 10. Configuration (env)
 
 `DATABASE_URL`, `PORT` (8080), `PUBLIC_URL`, `EVIDENCE_KEY` (base64 32 bytes), `SESSION_SECRET`,

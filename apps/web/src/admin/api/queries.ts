@@ -46,6 +46,10 @@ export const qk = {
   verifierInfo: ['integrations', 'verifiers'] as const,
   reviewQueueAll: ['review-queue'] as const,
   reviewQueue: (p: object) => ['review-queue', p] as const,
+  decisionConfigs: ['decision-configs'] as const,
+  decisionConfigImpact: (id: string) => ['decision-configs', id, 'impact'] as const,
+  calibration: (p: object) => ['calibration', p] as const,
+  drift: ['drift'] as const,
 };
 
 /* ------------------------------------------------------------------ cache patching (realtime + mutations) */

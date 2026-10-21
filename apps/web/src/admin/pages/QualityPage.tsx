@@ -8,6 +8,7 @@ import { DECISION_LABELS, eventTypeTitle, TRIGGER_LABELS } from '../lib/labels';
 import { CategoryBadge, DecisionBadge } from '../components/Badges';
 import { EmptyState, ErrorState, Loading, PageHeader } from '../components/Common';
 import { OfflineEvaluationSection } from './OfflineEvaluation';
+import { CalibrationPanel, DecisionConfigPanel, DriftPanel } from './QualityGovernance';
 
 const RANGES = [
   { id: '7', label: 'Last 7 days', days: 7 },
@@ -62,8 +63,16 @@ export function QualityPage() {
           hairstyles, clothing, backgrounds and pause lengths, and replays labelled scenarios through the behaviour detectors (precision, recall, false alerts per hour).
           See <code>docs/accuracy/</code> and <code>docs/ARCHITECTURE.md</code> §9 for the methodology.
         </p>
+        <p>
+          <strong>Governance</strong>: identity decisions are broken down by capture conditions and by the versions that made them (decision configuration,
+          calibration, recogniser model); drift compares the last week with the four weeks before. The identity thresholds themselves are versioned: changed only
+          through a proposal approved by a second administrator, and restorable at once.
+        </p>
       </div>
       {q.isPending ? <Loading /> : q.isError ? <ErrorState error={q.error} onRetry={() => void q.refetch()} /> : <QualityBody d={q.data} />}
+      <CalibrationPanel from={params.from ?? 0} to={params.to} />
+      <DriftPanel />
+      <DecisionConfigPanel />
     </div>
   );
 }

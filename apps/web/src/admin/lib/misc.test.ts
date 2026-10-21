@@ -166,19 +166,11 @@ describe('settings validation', () => {
     eventRetentionDays: '365',
     abandonAfterDays: '30',
     privacyContact: 'privacy@example.com',
-    match: '0.4',
-    mismatch: '0.28',
-    idPhotoMatch: '0.36',
-    idPhotoMismatch: '0.24',
-    mismatchConfirmations: '2',
   };
-  it('accepts valid settings and rejects inconsistent thresholds', () => {
+  it('accepts valid settings and rejects invalid periods', () => {
     expect(validateSettingsDraft(ok)).toEqual({});
-    expect(validateSettingsDraft({ ...ok, mismatch: '0.5' }).mismatch).toMatch(/lower than/);
-    expect(validateSettingsDraft({ ...ok, match: '1.5' }).match).toBeDefined();
     expect(validateSettingsDraft({ ...ok, eventRetentionDays: '10' }).eventRetentionDays).toBeDefined();
     expect(validateSettingsDraft({ ...ok, evidenceRetentionDays: '2.5' }).evidenceRetentionDays).toBeDefined();
-    expect(validateSettingsDraft({ ...ok, mismatchConfirmations: '0' }).mismatchConfirmations).toBeDefined();
     expect(validateSettingsDraft({ ...ok, name: ' ' }).name).toBe('Required');
     expect(validateSettingsDraft({ ...ok, abandonAfterDays: '0' }).abandonAfterDays).toBeDefined();
     expect(validateSettingsDraft({ ...ok, abandonAfterDays: '7.5' }).abandonAfterDays).toBeDefined();

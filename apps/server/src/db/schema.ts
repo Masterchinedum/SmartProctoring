@@ -30,6 +30,8 @@ import type {
   ExamVersionReason,
   CheckPurpose,
   ConnectionStatus,
+  DecisionConfigStatus,
+  DecisionThresholds,
   DeviceInfo,
   EmailAlertToggles,
   EventCategory,
@@ -91,6 +93,11 @@ export interface OrgSettings {
   requireMfa: MfaRequirement;
   /** Service-level targets for review work (review queue, overdue holds). */
   reviewSla: ReviewSlaSettings;
+  /**
+   * Version of the active decision configuration (services/decision-configs.ts), mirrored here with its thresholds
+   * (identityThresholds) so the decision paths read one row. 1 until a configuration was approved.
+   */
+  decisionConfigVersion: number;
 }
 
 export const organizations = pgTable('organizations', {
@@ -538,6 +545,8 @@ export const examSessions = pgTable(
   (t) => [
     uniqueIndex('exam_sessions_token_uq').on(t.accessTokenHash),
     index('exam_sessions_org_status_idx').on(t.orgId, t.status),
+    // Exams started in a time range per organisation (decision configuration usage, drift denominators).
+    index('exam_sessions_org_started_idx').on(t.orgId, t.startedAt),
     index('exam_sessions_exam_idx').on(t.examId),
     index('exam_sessions_candidate_idx').on(t.candidateId),
     index('exam_sessions_exam_version_idx').on(t.examVersionId),
@@ -742,11 +751,18 @@ export const identityChecks = pgTable(
     eventId: uuid('event_id'),
     /** Stored response for idempotent replays of the same sampleId. */
     response: jsonb('response').$type<Record<string, unknown>>(),
+    /** What made the decision (model governance): the organisation's decision configuration version … */
+    decisionConfigVersion: integer('decision_config_version'),
+    /** … the server's identity calibration (vision/calibration.ts) and recogniser model (vision/embeddings.ts). Null before 0011. */
+    calibrationVersion: text('calibration_version'),
+    modelVersion: text('model_version'),
   },
   (t) => [
     uniqueIndex('identity_checks_sample_uq').on(t.sessionId, t.sampleId),
     index('identity_checks_session_idx').on(t.sessionId, t.at),
     index('identity_checks_event_idx').on(t.eventId),
+    // Organisation-wide time ranges (calibration by condition, drift).
+    index('identity_checks_at_idx').on(t.at),
   ],
 );
 
@@ -823,6 +839,8 @@ export const events = pgTable(
     reviewNote: text('review_note'),
     /** What the reviewer concluded (services/review.ts); null for undecided events and older plain-status decisions. */
     resolution: text('resolution').$type<ReviewResolution>(),
+    /** Version of the browser detectors that raised it (@sp/detection DETECTION_ENGINE_VERSION); null for server events. */
+    engineVersion: text('engine_version'),
   },
   (t) => [
     index('events_session_started_idx').on(t.sessionId, t.startedAt),
@@ -834,6 +852,10 @@ export const events = pgTable(
     index('events_undecided_flags_idx')
       .on(t.orgId, t.sessionId, t.firstReceivedAt)
       .where(sql`${t.reviewStatus} = 'unreviewed' and ${t.category} in ('integrity', 'uncertain', 'technical')`),
+    // Flags by start time per organisation (drift: share of exams with each kind of flag).
+    index('events_org_flags_started_idx')
+      .on(t.orgId, t.startedAt)
+      .where(sql`${t.category} in ('integrity', 'uncertain', 'technical')`),
   ],
 );
 
@@ -1003,6 +1025,43 @@ export const deviceRecords = pgTable(
   },
   (t) => [index('device_records_session_idx').on(t.sessionId, t.at)],
 );
+
+/**
+ * Versioned identity decision configurations (model governance, services/decision-configs.ts): proposed with a
+ * reason, approved by a second administrator, active one at a time, retired when replaced; rollback restores an
+ * earlier one as a new version. `thresholds` null = the release defaults of the running server.
+ */
+export const decisionConfigs = pgTable(
+  'decision_configs',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    status: text('status').$type<DecisionConfigStatus>().notNull(),
+    thresholds: jsonb('thresholds').$type<DecisionThresholds | null>(),
+    note: text('note').notNull(),
+    basedOnVersion: integer('based_on_version'),
+    rollbackOfVersion: integer('rollback_of_version'),
+    proposedBy: uuid('proposed_by').references(() => staffUsers.id, { onDelete: 'set null' }),
+    proposedAt: ts('proposed_at').notNull(),
+    decidedBy: uuid('decided_by').references(() => staffUsers.id, { onDelete: 'set null' }),
+    decidedAt: ts('decided_at'),
+    decisionNote: text('decision_note'),
+    /** Approved by its proposer because the organisation had no other active administrator. */
+    selfApproved: boolean('self_approved').notNull().default(false),
+    activatedAt: ts('activated_at'),
+    retiredAt: ts('retired_at'),
+  },
+  (t) => [
+    uniqueIndex('decision_configs_version_uq').on(t.orgId, t.version),
+    // One active configuration and at most one open proposal per organisation.
+    uniqueIndex('decision_configs_active_uq').on(t.orgId).where(sql`${t.status} = 'active'`),
+    uniqueIndex('decision_configs_proposed_uq').on(t.orgId).where(sql`${t.status} = 'proposed'`),
+  ],
+);
+export type DecisionConfig = typeof decisionConfigs.$inferSelect;
 
 /** Offline evaluation reports (identity harness / detection harness) for the Detection-quality page. */
 export const evaluationReports = pgTable(

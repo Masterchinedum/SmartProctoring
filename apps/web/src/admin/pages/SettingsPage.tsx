@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { DEFAULT_IDENTITY_THRESHOLDS, DEFAULT_POLICY, MFA_REQUIREMENT_LABEL, MFA_REQUIREMENTS, mfaRequiredFor, type MfaRequirement, type OrgSettingsDTO } from '@sp/shared';
+import { DEFAULT_POLICY, MFA_REQUIREMENT_LABEL, MFA_REQUIREMENTS, mfaRequiredFor, type MfaRequirement, type OrgSettingsDTO } from '@sp/shared';
 import { useAuth } from '../auth';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
@@ -130,11 +130,6 @@ interface Draft {
   eventRetentionDays: string;
   abandonAfterDays: string;
   privacyContact: string;
-  match: string;
-  mismatch: string;
-  idPhotoMatch: string;
-  idPhotoMismatch: string;
-  mismatchConfirmations: string;
 }
 
 function toDraft(s: OrgSettingsDTO): Draft {
@@ -144,11 +139,6 @@ function toDraft(s: OrgSettingsDTO): Draft {
     eventRetentionDays: String(s.eventRetentionDays),
     abandonAfterDays: String(s.abandonAfterDays),
     privacyContact: s.privacyContact,
-    match: String(s.identityThresholds.match),
-    mismatch: String(s.identityThresholds.mismatch),
-    idPhotoMatch: String(s.identityThresholds.idPhotoMatch),
-    idPhotoMismatch: String(s.identityThresholds.idPhotoMismatch),
-    mismatchConfirmations: String(s.identityThresholds.mismatchConfirmations),
   };
 }
 
@@ -156,15 +146,10 @@ function toDraft(s: OrgSettingsDTO): Draft {
 export function validateSettingsDraft(d: Draft): Record<string, string> {
   const e: Record<string, string> = {};
   const int = (v: string) => Number.isInteger(Number(v)) && v.trim() !== '';
-  const unit = (v: string) => v.trim() !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
   if (!d.name.trim()) e.name = 'Required';
   if (!int(d.evidenceRetentionDays) || +d.evidenceRetentionDays < 1 || +d.evidenceRetentionDays > 3650) e.evidenceRetentionDays = 'Whole number of days, 1–3650';
   if (!int(d.eventRetentionDays) || +d.eventRetentionDays < 30 || +d.eventRetentionDays > 3650) e.eventRetentionDays = 'Whole number of days, 30–3650';
   if (!int(d.abandonAfterDays) || +d.abandonAfterDays < 1 || +d.abandonAfterDays > 3650) e.abandonAfterDays = 'Whole number of days, 1–3650';
-  for (const k of ['match', 'mismatch', 'idPhotoMatch', 'idPhotoMismatch'] as const) if (!unit(d[k])) e[k] = 'A number between 0 and 1';
-  if (!e.match && !e.mismatch && +d.mismatch >= +d.match) e.mismatch = 'Must be lower than the match threshold';
-  if (!e.idPhotoMatch && !e.idPhotoMismatch && +d.idPhotoMismatch >= +d.idPhotoMatch) e.idPhotoMismatch = 'Must be lower than the ID-photo match threshold';
-  if (!int(d.mismatchConfirmations) || +d.mismatchConfirmations < 1 || +d.mismatchConfirmations > 10) e.mismatchConfirmations = 'Whole number, 1–10';
   return e;
 }
 
@@ -177,12 +162,6 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
   const errors = validateSettingsDraft(d);
   const policyCheck = validatePolicy(policy);
   const hasErrors = Object.keys(errors).length > 0 || !policyCheck.ok || invalidPolicy.length > 0;
-  const thresholdsChanged =
-    +d.match !== initial.identityThresholds.match ||
-    +d.mismatch !== initial.identityThresholds.mismatch ||
-    +d.idPhotoMatch !== initial.identityThresholds.idPhotoMatch ||
-    +d.idPhotoMismatch !== initial.identityThresholds.idPhotoMismatch ||
-    +d.mismatchConfirmations !== initial.identityThresholds.mismatchConfirmations;
 
   const set = (patch: Partial<Draft>) => {
     setD((x) => ({ ...x, ...patch }));
@@ -197,13 +176,6 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
         abandonAfterDays: Number(d.abandonAfterDays),
         privacyContact: d.privacyContact.trim(),
         defaultPolicy: policy,
-        identityThresholds: {
-          match: Number(d.match),
-          mismatch: Number(d.mismatch),
-          idPhotoMatch: Number(d.idPhotoMatch),
-          idPhotoMismatch: Number(d.idPhotoMismatch),
-          mismatchConfirmations: Number(d.mismatchConfirmations),
-        },
       }),
     onSuccess: (s) => {
       qc.setQueryData(qk.settings, s);
@@ -263,26 +235,22 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
           )}
         </div>
       </section>
-      <section className="card stack">
+      <section className="card stack" data-testid="settings-thresholds">
         <h2>Identity decision thresholds</h2>
-        <div className="banner banner-warning small">
-          <strong>Change these only on the basis of an offline evaluation on your own consented data</strong> (see the Quality page and <code>docs/accuracy/</code>).
-          Raising the match threshold or lowering the mismatch threshold increases “inconclusive” results; moving the mismatch threshold up increases false “possible
-          different person” events, which put genuine candidates on hold. Changes apply to new identity checks only and are audit-logged.
+        <p className="small">
+          Version {initial.decisionConfigVersion}: same person at or above <strong>{initial.identityThresholds.match}</strong>, possible different person below{' '}
+          <strong>{initial.identityThresholds.mismatch}</strong> (ID photo: {initial.identityThresholds.idPhotoMatch} / {initial.identityThresholds.idPhotoMismatch};{' '}
+          {initial.identityThresholds.mismatchConfirmations} confirmations).
+        </p>
+        <p className="small muted">
+          The thresholds are versioned. A change is proposed with a reason, previewed on recent identity samples and approved by a second administrator; an earlier
+          version can be restored at once. Every identity decision records the version that made it.
+        </p>
+        <div>
+          <Link className="btn btn-sm" to="/admin/quality">
+            Decision configuration on the Detection quality page ›
+          </Link>
         </div>
-        <div className="grid-2">
-          {field('match', 'Match threshold (same person at or above)', { type: 'number', min: 0, max: 1, step: 0.01 }, `Default ${DEFAULT_IDENTITY_THRESHOLDS.match}`)}
-          {field('mismatch', 'Mismatch threshold (possible different person below)', { type: 'number', min: 0, max: 1, step: 0.01 }, `Default ${DEFAULT_IDENTITY_THRESHOLDS.mismatch}`)}
-          {field('idPhotoMatch', 'ID photo: match threshold', { type: 'number', min: 0, max: 1, step: 0.01 }, `Default ${DEFAULT_IDENTITY_THRESHOLDS.idPhotoMatch}`)}
-          {field('idPhotoMismatch', 'ID photo: mismatch threshold', { type: 'number', min: 0, max: 1, step: 0.01 }, `Default ${DEFAULT_IDENTITY_THRESHOLDS.idPhotoMismatch}`)}
-          {field(
-            'mismatchConfirmations',
-            'Consecutive mismatches before raising an event',
-            { type: 'number', min: 1, max: 10, step: 1 },
-            `Default ${DEFAULT_IDENTITY_THRESHOLDS.mismatchConfirmations}. Single samples never raise an event on their own.`,
-          )}
-        </div>
-        {thresholdsChanged ? <div className="banner banner-danger small">You are changing identity thresholds.</div> : null}
       </section>
       <section className="stack">
         <div className="row">

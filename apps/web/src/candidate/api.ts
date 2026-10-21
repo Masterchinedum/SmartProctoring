@@ -1,3 +1,4 @@
+import { DETECTION_ENGINE_VERSION } from '@sp/detection';
 import type {
   CandidateSessionState,
   CheckFrameResponse,
@@ -292,7 +293,7 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
     start: () => request<CandidateSessionState>('POST', '/api/candidate/start'),
     saveAnswer: (questionId, req) => json<SaveAnswerResponse>('PUT', `/api/candidate/answers/${encodeURIComponent(questionId)}`, req),
     heartbeat: (req) => request<HeartbeatResponse>('POST', '/api/candidate/heartbeat', req),
-    sendEvents: (events) => json<EventBatchResponse>('POST', '/api/candidate/events/batch', { events }),
+    sendEvents: (events) => json<EventBatchResponse>('POST', '/api/candidate/events/batch', { events, engineVersion: DETECTION_ENGINE_VERSION }),
     uploadEvidence: async (evidenceId, jpeg, q) =>
       (
         await request<EvidenceUploadResponse>(

@@ -11,7 +11,10 @@ import { eq } from 'drizzle-orm';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, findMigrationsDir, migrate, type Database } from '../src/db/index.js';
-import { eventReviews, events, examSessions, exams, examVersions } from '../src/db/schema.js';
+import { DEFAULT_IDENTITY_THRESHOLDS } from '@sp/shared';
+import { decisionConfigs, eventReviews, events, examSessions, exams, examVersions } from '../src/db/schema.js';
+import { calibrationBreakdown } from '../src/services/calibration.js';
+import { ensureDecisionConfigs, listDecisionConfigs } from '../src/services/decision-configs.js';
 import { gradeSession } from '../src/services/grading.js';
 import { sessionExamContent, versionForStart } from '../src/services/exam-versions.js';
 import { dbUrl, TEST_ADMIN_URL } from './global-setup.js';
@@ -183,5 +186,38 @@ describe('0010_review_workflow', () => {
     // A reviewer who no longer exists: the decision is kept without a reviewer.
     expect(history.find((h) => h.eventId === dismissedByGone)).toMatchObject({ reviewerId: null, status: 'dismissed' });
     expect(history.some((h) => h.eventId === open)).toBe(false);
+  });
+});
+
+describe('0011_model_governance', () => {
+  it('turns the thresholds an organisation had into version 1; earlier decisions stay unrecorded', async () => {
+    const database = await databaseAt('0010_review_workflow');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    // Customised (partially) through Settings before versioned configurations existed.
+    const custom = (await one(`INSERT INTO organizations (name, settings) VALUES ('Custom Org', $1) RETURNING id`, [JSON.stringify({ identityThresholds: { match: 0.5, mismatch: 0.28 } })])).id;
+    const plain = (await one(`INSERT INTO organizations (name) VALUES ('Plain Org') RETURNING id`)).id;
+    const cand = (await one(`INSERT INTO candidates (org_id, name) VALUES ($1, 'Old Candidate') RETURNING id`, [custom])).id;
+    const exam = (await one(`INSERT INTO exams (org_id, title, duration_sec, status, policy) VALUES ($1, 'Old', 600, 'published', '{}') RETURNING id`, [custom])).id;
+    const session = (await one(`INSERT INTO exam_sessions (org_id, exam_id, candidate_id, access_token_hash, duration_ms, status) VALUES ($1, $2, $3, 'h', 600000, 'submitted') RETURNING id`, [custom, exam, cand])).id;
+    const at = new Date();
+    await sql(`INSERT INTO identity_checks (session_id, trigger, decision, similarity, confidence, at, received_at) VALUES ($1, 'periodic', 'match', 0.7, 0.9, $2, $2)`, [session, at]);
+
+    await migrate(database);
+
+    const db = database.db;
+    const now = Date.now();
+    const v1 = await ensureDecisionConfigs(db, custom, now);
+    expect(v1).toMatchObject({ version: 1, status: 'active', thresholds: { ...DEFAULT_IDENTITY_THRESHOLDS, match: 0.5, mismatch: 0.28 } });
+    expect((await listDecisionConfigs(db, custom))[0]).toMatchObject({ version: 1, releaseDefaults: false, thresholds: { match: 0.5, mismatch: 0.28 } });
+    expect(await ensureDecisionConfigs(db, plain, now)).toMatchObject({ version: 1, thresholds: null });
+    expect((await listDecisionConfigs(db, plain))[0]).toMatchObject({ releaseDefaults: true, thresholds: DEFAULT_IDENTITY_THRESHOLDS });
+    // Idempotent.
+    expect((await ensureDecisionConfigs(db, custom, now)).id).toBe(v1.id);
+    expect(await db.select().from(decisionConfigs)).toHaveLength(2);
+    // Decisions made before the upgrade carry no versions.
+    const c = await calibrationBreakdown(db, custom, at.getTime() - 60_000, at.getTime() + 60_000);
+    expect(c.segments.find((s) => s.dimension === 'decisionConfig')).toMatchObject({ segment: 'unrecorded', samples: 1 });
+    expect(c.segments.find((s) => s.dimension === 'model')).toMatchObject({ segment: 'unrecorded', samples: 1 });
   });
 });

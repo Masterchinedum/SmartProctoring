@@ -164,7 +164,7 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     const c = getCandidate(req);
     const instanceId = requireInstanceId(req);
     const body = eventBatchRequestSchema.parse(req.body);
-    return ingestEvents(ctx, c.session, c.policy, instanceId, body.events, c);
+    return ingestEvents(ctx, c.session, c.policy, instanceId, body.events, c, body.engineVersion);
   });
 
   app.put('/evidence/:evidenceId', { config: limit(240) }, async (req) => {

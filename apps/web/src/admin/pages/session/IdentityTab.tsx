@@ -6,6 +6,7 @@ import { api, shouldRetry } from '../../api/client';
 import { qk } from '../../api/queries';
 import { formatDateTime, formatNumber, formatPercent, formatSimilarity } from '../../lib/format';
 import { contextLabel, DECISION_HELP, DECISION_LABELS, PERIOD_LABELS, qualityIssueLabel, TRIGGER_LABELS } from '../../lib/labels';
+import { checkVersionLabel } from '../../lib/governance';
 import { DecisionBadge } from '../../components/Badges';
 import { EmptyState } from '../../components/Common';
 import { EvidenceGallery } from '../../components/EventDetail';
@@ -105,6 +106,11 @@ export function IdentityTab({ d, onOpenEvent }: { d: SessionDetailDTO; onOpenEve
                     <td>
                       <DecisionBadge decision={c.decision} livenessFailed={c.livenessPassed === false} />
                       <div className="muted small">confidence {formatPercent(c.confidence)}</div>
+                      {c.versions ? (
+                        <div className="muted small" title={checkVersionLabel(c.versions).title}>
+                          {checkVersionLabel(c.versions).label}
+                        </div>
+                      ) : null}
                       {c.secondOpinion ? (
                         <div className="small second-opinion" title={`Outcome: ${c.secondOpinion.outcome}`}>
                           {c.secondOpinion.needsHumanReview ? <span className="badge badge-warning">Opinions disagree — review</span> : null}

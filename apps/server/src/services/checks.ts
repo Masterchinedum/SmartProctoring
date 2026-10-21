@@ -80,7 +80,7 @@ import { buildCandidateState, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { purgeEvidenceRows, readEvidence, storeEvidence } from './evidence.js';
 import { copyEvidence, frameAad, frameToAnalysis, idPhotoAad, loadActiveReference, precedingContext, referenceAad, summarizeAnalysis, toIdentityResultDTO, type ActiveReference } from './identity-common.js';
 import { clearedHold } from './session-actions.js';
-import { orgThresholds } from './org.js';
+import { decisionStamp, orgThresholds, type DecisionStamp } from './org.js';
 import { assertCheckRate, assertSessionEvidenceCapacity } from './session-limits.js';
 import { effectivePolicy, holdNow, identityState, requiredCheckFor, withSession, type SessionMutation } from './session-state.js';
 
@@ -567,6 +567,7 @@ interface AbandonedMismatch {
   agg: ContinuationIdentity;
   prepared: PreparedFrames;
   active: ActiveReference;
+  stamp: DecisionStamp;
 }
 
 /**
@@ -586,7 +587,7 @@ async function abandonedMismatch(ctx: Ctx, check: Check): Promise<AbandonedMisma
     active,
     orgThresholds(org),
   );
-  return agg.decision === 'mismatch' ? { agg, prepared, active } : null;
+  return agg.decision === 'mismatch' ? { agg, prepared, active, stamp: decisionStamp(org) } : null;
 }
 
 /**
@@ -636,7 +637,7 @@ export async function settleAbandonedChecks(ctx: Ctx, sessionId: string, how: Ab
 const ABANDONED_MESSAGE = 'The identity check was not finished. Please start it again.';
 
 async function settleAbandoned(m: SessionMutation, check: Check, how: AbandonHow, j: AbandonedMismatch): Promise<void> {
-  const { agg, prepared, active } = j;
+  const { agg, prepared, active, stamp } = j;
   const s = m.session;
   const st = identityState(s);
   const best = agg.bestProbeIndex != null ? prepared.frontal[agg.bestProbeIndex] : undefined;
@@ -660,6 +661,7 @@ async function settleAbandoned(m: SessionMutation, check: Check, how: AbandonHow
       probeEvidenceId: best ? (best.cropId ?? best.evidenceId) : null,
       frameEvidenceId: best?.evidenceId ?? null,
       dhash: best?.analysis.dhash ?? null,
+      ...stamp,
       context: {
         precededBy: [],
         periodKind: open?.kind ?? null,
@@ -993,6 +995,7 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
   const [org] = await ctx.db.select().from(organizations).where(eq(organizations.id, s0.orgId));
   const policy = effectivePolicy(s0, exam, org ?? null);
   const thresholds = orgThresholds(org);
+  const stamp = decisionStamp(org);
 
   const liveness: LivenessResultDTO | null = verifyCheckLiveness(check, livenessFrames(prepared), thresholds);
   const livenessOk = !liveness || liveness.passed;
@@ -1106,7 +1109,7 @@ export async function completeCheck(ctx: Ctx, sessionId: string, instanceId: str
     if (!cur || cur.status !== 'open') throw conflict('check_closed', 'This check is no longer open. Start a new check.');
     if (m.session.activeInstanceId !== instanceId) throw conflict('superseded', SUPERSEDED_MESSAGE);
     if (requiredCheckFor(m.session, instanceId) !== purpose) throw conflict('check_not_required', 'This check is no longer needed.', { requiredCheck: requiredCheckFor(m.session, instanceId) });
-    const ctxInfo: ApplyCtx = { m, ctx, check, policy, thresholds, liveness, livenessOk, reference, aggregate, active, refImages, probeImages, idPhoto, prepared, instanceId, second, idPhotoSecond };
+    const ctxInfo: ApplyCtx = { m, ctx, check, policy, thresholds, stamp, liveness, livenessOk, reference, aggregate, active, refImages, probeImages, idPhoto, prepared, instanceId, second, idPhotoSecond };
     const out = purpose === 'initial' ? await applyInitial(ctxInfo) : await applyContinuation(ctxInfo);
     const status = out.outcome === 'passed' ? 'passed' : out.outcome === 'retry' ? 'retry' : out.outcome === 'held' ? 'held' : 'failed';
     const response = {
@@ -1165,6 +1168,8 @@ interface ApplyCtx {
   check: Check;
   policy: ProctoringPolicy;
   thresholds: IdentityThresholds;
+  /** The versions behind `thresholds` and the comparison (same organisation row), recorded on each decision. */
+  stamp: DecisionStamp;
   liveness: LivenessResultDTO | null;
   livenessOk: boolean;
   reference: GalleryResult | null;
@@ -1212,6 +1217,7 @@ async function insertIdentityCheck(a: ApplyCtx, fields: Partial<typeof identityC
       at: new Date(m.now),
       receivedAt: new Date(m.now),
       clientInstanceId: a.instanceId,
+      ...a.stamp,
       ...fields,
     })
     .returning();

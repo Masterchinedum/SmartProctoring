@@ -201,6 +201,9 @@ export function toIdentityCheckDTO(row: IdentityCheck, probe: EvidenceRow | null
     livenessPassed: livenessFromContext(c as unknown as Record<string, unknown>),
     // Only present when an external second opinion was asked (off by default): the DTO is otherwise unchanged.
     ...withSecondOpinion(secondOpinionFromContext(c as unknown as Record<string, unknown>)),
+    ...(row.decisionConfigVersion != null || row.calibrationVersion || row.modelVersion
+      ? { versions: { decisionConfig: row.decisionConfigVersion ?? null, calibration: row.calibrationVersion ?? null, model: row.modelVersion ?? null } }
+      : {}),
   };
 }
 

@@ -369,7 +369,16 @@ export const eventUpsertSchema = z.object({
 export type EventUpsert = z.infer<typeof eventUpsertSchema>;
 
 /** POST /api/candidate/events/batch */
-export const eventBatchRequestSchema = z.object({ events: z.array(eventUpsertSchema).max(200) });
+export const eventBatchRequestSchema = z.object({
+  events: z.array(eventUpsertSchema).max(200),
+  /** Version of the browser detectors that raised them (@sp/detection DETECTION_ENGINE_VERSION), stored on new events. */
+  engineVersion: z
+    .string()
+    .trim()
+    .max(64)
+    .regex(/^[\w.+-]+$/)
+    .optional(),
+});
 export type EventBatchRequest = z.infer<typeof eventBatchRequestSchema>;
 export interface EventBatchResponse {
   results: { id: string; result: 'created' | 'updated' | 'stale' | 'rejected'; reason?: string }[];
@@ -521,6 +530,15 @@ export interface IdentityCheckDTO {
    * above is the fused decision; `needsHumanReview` = the two opinions disagree (show it to reviewers).
    */
   secondOpinion?: IdentitySecondOpinionDTO | null;
+  /** What made the decision (./governance.ts); absent for decisions made before versions were recorded. */
+  versions?: IdentityDecisionVersionsDTO;
+}
+
+/** The organisation's decision configuration version and the server's calibration / recogniser model behind a decision. */
+export interface IdentityDecisionVersionsDTO {
+  decisionConfig: number | null;
+  calibration: string | null;
+  model: string | null;
 }
 
 export interface IdentitySecondOpinionDTO {
@@ -689,6 +707,8 @@ export interface SessionReportDTO {
     unableToVerify: number;
     idPhoto: { decision: IdentityDecision; similarity: number | null } | null;
     summary: string;
+    /** The versions the session's identity decisions were made under (distinct, in order of first use); staff only. */
+    versions?: { decisionConfigs: number[]; calibrations: string[]; models: string[] };
   };
   eventCounts: Record<EventCategory, { total: number; dismissed: number; reviewed: number; unreviewed: number }>;
   byType: { type: EventType; title: string; category: EventCategory; count: number; totalDurationMs: number; dismissed: number }[];
@@ -892,7 +912,10 @@ export interface OrgSettingsDTO {
   eventRetentionDays: number;
   defaultPolicy: ProctoringPolicy;
   privacyContact: string;
+  /** The identity thresholds in use: those of the active decision configuration (./governance.ts; read-only here). */
   identityThresholds: { match: number; mismatch: number; idPhotoMatch: number; idPhotoMismatch: number; mismatchConfirmations: number };
+  /** Version of the active decision configuration (GET /api/admin/decision-configs). */
+  decisionConfigVersion: number;
   /**
    * Invited / ready / paused sessions with no activity for this many days are closed automatically
    * (status 'terminated', endReason 'abandoned'; answers kept, no score). Default 30.
@@ -1104,6 +1127,11 @@ export const settingsUpdateSchema = z.object({
   eventRetentionDays: z.number().int().min(30).max(3650).optional(),
   privacyContact: z.string().max(500).optional(),
   defaultPolicy: z.record(z.unknown()).optional(),
+  /**
+   * Read-only: thresholds change through a decision configuration (POST /api/admin/decision-configs, approved by a
+   * second administrator). Sending the values in use is accepted (a settings form posting everything back); any other
+   * value is refused with 409 decision_config_required.
+   */
   identityThresholds: z
     .object({
       match: z.number().min(0).max(1),

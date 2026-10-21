@@ -7,6 +7,7 @@ import { formatDateTime, formatDuration, formatPercent, formatSimilarity, format
 import { DECISION_LABELS, END_REASON_LABELS, PERIOD_LABELS, STATUS_LABELS } from '../lib/labels';
 import { formatScore } from '../lib/examVersions';
 import { formatExceptionValue } from '../lib/accommodations';
+import { reportVersionsLabel } from '../lib/governance';
 import { CategoryBadge, DecisionBadge, ReviewBadge, SeverityBadge } from '../components/Badges';
 import { ErrorState, Loading } from '../components/Common';
 import { EvidenceImage } from '../components/EvidenceImage';
@@ -277,6 +278,12 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
                 )}
               </td>
             </tr>
+            {r.identity.versions ? (
+              <tr>
+                <th>Decided under</th>
+                <td className="small">{reportVersionsLabel(r.identity.versions)}</td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </section>

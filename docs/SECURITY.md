@@ -95,6 +95,18 @@ server-side identity match, read other sessions, or change category/severity (th
   export itself is audited). Integrations receive the review outcome but never staff notes or the event
   explanations (which quote detector and identity measurements).
 
+### Model governance
+* Identity thresholds change only through a decision configuration: proposed by an administrator with a reason,
+  approved or rejected by a **different** administrator / owner (four eyes; self-approval only when no other active
+  administrator exists, and recorded as such). Reviewers can read configurations, calibration and drift but not
+  change them; the settings API refuses threshold changes (409). Restoring an earlier, previously approved version is
+  immediate (incident response) and withdraws an open proposal. Every step is audit-logged
+  (`decision_config.proposed / approved / rejected / withdrawn / rolled_back`, with the values from and to).
+* Concurrency: one active version and one open proposal per organisation (partial unique indexes), each transition
+  under the organisation row lock; configurations are scoped to the organisation (another organisation's id is 404).
+* Every identity decision records the configuration, calibration and model versions that made it, so a disputed
+  decision can be traced to the exact rules in force.
+
 ### Authorisation
 * Every `/api/admin/*` route has `requireStaff(<role>)`; every query is scoped by the staff member's
   organisation (other organisations' ids return 404). Only owners create/modify owners and admins; the last

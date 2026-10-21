@@ -228,6 +228,7 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     unableToVerify: checks.filter((c) => c.decision === 'unable_to_verify').length,
     idPhoto,
     summary: identitySummary({ clock, session, refs, checks, events: evs, idPhoto, items: timeline.items, endAt, staffVerifications }),
+    ...decisionVersions(checks),
   };
 
   /* -------------------------------------------------------------- event counts */
@@ -784,4 +785,18 @@ export function buildLimitations(input: LimitationInput): string[] {
   if (!policy.evidence.screenshots) out.push('Screenshots were turned off by the exam rules, so events have no images.');
   if (input.evidencePurgedAt != null) out.push(`Screenshots and identity images were deleted on ${clock.dateTime(input.evidencePurgedAt)} under the retention policy; the event records remain.`);
   return out;
+}
+
+/** The distinct versions behind a session's identity decisions (in order of first use), when any were recorded. */
+function decisionVersions(checks: IdentityCheckDTO[]): Pick<SessionReportDTO['identity'], 'versions'> {
+  const ordered = [...checks].sort((a, b) => a.at - b.at).flatMap((c) => (c.versions ? [c.versions] : []));
+  if (!ordered.length) return {};
+  const distinct = <T>(xs: (T | null)[]) => [...new Set(xs.filter((x): x is T => x != null))];
+  return {
+    versions: {
+      decisionConfigs: distinct(ordered.map((v) => v.decisionConfig)),
+      calibrations: distinct(ordered.map((v) => v.calibration)),
+      models: distinct(ordered.map((v) => v.model)),
+    },
+  };
 }

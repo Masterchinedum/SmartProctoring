@@ -376,9 +376,11 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     const tz = resolveTimeZone((req.query as Record<string, unknown> | undefined)?.tz);
     const report = await buildSessionReport(ctx, id, key.orgId, { timeZone: tz });
     await apiAudit(ctx.db, key, ctx.now(), 'api.session.report_read', 'session', id);
-    // Explanations are reviewer-facing (they quote detector and identity measurements): not for integrations.
+    // Explanations are reviewer-facing (they quote detector and identity measurements): not for integrations; nor
+    // are the internal decision versions (Quality page).
     const { explanations: _explanations, ...rest } = report;
-    return withoutFaceScores({ ...rest, notableEvents: report.notableEvents.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)), staffUrl: sessionStaffUrl(ctx.config.publicUrl, id) });
+    const { versions: _versions, ...identity } = rest.identity;
+    return withoutFaceScores({ ...rest, identity, notableEvents: report.notableEvents.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)), staffUrl: sessionStaffUrl(ctx.config.publicUrl, id) });
   });
 
   app.get('/sessions/:id/events', auth, async (req) => {

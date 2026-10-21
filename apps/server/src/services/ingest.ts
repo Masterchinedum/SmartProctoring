@@ -110,7 +110,16 @@ function periodKindAt(t: Timeline, at: number): string | null {
   return kind;
 }
 
-export async function ingestEvents(ctx: Ctx, session: ExamSession, policy: ProctoringPolicy, instanceId: string, batch: EventUpsert[], preload?: SessionPreload): Promise<EventBatchResponse> {
+/** `engineVersion`: the browser detectors that raised the batch (stored on new events, for drift analysis). */
+export async function ingestEvents(
+  ctx: Ctx,
+  session: ExamSession,
+  policy: ProctoringPolicy,
+  instanceId: string,
+  batch: EventUpsert[],
+  preload?: SessionPreload,
+  engineVersion?: string,
+): Promise<EventBatchResponse> {
   assertInControl(session, instanceId);
   const results: EventBatchResponse['results'] = [];
   if (batch.length === 0) return { results };
@@ -234,6 +243,7 @@ export async function ingestEvents(ctx: Ctx, session: ExamSession, policy: Proct
           firstReceivedAt: new Date(now),
           receivedAt: new Date(now),
           deliveredLate: late,
+          engineVersion: engineVersion ?? null,
         });
         count++;
         existing.set(e.id, { id: e.id, sessionId: session.id, type: e.type, version: e.version } as EventRow);

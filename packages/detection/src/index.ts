@@ -7,6 +7,7 @@
  */
 
 // Engine
+export { DETECTION_ENGINE_VERSION } from './version';
 export { createMonitoringEngine } from './engine/engine';
 export type { EngineOptions, MonitoringEngine } from './engine/engine';
 export { K as ENGINE_CONSTANTS, DEFAULT_BASELINE, attentionAngles, directionOf, isAway, awayThresholds, plausibleFaces, countPersons } from './engine/context';

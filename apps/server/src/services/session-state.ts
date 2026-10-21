@@ -51,7 +51,7 @@ import { refreshSessionAccommodations, withAccommodations } from './accommodatio
 import { loadVersion, versionForStart } from './exam-versions.js';
 import { gradeSession } from './grading.js';
 import { enqueueIntegrationNotifications } from './integration-events.js';
-import { mergePolicy, orgThresholds } from './org.js';
+import { decisionStamp, mergePolicy, orgThresholds, type DecisionStamp } from './org.js';
 import { capturesWithin, GAP_NOT_RETURNED, loadLateCaptures } from './reporting-gaps.js';
 import { EMPTY_ACCUMULATOR } from './identity-evidence.js';
 
@@ -202,6 +202,11 @@ export class SessionMutation {
 
   async thresholds() {
     return orgThresholds(await this.org());
+  }
+
+  /** The versions an identity decision made now records (same organisation row as thresholds()). */
+  async decisionStamp(): Promise<DecisionStamp> {
+    return decisionStamp(await this.org());
   }
 
   /* ---------------------------------------------------------------- notifications */

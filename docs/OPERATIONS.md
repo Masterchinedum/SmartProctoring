@@ -42,6 +42,10 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
 * Keep the database backup taken just before the upgrade: restoring it is the only way to return to templates a
   pre-v2 build can read (sessions and uploads since then are lost).
 * `rekey` (key rotation) re-encrypts templates without reading their model id, so it is safe on either version.
+* From migration 0011 every identity decision records the decision configuration, calibration and model versions,
+  and browser events the detector version. Older rows show as “unrecorded” on the Quality page; nothing is
+  backfilled. An upgrade that ships a new calibration or detector version appears in the Drift section's version
+  changes the first time it decides.
 
 ## 2. Sizing and scaling
 
@@ -199,7 +203,9 @@ backups until they expire; align backup retention with the privacy notice.
   connection failed.
 * Watch for: rising `reporting_interrupted` events (network problems), `monitoring_degraded` events
   (under-powered candidate devices), and the “Detection quality” page (dismissal rate per detector —
-  a rising rate signals false positives or a threshold that needs tuning).
+  a rising rate signals false positives or a threshold that needs tuning; **Drift** compares the last week with
+  the four weeks before and lists version changes next to any signal; **Identity decisions by condition** shows
+  whether lighting, camera resolution or a browser explains a rise in “could not verify”).
 
 ## 6. Retention job
 Runs hourly inside the server. To run manually: `pnpm --filter @sp/server retention:run`.
@@ -279,6 +285,24 @@ It ends the account's sessions, lifts its sign-in backoff, writes `user.mfa_rese
 *system*, with the reason) to the organisation's audit log and emails the person. Hand a temporary password over
 through a trusted channel; they change it on their account page. Exit codes: 0 done, 2 bad arguments, 4 no such
 address. Afterwards, add a second owner so this is not needed again.
+
+**Changing the identity thresholds.** Only on evidence: an offline evaluation on your own consented data
+(`docs/accuracy/`), a pilot, or the Quality page's *Identity decisions by condition*. An administrator opens
+**Detection quality → Identity decision configuration → Propose new thresholds…**, enters the complete set and the
+reason (ticket, evidence). A second administrator reads the preview — how many of the last 30 days' samples would be
+labelled differently — and approves (or rejects with a note). It applies to the next identity decision, also in
+exams in progress. Lowering the mismatch threshold makes the system slower to suspect a different person; raising it
+makes false suspicions (and holds of genuine candidates) more likely.
+
+**False suspicions or holds rose after a threshold change.** Detection quality → *Drift* lists the change next to the
+signal. Restore the previous version: *History → Restore…* on that version, with the reason. It is active at once (no
+second approval: it was approved before) and withdraws any proposal waiting. Then decide the affected holds as usual
+— a version change never re-decides past samples.
+
+**Drift flagged after a server upgrade** (a new calibration, recogniser model or detector version in the version
+changes). Compare the segments (lighting, browser, resolution) to see whether it is general or one environment.
+Organisation thresholds can compensate only temporarily; report it with the Quality page figures. Roll back the
+deployment only per §1 *Upgrades and rollback* (face templates are tied to the model).
 
 **An API key was leaked.** Integrations → API keys → **Revoke** (effective immediately), create a new key
 and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) shows what the key did.

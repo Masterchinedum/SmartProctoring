@@ -71,6 +71,7 @@ export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
     externalVerifier: toExternalVerifierDTO(s.externalVerifier),
     requireMfa: s.requireMfa,
     reviewSla: { ...s.reviewSla },
+    decisionConfigVersion: s.decisionConfigVersion,
   };
 }
 
@@ -111,9 +112,11 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       if (body.evidenceRetentionDays !== undefined) stored.evidenceRetentionDays = body.evidenceRetentionDays;
       if (body.eventRetentionDays !== undefined) stored.eventRetentionDays = body.eventRetentionDays;
       if (body.privacyContact !== undefined) stored.privacyContact = body.privacyContact.trim();
+      // Thresholds change only through an approved decision configuration (services/decision-configs.ts); a form that
+      // posts back the values in use is fine.
       if (body.identityThresholds) {
-        const provided = Object.fromEntries(Object.entries(body.identityThresholds).filter(([, v]) => v !== undefined));
-        stored.identityThresholds = { ...(stored.identityThresholds ?? {}), ...provided } as OrgSettings['identityThresholds'];
+        const differs = Object.entries(body.identityThresholds).some(([k, v]) => v !== undefined && v !== cur.identityThresholds[k as keyof OrgSettings['identityThresholds']]);
+        if (differs) throw conflict('decision_config_required', 'Identity thresholds are changed through a decision configuration: proposed with a reason and approved by a second administrator (Detection quality page).');
       }
       if (body.abandonAfterDays !== undefined) stored.abandonAfterDays = body.abandonAfterDays;
       if (body.alertRecipients !== undefined) stored.alertRecipients = [...new Set(body.alertRecipients.map((e) => e.trim().toLowerCase()))];
@@ -143,9 +146,6 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       if (next.eventRetentionDays < next.evidenceRetentionDays) {
         issues.push({ path: 'eventRetentionDays', message: 'Event records must be kept at least as long as the evidence images' });
       }
-      const t = next.identityThresholds;
-      if (!(t.mismatch < t.match)) issues.push({ path: 'identityThresholds.mismatch', message: 'The mismatch threshold must be lower than the match threshold' });
-      if (!(t.idPhotoMismatch < t.idPhotoMatch)) issues.push({ path: 'identityThresholds.idPhotoMismatch', message: 'The ID-photo mismatch threshold must be lower than the ID-photo match threshold' });
       if (issues.length) throw validationFailed('Invalid settings', issues);
 
       const name = body.name !== undefined ? body.name.trim() : org.name;
@@ -168,7 +168,6 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         targetId: staff.orgId,
         meta: {
           fields: changed,
-          ...(changed.includes('identityThresholds') ? { identityThresholds: { from: cur.identityThresholds, to: next.identityThresholds } } : {}),
           ...(changed.includes('evidenceRetentionDays') ? { evidenceRetentionDays: { from: cur.evidenceRetentionDays, to: next.evidenceRetentionDays } } : {}),
           ...(changed.includes('eventRetentionDays') ? { eventRetentionDays: { from: cur.eventRetentionDays, to: next.eventRetentionDays } } : {}),
           ...(changed.includes('abandonAfterDays') ? { abandonAfterDays: { from: cur.abandonAfterDays, to: next.abandonAfterDays } } : {}),

@@ -2,6 +2,8 @@ import { DEFAULT_IDENTITY_THRESHOLDS, DEFAULT_REVIEW_SLA, identityThresholdsSche
 import { eq } from 'drizzle-orm';
 import type { DbOrTx } from '../db/index.js';
 import { organizations, type Organization, type OrgSettings } from '../db/schema.js';
+import { CALIBRATION } from '../vision/calibration.js';
+import { EMBEDDING_MODEL_VERSION } from '../vision/embeddings.js';
 import { DEFAULT_EXTERNAL_VERIFIER_SETTINGS, normalizeExternalVerifierSettings } from '../verifiers/settings.js';
 
 export const DEFAULT_ORG_SETTINGS: OrgSettings = {
@@ -22,6 +24,7 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   externalVerifier: DEFAULT_EXTERNAL_VERIFIER_SETTINGS,
   requireMfa: 'off',
   reviewSla: { ...DEFAULT_REVIEW_SLA },
+  decisionConfigVersion: 1,
 };
 
 /** Organisation settings with every field filled from defaults. */
@@ -39,6 +42,7 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
     externalVerifier: normalizeExternalVerifierSettings(s.externalVerifier),
     requireMfa: s.requireMfa === 'admins' || s.requireMfa === 'everyone' ? s.requireMfa : 'off',
     reviewSla: reviewSlaSchema.safeParse({ ...DEFAULT_REVIEW_SLA, ...(s.reviewSla ?? {}) }).data ?? { ...DEFAULT_REVIEW_SLA },
+    decisionConfigVersion: Number.isInteger(s.decisionConfigVersion) && s.decisionConfigVersion! >= 1 ? s.decisionConfigVersion! : 1,
   };
 }
 
@@ -46,6 +50,20 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
 export function orgThresholds(org: Pick<Organization, 'settings'> | null | undefined): IdentityThresholds {
   const parsed = identityThresholdsSchema.safeParse(orgSettings(org).identityThresholds);
   return parsed.success ? parsed.data : DEFAULT_IDENTITY_THRESHOLDS;
+}
+
+/**
+ * What an identity decision records about how it was made (model governance): the organisation's decision
+ * configuration version (whose thresholds orgThresholds() returns), the server's calibration and recogniser model.
+ */
+export interface DecisionStamp {
+  decisionConfigVersion: number;
+  calibrationVersion: string;
+  modelVersion: string;
+}
+
+export function decisionStamp(org: Pick<Organization, 'settings'> | null | undefined): DecisionStamp {
+  return { decisionConfigVersion: orgSettings(org).decisionConfigVersion, calibrationVersion: CALIBRATION.version, modelVersion: EMBEDDING_MODEL_VERSION };
 }
 
 /** Effective policy for a new exam: org default policy merged with the exam's own (exam wins, deep per section). */

@@ -55,7 +55,7 @@ import { aggregateBurst, scoreReference } from './identity-gallery.js';
 import { IDENTITY_SAMPLE_SHARE, sessionHasEvidenceCapacity } from './session-limits.js';
 import { holdNow, identityState, withSession, type SessionMutation, type SessionPreload } from './session-state.js';
 import { secondOpinion, secondOpinionApplies, secondOpinionDetails, type SecondOpinionRecord } from './identity-external.js';
-import { loadOrg, mergePolicy, orgThresholds } from './org.js';
+import { loadOrg, mergePolicy, orgThresholds, type DecisionStamp } from './org.js';
 import { fusionPolicyFor } from '../verifiers/index.js';
 import { internalStrength, type InternalOpinion } from '../verifiers/fusion.js';
 
@@ -376,6 +376,8 @@ interface SampleEnv {
   baseline: ActiveReference['ref']['baseline'];
   policy: ProctoringPolicy;
   thresholds: Awaited<ReturnType<SessionMutation['thresholds']>>;
+  /** The versions behind `thresholds` and the comparison, recorded on the decision. */
+  stamp: DecisionStamp;
   jpegBytes: number;
   /**
    * Identity checks whose suspected swap waits for the external second opinion: the caller resolves them after the
@@ -385,7 +387,16 @@ interface SampleEnv {
 }
 
 async function sampleEnv(m: SessionMutation, active: ActiveReference, jpegBytes: number, secondOpinionRequests: string[] = []): Promise<SampleEnv> {
-  return { ctx: m.ctx, active, baseline: sampleBaseline(active, identityState(m.session)), policy: await m.policy(), thresholds: await m.thresholds(), jpegBytes, secondOpinionRequests };
+  return {
+    ctx: m.ctx,
+    active,
+    baseline: sampleBaseline(active, identityState(m.session)),
+    policy: await m.policy(),
+    thresholds: await m.thresholds(),
+    stamp: await m.decisionStamp(),
+    jpegBytes,
+    secondOpinionRequests,
+  };
 }
 
 /**
@@ -604,6 +615,7 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
       dhash: repFrame?.analysis.dhash ?? null,
       clientInstanceId: m.session.activeInstanceId,
       context: ctxInfo,
+      ...env.stamp,
     })
     .returning();
   m.publishIdentityCheck(row);
