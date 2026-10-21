@@ -14,13 +14,13 @@ import { availableParallelism } from 'node:os';
 import { disableOrtTelemetry, VisionEngine } from './engine';
 import { processIdPhoto } from './id-photo';
 import { resolveModelsDir } from './models';
-import { retryAfterSecFor, VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
-import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate, VisionLoad, VisionObserver } from './types';
+import { retryAfterSecFor, VisionBusyError, VisionCancelledError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
+import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate, TimedAnalysis, VisionLoad, VisionObserver } from './types';
 import { DEFAULT_DETECT_THRESHOLD } from './detect';
 import { DEFAULT_MAX_DECODE_SIDE } from './image';
 import type { EmbeddingRecipe } from './embed-prep';
 
-export { VisionBusyError, VisionClosedError };
+export { VisionBusyError, VisionCancelledError, VisionClosedError };
 
 export interface VisionServiceOptions {
   /** Directory containing the two ONNX files (default: MODELS_DIR or apps/server/models). */
@@ -125,6 +125,11 @@ class Limiter {
     return this.active < this.max ? 0 : Math.round(((this.waiting.length + 1) * this.serviceMs) / this.max);
   }
   async run<T>(fn: () => Promise<T>): Promise<T> {
+    return (await this.runTimed(fn)).value;
+  }
+  /** run(), plus the time spent waiting for a slot and running (ms). */
+  async runTimed<T>(fn: () => Promise<T>): Promise<{ value: T; waitMs: number; runMs: number }> {
+    const queuedAt = performance.now();
     if (this.active >= this.max) {
       if (this.waiting.length >= this.maxQueue) throw new VisionBusyError(retryAfterSecFor(this.estimatedWaitMs()));
       await new Promise<void>((res) => this.waiting.push(res));
@@ -133,9 +138,10 @@ class Limiter {
     }
     const t0 = performance.now();
     try {
-      const out = await fn();
-      this.serviceMs += 0.1 * (performance.now() - t0 - this.serviceMs);
-      return out;
+      const value = await fn();
+      const runMs = performance.now() - t0;
+      this.serviceMs += 0.1 * (runMs - this.serviceMs);
+      return { value, waitMs: Math.round(t0 - queuedAt), runMs: Math.round(runMs) };
     } finally {
       const next = this.waiting.shift();
       if (next) next();
@@ -145,7 +151,7 @@ class Limiter {
 }
 
 interface Backend {
-  analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis>;
+  analyzeTimed(image: Buffer, opts: AnalyzeOptions, signal?: AbortSignal): Promise<TimedAnalysis>;
   detect(image: Buffer): Promise<DetectedFace[]>;
   readonly inFlight: number;
   readonly queued: number;
@@ -179,11 +185,12 @@ class InProcessBackend implements Backend {
       maxQueue: l.maxQueue,
     };
   }
-  analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis> {
-    return this.limiter.run(async () => {
+  async analyzeTimed(image: Buffer, opts: AnalyzeOptions): Promise<TimedAnalysis> {
+    const r = await this.limiter.runTimed(async () => {
       if (this.closed) throw new VisionClosedError();
       return this.engine.analyze(image, opts);
     });
+    return { analysis: r.value, waitMs: r.waitMs, runMs: r.runMs };
   }
   detect(image: Buffer): Promise<DetectedFace[]> {
     return this.limiter.run(async () => {
@@ -262,15 +269,23 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
   }
 
   async analyze(image: Buffer, opts: AnalyzeOptions = {}): Promise<ImageAnalysis> {
+    return (await this.analyzeTimed(image, opts)).analysis;
+  }
+
+  /**
+   * analyze(), plus the queue wait and analysis time of this image (ms; the dedicated vision worker reports them).
+   * `signal` drops the analysis while it is still queued (worker pool only; VisionCancelledError).
+   */
+  async analyzeTimed(image: Buffer, opts: AnalyzeOptions = {}, signal?: AbortSignal): Promise<TimedAnalysis> {
     if (this.closed) throw new VisionClosedError();
     const t0 = performance.now();
     try {
-      const result = await this.backend.analyze(image, opts);
+      const result = await this.backend.analyzeTimed(image, opts, signal);
       this.analyzed++;
       this.totalMs += performance.now() - t0;
       return result;
     } catch (err) {
-      if (!(err instanceof VisionBusyError) && !(err instanceof VisionClosedError)) this.failed++;
+      if (!(err instanceof VisionBusyError) && !(err instanceof VisionClosedError) && !(err instanceof VisionCancelledError)) this.failed++;
       throw err;
     }
   }

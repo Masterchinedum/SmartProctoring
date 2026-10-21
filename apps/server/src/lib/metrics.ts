@@ -74,6 +74,18 @@ export class AppMetrics {
     buckets: [0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5, 1, 2],
     registers: [this.registry],
   });
+  readonly visionRemoteOverhead = new Histogram({
+    name: 'sp_vision_remote_overhead_seconds',
+    help: 'Remote vision driver: time an analysis request to a vision worker took beyond the worker’s own queue wait and analysis (the HTTP hop).',
+    buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+    registers: [this.registry],
+  });
+  readonly visionRemoteFailures = new Counter({
+    name: 'sp_vision_remote_failures_total',
+    help: 'Remote vision driver: failed requests and load polls to vision workers, by reason (connect, timeout, reset, unauthorized, bad_response, server_error).',
+    labelNames: ['reason'] as const,
+    registers: [this.registry],
+  });
   readonly identityDecisions = new Counter({
     name: 'sp_identity_decisions_total',
     help: 'Identity decisions recorded on this instance: kind check (check-in / resume / reconnect / reverify) or sample (during the exam), by trigger and decision (match / inconclusive / mismatch / unable_to_verify).',
@@ -130,6 +142,17 @@ export class AppMetrics {
       collect() {
         const l = load();
         if (l) this.set(l.workers);
+      },
+    });
+    new Gauge({
+      name: 'sp_vision_remote_workers',
+      help: 'Remote vision driver: vision worker processes by state (up = in use, unready = no analysis thread ready, down = not answering / token rejected, unknown = not reached yet).',
+      labelNames: ['state'] as const,
+      registers: reg,
+      collect() {
+        const v = self.ctx?.vision as { workerStates?: () => Record<string, number> } | undefined;
+        const states = v?.workerStates?.();
+        if (states) for (const [state, n] of Object.entries(states)) this.set({ state }, n);
       },
     });
     new Gauge({
@@ -258,6 +281,12 @@ export class AppMetrics {
     },
     analysisRefused: (priority) => {
       this.visionRefused.inc({ priority });
+    },
+    remoteRequestEnded: ({ overheadMs }) => {
+      this.visionRemoteOverhead.observe(overheadMs / 1000);
+    },
+    remoteFailure: (reason) => {
+      this.visionRemoteFailures.inc({ reason });
     },
   };
 

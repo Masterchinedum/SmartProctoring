@@ -13,6 +13,9 @@ YuNet/SFace inference on real face photos); the method is in §2 so every number
 - *Unchanged:* the request path is not affected. Heartbeat p95 stays ≤ 28 ms even at N=500 with face analysis
   saturated.
 - *History:* §1–§5 describe the identity-v1 optimisation work and its measurements.
+- *Dedicated vision workers* (`VISION_DRIVER=remote`, 2026-10-21, §8): face analysis can move to separate worker
+  processes and scale on its own hosts. The HTTP hop costs ≈ 2–3 ms per frame (latency and CPU, ≈ 2 % of a frame's
+  analysis) on one host; the analysis itself is unchanged.
 
 ## 1. Summary (identity v1)
 
@@ -318,6 +321,11 @@ of face analysis long before that, so grow by vision workers (a bigger instance)
   more connections do not make a CPU-bound event loop faster. `PG_STATEMENT_TIMEOUT_MS` (default 60 s) stops a
   runaway statement from holding a connection and row locks.
 * **Memory**: ≈ 400 MB + ≈ 100 MB per vision worker; ≈ 0.7 GB at 1,000 candidates on 4 vCPU.
+* **Dedicated vision workers** (`VISION_DRIVER=remote`, §8, OPERATIONS §2): size the worker fleet from the frames/s
+  above (a 4-vCPU worker host with 4 threads ≈ 46 analyses/s in isolation, ≈ 38 client frames/s; plan at ≤ 75 %), and
+  the API servers for the request path plus ≈ 10–15 ms of CPU per analysed frame (evidence, database, identity logic:
+  the part of the ≈ 85 ms that is not analysis, plus the HTTP client). Memory: a model-free server ≈ 300–350 MB, a
+  worker ≈ 300 MB + ≈ 100 MB per analysis thread.
 
 ## 7. Identity v2 (re-measured 2026-09-25)
 
@@ -652,4 +660,105 @@ compare the two runs with each other, not with the tables above. 136 of 150 chec
 # server: EXAM_START_ADMISSION=false LOAD_AWARE_SAMPLING=false for the "off" run
 cd e2e && BASE=http://127.0.0.1:8097 STAFF_EMAIL=perf@example.com STAFF_PASSWORD=PerfTest12345 \
   N=150 RAMP_SEC=30 DURATION_SEC=300 FACES_DIR=/path/to/face/jpegs npx tsx scripts/load-test.ts
+```
+
+## 8. Dedicated vision worker (measured 2026-10-21)
+
+Face analysis can run in separate vision worker processes (`src/vision-worker`, `VISION_DRIVER=remote`; ARCHITECTURE
+§4). Its purpose is **horizontal scaling**: the ≈ 35 frames/s of one 4-vCPU instance (§7) is no longer the ceiling
+of an API server, and analysis capacity grows by adding worker hosts. One host cannot show that gain; what it can
+show is what the HTTP hop costs per frame. Both are below.
+
+**Conditions — read before using any number here.** One 4-vCPU / 16 GB VM, Node 24.22.1, bundled server
+(`node dist/main.js`) and worker (`node dist/vision-server.js`), Postgres 16 and the load generator on the same VM.
+The VM was **shared with three other agents running test suites and browser end-to-end runs the whole time**: the
+1-min load average was 8–12 during the first series and 14–25 during the second (against 4 vCPUs; §7 used runs
+started below 1.0). Under that contention every analysis cost ≈ 1.9× its quiet CPU time (≈ 160 ms instead of ≈ 85 ms
+per frame in the server) and throughput was 3–13 frames/s instead of ≈ 25–35. **Absolute capacity could not be
+re-measured; only comparisons made side by side mean anything, and §6 is unchanged.** Re-run on a quiet box (and
+with the worker on its own host) before relying on throughput figures.
+
+### 8.1 The cost of the hop (micro-benchmark)
+
+The identity-sample analysis (embedding + face crop, 640×480 q80 test frames, `background` priority) through
+(a) the in-process pool and (b) the remote driver → one worker process on the same VM, both with 3 analysis threads;
+150 sequential analyses (latency on an idle pool) and 12 concurrent for 20 s (throughput). CPU time per frame read
+per thread from `/proc` (scratch script, not committed). Order local, remote, remote, local, then remote, local; load
+average 9.4–12.5.
+
+| per frame | in-process pool | remote driver → worker |
+|---|---|---|
+| sequential latency p50 / p95 (3 runs) | 145 / 205, 136 / 163, 161 / 283 ms | 141 / 179, 136 / 177, 162 / 273 ms |
+| hop overhead (round trip − worker-reported queue wait − analysis), sequential | — | **p50 2.3 ms**, p95 10 ms |
+| hop overhead, 12 concurrent | — | p50 5.3 ms, p95 35 ms |
+| CPU of the analysis threads | 135–143 ms | 132–139 ms |
+| CPU of the main threads (pool messaging / HTTP, JSON, base64) | 0.3–0.4 ms | **1.2–1.5 ms caller + 1.4–1.9 ms worker** |
+| 12 concurrent, analyses/s | 16.7 (7.7 and 6.2 in runs hit by a burst of outside load) | 16.3, 16.4 (7.2 in the burst) |
+
+- The hop adds **≈ 2–3 ms of latency** to an idle-pool analysis (≈ 2 % of a frame) and **≈ 2.5–3 ms of CPU** split
+  between the server and the worker (inflated like everything else on this VM; expect less on a quiet one). The
+  sequential latencies and the throughput of the two drivers are equal within the noise.
+- The concurrent p95 of 35 ms is event-loop queueing on a CPU-starved VM (the worker's main thread competes with its
+  own analysis threads and three other test suites). `sp_vision_remote_overhead_seconds` reports it in production;
+  the alert in `docs/prometheus-alerts.yml` fires above 100 ms.
+- Analysis results are identical bit for bit (embedding, face crop, pose, quality, ID-photo result;
+  `test/vision-remote.test.ts` with the real models).
+
+### 8.2 Load test: in-process vs server + one worker on the same VM
+
+`e2e/scripts/load-test.ts`, identity-v2 cadence (Maximum profile), N candidates checking in over 30 s (a synchronised
+start), 150 s, admission at exam start and load-aware sampling **off** (raw capacity, as §7.2), a fresh database and
+freshly started processes per run. Remote: the worker with `VISION_THREADS=3` (the in-process default on 4 vCPU),
+reached over 127.0.0.1. Runs back to back, in pairs.
+
+| run (load avg mean / max) | checked in | analysed frames/s | identity frame p50 / p95 | check frame p50 / p95 | heartbeat p95 | CPU: server + worker | CPU per analysed frame: server + worker = total | hop overhead (from `/metrics`) |
+|---|---|---|---|---|---|---|---|---|
+| N=60 in-process (9.5 / 12.7) | 54 | 9.7 | 8.3 / 20.8 s | 3.7 / 8.4 s | 116 ms | 1.34 cores | 160 ms | — |
+| N=60 remote (8.5 / 11.5) | 54 | 12.6 | 5.1 / 16.3 s | 1.7 / 3.1 s | 249 ms | 0.22 + 1.56 cores | 20 + 140 = **160 ms** | mean 11 ms, 51 % ≤ 5 ms |
+| N=90 in-process (8.8 / 12.1) | 82 | 9.0 | 23.0 / 37.3 s | 6.7 / 13.6 s | 199 ms | 1.42 cores | 165 ms | — |
+| N=90 remote, before the fix below (9.7 / 10.6) | 82 | 7.8 | 16.6 / 49.8 s | 9.7 / 27.8 s | 221 ms | 0.21 + 1.08 cores | 33 + 168 = 201 ms | mean 19 ms |
+
+The second series (same parameters, reverse order, after the fix) ran at a load average of 14–25: 3–5 frames/s in
+both modes, check-ins expiring in both, and no conclusion either way beyond the fix's effect noted below.
+
+Reading the tables:
+- **Total CPU per analysed frame is the same** (160 ms in both N=60 runs): the work moved from the server to the
+  worker. With a remote worker the API server spent ≈ 20–33 ms of CPU per analysed frame on this VM (evidence storage,
+  database, identity logic, the HTTP client) — ≈ 10–15 ms on a quiet one, which is what an API server must be sized
+  for per analysed frame (§6).
+- **Throughput and latencies are equal within the noise.** The N=60 remote run happened to get more CPU (12.6 vs
+  9.7 frames/s; two processes compete differently with the other agents' processes); do not read it as a gain.
+  The heartbeat p95 was higher with the remote driver in these two pairs (249 vs 116 ms, 221 vs 199 ms), higher
+  again in one pair of the second series (554 vs 320 ms) and equal in the other (421 vs 425 ms) — all far above the
+  ≤ 28 ms of a quiet box (§7.2). The server's event loop does less work per frame with a remote worker (it no longer
+  pools images to threads, but parses each JSON answer), so this is most likely contention noise; re-check on a quiet
+  box.
+- **What the N=90 remote run exposed (fixed).** With identity frames queueing beyond 30 s, the driver's
+  `VISION_WORKER_TIMEOUT_MS` (30 s, below the candidate app's 45-s upload timeout) answered 213 frames with 503 +
+  `Retry-After`, as intended — but the worker still analysed those frames for nobody (worker CPU per *answered* frame
+  168 ms vs 140 ms), and three timeouts in a row opened the circuit of a worker that was only busy. Fixed: a timed-out
+  request now closes its connection and the worker drops the frame if it is still queued (`AbortSignal` into the
+  pool), and timeouts no longer count against a worker (hung workers fail their 2-s load polls instead). In the
+  second series the remote N=90 run retried 191 such answers and refused none after the client's retries (246
+  before).
+- In-process the same overload produces no 503s from the server; frames simply wait (p95 37 s here), and a real
+  candidate's browser gives up after 45 s. With the remote driver the candidate is told "busy, retry in N s" after
+  30 s instead.
+
+### 8.3 What scaling out buys
+
+Not measurable on one host. By construction, analysis capacity is the sum of the workers' (each a §7.4 pool: 3–4
+threads ≈ 37–46 analyses/s on 4 vCPU in isolation, or up to 8 threads on a bigger host), and the API server keeps
+only the ≈ 10–15 ms per frame of non-analysis work plus the request path. An API server that previously saturated
+at ≈ 35 frames/s with its own analysis can therefore drive several workers' worth of frames before its own CPU is the
+limit (≈ 100 frames/s per 2 vCPU at 15 ms per frame; the request path adds ≈ 0.7 ms per candidate-second). The
+driver balances by least expected wait, so workers of different sizes fill in proportion to their speed.
+
+```bash
+# worker (one per vision host; VISION_THREADS defaults to the CPU count, max 8)
+VISION_WORKER_TOKEN=<secret> VISION_WORKER_PORT=8090 node apps/server/dist/vision-server.js
+# server
+VISION_DRIVER=remote VISION_WORKER_URLS=http://vision-1:8090,http://vision-2:8090 VISION_WORKER_TOKEN=<secret> \
+  ... node apps/server/dist/main.js
+# then the load test of §7.1 against the server; per-frame hop: sp_vision_remote_overhead_seconds on /metrics
 ```

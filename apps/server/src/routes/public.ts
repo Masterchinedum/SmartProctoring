@@ -29,6 +29,7 @@ async function dbStatus(ctx: Ctx): Promise<'ok' | 'error' | 'timeout'> {
  *
  *   GET /health/live      the process answers (no I/O)                                   -> liveness probe
  *   GET /health/ready     the database answers and face analysis has a worker (200/503)  -> load balancer / readiness
+ *                         (remote vision driver: at least one vision worker process ready; `visionWorkers`)
  *   GET /health           same as /health/ready (kept for existing probes, e.g. the Dockerfile HEALTHCHECK)
  *   GET /health/capacity  whether this instance should take more exam starts (always 200; `accepting`)
  *                         — for operators, autoscalers and admission, never for load-balancer routing
@@ -45,7 +46,10 @@ export const publicRoutes: FastifyPluginAsync = async (app) => {
     const load = ctx.vision.load;
     const vision = !load || load.workers > 0 ? 'ok' : 'unavailable';
     const ok = db === 'ok' && vision === 'ok';
-    return reply.status(ok ? 200 : 503).send({ ok, db, vision, uptimeSec: uptimeSec(), serverTime: ctx.now() });
+    // Remote vision driver: how many vision worker processes are in use (ready = at least one).
+    const states = (ctx.vision as { workerStates?: () => Record<string, number> }).workerStates?.();
+    const visionWorkers = states ? { ready: states.up, configured: Object.values(states).reduce((a, b) => a + b, 0) } : undefined;
+    return reply.status(ok ? 200 : 503).send({ ok, db, vision, ...(visionWorkers ? { visionWorkers } : {}), uptimeSec: uptimeSec(), serverTime: ctx.now() });
   };
   app.get('/health', ready);
   app.get('/health/ready', ready);

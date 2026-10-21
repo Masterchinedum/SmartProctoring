@@ -18,6 +18,9 @@ import { fileURLToPath } from 'node:url';
  *   E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD   owner created via BOOTSTRAP_ADMIN_* (and used by the tests)
  *   E2E_NO_SKIP=1        a test that would be skipped because its face images are missing FAILS instead, and global
  *                        setup stops when a fixture cannot be built (CI: a green run means every scenario ran)
+ *   E2E_VISION=remote    face analysis in a dedicated vision worker process (src/vision-worker) started next to the
+ *                        server on E2E_VISION_WORKER_PORT (default E2E_PORT + 40); every server of the run, the
+ *                        dedicated instances included, uses it (VISION_DRIVER=remote). Default: in-process (local).
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +44,11 @@ export const SESSION_SECRET = 'e2e-session-secret-0123456789abcdefghijklmnopqrst
 export const HEADED = env.E2E_HEADED === '1';
 export const WORKERS = Number(env.E2E_WORKERS || 2);
 export const NO_SKIP = env.E2E_NO_SKIP === '1';
+/** Where the servers analyse faces: in-process (default) or in one dedicated vision worker process. */
+export const VISION_MODE: 'local' | 'remote' = env.E2E_VISION === 'remote' ? 'remote' : 'local';
+export const VISION_WORKER_PORT = Number(env.E2E_VISION_WORKER_PORT || PORT + 40);
+/** Fixed test token shared by the servers and the vision worker (never used outside this throwaway environment). */
+export const VISION_WORKER_TOKEN = 'e2e-vision-worker-token-0123456789abcdef';
 
 export function faceImage(name: string): string {
   return join(FACES_DIR, name);

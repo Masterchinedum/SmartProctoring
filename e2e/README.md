@@ -66,6 +66,14 @@ All use `PUBLIC_URL=http://127.0.0.1:<port>` (a different host than the main ser
 cookies never mix), `NODE_ENV=production` and `VISION_THREADS=2`. Their databases are re-created by the spec
 (names must contain `e2e`); logs: `e2e/.artifacts/server-integrations.log`, `server-rekey-{1,2,3}.log`, `server-mfa.log`, `server-governance.log`, `server-privacy.log`, `server-residency.log`.
 
+**Dedicated vision worker (`E2E_VISION=remote`).** Global setup first starts one vision worker from source
+(`tsx src/vision-worker/main.ts`, like `pnpm --filter @sp/server vision-worker`) on 127.0.0.1:`E2E_VISION_WORKER_PORT`
+with as many analysis threads as an in-process server would use (CPU count − 1), waits for its `/health/ready`, and
+gives every server of the run — the main one and the dedicated instances — `VISION_DRIVER=remote`,
+`VISION_WORKER_URLS` and a fixed test `VISION_WORKER_TOKEN`; teardown stops it after the server. Log:
+`e2e/.artifacts/vision-worker.log`. It is not the default (CI runs the in-process driver); use it to check the camera
+scenarios through the HTTP hop, e.g. `E2E_VISION=remote … playwright test tests/01 tests/04`.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -87,6 +95,8 @@ cookies never mix), `NODE_ENV=production` and `VISION_THREADS=2`. Their database
 | `E2E_RW_REPEAT` | `1` | Repetitions of every realistic case (the measurement run for `docs/accuracy/end-to-end.md` uses 3) |
 | `E2E_RW_LONG_MIN` | `5` | Minutes of the genuine-candidate long runs (scenario 22) |
 | `E2E_KEEP_LOGS` | — | `1` = attach the server-log slice and candidate API logs to every test, not only failed ones |
+| `E2E_VISION` | `local` | `remote` = face analysis in a dedicated vision worker process (below) instead of in each server |
+| `E2E_VISION_WORKER_PORT` | `E2E_PORT`+40 (8138) | Port of that vision worker |
 
 ## Face images and fixtures
 

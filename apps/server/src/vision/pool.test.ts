@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { VisionInputError } from './image';
-import { BACKGROUND_MAX_WAIT_MS, MAX_RETRY_AFTER_SEC, resolveWorkerScript, retryAfterSecFor, VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
+import { BACKGROUND_MAX_WAIT_MS, MAX_RETRY_AFTER_SEC, resolveWorkerScript, retryAfterSecFor, VisionBusyError, VisionCancelledError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
 
 const FAKE_WORKER = `
 import { parentPort, workerData } from 'node:worker_threads';
@@ -47,6 +47,36 @@ describe('VisionWorkerPool', () => {
     expect(a.dhash).toBe('hello');
     expect(Buffer.isBuffer(a.faceCropJpeg)).toBe(true);
     expect(a.embedding).toBeInstanceOf(Float32Array);
+  });
+
+  it('reports each analysis\' queue wait and worker time (analyzeTimed; the dedicated vision worker forwards them)', async () => {
+    const pool = await start(1);
+    const [first, second] = await Promise.all([pool.analyzeTimed(img('sleep:80'), {}), pool.analyzeTimed(img('sleep:10'), {})]);
+    expect(first.analysis.dhash).toBe('sleep:80');
+    expect(first.runMs).toBeGreaterThanOrEqual(70);
+    expect(first.waitMs).toBeLessThan(40);
+    expect(second.waitMs).toBeGreaterThanOrEqual(60); // queued behind the first on the only worker
+    expect(Buffer.isBuffer(second.analysis.faceCropJpeg)).toBe(true);
+  });
+
+  it('drops a queued analysis whose caller gave up (AbortSignal); one already on a worker finishes', async () => {
+    const pool = await start(1);
+    const running = new AbortController();
+    const queued = new AbortController();
+    const first = pool.analyzeTimed(img('sleep:80'), {}, running.signal);
+    const dropped = pool.analyzeTimed(img('never'), {}, queued.signal);
+    const third = pool.analyzeTimed(img('third'), {});
+    await new Promise((r) => setTimeout(r, 20));
+    expect(pool.queued).toBe(2);
+    queued.abort();
+    running.abort(); // too late: already on the worker
+    await expect(dropped).rejects.toBeInstanceOf(VisionCancelledError);
+    expect(pool.queued).toBe(1);
+    expect((await first).analysis.dhash).toBe('sleep:80');
+    expect((await third).analysis.dhash).toBe('third');
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(pool.analyzeTimed(img('x'), {}, aborted.signal)).rejects.toBeInstanceOf(VisionCancelledError);
   });
 
   it('maps worker errors back to their classes (VisionInputError -> HTTP 400)', async () => {

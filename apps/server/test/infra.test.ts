@@ -6,6 +6,7 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
+import { loadVisionWorkerConfig } from '../src/vision-worker/config.js';
 import { createDatabase, migrate } from '../src/db/index.js';
 import { staffUsers } from '../src/db/schema.js';
 import { createKeyring, hashPassword, isJpeg, verifyPassword } from '../src/lib/crypto.js';
@@ -109,6 +110,29 @@ describe('config', () => {
     expect(tuned.visionWorkers).toBe(0);
     expect(tuned.visionConcurrency).toBe(3);
     expect(() => loadConfig({ PG_POOL_MAX: 'many' })).toThrow(/Invalid integer/);
+  });
+
+  it('reads the vision driver: local by default, remote with worker URLs and a token', () => {
+    expect(loadConfig({})).toMatchObject({ visionDriver: 'local', visionRemote: null });
+    const token = 'w'.repeat(32);
+    const remote = loadConfig({ VISION_DRIVER: 'remote', VISION_WORKER_URLS: 'http://vision:8090, https://10.0.0.7:9000/vision/ http://vision:8090', VISION_WORKER_TOKEN: token, VISION_WORKER_TIMEOUT_MS: '500' });
+    expect(remote).toMatchObject({ visionDriver: 'remote', visionRemote: { urls: ['http://vision:8090', 'https://10.0.0.7:9000/vision/'], token, timeoutMs: 1_000 } });
+    expect(() => loadConfig({ VISION_DRIVER: 'cloud' })).toThrow(/VISION_DRIVER/);
+    expect(() => loadConfig({ VISION_DRIVER: 'remote', VISION_WORKER_TOKEN: token })).toThrow(/VISION_WORKER_URLS/);
+    expect(() => loadConfig({ VISION_DRIVER: 'remote', VISION_WORKER_URLS: 'vision:8090', VISION_WORKER_TOKEN: token })).toThrow(/http/);
+    expect(() => loadConfig({ VISION_DRIVER: 'remote', VISION_WORKER_URLS: 'http://user:pw@vision:8090', VISION_WORKER_TOKEN: token })).toThrow(/plain base URL/);
+    expect(() => loadConfig({ VISION_DRIVER: 'remote', VISION_WORKER_URLS: 'http://vision:8090', VISION_WORKER_TOKEN: 'short' })).toThrow(/VISION_WORKER_TOKEN/);
+  });
+
+  it('reads the vision worker’s own settings (token required; every CPU for analysis by default)', () => {
+    expect(() => loadVisionWorkerConfig({})).toThrow(/VISION_WORKER_TOKEN/);
+    const token = 't'.repeat(24);
+    expect(loadVisionWorkerConfig({ VISION_WORKER_TOKEN: token }, 4)).toMatchObject({ tokens: [token], port: 8090, host: '0.0.0.0', threads: 4, logLevel: 'info' });
+    expect(loadVisionWorkerConfig({ VISION_WORKER_TOKEN: `${'n'.repeat(30)}, ${token}` }, 4).tokens).toEqual(['n'.repeat(30), token]); // rotation
+    expect(() => loadVisionWorkerConfig({ VISION_WORKER_TOKEN: `${token},short` })).toThrow(/VISION_WORKER_TOKEN/);
+    expect(loadVisionWorkerConfig({ VISION_WORKER_TOKEN: token }, 32).threads).toBe(8);
+    expect(loadVisionWorkerConfig({ VISION_WORKER_TOKEN: token, VISION_THREADS: '2', VISION_WORKER_PORT: '9100', MODELS_DIR: '/m' }, 4)).toMatchObject({ threads: null, port: 9100, modelsDir: '/m' });
+    expect(() => loadVisionWorkerConfig({ VISION_WORKER_TOKEN: token, VISION_WORKER_PORT: 'x' })).toThrow(/VISION_WORKER_PORT/);
   });
 });
 

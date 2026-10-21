@@ -3,7 +3,7 @@
  * reference enrolment, liveness verification. See types.ts for the contract.
  */
 export * from './types';
-export { createVisionService, OnnxVisionService, VisionBusyError, VisionClosedError, type VisionServiceOptions, type VisionStats } from './service';
+export { createVisionService, OnnxVisionService, VisionBusyError, VisionCancelledError, VisionClosedError, type VisionServiceOptions, type VisionStats } from './service';
 export {
   cosineSimilarity,
   maxSimilarity,

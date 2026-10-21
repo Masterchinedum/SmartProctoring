@@ -120,6 +120,11 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
 
   const metrics = new AppMetrics();
   let vision = opts.vision;
+  if (!vision && config.visionRemote) {
+    // Dedicated vision workers over HTTP (VISION_DRIVER=remote): this process loads no models.
+    const { createRemoteVisionService } = await import('./vision/remote.js');
+    vision = owned.vision = await createRemoteVisionService({ ...config.visionRemote, observer: metrics.visionObserver, log: app.log });
+  }
   if (!vision) {
     const { createVisionService } = await import('./vision/index.js');
     // Worker-thread pool by default (VISION_WORKERS / VISION_THREADS): inference never blocks the event loop.

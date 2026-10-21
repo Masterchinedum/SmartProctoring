@@ -8,6 +8,8 @@
  *    (no starvation either way). More than `maxQueue` waiting analyses of one priority => VisionBusyError
  *    (HTTP 503 + Retry-After: the estimated time the work ahead needs, from the measured analysis time).
  *  - `load` is a snapshot of the queue (health, metrics, admission, sampling cadence).
+ *  - analyzeTimed() reports each analysis' queue wait and worker time, and drops a queued analysis whose caller gave up
+ *    (AbortSignal; the dedicated vision worker aborts when the server stops waiting).
  *  - A worker that crashes fails only its in-flight analysis and is replaced (with backoff).
  *  - Idle workers are unref'ed, so a forgotten pool never keeps a CLI process alive.
  */
@@ -16,7 +18,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
-import type { AnalyzeOptions, DetectedFace, ImageAnalysis, VisionByPriority, VisionLoad, VisionObserver, VisionPriority } from './types';
+import type { AnalyzeOptions, DetectedFace, ImageAnalysis, TimedAnalysis, VisionByPriority, VisionLoad, VisionObserver, VisionPriority } from './types';
 import { reviveAnalysis, reviveError, type SerializedError, type VisionWorkerData, type WorkerRequest, type WorkerResponse } from './worker-protocol';
 
 /** Retry-After (seconds) when there is no better estimate. */
@@ -37,6 +39,15 @@ export class VisionBusyError extends Error {
     super('Vision service is overloaded; retry shortly');
     this.name = 'VisionBusyError';
     this.retryAfterSec = retryAfterSec;
+  }
+}
+
+/** The caller gave up (AbortSignal) while the analysis was still queued: it was dropped without running. */
+export class VisionCancelledError extends Error {
+  readonly code = 'vision_cancelled';
+  constructor() {
+    super('Analysis cancelled before it started');
+    this.name = 'VisionCancelledError';
   }
 }
 
@@ -118,7 +129,7 @@ interface Task {
   enqueuedAt: number;
   /** When a worker took it (0 while queued). */
   startedAt: number;
-  resolve: (v: ImageAnalysis | DetectedFace[]) => void;
+  resolve: (v: { value: ImageAnalysis | DetectedFace[]; waitMs: number; runMs: number }) => void;
   reject: (err: Error) => void;
 }
 
@@ -198,17 +209,20 @@ export class VisionWorkerPool {
     return Math.round(((ahead + 1) * this.serviceMs) / workers);
   }
 
-  private taskEnded(task: Task, ok: boolean): void {
+  /** Records the analysis time (moving average, observer) and returns the task's queue wait and run time (ms). */
+  private taskEnded(task: Task, ok: boolean): { waitMs: number; runMs: number } {
     const runMs = Date.now() - task.startedAt;
+    const waitMs = task.startedAt - task.enqueuedAt;
     if (ok) {
       this.serviceMs = this.serviceMeasured ? this.serviceMs + SERVICE_MS_ALPHA * (runMs - this.serviceMs) : runMs;
       this.serviceMeasured = true;
     }
     try {
-      this.opts.observer?.analysisEnded({ priority: task.priority, waitMs: task.startedAt - task.enqueuedAt, runMs, ok });
+      this.opts.observer?.analysisEnded({ priority: task.priority, waitMs, runMs, ok });
     } catch {
       /* metrics must never break analysis */
     }
+    return { waitMs, runMs };
   }
 
   private get readyWorkers(): number {
@@ -233,6 +247,15 @@ export class VisionWorkerPool {
   }
 
   analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis> {
+    return this.analyzeTimed(image, opts).then((r) => r.analysis);
+  }
+
+  /**
+   * analyze(), plus how long the analysis waited in the queue and how long a worker took (ms; the vision worker reports
+   * both). `signal`: when it aborts while the analysis is still queued, it is dropped (VisionCancelledError) — the
+   * vision worker passes one that aborts when the server stops waiting, so abandoned frames cost nothing.
+   */
+  analyzeTimed(image: Buffer, opts: AnalyzeOptions, signal?: AbortSignal): Promise<TimedAnalysis> {
     const req: TaskRequest = {
       type: 'analyze',
       image,
@@ -244,15 +267,16 @@ export class VisionWorkerPool {
         ...(opts.enhanceLowLight != null ? { enhanceLowLight: opts.enhanceLowLight } : {}),
       },
     };
-    return this.submit(req, opts.priority ?? 'interactive').then((a) => reviveAnalysis(a as ImageAnalysis));
+    return this.submit(req, opts.priority ?? 'interactive', signal).then((r) => ({ analysis: reviveAnalysis(r.value as ImageAnalysis), waitMs: r.waitMs, runMs: r.runMs }));
   }
 
   detect(image: Buffer): Promise<DetectedFace[]> {
-    return this.submit({ type: 'detect', image }, 'interactive') as Promise<DetectedFace[]>;
+    return this.submit({ type: 'detect', image }, 'interactive').then((r) => r.value as DetectedFace[]);
   }
 
-  private submit(req: TaskRequest, priority: VisionPriority): Promise<ImageAnalysis | DetectedFace[]> {
+  private submit(req: TaskRequest, priority: VisionPriority, signal?: AbortSignal): Promise<{ value: ImageAnalysis | DetectedFace[]; waitMs: number; runMs: number }> {
     if (this.closed) return Promise.reject(new VisionClosedError());
+    if (signal?.aborted) return Promise.reject(new VisionCancelledError());
     const queue = this.queues[priority];
     const free = this.slots.some((s) => s.ready && !s.task);
     if (!free && queue.length >= this.opts.maxQueue) {
@@ -264,7 +288,18 @@ export class VisionWorkerPool {
       return Promise.reject(new VisionBusyError(retryAfterSecFor(this.estimatedWaitMs(priority))));
     }
     return new Promise((resolve, reject) => {
-      queue.push({ id: this.nextId++, req, priority, enqueuedAt: Date.now(), startedAt: 0, resolve, reject });
+      const task: Task = { id: this.nextId++, req, priority, enqueuedAt: Date.now(), startedAt: 0, resolve, reject };
+      queue.push(task);
+      signal?.addEventListener(
+        'abort',
+        () => {
+          const i = queue.indexOf(task);
+          if (task.startedAt !== 0 || i < 0) return; // already on a worker: let it finish
+          queue.splice(i, 1);
+          reject(new VisionCancelledError());
+        },
+        { once: true },
+      );
       this.pump();
     });
   }
@@ -331,8 +366,8 @@ export class VisionWorkerPool {
           const task = slot.task;
           if (!task || task.id !== msg.id) return;
           slot.task = null;
-          this.taskEnded(task, msg.ok);
-          if (msg.ok) task.resolve((msg.analysis ?? msg.faces)!);
+          const timing = this.taskEnded(task, msg.ok);
+          if (msg.ok) task.resolve({ value: (msg.analysis ?? msg.faces)!, ...timing });
           else task.reject(reviveError(msg.error));
           if (!this.queued) worker.unref();
           this.pump();

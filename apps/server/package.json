@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "tsx watch --clear-screen=false src/main.ts",
     "start": "node dist/main.js",
+    "start:vision-worker": "node dist/vision-server.js",
+    "vision-worker": "tsx src/vision-worker/main.ts",
     "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p .",

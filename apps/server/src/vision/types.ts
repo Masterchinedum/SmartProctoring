@@ -78,12 +78,29 @@ export type VisionPriority = 'interactive' | 'background';
 /** One number per queue priority. */
 export type VisionByPriority = Record<VisionPriority, number>;
 
+/** An analysis and what it spent waiting in the queue and on a worker (ms). */
+export interface TimedAnalysis {
+  analysis: ImageAnalysis;
+  waitMs: number;
+  runMs: number;
+}
+
+/** Why a request (or load poll) to a dedicated vision worker failed (remote driver, vision/remote.ts). */
+export type RemoteFailureReason = 'connect' | 'timeout' | 'reset' | 'unauthorized' | 'bad_response' | 'server_error';
+
 /** Told about every analysis of the worker pool (metrics). Must not throw or block. */
 export interface VisionObserver {
   /** An analysis finished (ok) or failed: how long it waited in the queue and how long a worker took (ms). */
   analysisEnded(info: { priority: VisionPriority; waitMs: number; runMs: number; ok: boolean }): void;
   /** An analysis was refused because its queue was full (VisionBusyError, HTTP 503). */
   analysisRefused(priority: VisionPriority): void;
+  /**
+   * Remote driver only: an analysis request to a vision worker was answered. `overheadMs` = the round trip minus the
+   * worker's own queue wait and analysis time (transfer, encoding, both event loops: the cost of the HTTP hop).
+   */
+  remoteRequestEnded?(info: { overheadMs: number }): void;
+  /** Remote driver only: a request or load poll to a vision worker failed. */
+  remoteFailure?(reason: RemoteFailureReason): void;
 }
 
 /** Snapshot of the face-analysis queue of one server instance. */

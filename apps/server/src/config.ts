@@ -43,6 +43,17 @@ export interface Config {
   /** In-process mode only (VISION_WORKERS=0): analyses in flight (VISION_CONCURRENCY). */
   visionConcurrency: number;
   /**
+   * Where face analysis runs (VISION_DRIVER): 'local' (default) = the worker-thread pool in this process (the settings
+   * above); 'remote' = dedicated vision workers over HTTP (src/vision-worker, vision/remote.ts; docs/OPERATIONS.md §2).
+   */
+  visionDriver: 'local' | 'remote';
+  /**
+   * VISION_DRIVER=remote: VISION_WORKER_URLS (comma-separated base URLs; a DNS name stands for all its addresses),
+   * VISION_WORKER_TOKEN (shared secret, ≥ 24 characters, the same on every worker), VISION_WORKER_TIMEOUT_MS (longest
+   * wait for one analysis, queue included; default 30 000). null with the local driver.
+   */
+  visionRemote: { urls: string[]; token: string; timeoutMs: number } | null;
+  /**
    * When this instance is too busy to take more exam starts (services/capacity.ts, docs/OPERATIONS.md §5):
    * CAPACITY_MAX_VISION_WAIT_MS (2000) expected wait of a new identity sample in the face-analysis queue,
    * CAPACITY_MAX_EVENT_LOOP_MS (200) event-loop delay p99, CAPACITY_MAX_DB_WAITING (5) requests waiting for a
@@ -194,6 +205,34 @@ function parseProviderList(v: string | undefined): string[] {
     .filter(Boolean);
   if (list.some((p) => p === 'none' || p === 'off' || p === 'false')) return [];
   return [...new Set(list)];
+}
+
+/** Minimum length of VISION_WORKER_TOKEN (as METRICS_TOKEN): a random secret, e.g. `openssl rand -hex 32`. */
+export const MIN_VISION_WORKER_TOKEN_LENGTH = 24;
+
+/** VISION_DRIVER / VISION_WORKER_*: the remote vision driver's settings (null = local driver). */
+function parseVisionRemote(env: NodeJS.ProcessEnv): Config['visionRemote'] {
+  const driver = (env.VISION_DRIVER || 'local').trim().toLowerCase();
+  if (driver === 'local') return null;
+  if (driver !== 'remote') throw new Error(`Unknown VISION_DRIVER: ${env.VISION_DRIVER} (expected local or remote)`);
+  const urls = (env.VISION_WORKER_URLS ?? '')
+    .split(/[\s,]+/)
+    .map((u) => u.trim())
+    .filter(Boolean);
+  if (!urls.length) throw new Error('VISION_DRIVER=remote requires VISION_WORKER_URLS (e.g. http://vision:8090).');
+  for (const raw of urls) {
+    let u: URL;
+    try {
+      u = new URL(raw);
+    } catch {
+      throw new Error(`VISION_WORKER_URLS: not a URL: ${raw}`);
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error(`VISION_WORKER_URLS: ${raw} must start with http:// or https://`);
+    if (u.username || u.password || u.search || u.hash) throw new Error(`VISION_WORKER_URLS: ${raw} must be a plain base URL (no credentials, query or fragment); the token goes in VISION_WORKER_TOKEN`);
+  }
+  const token = env.VISION_WORKER_TOKEN ?? '';
+  if (token.length < MIN_VISION_WORKER_TOKEN_LENGTH) throw new Error(`VISION_DRIVER=remote requires VISION_WORKER_TOKEN of at least ${MIN_VISION_WORKER_TOKEN_LENGTH} characters (e.g. openssl rand -hex 32), the same value as on the vision workers.`);
+  return { urls: [...new Set(urls)], token, timeoutMs: Math.min(120_000, Math.max(1_000, int(env.VISION_WORKER_TIMEOUT_MS, 30_000))) };
 }
 
 function decodeKey(name: string, b64: string): Buffer {
@@ -396,6 +435,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const cookieSecure = bool(env.COOKIE_SECURE, isProduction);
   if (isProduction && !cookieSecure) warnings.push('COOKIE_SECURE=false in production: staff cookies will be sent over plain HTTP.');
   const metricsToken = env.METRICS_TOKEN || null;
+  const visionRemote = parseVisionRemote(env);
   if (metricsToken && metricsToken.length < 24) throw new Error('METRICS_TOKEN must be at least 24 characters (e.g. openssl rand -hex 24).');
 
   let smtp: SmtpConfig | null = null;
@@ -447,6 +487,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     modelsDir: resolvePath(env.MODELS_DIR || 'models', root),
     visionWorkers: env.VISION_WORKERS != null && env.VISION_WORKERS !== '' ? Math.max(0, int(env.VISION_WORKERS, 0)) : null,
     visionConcurrency: int(env.VISION_CONCURRENCY, 0),
+    visionDriver: visionRemote ? 'remote' : 'local',
+    visionRemote,
     capacity: {
       maxVisionWaitMs: Math.max(100, int(env.CAPACITY_MAX_VISION_WAIT_MS, 2000)),
       maxEventLoopP99Ms: Math.max(10, int(env.CAPACITY_MAX_EVENT_LOOP_MS, 200)),

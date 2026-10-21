@@ -153,7 +153,8 @@ containers; `docker compose -f docker-compose.dev.yml down -v` also deletes the 
 
 `docker compose up -d --build` (see [docs/OPERATIONS.md](docs/OPERATIONS.md)) — single container
 serving API + web app, Postgres, optional Redis for multi-instance realtime. Configuration:
-[.env.example](.env.example). HTTPS is required for camera access.
+[.env.example](.env.example). HTTPS is required for camera access. Face analysis can move to dedicated, separately
+scaled vision workers (`docker-compose.vision.yml`, OPERATIONS §2).
 
 ## Testing
 

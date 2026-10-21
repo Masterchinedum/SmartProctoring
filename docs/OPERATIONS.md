@@ -16,6 +16,14 @@ reverse proxy (camera access requires HTTPS in browsers) and set `PUBLIC_URL`, `
 Database migrations run automatically at start-up. On first start, if no staff user exists, the
 organisation owner is created from `BOOTSTRAP_ADMIN_*`.
 
+**Dedicated vision workers** (optional, §2): face analysis in separate `vision` containers of the same image, scaled
+on their own. Set `VISION_WORKER_TOKEN` in `.env` (`openssl rand -hex 32`), then
+```bash
+docker compose -f docker-compose.yml -f docker-compose.vision.yml up -d --build --scale vision=3
+```
+The app finds every replica through the service name (`VISION_WORKER_URLS=http://vision:8090`); the workers' port is
+not published.
+
 ### Without Docker
 Node 24 or later (required: `pnpm install` refuses older versions), pnpm 10, Postgres 14+.
 ```bash
@@ -23,6 +31,8 @@ pnpm install --frozen-lockfile
 pnpm --filter @sp/web build
 pnpm --filter @sp/server build
 NODE_ENV=production DATABASE_URL=... EVIDENCE_KEY=... SESSION_SECRET=... node apps/server/dist/main.js
+# optional dedicated vision worker (on each vision host; the servers then run with VISION_DRIVER=remote):
+NODE_ENV=production VISION_WORKER_TOKEN=... node apps/server/dist/vision-server.js
 ```
 
 ### Upgrades and rollback
@@ -94,6 +104,34 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
   20 per instance; instances × `PG_POOL_MAX` < Postgres `max_connections`); `PG_STATEMENT_TIMEOUT_MS`
   (default 60 s). Memory ≈ 400 MB + 100 MB per vision thread. Postgres: ≈ 0.25 vCPU and ≈ 1,500 queries/s per
   1,000 candidates.
+* **Dedicated vision workers** (`VISION_DRIVER=remote`; ARCHITECTURE §4): face analysis — the limit above — runs in
+  separate worker processes, so it scales on its own hosts while the API servers stay small. Use it when one host's
+  CPU is not enough for the analysis, or to keep exam-start peaks of face analysis off the hosts that serve
+  requests. On a single host the default in-process pool is as fast and simpler (PERFORMANCE §8).
+  - *Topology*: API servers (any number, behind the load balancer) → `VISION_WORKER_URLS` → N workers on a private
+    network. A DNS name in `VISION_WORKER_URLS` stands for every address it resolves to (re-resolved every 10 s), so
+    `docker compose --scale vision=N` (service name `vision`) or a Kubernetes headless Service needs no URL list;
+    static hosts can be listed (`http://10.0.0.21:8090,http://10.0.0.22:8090`). Every server uses every worker,
+    picking the one with the shortest expected wait.
+  - *Sizing*: a worker uses every CPU of its host by default (`VISION_THREADS` = CPU count, max 8: no event loop or
+    database next to it); ≈ 46 analyses/s with 4 threads on a 4-vCPU host in isolation (PERFORMANCE §7.4), i.e.
+    ≈ 38 client frames/s. Plan workers from the demand per candidate in the table above (frames/s): e.g. 200
+    candidates starting together send ≈ 100 frames/s at the peak ⇒ 3–4 such workers (plan at ≤ 75 %). The API
+    servers then need CPU for the request path (≈ 0.7 ms per candidate-second) plus ≈ 10–15 ms per analysed frame
+    (evidence, database, identity logic, the HTTP client; PERFORMANCE §8): at 75 % one 2-vCPU server carries ≈ 200
+    candidates starting together or ≈ 500 in steady state. Memory: worker ≈ 300 MB + ≈ 100 MB per analysis thread;
+    a server without models ≈ 350 MB. These are estimates from a contended VM (PERFORMANCE §8): verify on your
+    hardware with the load test.
+  - *Settings*: servers `VISION_DRIVER=remote`, `VISION_WORKER_URLS`, `VISION_WORKER_TOKEN` (≥ 24 characters, the
+    same everywhere), `VISION_WORKER_TIMEOUT_MS` (30 000: longest wait for one analysis, queue included — keep it below the candidate
+    app's 45-s upload timeout so a candidate is told "busy, retry" rather than timing out; the worker drops a frame
+    nobody waits for any more); workers
+    `VISION_WORKER_TOKEN`, `VISION_WORKER_PORT` (8090), `VISION_THREADS`, `MODELS_DIR`. A worker needs no database,
+    evidence key or storage.
+  - *Behaviour*: a worker that stops answering is skipped within a second or two and used again once it answers; a
+    frame it did not take goes to another worker; with no worker left the servers are not ready (§5) and frames
+    answer 503 `vision_busy` + `Retry-After`, as a saturated local pool would. Admission at exam start and load-aware
+    sampling use the fleet's queue.
 * **Multiple instances**: run N app containers behind a load balancer, set `REDIS_URL` so realtime
   staff updates fan out across instances and rate-limit counters (login, candidate endpoints, integration API)
   are shared by all instances, and use `STORAGE_DRIVER=s3` (or a shared volume) so every
@@ -215,6 +253,9 @@ anything still refers to it).
      (exit code 0). Keep a copy of the retired key in your secret manager until backups made before the
      rotation have expired — restoring such a backup needs it.
 * `SESSION_SECRET` signs staff session cookies; rotating it signs everyone out.
+* `VISION_WORKER_TOKEN` (dedicated vision workers only) authenticates the servers to the workers. Rotate without
+  downtime: set the workers to `VISION_WORKER_TOKEN=<new>,<old>` and restart them one by one, restart the servers
+  with `<new>`, then set the workers to `<new>` only.
 * **Staff sign-in**: sessions expire after `STAFF_SESSION_IDLE_MIN` (default 60) minutes without activity and
   `STAFF_SESSION_MAX_HOURS` (default 12) hours at most; the staff app then returns to the sign-in page and back
   to the page that was open. After 5 failed sign-ins in a row for an address (no 15-minute pause), further
@@ -243,6 +284,12 @@ backups until they expire; align backup retention with the privacy notice.
   | `GET /api/health/ready` (= `GET /api/health`) | `{ ok, db, vision }`; 503 when Postgres does not answer within 2 s (`db: "timeout"` / `"error"`) or face analysis has no worker (`vision: "unavailable"`) | load balancer / readiness, the Dockerfile `HEALTHCHECK` |
   | `GET /api/health/capacity` | `{ accepting, reasons }`, always 200 | whether this instance should take more exam starts: alerting, autoscaling, admission |
 
+  With dedicated vision workers (`VISION_DRIVER=remote`) the server's `ready` means *at least one worker ready*
+  (`visionWorkers: { ready, configured }` in the answer), and capacity reads the fleet's queue. Each worker has its
+  own probes, without authentication: `GET /health/live` (the process answers) and `GET /health/ready` (200 while at
+  least one analysis thread is ready; the image's `HEALTHCHECK` uses it in a worker container). Everything else on a
+  worker needs the token.
+
   `reasons`: `vision_queue_long` (a new identity sample would wait longer than `CAPACITY_MAX_VISION_WAIT_MS`, default
   2 000 ms, in the face-analysis queue), `vision_unavailable`, `event_loop_lagging` (p99 >
   `CAPACITY_MAX_EVENT_LOOP_MS`, default 200), `database_pool_exhausted` (more than `CAPACITY_MAX_DB_WAITING`, default
@@ -264,7 +311,10 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_vision_queued`, `sp_vision_oldest_wait_seconds`, `sp_vision_estimated_wait_seconds` `{priority}` | face-analysis backlog now (interactive = check frames, background = identity samples) |
   | `sp_vision_queue_wait_seconds`, `sp_vision_analysis_seconds` (histograms) `{priority}` | queue latency and inference time per analysis |
   | `sp_vision_analyses_total{priority,result}`, `sp_vision_refused_total{priority}` | analyses done / failed, refused with 503 `vision_busy` |
-  | `sp_vision_workers`, `sp_vision_in_flight` | workers ready (0 = no face analysis possible) |
+  | `sp_vision_workers`, `sp_vision_in_flight` | analysis threads ready (0 = no face analysis possible); with dedicated workers, summed over the workers in use |
+  | `sp_vision_remote_workers{state}` | dedicated vision workers: `up` (in use), `unready` (no thread ready), `down` (not answering, or the token is rejected), `unknown` |
+  | `sp_vision_remote_overhead_seconds` (histogram) | dedicated vision workers: time per analysis beyond the worker's own queue wait and analysis (the HTTP hop; p50 ≈ 2–5 ms measured on one host, PERFORMANCE §8) |
+  | `sp_vision_remote_failures_total{reason}` | dedicated vision workers: failed requests / load polls (`connect`, `timeout`, `reset`, `unauthorized`, `bad_response`, `server_error`) |
   | `sp_capacity_accepting`, `sp_capacity_limited{reason}` | `/api/health/capacity` as numbers |
   | `sp_identity_decisions_total{kind,trigger,decision}` | identity outcomes (`kind` check / sample; `decision` match, inconclusive, mismatch, unable_to_verify): check completion, *unable to verify* and mismatch rates |
   | `sp_identity_model_info{calibration,embedding_model}` | the decision calibration and face-template model running (a change between deploys changes decisions) |
@@ -284,8 +334,8 @@ backups until they expire; align backup retention with the privacy notice.
 
   Suggested alerts, as a Prometheus rules file to adapt: [`docs/prometheus-alerts.yml`](prometheus-alerts.yml)
   (face-analysis latency and refusals, capacity, reporting outage, retention, evidence storage, webhook backlog,
-  identity mismatch and *unable to verify* rates, no vision worker, API keys about to expire). `rekey` (key rotation) is a command, not a
-  service: it reports progress on stderr and in its exit code (§3).
+  identity mismatch and *unable to verify* rates, no vision worker, a dedicated vision worker down, API keys about to
+  expire). `rekey` (key rotation) is a command, not a service: it reports progress on stderr and in its exit code (§3).
 * Capacity: a `server overloaded (event loop lagging | database pool exhausted | face analysis queue long)`
   warning (at most one a minute, with the numbers under `loadMonitor`) means this instance is at its limit —
   requests are queuing. Occasional warnings during check-in bursts are expected; sustained ones mean add an
@@ -362,6 +412,14 @@ ran out). The candidate opens the same link, passes a fresh camera and identity 
 and remaining time; the exam clock stays stopped until then. An exam that never started returns to the check-in
 (reschedule it too if its window closed). Integrations receive `session.reopened`; the score is computed again when
 the exam ends again.
+
+**A dedicated vision worker is down** (`SmartProctoringVisionWorkerDown`, `sp_vision_remote_workers{state="down"}`;
+the server log says `remote vision: worker not answering` or `rejected VISION_WORKER_TOKEN`). The other workers
+carry its frames, so check capacity (`/api/health/capacity`) first. Then look at the worker: its container health /
+`GET /health/ready`, its log (models not found, out of memory), the network between server and worker, and — for
+`unauthorized` — that `VISION_WORKER_TOKEN` is identical on both sides. When every worker is down the servers report
+not ready (`vision: "unavailable"`) and frames answer 503 with `Retry-After`; candidates' apps retry by themselves.
+The servers pick a worker up again within a few seconds of it answering; no restart needed.
 
 **A candidate needs more time (accommodation or technical loss).** Open the session → *Extend time*
 and enter the minutes and a reason. The extension applies to that session only, is shown on the

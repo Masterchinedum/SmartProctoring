@@ -1,0 +1,34 @@
+# Dedicated vision workers (docs/OPERATIONS.md §2 "Dedicated vision workers"): face analysis moves out of the app
+# container into `vision` containers of the same image, scaled on their own. Use together with docker-compose.yml:
+#
+#   # .env: VISION_WORKER_TOKEN=<openssl rand -hex 32>
+#   docker compose -f docker-compose.yml -f docker-compose.vision.yml up -d --build --scale vision=3
+#
+# The app reaches the workers by the service name: Docker's DNS answers `vision` with the address of every replica,
+# and the app's remote driver treats each address as one worker (re-resolved every 10 s, so `--scale` up or down
+# needs no restart). The workers are reachable only on the compose network: never publish their port.
+services:
+  app:
+    image: smartproctoring:latest
+    environment:
+      VISION_DRIVER: remote
+      VISION_WORKER_URLS: http://vision:8090
+      VISION_WORKER_TOKEN: ${VISION_WORKER_TOKEN:?set VISION_WORKER_TOKEN in .env (openssl rand -hex 32)}
+    depends_on:
+      vision:
+        condition: service_healthy
+
+  vision:
+    build: .
+    image: smartproctoring:latest
+    command: ["node", "dist/vision-server.js"]
+    restart: unless-stopped
+    # Only what the worker needs: no database, evidence key or session secret (it never stores anything).
+    environment:
+      VISION_WORKER_TOKEN: ${VISION_WORKER_TOKEN:?set VISION_WORKER_TOKEN in .env (openssl rand -hex 32)}
+      VISION_WORKER_PORT: "8090"
+      # CPU threads for face analysis per worker container (default: the container's CPU count, max 8).
+      VISION_THREADS: ${VISION_WORKER_THREADS:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    expose:
+      - "8090"

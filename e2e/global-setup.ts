@@ -3,10 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, st
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FullConfig } from '@playwright/test';
-import { ARTIFACTS_DIR, BASE_URL, DATABASE_URL, EXTERNAL_SERVER, FACES_DIR, NO_SKIP, PORT, REPO_DIR } from './lib/config';
+import { ARTIFACTS_DIR, BASE_URL, DATABASE_URL, EXTERNAL_SERVER, FACES_DIR, NO_SKIP, PORT, REPO_DIR, VISION_MODE, VISION_WORKER_PORT } from './lib/config';
 import { ensureFixtures } from './lib/fixtures';
 import { ensureRealisticFixtures, FACESETS_DIR, type RwFixtureName } from './lib/realistic';
-import { resetDatabase, startServer, waitForHealth } from './lib/server';
+import { resetDatabase, startServer, startVisionWorker, waitForHealth } from './lib/server';
 
 const log = (m: string) => console.log(`[e2e setup] ${m}`);
 
@@ -73,12 +73,25 @@ export default async function globalSetup(_config: FullConfig): Promise<() => Pr
   const storageDir = mkdtempSync(join(tmpdir(), 'sp-e2e-storage-'));
   // Workers inherit this: specs that run the server's CLIs against the main server (retention) need its storage.
   process.env.E2E_STORAGE_DIR = storageDir;
+  // E2E_VISION=remote: face analysis in a dedicated vision worker process, shared by every server of the run.
+  let visionWorker: { stop(): Promise<void> } | null = null;
+  if (VISION_MODE === 'remote') {
+    log(`starting the vision worker on 127.0.0.1:${VISION_WORKER_PORT} (log: e2e/.artifacts/vision-worker.log); the servers use VISION_DRIVER=remote`);
+    visionWorker = await startVisionWorker({ port: VISION_WORKER_PORT, logFile: join(ARTIFACTS_DIR, 'vision-worker.log') });
+  }
   log(`starting the server on ${BASE_URL} (log: e2e/.artifacts/server.log)`);
-  const server = await startServer({ port: PORT, databaseUrl: DATABASE_URL, storageDir, logFile: join(ARTIFACTS_DIR, 'server.log') });
+  let server;
+  try {
+    server = await startServer({ port: PORT, databaseUrl: DATABASE_URL, storageDir, logFile: join(ARTIFACTS_DIR, 'server.log') });
+  } catch (err) {
+    await visionWorker?.stop();
+    throw err;
+  }
   log(`ready after ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 
   return async () => {
     await server.stop();
+    await visionWorker?.stop();
     rmSync(storageDir, { recursive: true, force: true });
   };
 }

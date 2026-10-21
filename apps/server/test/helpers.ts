@@ -30,6 +30,7 @@ import { createExam } from '../src/services/exams.js';
 import { createOrganization } from '../src/services/org.js';
 import { createExamSession } from '../src/services/session-actions.js';
 import { FakeVisionService, type FakeImageSpec } from '../src/vision/fake.js';
+import type { VisionService } from '../src/vision/types.js';
 import { dbUrl, TEST_ADMIN_URL } from './global-setup.js';
 
 export const TEST_PASSWORD = 'Test-Password-123!';
@@ -106,6 +107,10 @@ export interface TestEnvOptions {
   defaultSpec?: FakeImageSpec;
   /** Outgoing email (e.g. a MemoryMailer); default none (email alerts unavailable). */
   mailer?: Mailer | null;
+  /** The fake that `env.vision` names (default: a new one; e.g. the fake behind a vision worker). */
+  fake?: FakeVisionService;
+  /** What the app analyses with (default: `env.vision` itself; e.g. the remote driver in front of a vision worker). Not closed by env.close(). */
+  service?: VisionService;
 }
 
 export async function createTestEnv(opts: TestEnvOptions = {}): Promise<TestEnv> {
@@ -135,9 +140,9 @@ export async function createTestEnv(opts: TestEnvOptions = {}): Promise<TestEnv>
   });
   const database = createDatabase(config.databaseUrl, { max: 10 });
   const clock = new TestClock();
-  const vision = new FakeVisionService({ defaultSpec: opts.defaultSpec ?? { person: 'alice' } });
+  const vision = opts.fake ?? new FakeVisionService({ defaultSpec: opts.defaultSpec ?? { person: 'alice' } });
   const storage = new FsStorage(storageDir);
-  const app = await buildApp({ config, database, vision, storage, bus: new LocalBus(), now: clock.now, migrate: false, jobs: false, bootstrap: false, serveWeb: false, mailer: opts.mailer ?? null });
+  const app = await buildApp({ config, database, vision: opts.service ?? vision, storage, bus: new LocalBus(), now: clock.now, migrate: false, jobs: false, bootstrap: false, serveWeb: false, mailer: opts.mailer ?? null });
   await app.ready();
   const ctx = app.ctx;
   const db = ctx.db;

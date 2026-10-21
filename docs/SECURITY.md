@@ -210,6 +210,24 @@ server-side identity match, read other sessions, or change category/severity (th
   decision. Operators can switch the feature off (`EXTERNAL_VERIFIERS=none`) and must opt in to letting
   organisations use the server's own AWS credentials (`EXTERNAL_VERIFIER_ENV_CREDENTIALS`).
 
+### Dedicated vision workers (optional, `VISION_DRIVER=remote`)
+* A worker receives candidate images and returns face templates and face crops: biometric data in transit. It holds
+  no database connection, evidence key, session secret or storage, keeps an image only in memory for the analysis and
+  its answer, and never logs images or request bodies (route logs at `warn` and above carry method, URL and errors).
+* **Authentication**: every request except the two health probes carries `Authorization: Bearer <VISION_WORKER_TOKEN>`
+  (≥ 24 characters, random). The worker compares SHA-256 digests with `timingSafeEqual` against every accepted token
+  (two while rotating, OPERATIONS §3), **before reading the body**, so an unauthenticated client cannot make it
+  buffer images. `/health/live` and `/health/ready` reveal only `ok`, the number of ready threads and an instance id.
+* **Network exposure: a worker must never be reachable from the internet.** Keep it on the private network of the
+  API servers: Compose `expose` (no `ports`), a Kubernetes ClusterIP / headless Service with a NetworkPolicy allowing
+  only the servers, or a firewall rule. The driver sends the token and images in clear over `http://`; between hosts
+  on a network you do not fully control, put TLS in front of the workers (a reverse proxy or service mesh) and use
+  `https://` URLs — certificates are verified against the system CAs (`NODE_EXTRA_CA_CERTS` for a private CA; the
+  certificate must name the host in the URL, also when a DNS name is expanded to its addresses).
+* **Availability**: request bodies ≤ 8 MB, the analysis queue bounded per priority (256) with 503 + `Retry-After`;
+  servers skip a worker that fails (circuit breaker) and never retry an analysis a worker accepted, so a slow worker
+  cannot be flooded with duplicates. URLs come only from the operator's environment (no SSRF surface).
+
 ### Abuse and availability
 * Rate limits: candidate endpoints per access token (30–600/min per endpoint), privacy notice 60/min/IP,
   login and password change 10/min/IP, integration API 600/min/key, webhook test/redeliver, test email and
@@ -274,6 +292,9 @@ fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, 
       WebSocket `/api/admin/live`.
 - [ ] Bind the app to localhost or the private network only (e.g. `127.0.0.1:8080:8080` in Compose) so
       nothing reaches it except through the proxy.
+- [ ] Dedicated vision workers (if used): on the private network only, never published; a random
+      `VISION_WORKER_TOKEN` (`openssl rand -hex 32`) from the secret manager; `https://` worker URLs (TLS in front of
+      the workers) whenever the traffic leaves a network you control.
 - [ ] `TRUST_PROXY` = the proxy's address(es), e.g. `127.0.0.1`, `loopback,uniquelocal` or the load balancer
       subnet — **not** `true` (unless the proxy overwrites `X-Forwarded-For`). Hop counts are not supported.
 - [ ] `PUBLIC_URL` = the exact public origin (used for links and the CSRF origin check); `COOKIE_SECURE=true`.

@@ -20,6 +20,8 @@ apps/web  (React + Vite)                     apps/server (Node 24 + Fastify 5 + 
      └─ exams, candidates, settings, quality
 packages/shared     types, zod schemas, event catalog, policy, clock math, privacy notice
 packages/detection  pure-TS monitoring engine: FrameObservation stream -> episodes (+ synthetic eval harness)
+apps/server/src/vision-worker   optional dedicated vision worker process: the vision/ pipeline behind an
+                                authenticated HTTP API, scaled separately (VISION_DRIVER=remote, §4)
 ```
 
 Why this split:
@@ -169,6 +171,51 @@ camera step and never opens a camera; its monitoring runtime observes the browse
   the candidate passes the check.
 
 ## 4. Identity pipeline (server)
+
+**Where it runs.** Steps 1–3 (decode, detection, quality, alignment, embedding: `vision/engine.ts`) are the
+expensive part — ≈ 85 ms of CPU per frame, the limit of a deployment (PERFORMANCE §6). Everything else (references,
+scores, evidence, decisions, storage) runs in the API server. Two drivers implement the same `VisionService`
+(`vision/types.ts`: `analyze`, `processIdPhoto`, and `load`, the queue snapshot that readiness, capacity, admission at
+exam start, load-aware sampling and `/metrics` read):
+
+```
+VISION_DRIVER=local (default; dev, tests, single host)       VISION_DRIVER=remote (scale face analysis on its own)
+ API server                                                    API server(s)                     vision workers (N)
+  └─ vision/service.ts                                          └─ vision/remote.ts   HTTP+token   ├─ src/vision-worker
+      └─ pool.ts: worker threads, 2 priority queues    ===>        least expected wait ─────────► │   (Fastify, no DB,
+          (interactive before background, 503 +                    load polls, circuit breaker     │    no keys)
+           Retry-After when full)                                  bounded retry, aggregated load  └─ the same pool.ts
+```
+
+* **Local** (`vision/service.ts`, `pool.ts`): a worker-thread pool in the server process (`VISION_THREADS`), two FIFO
+  queues (interactive = check frames, exam-start and requested samples, ID photos; background = routine samples;
+  overdue background work alternates), a per-priority queue limit (256) and `VisionBusyError` → HTTP 503 `vision_busy`
+  with `Retry-After` = the estimated time the work ahead needs.
+* **Remote** (`vision/remote.ts` → `src/vision-worker/server.ts`, wire format `vision/wire.ts`): the same pool runs in
+  dedicated worker processes (same image, command `node dist/vision-server.js`), which hold no database connection,
+  key or storage. The driver sends each JPEG (`POST /v1/analyze`, options in `X-Vision-Options`, `Authorization: Bearer
+  VISION_WORKER_TOKEN`) to the worker with the least expected wait for the request's priority (its last reported
+  `VisionLoad`, from a poll every second or the previous answer, plus what was sent to it since); answers are JSON
+  with base64 Float32 embeddings and the face crop, plus the worker's queue wait and analysis time per image (fed to
+  the same `sp_vision_*` metrics). An ID photo is one request (`/v1/id-photo`: the worker analyses the photo and its
+  perturbed copies). `VISION_WORKER_URLS` lists base URLs; a DNS name stands for all its addresses (re-resolved every
+  10 s: `docker compose --scale`, a Kubernetes headless Service), and two addresses of one worker process (same
+  instance id) count once. The workers keep the priorities, queue limits and Retry-After (a full worker answers 503
+  `vision_busy`), so behaviour under load is the local one, per worker.
+  - *Failures.* A worker that refuses connections or the token, or fails 3 requests / polls in a row, is skipped
+    (circuit open) until a poll succeeds (back-off 1 → 30 s). A request the worker did not take (connection failed,
+    a stale keep-alive socket, 503 busy / no ready thread) is retried once on another worker; a request it took is
+    never retried (no doubled load). No worker available, every worker full, or an accepted request past
+    `VISION_WORKER_TIMEOUT_MS` (30 s, below the candidate app's 45 s upload timeout) ⇒ `VisionBusyError` ⇒ 503
+    `vision_busy` + `Retry-After`, exactly what a saturated local pool answers: identity samples come back later,
+    check frames tell the candidate the server is busy. A timed-out request closes its connection and the worker
+    drops the frame if it is still queued (`AbortSignal` into `pool.ts`), so frames nobody waits for cost nothing;
+    timeouts do not open the circuit (a long queue is not a dead worker; a hung worker fails its 2-s load polls).
+  - *Load.* `load` sums the workers in use (threads, queues, in flight, queue limits), takes the longest oldest-wait
+    and the best worker's expected wait; 0 workers when none is ready, so `/api/health/ready` (ready = at least one
+    worker ready) and capacity (`vision_unavailable`) follow the fleet.
+  - *Cost.* The HTTP hop adds ≈ 2–3 ms of latency and of CPU per frame on one host (PERFORMANCE §8); analysis
+    results are identical bit for bit (tested with the real models).
 
 1. Decode JPEG (sharp), letterbox to 640×640, YuNet → faces with 5 landmarks + score (NMS).
 2. Quality gate on primary face → `FaceQuality` (`shared/identity.ts`): face count, detector score,
@@ -452,7 +499,10 @@ What decides, and who may change it:
 (further evidence storage locations; OPERATIONS §2), `REDIS_URL` (optional), `BOOTSTRAP_ADMIN_EMAIL` /
 `BOOTSTRAP_ADMIN_PASSWORD`, `WEB_DIST_DIR`. Capacity (docs/PERFORMANCE.md): `VISION_THREADS` (CPU threads
 for face analysis, default CPU count − 1), `VISION_WORKERS`, `VISION_NICE`, `PG_POOL_MAX` (20),
-`PG_STATEMENT_TIMEOUT_MS` (60 000), `CAPACITY_MAX_VISION_WAIT_MS` / `CAPACITY_MAX_EVENT_LOOP_MS` / `CAPACITY_MAX_DB_WAITING`
+`PG_STATEMENT_TIMEOUT_MS` (60 000), `VISION_DRIVER` (`local` | `remote`; with `remote`: `VISION_WORKER_URLS`,
+`VISION_WORKER_TOKEN`, `VISION_WORKER_TIMEOUT_MS`, §4; the worker process itself reads `VISION_WORKER_TOKEN`,
+`VISION_WORKER_PORT` (8090), `VISION_WORKER_HOST`, `VISION_THREADS` (default: every CPU), `MODELS_DIR`),
+`CAPACITY_MAX_VISION_WAIT_MS` / `CAPACITY_MAX_EVENT_LOOP_MS` / `CAPACITY_MAX_DB_WAITING`
 (when `/api/health/capacity` stops accepting exam starts; OPERATIONS §5), `METRICS_TOKEN` (serves Prometheus
 `/metrics` to a scraper holding it; unset = not served). Integrations (optional):
 `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` (email alerts),

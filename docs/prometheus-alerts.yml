@@ -13,6 +13,23 @@ groups:
           summary: "{{ $labels.instance }}: no face-analysis worker"
           description: Identity checks and samples cannot be analysed on this instance; it also fails /api/health/ready.
 
+      - alert: SmartProctoringVisionWorkerDown
+        # Dedicated vision workers (VISION_DRIVER=remote) only; every server sees the same fleet: max, not sum.
+        expr: max(sp_vision_remote_workers{state=~"down|unready"}) > 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} dedicated vision worker(s) not answering or without a ready analysis thread"
+          description: The other workers carry their frames (check capacity). Look at the worker's /health/ready, its log and VISION_WORKER_TOKEN (docs/OPERATIONS.md §7). With none left, SmartProctoringNoFaceAnalysisWorker fires.
+
+      - alert: SmartProctoringVisionHopSlow
+        expr: histogram_quantile(0.95, sum by (instance, le) (rate(sp_vision_remote_overhead_seconds_bucket[5m]))) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }}: the network hop to the vision workers adds more than 100 ms per frame (p95)"
+          description: Usually a saturated network or an overloaded server event loop; a few ms is normal (p50 ≈ 2–5 ms on one host, docs/PERFORMANCE.md §8).
+
       - alert: SmartProctoringIdentitySamplesDelayed
         expr: max by (instance) (max_over_time(sp_vision_oldest_wait_seconds{priority="background"}[5m])) > 10
         for: 5m
