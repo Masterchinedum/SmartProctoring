@@ -33,10 +33,15 @@ import type {
   IntegrationStatusDTO,
   LiveEventDTO,
   NoteDTO,
+  OpsChecksDTO,
   OrgSettingsDTO,
   MfaChallengeResponse,
   Paged,
+  CreatePrivacyRequest,
+  PrivacyRequestDTO,
+  PrivacyRequestsDTO,
   RecoveryCodesDTO,
+  RetentionPreviewDTO,
   RegradeRequest,
   RegradeResultDTO,
   QueueView,
@@ -53,6 +58,7 @@ import type {
   StaffVerificationMethod,
   TotpSetupDTO,
   TimelineItemDTO,
+  UpdatePrivacyRequest,
   WebhookDTO,
   WebhookDeliveryDTO,
   WebhookInput,
@@ -307,6 +313,18 @@ export const api = {
   decideDecisionConfig: (id: string, decision: 'approve' | 'reject' | 'withdraw', note?: string) =>
     request<DecisionConfigDTO>('POST', `${A}/decision-configs/${enc(id)}/${decision}`, { body: note ? { note } : {} }),
   rollbackDecisionConfig: (id: string, note: string) => request<DecisionConfigDTO>('POST', `${A}/decision-configs/${enc(id)}/rollback`, { body: { note } }),
+
+  // ---- privacy operations (admin): request register, export, erasure, retention preview, operational checks
+  privacyRequests: (p: { status?: 'open' | 'closed' | 'all'; candidateId?: string }) => request<PrivacyRequestsDTO>('GET', `${A}/privacy-requests`, { query: { ...p } }),
+  privacyRequest: (id: string) => request<PrivacyRequestDTO>('GET', `${A}/privacy-requests/${enc(id)}`),
+  createPrivacyRequest: (input: CreatePrivacyRequest) => request<PrivacyRequestDTO>('POST', `${A}/privacy-requests`, { body: input }),
+  updatePrivacyRequest: (id: string, patch: UpdatePrivacyRequest) => request<PrivacyRequestDTO>('PUT', `${A}/privacy-requests/${enc(id)}`, { body: patch }),
+  /** The candidate's data as a ZIP (downloaded by the browser with the staff cookie; audited, recorded on the request). */
+  privacyExportUrl: (id: string) => `${A}/privacy-requests/${enc(id)}/export`,
+  erasePrivacyRequest: (id: string) =>
+    request<{ request: PrivacyRequestDTO; sessionsDeleted: number; evidencePurged: number }>('POST', `${A}/privacy-requests/${enc(id)}/erase`, { body: { confirm: true } }),
+  retentionPreview: (days = 30) => request<RetentionPreviewDTO>('GET', `${A}/retention/preview`, { query: { days } }),
+  opsChecks: () => request<OpsChecksDTO>('GET', `${A}/ops/checks`),
 
   // ---- integrations (API keys, webhooks, email alerts)
   integrationStatus: () => request<IntegrationStatusDTO>('GET', `${A}/integrations/status`),

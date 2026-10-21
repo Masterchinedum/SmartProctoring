@@ -16,8 +16,8 @@
  * guidance for the staff member (the shared contract; the web UI shows the guidance). A body that is not
  * a JPEG is 415; an unreadable JPEG is 422 invalid_image; more than 5 MB is 413.
  */
-import { candidateInputSchema, TERMINAL_STATUSES, type CandidateDTO, type IdPhotoUploadResponse } from '@sp/shared';
-import { and, asc, desc, eq, ilike, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
+import { candidateInputSchema, type CandidateDTO, type IdPhotoUploadResponse } from '@sp/shared';
+import { and, asc, desc, eq, ilike, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { getStaff, requireStaff } from '../../auth/staff.js';
@@ -26,7 +26,8 @@ import { candidates, evidence, examSessions, exams, type Candidate } from '../..
 import { audit } from '../../lib/audit.js';
 import { isJpeg } from '../../lib/crypto.js';
 import { conflict, HttpError, notFound, unsupportedMedia } from '../../lib/errors.js';
-import { purgeCandidateIdPhoto, purgeEvidenceRows, purgeSessionEvidence, storeEvidence } from '../../services/evidence.js';
+import { purgeCandidateIdPhoto, purgeEvidenceRows, storeEvidence } from '../../services/evidence.js';
+import { eraseCandidate } from '../../services/privacy-requests.js';
 import { serializeEmbeddings } from '../../vision/embeddings.js';
 import { processIdPhoto } from '../../vision/id-photo.js';
 import type { IdPhotoCapableVisionService, IdPhotoResult } from '../../vision/types.js';
@@ -173,35 +174,8 @@ export const candidatesRoutes: FastifyPluginAsync = async (app) => {
   app.delete('/candidates/:id', admin, async (req) => {
     const staff = getStaff(req);
     const id = idParam(req, 'id', 'Candidate', 'candidate_not_found');
-    const now = ctx.now();
     await loadScopedCandidate(ctx.db, staff.orgId, id);
-    const open = await ctx.db
-      .select({ id: examSessions.id, status: examSessions.status })
-      .from(examSessions)
-      .where(and(eq(examSessions.candidateId, id), notInArray(examSessions.status, TERMINAL_STATUSES)));
-    if (open.length) {
-      throw conflict('candidate_has_open_sessions', 'This candidate has an exam session that has not ended. Submit or terminate it before deleting the candidate.', { sessionIds: open.map((s) => s.id) });
-    }
-    const sessions = await ctx.db.select({ id: examSessions.id, legalHold: examSessions.legalHold }).from(examSessions).where(eq(examSessions.candidateId, id));
-    const held = sessions.filter((s) => s.legalHold);
-    if (held.length) {
-      throw conflict('candidate_under_legal_hold', 'A session of this candidate is under legal hold, so its evidence must be kept. Lift the legal hold before deleting the candidate.', { sessionIds: held.map((s) => s.id) });
-    }
-    // Delete images and templates first (blobs are not transactional), then the records.
-    let purged = 0;
-    for (const s of sessions) purged += (await purgeSessionEvidence(ctx, ctx.db, s.id, 'candidate_deleted')).evidence;
-    await purgeCandidateIdPhoto(ctx, ctx.db, id, 'candidate_deleted');
-    const leftovers = await ctx.db
-      .select()
-      .from(evidence)
-      .where(and(eq(evidence.candidateId, id), isNull(evidence.purgedAt)));
-    purged += await purgeEvidenceRows(ctx, ctx.db, leftovers, 'candidate_deleted');
-    await ctx.db.transaction(async (tx) => {
-      const sessionIds = sessions.map((s) => s.id);
-      await tx.delete(evidence).where(or(eq(evidence.candidateId, id), sessionIds.length ? inArray(evidence.sessionId, sessionIds) : undefined)!);
-      await tx.delete(candidates).where(and(eq(candidates.id, id), eq(candidates.orgId, staff.orgId))); // cascades to sessions and their records
-      await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'candidate.deleted', targetType: 'candidate', targetId: id, meta: { sessionsDeleted: sessions.length, evidencePurged: purged }, ip: req.ip, at: now });
-    });
+    await eraseCandidate(ctx, { id: staff.id, orgId: staff.orgId, ip: req.ip }, id);
     return { ok: true };
   });
 

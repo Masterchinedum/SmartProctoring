@@ -190,7 +190,7 @@ export interface WebhookSessionData extends WebhookPartyRefs {
   at: number;
   /** The timeline event that recorded the change. */
   eventId: string;
-  /** session.held / session.released: the hold reason; session.terminated: e.g. 'abandoned_after_inactivity'. */
+  /** session.held / session.released: the hold reason; session.terminated: 'abandoned_after_inactivity', 'consent_withdrawn' or null. */
   reason: string | null;
   /** session.pause_requested only. */
   pauseRequest?: { id: string | null; reason: string | null };

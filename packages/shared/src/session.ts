@@ -28,7 +28,12 @@ export const HOLD_REASONS = [
 ] as const;
 export type HoldReason = (typeof HOLD_REASONS)[number];
 
-export const END_REASONS = ['candidate_submitted', 'time_expired', 'staff_submitted', 'staff_terminated'] as const;
+/**
+ * 'candidate_withdrew': the candidate withdrew their consent in the exam app (POST /api/candidate/consent/withdraw):
+ * the exam ended as terminated (no score), its face images and templates were deleted, and a consent-withdrawal
+ * entry was added to the privacy register (./privacy-ops.ts) so staff arrange an alternative assessment.
+ */
+export const END_REASONS = ['candidate_submitted', 'time_expired', 'staff_submitted', 'staff_terminated', 'candidate_withdrew'] as const;
 export type EndReason = (typeof END_REASONS)[number];
 
 /**

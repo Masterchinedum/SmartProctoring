@@ -21,6 +21,7 @@ import { CandidatesPage } from './pages/candidates/CandidatesPage';
 import { CandidateDetailPage } from './pages/candidates/CandidateDetailPage';
 import { QualityPage } from './pages/QualityPage';
 import { AuditLogPage } from './pages/AuditLogPage';
+import { PrivacyPage } from './pages/PrivacyPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { IntegrationsPage } from './pages/IntegrationsPage';
 import { UsersPage } from './pages/UsersPage';
@@ -50,6 +51,7 @@ export default function AdminApp() {
         <Route path="candidates/:id" element={<CandidateDetailPage />} />
         <Route path="quality" element={<QualityPage />} />
         <Route path="audit" element={<AdminOnly><AuditLogPage /></AdminOnly>} />
+        <Route path="privacy" element={<AdminOnly><PrivacyPage /></AdminOnly>} />
         <Route path="settings" element={<AdminOnly><SettingsPage /></AdminOnly>} />
         <Route path="integrations" element={<AdminOnly><IntegrationsPage /></AdminOnly>} />
         <Route path="users" element={<AdminOnly><UsersPage /></AdminOnly>} />

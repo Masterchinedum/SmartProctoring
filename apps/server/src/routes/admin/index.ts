@@ -8,6 +8,7 @@ import { governanceRoutes } from './governance.js';
 import { integrationRoutes } from './integrations.js';
 import { metricsRoutes } from './metrics.js';
 import { orgRoutes } from './org.js';
+import { privacyRoutes } from './privacy.js';
 import { reviewRoutes } from './review.js';
 import { sessionRoutes } from './sessions.js';
 import { toolRoutes } from './tools.js';
@@ -31,6 +32,7 @@ import { verifierRoutes } from './verifiers.js';
  *   org.ts         organisation settings, staff users, audit log
  *   metrics.ts     detection quality, offline evaluation uploads
  *   governance.ts  versioned identity decision configurations (propose / approve / rollback), calibration, drift
+ *   privacy.ts     privacy request register (export, erasure), retention preview, operational checks
  *   integrations.ts  API keys, webhooks (+ deliveries), email-alert test, integration status
  *   tools.ts       staff camera self-test of the identity pipeline (transient, nothing stored)
  *   verifiers.ts   external second-opinion face verifier: providers offered, test connection
@@ -46,6 +48,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(orgRoutes);
   await app.register(metricsRoutes);
   await app.register(governanceRoutes);
+  await app.register(privacyRoutes);
   await app.register(integrationRoutes);
   await app.register(toolRoutes);
   await app.register(verifierRoutes);

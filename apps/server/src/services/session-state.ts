@@ -660,15 +660,16 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
 export async function finalizeSession(
   m: SessionMutation,
   endReason: SessionEndReason,
-  opts: { by?: string | null; note?: string | null; /** 'abandoned' only */ observation?: string; details?: Record<string, unknown>; candidateMessage?: string } = {},
+  opts: { by?: string | null; note?: string | null; /** 'abandoned' / 'candidate_withdrew' only */ observation?: string; details?: Record<string, unknown>; candidateMessage?: string } = {},
 ): Promise<void> {
   if (TERMINAL.includes(m.session.status)) return;
   // Time expiry is recorded at the moment the clock ran out (the sweeper may run a few seconds later).
   const rs = m.session.runningSince?.getTime();
   const at = endReason === 'time_expired' && rs != null ? Math.max(rs, Math.min(m.now, rs + m.session.durationMs - m.session.usedMs)) : m.now;
   m.clockStop(at);
-  // 'abandoned' (housekeeping after inactivity) ends as terminated so no score is implied; answers are kept.
-  const status: SessionStatus = endReason === 'staff_terminated' || endReason === 'abandoned' ? 'terminated' : 'submitted';
+  // 'abandoned' (housekeeping after inactivity) and 'candidate_withdrew' (consent withdrawn) end as terminated so no
+  // score is implied; answers are kept.
+  const status: SessionStatus = endReason === 'staff_terminated' || endReason === 'abandoned' || endReason === 'candidate_withdrew' ? 'terminated' : 'submitted';
   await closeReportingGapAtEnd(m, at, endReason);
   await m.closeOpenEvents(at, 'session_end');
   await m.closeOpenPeriod(at);
@@ -694,11 +695,21 @@ export async function finalizeSession(
   } else if (endReason === 'staff_terminated') {
     await m.addEvent({ type: 'session_terminated', source: 'staff', startedAt: at, details: { reason: opts.note ?? null, by: opts.by ?? null } });
     await m.enqueueCommand({ kind: 'terminated', message: 'Your exam was ended by an administrator.' });
+  } else if (endReason === 'candidate_withdrew') {
+    // services/privacy-requests.ts withdrawConsent: the candidate's own decision, not an integrity observation.
+    await m.addEvent({
+      type: 'session_terminated',
+      source: 'server_system',
+      startedAt: at,
+      observation: opts.observation ?? 'The candidate withdrew their consent, so the exam ended. Its face images and templates were deleted.',
+      details: { reason: 'consent_withdrawn', ...(opts.details ?? {}) },
+    });
+    await m.enqueueCommand({ kind: 'terminated', message: opts.candidateMessage ?? 'You withdrew your consent, so your exam has ended.' });
   } else {
     await m.addEvent({ type: 'session_submitted', startedAt: at, source: 'server_system', details: { endReason, by: opts.by ?? null, note: opts.note ?? null } });
     if (endReason !== 'candidate_submitted') await m.enqueueCommand({ kind: 'submitted', reason: endReason });
   }
-  if (wasStarted && endReason !== 'abandoned') {
+  if (wasStarted && endReason !== 'abandoned' && endReason !== 'candidate_withdrew') {
     const score = await gradeSession(m.tx, m.session, at);
     m.set({ score });
   }

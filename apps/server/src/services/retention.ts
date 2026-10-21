@@ -23,6 +23,7 @@ import type { DbOrTx } from '../db/index.js';
 import { checkFrames, checks, events, evidence, examSessions, exams, identityChecks, identitySampleFrames, organizations } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { purgeSessionEvidence } from './evidence.js';
+import { recordJobFinish, recordJobStart, RETENTION_JOB } from './job-status.js';
 import { DEFAULT_ORG_SETTINGS, orgSettings } from './org.js';
 import { effectivePolicy } from './session-state.js';
 
@@ -81,19 +82,50 @@ export function evidenceDaysFor(session: Parameters<typeof effectivePolicy>[0], 
   return fromPolicy ?? orgSettings(org).evidenceRetentionDays;
 }
 
-/** SQL: evidence retention days for a session row (same precedence as evidenceDaysFor). Used to pre-filter. */
+/**
+ * SQL: evidence retention days for a session row (same precedence as evidenceDaysFor), and event-metadata days for its
+ * organisation. Used to pre-filter here and by the retention preview (services/privacy-ops.ts); a query using them
+ * joins exam_sessions, exams and organizations.
+ */
 const jsonDays = (expr: ReturnType<typeof sql>) => sql`(case when jsonb_typeof(${expr}) = 'number' then (${expr})::text::numeric end)`;
-const evidenceDaysSql = sql`coalesce(
+export const evidenceDaysSql = sql`coalesce(
   ${jsonDays(sql`${examSessions.policy} -> 'retention' -> 'evidenceDays'`)},
   ${jsonDays(sql`${exams.policy} -> 'retention' -> 'evidenceDays'`)},
   ${jsonDays(sql`${organizations.settings} -> 'defaultPolicy' -> 'retention' -> 'evidenceDays'`)},
   ${jsonDays(sql`${organizations.settings} -> 'evidenceRetentionDays'`)},
   ${DEFAULT_ORG_SETTINGS.evidenceRetentionDays}::numeric)`;
-const eventDaysSql = sql`coalesce(${jsonDays(sql`${organizations.settings} -> 'eventRetentionDays'`)}, ${DEFAULT_ORG_SETTINGS.eventRetentionDays}::numeric)`;
+export const eventDaysSql = sql`coalesce(${jsonDays(sql`${organizations.settings} -> 'eventRetentionDays'`)}, ${DEFAULT_ORG_SETTINGS.eventRetentionDays}::numeric)`;
 
 /* ================================================================== run */
 
+/**
+ * One retention run. A real run (not a dry run) is recorded in job_status (services/job-status.ts): when it started,
+ * when it ended, and its summary, or the error that stopped it.
+ */
 export async function runRetention(ctx: RetentionCtx, opts: RetentionOptions = {}): Promise<RetentionSummary> {
+  if (opts.dryRun) return runRetentionPhases(ctx, opts);
+  // Run times are the clock's (opts.now only moves the instant retention is evaluated at).
+  await recordJobStart(ctx.db, RETENTION_JOB, ctx.now());
+  let summary: RetentionSummary;
+  try {
+    summary = await runRetentionPhases(ctx, opts);
+  } catch (err) {
+    await recordJobFinish(ctx.db, RETENTION_JOB, ctx.now(), { error: (err as Error).message || String(err) }).catch((e) => ctx.log.error({ err: e }, 'retention: could not record the failed run'));
+    throw err;
+  }
+  await recordJobFinish(ctx.db, RETENTION_JOB, ctx.now(), {
+    summary: {
+      sessionsEvidencePurged: summary.sessionsEvidencePurged,
+      evidenceItemsPurged: summary.evidenceItemsPurged,
+      sessionsEventMetadataPurged: summary.sessionsEventMetadataPurged,
+      skippedLegalHold: summary.skippedLegalHold,
+      failures: summary.failures.length,
+    },
+  });
+  return summary;
+}
+
+async function runRetentionPhases(ctx: RetentionCtx, opts: RetentionOptions): Promise<RetentionSummary> {
   const started = Date.now();
   const now = opts.now ?? ctx.now();
   const batchSize = Math.max(1, Math.min(opts.batchSize ?? 100, 1000));

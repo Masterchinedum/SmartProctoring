@@ -47,6 +47,9 @@ import type {
   MonitoringStatus,
   PeriodKind,
   PolicyExceptionDTO,
+  PrivacyRequestChannel,
+  PrivacyRequestKind,
+  PrivacyRequestStatus,
   ProctoringPolicyInput,
   QuestionType,
   ReviewResolution,
@@ -1025,6 +1028,77 @@ export const deviceRecords = pgTable(
   },
   (t) => [index('device_records_session_idx').on(t.sessionId, t.at)],
 );
+
+/* ------------------------------------------------------------------ privacy operations */
+
+/**
+ * The register of data-subject requests (access, erasure, consent withdrawal, …) with their legal deadlines
+ * (services/privacy-requests.ts, docs/PRIVACY.md §5). A row outlives the candidate it concerns (candidate_id is set to
+ * null when the candidate is erased; `subject` still says who it was about), so the organisation can show it answered.
+ */
+export const privacyRequests = pgTable(
+  'privacy_requests',
+  {
+    id: id(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<PrivacyRequestKind>().notNull(),
+    status: text('status').$type<PrivacyRequestStatus>().notNull().default('open'),
+    /** Who the request is about (name, email, reference), as given: the register must outlive an erased candidate. */
+    subject: text('subject').notNull(),
+    candidateId: uuid('candidate_id').references(() => candidates.id, { onDelete: 'set null' }),
+    /** The exam session it arose from (consent withdrawal). */
+    sessionId: uuid('session_id').references(() => examSessions.id, { onDelete: 'set null' }),
+    channel: text('channel').$type<PrivacyRequestChannel>().notNull(),
+    /** 'candidate': made in the exam app (consent withdrawal); 'staff': recorded by a staff member. */
+    source: text('source').$type<'staff' | 'candidate'>().notNull(),
+    receivedAt: ts('received_at').notNull(),
+    /** receivedAt + DEFAULT_PRIVACY_RESPONSE_DAYS + extension days. */
+    dueAt: ts('due_at').notNull(),
+    extensionDays: integer('extension_days'),
+    extensionReason: text('extension_reason'),
+    /** What was asked, encrypted (AAD privacy-request:<id>); null when empty. Administrators only. */
+    detailsEnc: bytea('details_enc'),
+    assigneeId: uuid('assignee_id').references(() => staffUsers.id, { onDelete: 'set null' }),
+    createdBy: uuid('created_by').references(() => staffUsers.id, { onDelete: 'set null' }),
+    resolutionNote: text('resolution_note'),
+    closedAt: ts('closed_at'),
+    closedBy: uuid('closed_by').references(() => staffUsers.id, { onDelete: 'set null' }),
+    /** The candidate's data was exported / erased for this request. */
+    exportedAt: ts('exported_at'),
+    erasedAt: ts('erased_at'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('privacy_requests_org_status_due_idx').on(t.orgId, t.status, t.dueAt), index('privacy_requests_candidate_idx').on(t.candidateId)],
+);
+export type PrivacyRequest = typeof privacyRequests.$inferSelect;
+
+/** Summary of a retention run kept in job_status.last_summary (RetentionJobStatusDTO.lastSummary). */
+export interface RetentionRunSummary {
+  sessionsEvidencePurged: number;
+  evidenceItemsPurged: number;
+  sessionsEventMetadataPurged: number;
+  skippedLegalHold: number;
+  failures: number;
+}
+
+/**
+ * The last run of a cluster-wide background job, whichever instance ran it (retention: services/retention.ts), so
+ * staff and monitoring can see that deletion is actually happening (GET /api/admin/retention/preview, /ops/checks).
+ */
+export const jobStatus = pgTable('job_status', {
+  name: text('name').primaryKey(),
+  lastStartedAt: ts('last_started_at'),
+  lastFinishedAt: ts('last_finished_at'),
+  lastSuccessAt: ts('last_success_at'),
+  /** The error of the last run, null when it succeeded. */
+  lastError: text('last_error'),
+  lastSummary: jsonb('last_summary').$type<RetentionRunSummary>(),
+  updatedAt: updatedAt(),
+});
+export type JobStatusRow = typeof jobStatus.$inferSelect;
 
 /**
  * Versioned identity decision configurations (model governance, services/decision-configs.ts): proposed with a

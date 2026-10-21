@@ -211,6 +211,14 @@ backups until they expire; align backup retention with the privacy notice.
 Runs hourly inside the server. To run manually: `pnpm --filter @sp/server retention:run`.
 See `docs/PRIVACY.md` §4 for the rules (legal hold, tombstones).
 
+Every real run (scheduled or `retention:run`, not `--dry-run`) is recorded in the database (`job_status`): when it
+started and ended, what it deleted, or the error that stopped it — whichever server ran it. **Privacy → Deletion
+schedule** shows it with what is due over the next 30 days, what is past its date and not yet deleted, and the
+sessions under legal hold (`GET /api/admin/retention/preview`). **Privacy → Operational checks**
+(`GET /api/admin/ops/checks`) warns when the job has not succeeded for 3 hours, failed, or left images past their
+date (warning after 2 hours, failing after a day), next to overdue privacy requests, this server's face-analysis
+capacity, failing webhooks and alert emails.
+
 Retention starts when a session ends. Sessions that can never end on their own — invited, ready, paused,
 on hold, or active with the exam clock stopped (disconnect policy `stop`) — are closed by the hourly
 `abandoned-sessions` job once they have had no candidate or staff activity for the organisation's
@@ -303,6 +311,25 @@ second approval: it was approved before) and withdraws any proposal waiting. The
 changes). Compare the segments (lighting, browser, resolution) to see whether it is general or one environment.
 Organisation thresholds can compensate only temporarily; report it with the Quality page figures. Roll back the
 deployment only per §1 *Upgrades and rollback* (face templates are tied to the model).
+
+**A data-subject request arrives** (a candidate asks for a copy of their data, its deletion, a correction…).
+Privacy → *Record a request…* the day it arrives, with the date received (the one-month deadline counts from it) and
+the candidate record. Access: open the request → *Export the candidate's data (ZIP)*, check it, send it through a
+secure channel, then *Completed* with how it was sent. Erasure: *Erase the candidate…* (refused while an exam of
+theirs runs or is under legal hold: finish it, or decide whether the hold still applies), then *Completed*. Need
+longer (a complex request)? Extend the deadline with the reason and tell the person before the first month ends.
+`docs/PRIVACY.md` §5 has the rest.
+
+**A candidate withdrew consent in the exam app.** Their exam has ended and its images are deleted; the register has an
+open *Consent withdrawn* request linked to the session. Contact them about an alternative (e.g. the accommodation
+*identity verified by staff*, or *no camera*, and a new assignment), decide whether their approved ID photo is still
+needed, and complete the request with what was agreed.
+
+**Operational checks show "Retention job — Failing" or "Deletion on schedule — Failing".** The server log has the
+error (`retention run failed` / `retention: evidence purge failed`). Usual causes: the evidence store is unreachable
+or refuses deletes (S3 permissions), or the database was unavailable. Once fixed, run
+`pnpm --filter @sp/server retention:run` (or wait for the next hour) and check the page again. "No successful run for
+over 3 hours" with no error means no server runs background jobs: at least one must have `SWEEPER_ENABLED` on.
 
 **An API key was leaked.** Integrations → API keys → **Revoke** (effective immediately), create a new key
 and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) shows what the key did.

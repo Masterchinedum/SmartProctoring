@@ -90,6 +90,19 @@ export interface PrivacyRequestDTO {
   sessionId: string | null;
 }
 
+/** GET /api/admin/privacy-requests?status=open|closed|all&candidateId= */
+export const privacyRequestListQuerySchema = z.object({
+  status: z.enum(['open', 'closed', 'all']).default('open'),
+  candidateId: z.string().uuid().optional(),
+});
+export type PrivacyRequestListQuery = z.infer<typeof privacyRequestListQuerySchema>;
+
+/** A request still open that is due within this many days counts as "due soon". */
+export const PRIVACY_DUE_SOON_DAYS = 7;
+
+/** POST /api/admin/privacy-requests/:id/erase — the staff member confirmed the candidate and their records go. */
+export const erasePrivacyRequestSchema = z.object({ confirm: z.literal(true) });
+
 /** GET /api/admin/privacy-requests */
 export interface PrivacyRequestsDTO {
   items: PrivacyRequestDTO[];
@@ -133,3 +146,28 @@ export interface RetentionJobStatusDTO {
 
 /** A run older than this is reported as stale (the job runs hourly). */
 export const RETENTION_STALE_AFTER_MS = 3 * 3600_000;
+
+/** GET /api/admin/retention/preview?days= (1–90, default 30). */
+export const retentionPreviewQuerySchema = z.object({ days: z.coerce.number().int().min(1).max(90).default(30) });
+
+/* ------------------------------------------------------------------ operational checks */
+
+export const OPS_CHECK_STATUSES = ['ok', 'warning', 'failing'] as const;
+export type OpsCheckStatus = (typeof OPS_CHECK_STATUSES)[number];
+
+export const OPS_CHECK_IDS = ['retention_job', 'retention_overdue', 'privacy_requests', 'capacity', 'webhooks', 'email_alerts'] as const;
+export type OpsCheckId = (typeof OPS_CHECK_IDS)[number];
+
+export interface OpsCheckDTO {
+  id: OpsCheckId;
+  label: string;
+  status: OpsCheckStatus;
+  /** One plain sentence: what was found and, when it is not ok, what to do. */
+  detail: string;
+}
+
+/** GET /api/admin/ops/checks — the organisation's operational health at a glance (admin). */
+export interface OpsChecksDTO {
+  now: number;
+  checks: OpsCheckDTO[];
+}

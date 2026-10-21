@@ -64,6 +64,7 @@ const END_REASON_TEXT: Record<SessionEndReason, string> = {
   time_expired: 'submitted automatically when the exam time ran out',
   staff_submitted: 'submitted by an administrator',
   staff_terminated: 'ended by an administrator',
+  candidate_withdrew: 'ended when the candidate withdrew their consent (no score is recorded; the face images and templates were deleted)',
   abandoned: 'closed automatically after a long period without activity (no score is recorded)',
 };
 

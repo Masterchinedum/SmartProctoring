@@ -11,9 +11,10 @@ import type { InjectOptions } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { Ctx } from '../src/context.js';
-import { accommodations, auditLog, candidates, staffUsers, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, webhooks } from '../src/db/schema.js';
+import { accommodations, auditLog, candidates, staffUsers, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, privacyRequests, webhooks } from '../src/db/schema.js';
 import { accommodationNoteAad } from '../src/services/accommodations.js';
 import { totpAad, totpPendingAad } from '../src/services/mfa.js';
+import { privacyRequestDetailsAad } from '../src/services/privacy-requests.js';
 import { base32Decode, totp } from '../src/lib/totp.js';
 import { createKeyring, keyIdFor, sha256Hex, type Keyring } from '../src/lib/crypto.js';
 import { LocalBus } from '../src/realtime/bus.js';
@@ -56,6 +57,7 @@ async function assertAllDecrypt(keyring: Keyring) {
     ['accommodation_notes', (await env.ctx.db.select({ id: accommodations.id, v: accommodations.noteEnc }).from(accommodations).where(isNotNull(accommodations.noteEnc))).map((r) => ({ ...r, aad: accommodationNoteAad(r.id) }))],
     ['totp_secrets', (await env.ctx.db.select({ id: staffUsers.id, v: staffUsers.totpSecretEnc }).from(staffUsers).where(isNotNull(staffUsers.totpSecretEnc))).map((r) => ({ ...r, aad: totpAad(r.id) }))],
     ['totp_pending_secrets', (await env.ctx.db.select({ id: staffUsers.id, v: staffUsers.totpPendingEnc }).from(staffUsers).where(isNotNull(staffUsers.totpPendingEnc))).map((r) => ({ ...r, aad: totpPendingAad(r.id) }))],
+    ['privacy_request_details', (await env.ctx.db.select({ id: privacyRequests.id, v: privacyRequests.detailsEnc }).from(privacyRequests).where(isNotNull(privacyRequests.detailsEnc))).map((r) => ({ ...r, aad: privacyRequestDetailsAad(r.id) }))],
   ] as const) {
     for (const r of rows) keyring.decrypt(r.v!, r.aad);
     n[name] = rows.length;
@@ -101,6 +103,7 @@ describe('rekey after rotating EVIDENCE_KEY', () => {
     await purgeEvidenceRows(env.ctx, env.ctx.db, [p], 'test');
     webhookId = json(await admin.post('/webhooks', { url: 'http://127.0.0.1:9/hook', events: ['session.held'], description: 'x' })).webhook.id;
     json(await admin.post(`/candidates/${cand.id}/accommodations`, { kind: 'rest_breaks', basis: 'other', note: 'Rekey test note' }));
+    json(await admin.post('/privacy-requests', { kind: 'access', subject: 'Rekey Candidate', candidateId: cand.id, details: 'Rekey test request details' }));
     // Two-step sign-in: an active TOTP secret, and a second set-up left pending.
     const totpHeaders = { cookie: admin.cookie };
     const setup = (await env.app.inject({ method: 'POST', url: '/api/auth/mfa/totp/setup', headers: totpHeaders })).json();

@@ -91,6 +91,7 @@ export const END_REASON_LABELS: Record<SessionEndReason, string> = {
   time_expired: 'Time expired (auto-submitted)',
   staff_submitted: 'Submitted by staff',
   staff_terminated: 'Terminated by staff',
+  candidate_withdrew: 'Candidate withdrew consent (no score)',
   abandoned: 'Closed after inactivity (no score)',
 };
 

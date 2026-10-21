@@ -48,6 +48,9 @@ function str(v: unknown): string | null {
 
 const CLIENT_SOURCES: readonly EventSource[] = ['client_browser', 'client_vision'];
 
+/** Structured reasons a session.terminated webhook carries (staff free text never leaves the staff app). */
+const AUTOMATIC_TERMINATION_REASONS = new Set(['abandoned_after_inactivity', 'consent_withdrawn']);
+
 /**
  * Title and observation of an event as they may appear in a webhook or an alert email: the catalog wording for
  * anything the candidate's browser reported (its free text is candidate-controlled), link-free server wording
@@ -155,7 +158,7 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           // The structured outcome only; the reviewer's note stays in the staff app.
           if (ev.type === 'review_completed') data.outcome = str(d.outcome);
           // Free-text staff notes are never forwarded; only the structured automatic reason.
-          if (ev.type === 'session_terminated') data.reason = str(d.reason) === 'abandoned_after_inactivity' ? 'abandoned_after_inactivity' : null;
+          if (ev.type === 'session_terminated') data.reason = AUTOMATIC_TERMINATION_REASONS.has(str(d.reason) ?? '') ? str(d.reason) : null;
           notifications.push({ type: sessionType, dedupeKey: `${sessionType}:${ev.id}`, sessionId: s.id, data });
         }
 

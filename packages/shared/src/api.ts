@@ -1052,7 +1052,7 @@ export type { IdentityCheckTrigger };
  *   POST /candidates  CandidateInput               -> CandidateDTO                                  [admin]
  *   GET  /candidates/:id                           -> CandidateDTO                                  [reviewer]
  *   PUT  /candidates/:id  CandidateInput           -> CandidateDTO                                  [admin]
- *   DELETE /candidates/:id                         -> { ok }  (refused while a session is active)   [admin]
+ *   DELETE /candidates/:id                         -> { ok }  (refused while a session is active or under legal hold) [admin]
  *   PUT  /candidates/:id/id-photo  (image/jpeg)    -> IdPhotoUploadResponse                         [admin]
  *   DELETE /candidates/:id/id-photo                -> CandidateDTO                                  [admin]
  *   GET  /settings                                 -> OrgSettingsDTO                                [admin]
@@ -1084,6 +1084,17 @@ export type { IdentityCheckTrigger };
  *   POST /webhooks/deliveries/:id/redeliver        -> WebhookDeliveryDTO  (same delivery id, attempted now) [admin]
  *   POST /email-alerts/test {to?}                  -> { ok: true, recipients: string[] }  (409 smtp_not_configured) [admin]
  *   (email alert recipients/toggles and abandonAfterDays are part of GET/PUT /settings)
+ *
+ *   Privacy operations (types in ./privacy-ops.ts; admin and owner only):
+ *   GET  /privacy-requests?status=open|closed|all&candidateId= -> PrivacyRequestsDTO                [admin]
+ *   POST /privacy-requests  CreatePrivacyRequest   -> PrivacyRequestDTO                             [admin]
+ *   GET  /privacy-requests/:id                     -> PrivacyRequestDTO                             [admin]
+ *   PUT  /privacy-requests/:id  UpdatePrivacyRequest -> PrivacyRequestDTO (status, assignee, extension, resolution) [admin]
+ *   GET  /privacy-requests/:id/export              -> application/zip  (the candidate's data; audited) [admin]
+ *   POST /privacy-requests/:id/erase {confirm:true} -> { request, sessionsDeleted, evidencePurged }  (erasure requests) [admin]
+ *   GET  /retention/preview?days=                  -> RetentionPreviewDTO                           [admin]
+ *   GET  /ops/checks                               -> OpsChecksDTO                                  [admin]
+ *   (candidate: POST /api/candidate/consent/withdraw WithdrawConsentRequest -> CandidateSessionState: ends the exam, deletes its face images)
  *
  *   External second-opinion face verifier (types in ./verifiers.ts; settings = OrgSettingsDTO.externalVerifier):
  *   GET  /verifiers                                -> ExternalVerifierInfoDTO                       [admin]

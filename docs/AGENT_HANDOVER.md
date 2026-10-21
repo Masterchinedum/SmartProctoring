@@ -8,87 +8,38 @@ For the next agent picking this up. Read this first, then `docs/HANDOVER.md` (pr
 
 | # | Area | State |
 |---|---|---|
-| 1–10 | Node 24, busy-server handling, health checks, metrics, load-aware sampling, CI, exam versions, accommodations, staff MFA, reviewer workflow | **Done and pushed** (last pushed commit `7db31c2`) |
-| 11 | Model governance (versioned identity decision configs, four-eyes approval, rollback, calibration by condition, drift, version stamps) | **Implemented, verified, not yet committed** (see §2) |
-| 12 | Privacy operations (DSAR register, consent withdrawal, personal-data export, retention preview, job health) | **Started**: shared types drafted (`packages/shared/src/privacy-ops.ts`, not exported yet); ZIP writer done (`apps/server/src/lib/zip.ts`, tested). Nothing wired. |
-| 13–21 | See §4 | Not started |
+| 1–11 | Node 24, busy-server handling, health checks, metrics, load-aware sampling, CI, exam versions, accommodations, staff MFA, reviewer workflow, model governance | **Done and pushed** |
+| 12 | Privacy operations (request register, personal-data export, erasure, consent withdrawal, deletion schedule, operational checks) | **Done and pushed** (see §2) |
+| 13–21 | See §3 | Not started — **#13 is next** |
 
-Verification at the time of writing (all green on the working tree that includes #11):
+Verification at the time of writing (all green on the pushed branch):
 
 * `pnpm run typecheck` — shared, detection, server, web: pass. `pnpm --filter @sp/e2e typecheck`: pass.
-* `pnpm test` — shared 43, detection 169, server 659 (+20 skipped: two suites need real face-model files), web 354.
-* Core browser suite `E2E_FACES_DIR=… E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1 pnpm --filter @sp/e2e exec playwright test 'tests/[01]'` — **39/39 passed** (includes new `11d-model-governance`).
+* `pnpm test` — shared 43, detection 169, server 693, web 359 — 1,264 (with the face images fetched, nothing skipped).
+* Core browser suite `E2E_FACES_DIR=… E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1 pnpm --filter @sp/e2e exec playwright test 'tests/[01]'` (CI's `e2e` job) — the new `11e-privacy-operations` passed locally (2 min); the whole core suite runs in CI on every push.
 
-## 2. Uncommitted work (commit it first)
+## 2. What #12 added (for orientation)
 
-Everything in `git status` is the #11 change set plus two drafts. Suggested commit split (or one commit with the
-message "Model governance: versioned identity decision configurations, calibration and drift"):
+* Schema + migration `0012_privacy_operations`: `privacy_requests` (details encrypted, AAD `privacy-request:<id>`,
+  covered by `rekey`), `job_status` (the retention job's last run). Migration test in `test/migrations.test.ts`.
+* Server: `services/privacy-requests.ts` (register, `withdrawConsent`, `eraseCandidate` — now also behind
+  `DELETE /candidates/:id` — and `eraseForRequest`), `services/privacy-export.ts` (ZIP via `lib/zip.ts`),
+  `services/privacy-ops.ts` (retention preview, operational checks), `services/job-status.ts`, routes in
+  `routes/admin/privacy.ts`, candidate route `POST /api/candidate/consent/withdraw`. New end reason
+  `candidate_withdrew` (`END_REASONS`; terminated, no score; webhook reason `consent_withdrawn`). Evidence uploads are
+  refused for a withdrawn / purged session (`services/ingest.ts`).
+* Staff app: `pages/PrivacyPage.tsx` (admin only, nav "Privacy"), helpers `lib/privacy.ts` (+ tests).
+* Tests: `apps/server/test/privacy.test.ts`, `test/rekey.test.ts`, `test/migrations.test.ts` (0012); the test ZIP
+  reader moved to `apps/server/test/zip-reader.ts` (also used by e2e 11e); e2e `11e-privacy-operations` (dedicated
+  instance `PORT + 5`, database `proctor_e2e_privacy`).
+* Docs: `PRIVACY.md` §2, §4, §5; `OPERATIONS.md` §6 + runbooks; `SECURITY.md` (privacy operations);
+  `ARCHITECTURE.md` §8; `INTEGRATION_API.md` (end reason / webhook reason); `HANDOVER.md` (round 4 row, legal note).
 
-* **#11 governance** — `packages/shared/src/governance.ts` (+ test), `packages/shared/src/index.ts`,
-  `packages/shared/src/api.ts` (`decisionConfigVersion`, `IdentityDecisionVersionsDTO`, `identity.versions`,
-  `engineVersion` on the batch schema), `apps/server/src/services/decision-configs.ts`,
-  `services/calibration.ts`, `routes/admin/governance.ts` (registered in `routes/admin/index.ts`), schema + migration
-  `drizzle/0011_model_governance.sql` (+ snapshot, journal), stamping in `services/checks.ts`,
-  `services/identity-samples.ts`, `services/session-state.ts`, `services/org.ts` (`decisionStamp`), `vision/embeddings.ts`
-  (`EMBEDDING_MODEL_VERSION`), `services/ingest.ts` + `routes/candidate/index.ts` (`engine_version`), `services/dto.ts`,
-  `services/reports.ts`, `routes/v1/index.ts` (versions hidden from integrations), `routes/admin/org.ts` (thresholds
-  read-only: 409 `decision_config_required`), web: `lib/governance.ts` (+ test), `pages/QualityGovernance.tsx`,
-  `pages/QualityPage.tsx`, `pages/SettingsPage.tsx` (read-only thresholds, review targets kept),
-  `pages/ReportPage.tsx`, `pages/session/IdentityTab.tsx`, `api/client.ts`, `api/queries.ts`, `lib/auth-errors.test.ts`
-  (`errorMessage` shows specific 403 reasons), `lib/misc.test.ts`; candidate `api.ts` sends the detector version;
-  detection: `packages/detection/src/version.ts` (+ fingerprint test `version.test.ts`, pinned hash `c69cef7069b2d2ef`);
-  tests: `apps/server/test/governance.test.ts`, `test/admin/org.test.ts`, `test/migrations.test.ts` (0011),
-  `test/integrations/api.test.ts`; e2e `e2e/tests/11d-model-governance.spec.ts` (+ `e2e/README.md` rows);
-  docs `ARCHITECTURE.md` §9, `OPERATIONS.md` (runbooks), `SECURITY.md` (model governance), `HANDOVER.md` (row).
-* **Drafts, safe to commit** (complete and tested, or unexported): `apps/server/src/lib/zip.ts` + `zip.test.ts`
-  (streaming ZIP writer, no dependency, cross-checked with Python `zipfile` and `unzip -t`);
-  `packages/shared/src/privacy-ops.ts` (types only, not in the shared index yet).
+Deliberately left for the owner: the **exam-app button for withdrawing consent** (the server path is done; the
+candidate-facing wording should be reviewed first, then linked from the privacy notice and the exam screen —
+`apps/web/src/candidate`, with an e2e step clicking it instead of calling the API as 11e does now).
 
-Before committing: `git diff --stat` should show the files above and nothing else. Run `pnpm run typecheck`.
-
-## 3. Work in progress: #12 privacy operations
-
-Draft contents of `privacy-ops.ts`: request kinds (`access`, `erasure`, `rectification`, `restriction`, `objection`,
-`consent_withdrawal`, `other`), statuses (`open`, `in_progress`, `completed`, `rejected`), channels, zod schemas
-(`createPrivacyRequestSchema`, `updatePrivacyRequestSchema` — completing or rejecting needs a resolution note; extension
-≤ 60 days with a reason), `PrivacyRequestDTO` / `PrivacyRequestsDTO`, `withdrawConsentSchema`,
-`RetentionPreviewDTO`, `RetentionJobStatusDTO` (stale after 3 h; the job runs hourly).
-
-Plan, in order:
-
-1. Schema: `privacy_requests` table (org, kind, status, subject text, candidate id nullable, channel, received/due
-   timestamps, extension days + reason, details **encrypted** with `keyring.encryptString` and AAD per row, assignee,
-   created/closed by, resolution note, exported/erased timestamps, session id, source staff|candidate). Index
-   `(org_id, status, due_at)`. Migration `0012_privacy_operations`; add a migration test like `0011` in
-   `test/migrations.test.ts`. Add the table to `rekey` (`services/rekey.ts`) since it holds encrypted fields.
-2. Services: `services/privacy-requests.ts` (create/list/update, due date = received + 30 days, overdue flag, audit
-   every change). Export of a candidate: a ZIP via `lib/zip.ts` containing `candidate.json`, per session
-   `session.json` (the report from `buildSessionReport`), `answers.json`, `events.json`, `identity-checks.json`,
-   and evidence images decrypted through `readEvidence` (skip purged ones and say so in `README.txt`). Audit
-   the export. Erasure reuses `DELETE /candidates/:id` logic (`routes/admin/candidates.ts`), including the legal-hold
-   and open-session refusals, and records `erasedAt` on the request.
-3. Candidate consent withdrawal: `POST /api/candidate/consent/withdraw` (`withdrawConsentSchema`). The session ends
-   with a dedicated end reason (add `candidate_withdrew` to `END_REASONS` in `packages/shared/src/session.ts`; find
-   every switch on end reasons with `grep -rn "staff_terminated" apps packages`). Purge the session's evidence and
-   templates (`purgeSessionEvidence`, reason `consent_withdrawn`), keep the event timeline and the answers, and create
-   a `consent_withdrawal` request automatically. Add a candidate-app entry point only once the copy is reviewed
-   (`apps/web/src/candidate`); the server path comes first.
-4. Retention preview: `GET /api/admin/retention/preview` — counts per day of evidence due (reuse the SQL in
-   `services/retention.ts`: `evidenceDaysSql`, `eventDaysSql`) without deleting; legal holds listed; overdue = due and
-   not purged. Job health: persist the last run summary (new table or `organizations`-independent row) in
-   `runRetention` so `RetentionJobStatusDTO` can be served; expose it on `GET /api/admin/ops/checks` together with
-   the other operational checks (`services/capacity.ts`, `instance-usage.ts`).
-5. Web: `apps/web/src/admin/pages/PrivacyPage.tsx` (register table, due dates, overdue highlighted, detail drawer
-   with export/erase actions behind confirmation, retention preview, job status). Add to `AdminApp.tsx` routes and
-   `components/Shell.tsx` NAV (owner/admin only). Accessibility: run `expectNoA11yIssues` in the e2e.
-6. e2e `e2e/tests/11e-privacy-operations.spec.ts` on a dedicated instance (`PORT + 5`, database
-   `siblingDatabaseUrl(DATABASE_URL, 'privacy')`, add to the `e2e/README.md` dedicated-server table): create an access
-   request → export downloads a valid ZIP (unzip it in the test, check `candidate.json`); erasure of a candidate with
-   a legal hold is refused; consent withdrawal ends the session and deletes its images.
-7. Docs: `PRIVACY.md` §2 data inventory rows for requests and exports, §4 for withdrawal, §5 for the DSAR process;
-   `OPERATIONS.md` runbook "A data-subject request arrives"; `SECURITY.md` for the register's access rules.
-
-## 4. Remaining roadmap (from the original plan, in order)
+## 3. Remaining roadmap (from the original plan, in order)
 
 * **#13 Candidate recovery, scheduling windows, resume policy** — reschedule an invited session into a window
   (`exam_sessions` gets `windowStartsAt`/`windowEndsAt`; start refused outside it with a candidate message), a resume
@@ -114,10 +65,15 @@ Plan, in order:
 * **#21 Final** — `docs/ROADMAP.md` (what shipped, what is deferred and why), full verification (all tests, both
   e2e tiers, docker build), PR #1 description updated with the mirror of `.github/pull_request_template.md` if present.
 
-## 5. How to work in this repo
+## 4. How to work in this repo
 
-* Node 24 only. In the sandbox: `source <scratchpad>/env24.sh` (sets PATH; the scratchpad path changes per session).
-  Start services if down: `service postgresql start; service redis-server start`.
+* Node 24 only. A fresh cloud container has Node 22: download the Node 24 tarball from nodejs.org into the scratchpad
+  (check its SHA-256 against `SHASUMS256.txt`), put its `bin` first on PATH and `corepack enable` (pnpm comes from
+  `packageManager`); keep the exports in `<scratchpad>/env24.sh` with `PGHOST=127.0.0.1 PGUSER=postgres`,
+  `SP_TEST_FACES_DIR` / `SP_TEST_FACESETS_DIR` / `E2E_FACES_DIR` and `SP_REQUIRE_TEST_IMAGES=1`. Start services if down:
+  `service postgresql start; service redis-server start`; the tests need trust auth on 127.0.0.1 (as in CI: set
+  `trust` in `/etc/postgresql/16/main/pg_hba.conf` and reload), and the databases `proctor` / `proctor_test`. Face
+  images: `pnpm --filter @sp/e2e fetch-faces` and `pnpm --filter @sp/server eval:fetch-faces -- --dir <dir>`.
 * Unit: `pnpm test` (all packages). Single file: `cd apps/server && pnpm exec vitest run test/governance.test.ts`.
 * DB migrations: `cd apps/server && pnpm exec drizzle-kit generate --name <name>`. To regenerate a migration you just
   wrote: delete the `.sql`, its `meta/<n>_snapshot.json` and its journal entry, then generate again (custom SQL must be
@@ -131,11 +87,11 @@ Plan, in order:
   `orgId`; API errors via `lib/errors.ts` (`conflict`, `forbidden` with a specific code — the staff app shows the
   message for specific 403 codes, not for `forbidden`).
 * Never put model identifiers in commits, PR text or code. Commit trailers: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
-  and `Claude-Session: https://claude.ai/code/session_01EXCTMLZ92wByrEjQWUCpEF`. PR bodies end with
-  "🤖 Generated with [Claude Code](https://claude.com/claude-code)".
+  and `Claude-Session: <the session link your environment gives you>` (earlier sessions: session_01EXCTMLZ92wByrEjQWUCpEF,
+  session_017yjpdaeHzuYAYFpJxt51TL). PR bodies end with "🤖 Generated with [Claude Code](https://claude.com/claude-code)".
 * Never skip, disable or quarantine a failing test. Never push to another branch. Push with `git push -u origin <branch>`.
 
-## 6. Known gotchas hit so far
+## 5. Known gotchas hit so far
 
 * E2E dedicated servers run from source; editing imported server or shared source mid-run changes the running tests.
 * Staff cookies expire; re-mint in `beforeEach` for long suites. Login is rate-limited (10/min/IP).
@@ -143,3 +99,6 @@ Plan, in order:
   assertions.
 * A 403 `forbidden` now shows a generic message in the staff app by design; specific codes show their message.
 * Candidate-app `User-Agent` must match the one captured at check-in, or the server treats it as a second device.
+* A drizzle `sql` expression with bound values (e.g. `evidenceDaysSql`) used in both SELECT and GROUP BY renders as two
+  different parameter sets, and Postgres rejects the query: group / order by position (`sql\`1\``).
+* `pluralize(n, 'day')` in the staff app already includes the number ("3 days").

@@ -311,6 +311,27 @@ the session under `legalHold`; purges leave a metadata tombstone. Event metadata
 `eventRetentionDays`. No
 continuous video. Candidate references are per-session and never reused across exams.
 
+### Privacy operations (`packages/shared/src/privacy-ops.ts`, `services/privacy-requests.ts`, `services/privacy-export.ts`, `services/privacy-ops.ts`, `routes/admin/privacy.ts`)
+
+* **Register** (`privacy_requests`): one row per data-subject request with its deadline (received + 30 days +
+  extension ≤ 60 days with a reason), assignee and resolution; what was asked is encrypted (AAD
+  `privacy-request:<id>`). The candidate link is `ON DELETE SET NULL`, so the record of an answered request survives
+  the erasure it led to. Administrators and owners only.
+* **Export**: `buildCandidateExport` reads the records up front (candidate, accommodations with notes, per session the
+  report without the access link, answers without keys, events and identity checks with image file names) and returns
+  an async iterable of ZIP entries; images are decrypted one at a time while `lib/zip.ts` streams the archive. Only from
+  a request (`exportedAt`, audit before the first byte).
+* **Erasure**: `eraseCandidate` (shared with `DELETE /candidates/:id`) refuses open sessions and legal holds, deletes
+  blobs and templates first (not transactional), then the rows in one transaction (the candidate cascades).
+* **Consent withdrawal**: `withdrawConsent` ends the session in one `withSession` transaction
+  (`finalizeSession(m, 'candidate_withdrew')`: terminated, no grading, `session_terminated` with reason
+  `consent_withdrawn`) and inserts the register row; after commit it purges the session's evidence under the row lock
+  (skipped under legal hold). `uploadEventEvidence` refuses images for a withdrawn or purged session, and purges one
+  stored while the withdrawal raced it.
+* **Deletion evidence**: `runRetention` records each real run in `job_status` (`services/job-status.ts`);
+  `retentionPreview` groups due evidence by UTC day with the job's own day SQL (`evidenceDaysSql`); `opsChecks` turns the
+  job, overdue deletions, overdue requests, capacity, webhooks and alert emails into ok / warning / failing.
+
 ## 9. Accuracy measurement
 
 * `apps/server/src/eval` — identity harness: dataset folder `subject/condition__*.jpg`, computes

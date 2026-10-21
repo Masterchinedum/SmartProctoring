@@ -12,10 +12,13 @@ import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, findMigrationsDir, migrate, type Database } from '../src/db/index.js';
 import { DEFAULT_IDENTITY_THRESHOLDS } from '@sp/shared';
-import { decisionConfigs, eventReviews, events, examSessions, exams, examVersions } from '../src/db/schema.js';
+import { decisionConfigs, eventReviews, events, examSessions, exams, examVersions, privacyRequests } from '../src/db/schema.js';
 import { calibrationBreakdown } from '../src/services/calibration.js';
 import { ensureDecisionConfigs, listDecisionConfigs } from '../src/services/decision-configs.js';
 import { gradeSession } from '../src/services/grading.js';
+import { loadJobStatus, recordJobFinish, recordJobStart } from '../src/services/job-status.js';
+import { createPrivacyRequest } from '../src/services/privacy-requests.js';
+import { createKeyring } from '../src/lib/crypto.js';
 import { sessionExamContent, versionForStart } from '../src/services/exam-versions.js';
 import { dbUrl, TEST_ADMIN_URL } from './global-setup.js';
 
@@ -219,5 +222,33 @@ describe('0011_model_governance', () => {
     const c = await calibrationBreakdown(db, custom, at.getTime() - 60_000, at.getTime() + 60_000);
     expect(c.segments.find((s) => s.dimension === 'decisionConfig')).toMatchObject({ segment: 'unrecorded', samples: 1 });
     expect(c.segments.find((s) => s.dimension === 'model')).toMatchObject({ segment: 'unrecorded', samples: 1 });
+  });
+});
+
+describe('0012_privacy_operations', () => {
+  it('adds the privacy register and job status beside existing data; an erased candidate leaves the request in place', async () => {
+    const database = await databaseAt('0011_model_governance');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    const org = (await one(`INSERT INTO organizations (name) VALUES ('Old Org') RETURNING id`)).id;
+    const cand = (await one(`INSERT INTO candidates (org_id, name) VALUES ($1, 'Old Candidate') RETURNING id`, [org])).id;
+    const exam = (await one(`INSERT INTO exams (org_id, title, duration_sec, status, policy) VALUES ($1, 'Old', 600, 'published', '{}') RETURNING id`, [org])).id;
+    const session = (await one(`INSERT INTO exam_sessions (org_id, exam_id, candidate_id, access_token_hash, duration_ms, status, end_reason) VALUES ($1, $2, $3, 'h', 600000, 'terminated', 'staff_terminated') RETURNING id`, [org, exam, cand])).id;
+
+    await migrate(database);
+
+    const db = database.db;
+    const now = Date.now();
+    const keyring = createKeyring(Buffer.alloc(32, 3));
+    const req = await createPrivacyRequest({ keyring }, db, { id: null, orgId: org }, { kind: 'erasure', subject: 'Old Candidate', candidateId: cand, channel: 'letter', details: 'Delete me.' }, now);
+    expect(req).toMatchObject({ status: 'open', candidateId: cand, source: 'staff' });
+    await recordJobStart(db, 'retention', now);
+    await recordJobFinish(db, 'retention', now, { summary: { sessionsEvidencePurged: 0, evidenceItemsPurged: 0, sessionsEventMetadataPurged: 0, skippedLegalHold: 0, failures: 0 } });
+    expect(await loadJobStatus(db, 'retention')).toMatchObject({ lastError: null, lastSuccessAt: new Date(now) });
+    await sql(`DELETE FROM candidates WHERE id = $1`, [cand]);
+    const [kept] = await db.select().from(privacyRequests).where(eq(privacyRequests.id, req.id));
+    expect(kept).toMatchObject({ candidateId: null, subject: 'Old Candidate' });
+    expect(keyring.decryptString(kept.detailsEnc!, `privacy-request:${req.id}`)).toBe('Delete me.');
+    expect(await db.select().from(examSessions).where(eq(examSessions.id, session))).toHaveLength(0);
   });
 });

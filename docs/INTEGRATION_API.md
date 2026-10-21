@@ -124,7 +124,8 @@ A *session* is one candidate's attempt at one exam.
 ```
 
 * `status` / `endReason`: `submitted` with `candidate_submitted`, `time_expired` or `staff_submitted`;
-  `terminated` with `staff_terminated` or `abandoned` (closed automatically after the organisation's
+  `terminated` with `staff_terminated`, `candidate_withdrew` (the candidate withdrew consent in the exam app; no
+  score, its images deleted) or `abandoned` (closed automatically after the organisation's
   inactivity period — no score is implied). `hold` is set while the exam is `on_hold` (reason, since, message).
 * `counts` are observations awaiting or after human review — not a verdict. Dismissed events are not
   counted in the category totals.
@@ -187,7 +188,7 @@ delivers a `ping` immediately.
 | `session.released` | Staff released a hold | session fields, `reason`, `requireCheck` |
 | `session.pause_requested` | The candidate asked for a pause that needs approval | session fields, `pauseRequest { id, reason }` |
 | `session.submitted` | Submitted by the candidate, on time expiry or by staff | session fields, `endReason`, `score` |
-| `session.terminated` | Ended by staff, or closed automatically after inactivity | session fields, `endReason`, `reason` (`abandoned_after_inactivity` or null) |
+| `session.terminated` | Ended by staff, by the candidate withdrawing consent, or closed automatically after inactivity | session fields, `endReason`, `reason` (`abandoned_after_inactivity`, `consent_withdrawn` or null) |
 | `session.regraded` | An administrator regraded the finished attempt with corrected answer keys / points (sent only when its score or a question's result changed) | session fields, `score` (the new one), `reason` (the administrator's) |
 | `session.reviewed` | Staff completed the review of the attempt (sent again if a reopened review is completed again) | session fields, `outcome` (`no_concerns` \| `concerns` \| `inconclusive` \| `technical_issues`; never the reviewer's note) |
 | `ping` | “Send test” in the staff app | `{ webhookId, message, sentBy }` |

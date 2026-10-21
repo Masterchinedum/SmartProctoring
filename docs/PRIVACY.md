@@ -43,6 +43,9 @@ advice — review it with counsel for your jurisdictions.
 | External verifier credentials (AWS access key pair, optional) | Administrator | `organizations.settings` | Yes (AES-256-GCM) | Until removed or the provider is switched off |
 | Accommodations: what was granted (e.g. extra time, identity verified by staff), a **broad basis only** (accessibility / technical / other — never a diagnosis), scope, dates, who granted / revoked it, and an optional administrators' note | Administrator | `accommodations`; a copy of what applied (without basis or note) on each session | Note: yes (AES-256-GCM); visible to administrators only, never in the audit log, reports or integrations | Until revoked records are deleted with the candidate |
 | Staff identity verification (method, optional note, who, when) — when identity is verified by staff instead of the automated face check | Staff | `events` (`identity_verified_by_staff`), `audit_log` | — | Event retention period |
+| Privacy requests (the register of data-subject requests): kind, who it is from (as given), linked candidate and session, channel, received / due dates, extension and its reason, what was asked, assignee, how it was answered, when the candidate's data was exported / erased | Administrator; consent withdrawal: the candidate in the exam app | `privacy_requests`, `audit_log` | What was asked: yes (AES-256-GCM); administrators and owners only | Kept as the record that requests were answered (they outlive an erased candidate: the candidate link becomes empty). Delete per your records policy |
+| Personal-data exports (ZIP: candidate record, accommodations, sessions with report, answers, events, identity checks, decrypted images) | Generated on request by an administrator | **Not stored on the server**: streamed to the administrator's browser; the request records when, the audit log who | In transit (TLS); handle the file as personal data | Yours: send it securely, then delete your copy |
+| Retention job runs (start, end, counts, last error) | Server | `job_status` | — | The last run only |
 
 Not collected: continuous video/audio, screen contents, other applications, other monitors or
 devices, clipboard contents, keystrokes (which keys; only the time of the last key press is used, in the
@@ -77,6 +80,17 @@ browser — see the interaction-timing row above), pointer positions, location.
   after `abandonAfterDays` without activity (default 30; status terminated, no score, answers kept), so the
   retention periods above start running.
 * Deleting a candidate removes their ID photo and template immediately.
+* **Withdrawal of consent** (`POST /api/candidate/consent/withdraw`, from the exam app): the exam ends at once
+  (status terminated, end reason `candidate_withdrew`, no score; answers and the event timeline are kept), the
+  session's images, face templates and face geometry are deleted right away (not at the end of the retention
+  period), images still in the candidate's browser are refused when they arrive, and a consent-withdrawal request is
+  added to the register so staff arrange an alternative assessment. A session under legal hold keeps its images
+  (the request says so). The approved ID photo belongs to the candidate record and is kept unless staff remove it.
+  The exam app does not show a withdrawal button yet: the endpoint is ready, the candidate-facing wording is to be
+  reviewed first (then link it from the privacy notice and the exam screen).
+* **Showing that deletion happens**: Privacy → *Deletion schedule* lists what is due over the next 30 days, what is
+  past its date but not yet deleted, the sessions under legal hold, and the retention job's last run (recorded in the
+  database whichever server ran it); *Operational checks* turns a failing or stalled job into a warning.
 
 ## 5. Candidate rights and alternatives
 
@@ -87,8 +101,24 @@ person, **identity verified by a staff member instead of the automated face chec
 created and no face comparison is made), and **no camera at all**. Each one is shown to the candidate on
 the welcome screen, the privacy notice describes exactly what still runs (without a camera it mentions no
 camera monitoring and no images), and every exam rule it changed is listed on the session and in its
-report. The notice directs candidates to the privacy contact configured in Settings. Data subject access requests can be served from the
-session report plus the evidence listed in the session's Identity and Events tabs.
+report. The notice directs candidates to the privacy contact configured in Settings.
+
+**Data-subject requests** are handled in Privacy → *Requests* (administrators and owners):
+
+1. Record the request the day it arrives (what was asked, who it is from, how it came in, the date received): the
+   deadline is one month from receipt (GDPR Art. 12(3)); it can be extended once or more, up to two further months in
+   total, with the reason you give the person. Overdue and due-soon requests are counted on the page and in the
+   operational checks.
+2. Link it to the candidate record when there is one. **Access**: *Export the candidate's data (ZIP)* — records and
+   decrypted images of every session (answer keys and face templates are not included; images already deleted are
+   listed in its README). Check the archive, send it securely. **Erasure**: *Erase the candidate…* deletes the
+   candidate, their sessions and images — refused while an exam of theirs is running or under legal hold (lift the
+   hold first, or reject the request with the reason, e.g. an open appeal). **Rectification**: correct the record on
+   the Candidates page. **Restriction**: place their sessions under legal hold. **Objection**: offer an accommodation.
+3. Complete or reject the request with a note saying how it was answered. Every step (created, exported, erased,
+   extended, completed) is in the audit log.
+
+Exports and erasures exist only through a request, so every copy that left the system is accounted for.
 
 ## 6. Accuracy and fairness
 

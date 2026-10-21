@@ -231,6 +231,7 @@ const END_TEXT: Record<EndReason | 'abandoned', string> = {
   time_expired: 'The exam time ran out, and your saved answers were submitted automatically.',
   staff_submitted: 'Your exam was submitted by the exam administrator.',
   staff_terminated: 'Your exam was ended by the exam administrator.',
+  candidate_withdrew: 'You withdrew your consent, so your exam has ended. Your face images were deleted. The exam provider will contact you about another way to take the exam.',
   abandoned: 'This exam was closed because it was not continued for a long time. Your saved answers are kept.',
 };
 

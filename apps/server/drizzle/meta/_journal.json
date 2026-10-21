@@ -85,6 +85,13 @@
       "when": 1792590861682,
       "tag": "0011_model_governance",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792605015078,
+      "tag": "0012_privacy_operations",
+      "breakpoints": true
     }
   ]
 }

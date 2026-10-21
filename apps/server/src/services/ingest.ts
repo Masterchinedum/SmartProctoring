@@ -11,10 +11,10 @@
 import { EVENT_CATALOG, isClientReportable, type EventBatchResponse, type EventType, type EventUpsert, type EvidenceUploadResponse, type ProctoringPolicy } from '@sp/shared';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { events, evidence, sessionPeriods, type EventRow, type ExamSession, type SessionPeriod } from '../db/schema.js';
+import { events, evidence, examSessions, sessionPeriods, type EventRow, type ExamSession, type SessionPeriod } from '../db/schema.js';
 import { conflict } from '../lib/errors.js';
 import { assertInControl } from './candidate-state.js';
-import { storeEvidence } from './evidence.js';
+import { purgeEvidenceRows, storeEvidence } from './evidence.js';
 import { EVENT_SCREENSHOT_SHARE, sessionHasEvidenceCapacity, storageLimitError } from './session-limits.js';
 import { LATE_DELIVERY_MS } from './reporting-gaps.js';
 import { BLOCKING_PERIOD_KINDS, withSession, type SessionPreload } from './session-state.js';
@@ -283,6 +283,11 @@ export interface EvidenceQuery {
   reason?: string | null;
 }
 
+/** The session's images are gone for good: the candidate withdrew consent, or retention deleted them. */
+function evidenceClosed(s: Pick<ExamSession, 'endReason' | 'evidencePurgedAt'>): boolean {
+  return s.endReason === 'candidate_withdrew' || s.evidencePurgedAt != null;
+}
+
 export async function uploadEventEvidence(ctx: Ctx, session: ExamSession, policy: ProctoringPolicy, instanceId: string, evidenceId: string, q: EvidenceQuery, jpeg: Buffer): Promise<EvidenceUploadResponse> {
   const [prev] = await ctx.db.select({ id: evidence.id, sessionId: evidence.sessionId }).from(evidence).where(eq(evidence.id, evidenceId));
   if (prev) {
@@ -291,6 +296,8 @@ export async function uploadEventEvidence(ctx: Ctx, session: ExamSession, policy
   }
   assertInControl(session, instanceId);
   if (!policy.evidence.screenshots) return { stored: false, duplicate: false };
+  // Images that reach the server after the session's evidence was deleted (consent withdrawn, retention) are not kept.
+  if (evidenceClosed(session)) return { stored: false, duplicate: false };
   const now = ctx.now();
   const capturedAt = q.capturedAt != null && Number.isFinite(q.capturedAt) ? Math.min(q.capturedAt, now + FUTURE_TOLERANCE_MS) : now;
   const periods = await ctx.db.select().from(sessionPeriods).where(eq(sessionPeriods.sessionId, session.id));
@@ -317,7 +324,7 @@ export async function uploadEventEvidence(ctx: Ctx, session: ExamSession, policy
       .where(and(eq(evidence.eventId, eventId), eq(evidence.sessionId, session.id)));
     if (perEvent >= policy.evidence.maxScreenshotsPerEvent + 2) return { stored: false, duplicate: false };
   }
-  const { duplicate } = await storeEvidence(ctx, ctx.db, {
+  const { row, duplicate } = await storeEvidence(ctx, ctx.db, {
     id: evidenceId,
     orgId: session.orgId,
     sessionId: session.id,
@@ -329,6 +336,12 @@ export async function uploadEventEvidence(ctx: Ctx, session: ExamSession, policy
     data: jpeg,
     clientInstanceId: instanceId,
   });
+  // The candidate may have withdrawn consent while this upload was in flight (the purge has then already run).
+  const [now2] = await ctx.db.select({ endReason: examSessions.endReason, evidencePurgedAt: examSessions.evidencePurgedAt }).from(examSessions).where(eq(examSessions.id, session.id));
+  if (now2 && evidenceClosed(now2)) {
+    await purgeEvidenceRows(ctx, ctx.db, [row], now2.endReason === 'candidate_withdrew' ? 'consent_withdrawn' : 'retention');
+    return { stored: false, duplicate: false };
+  }
   if (eventId) {
     const [ev] = await ctx.db.select({ id: events.id, sessionId: events.sessionId }).from(events).where(eq(events.id, eventId));
     if (ev && ev.sessionId === session.id) ctx.live.eventChanged(ev.id, session.id);

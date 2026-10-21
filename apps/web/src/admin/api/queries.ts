@@ -50,6 +50,10 @@ export const qk = {
   decisionConfigImpact: (id: string) => ['decision-configs', id, 'impact'] as const,
   calibration: (p: object) => ['calibration', p] as const,
   drift: ['drift'] as const,
+  privacyAll: ['privacy'] as const,
+  privacyRequests: (p: object) => ['privacy', 'requests', p] as const,
+  retentionPreview: ['privacy', 'retention'] as const,
+  opsChecks: ['privacy', 'ops-checks'] as const,
 };
 
 /* ------------------------------------------------------------------ cache patching (realtime + mutations) */

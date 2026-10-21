@@ -107,6 +107,21 @@ server-side identity match, read other sessions, or change category/severity (th
 * Every identity decision records the configuration, calibration and model versions that made it, so a disputed
   decision can be traced to the exact rules in force.
 
+### Privacy operations
+* The privacy register (`/api/admin/privacy-requests`), the retention preview and the operational checks are for
+  administrators and owners only (reviewers get 403); every query is scoped to the staff member's organisation.
+* What a person asked is encrypted at rest (AES-256-GCM, AAD `privacy-request:<id>`, re-encrypted by `rekey`).
+* A personal-data export is produced only from a register entry (`GET /privacy-requests/:id/export`, 10 per minute
+  per address): `exportedAt` on the request and a `privacy_request.exported` audit entry (who, counts) are written
+  before the archive streams. The archive is never stored on the server; it leaves out the session access link (a
+  credential), staff-only decision versions, answer keys and face templates. `Cache-Control: no-store`.
+* Erasure is possible only for an erasure request (`POST /privacy-requests/:id/erase` with `{confirm: true}`), is
+  refused while an exam runs or a legal hold applies, and is audited (`candidate.deleted` with the request id,
+  `privacy_request.erased`).
+* Consent withdrawal (`POST /api/candidate/consent/withdraw`) is open to the holder of the access link whether or not
+  their browser is the one in control: it can only end the exam and delete data, never extend access. Rate-limited
+  (10 per minute per token).
+
 ### Authorisation
 * Every `/api/admin/*` route has `requireStaff(<role>)`; every query is scoped by the staff member's
   organisation (other organisations' ids return 404). Only owners create/modify owners and admins; the last
