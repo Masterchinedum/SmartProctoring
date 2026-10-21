@@ -56,6 +56,18 @@ export interface Config {
   capacity: { maxVisionWaitMs: number; maxEventLoopP99Ms: number; maxDbWaiting: number };
   /** Bearer token for GET /metrics (METRICS_TOKEN, ≥ 24 characters); null = /metrics is not served. */
   metricsToken: string | null;
+  /**
+   * Admission at exam start (services/candidate-actions.ts): while this instance is at capacity (services/capacity.ts)
+   * a start is deferred — 503 start_deferred + Retry-After, the candidate app retries on its own and the exam clock
+   * has not started — for at most EXAM_START_MAX_DEFER_SEC (300) in total, then it is let through.
+   * EXAM_START_ADMISSION=false turns it off.
+   */
+  examStartAdmission: { enabled: boolean; maxDeferMs: number };
+  /**
+   * LOAD_AWARE_SAMPLING (default true): while the face-analysis queue is long, routine identity samples are spaced out,
+   * at most to the Balanced sampling intensity (services/identity-evidence.ts loadAwareDelayMs).
+   */
+  loadAwareSampling: boolean;
   webDistDir: string;
   bootstrap: { email: string | null; password: string | null; orgName: string };
   logLevel: string;
@@ -303,6 +315,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxDbWaiting: Math.max(0, int(env.CAPACITY_MAX_DB_WAITING, 5)),
     },
     metricsToken,
+    examStartAdmission: {
+      enabled: bool(env.EXAM_START_ADMISSION, true),
+      maxDeferMs: Math.min(3600, Math.max(0, int(env.EXAM_START_MAX_DEFER_SEC, 300))) * 1000,
+    },
+    loadAwareSampling: bool(env.LOAD_AWARE_SAMPLING, true),
     webDistDir: resolvePath(env.WEB_DIST_DIR || '../web/dist', root),
     bootstrap: {
       email: env.BOOTSTRAP_ADMIN_EMAIL || null,

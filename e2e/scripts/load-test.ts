@@ -28,7 +28,11 @@
  *       SAMPLE_SEC (default 30 s), no start-up window, server cadence ignored (to compare per-frame cost).
  * The exam policy is created to match (liveness and ID-photo comparison off in both).
  *
- * 503 "server busy" answers are retried after Retry-After (BUSY_RETRIES, default 3), as the web client does.
+ * 503 "server busy" answers are retried after Retry-After plus a random 0-50 % (BUSY_RETRIES, default 3), as the
+ * web client does. A deferred exam start (503 start_deferred: the server is at capacity, admission at exam start) is
+ * retried until the server lets it through (at most EXAM_START_MAX_DEFER_SEC later); the "POST start" latency is
+ * then the candidate's wait. Start the server with EXAM_START_ADMISSION=false to measure without admission, as the
+ * runs in docs/PERFORMANCE.md §7 did.
  * Optional: STAFF_WS=<n> keeps n staff dashboards connected to /api/admin/live during the run (realtime
  * summaries are only built while someone listens); SAMPLE_SEC=<s> changes the routine identity-sample interval
  * (CADENCE=v1 SAMPLE_SEC=1 with enough candidates saturates the vision pool: see "identity samples/s");
@@ -155,7 +159,7 @@ class Candidate {
     readonly frames: Buffer[],
   ) {}
 
-  async call(label: string, method: string, path: string, opts: { json?: unknown; jpeg?: Buffer; query?: Record<string, string | number> } = {}): Promise<any> {
+  async call(label: string, method: string, path: string, opts: { json?: unknown; jpeg?: Buffer; query?: Record<string, string | number>; busyRetries?: number } = {}): Promise<any> {
     const qs = opts.query ? '?' + new URLSearchParams(Object.entries(opts.query).map(([k, v]) => [k, String(v)])) : '';
     const headers: Record<string, string> = { authorization: `Bearer ${this.token}`, 'x-client-instance': this.instance };
     let body: BodyInit | undefined;
@@ -173,9 +177,9 @@ class Candidate {
         const text = await res.text();
         // Like the web client: "server busy" (503 + Retry-After) is retried with the same payload. The latency
         // recorded is what the candidate experiences (first send to final answer); retries are counted apart.
-        if (res.status === 503 && attempt < BUSY_RETRIES) {
+        if (res.status === 503 && attempt < (opts.busyRetries ?? BUSY_RETRIES)) {
           busyRetries.set(label, (busyRetries.get(label) ?? 0) + 1);
-          await sleep(1000 * (Number(res.headers.get('retry-after')) || 2));
+          await sleep(1000 * (Number(res.headers.get('retry-after')) || 2) * (1 + 0.5 * Math.random()));
           continue;
         }
         record(label, performance.now() - t0, res.status);
@@ -223,7 +227,8 @@ class Candidate {
     checkInFrames.push(sent);
     const done = await this.call('POST check complete', 'POST', `/checks/${chk.checkId}/complete`);
     if (done.outcome !== 'passed') return (failCheckIn(done.__error ? `complete ${done.__error}` : `${done.outcome}: ${String(done.message ?? '').slice(0, 70)}`), false);
-    const started = await this.call('POST start', 'POST', '/start');
+    // Retried until admitted: the server lets a deferred start through after EXAM_START_MAX_DEFER_SEC at the latest.
+    const started = await this.call('POST start', 'POST', '/start', { busyRetries: Number.POSITIVE_INFINITY });
     if (started.__error) return (failCheckIn(`start ${started.__error}`), false);
     this.status = 'active';
     this.startedAt = Date.now();

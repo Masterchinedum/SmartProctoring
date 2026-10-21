@@ -135,9 +135,16 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     return completeCheck(ctx, c.session.id, instanceId, checkId);
   });
 
-  app.post('/start', { config: limit(30) }, async (req) => {
+  app.post('/start', { config: limit(30) }, async (req, reply) => {
     const c = getCandidate(req);
-    await startSession(ctx, c.session.id, requireInstanceId(req));
+    const { deferred } = await startSession(ctx, c.session.id, requireInstanceId(req));
+    if (deferred) {
+      // Not an error of the candidate's: the server is at capacity (admission at exam start). The app retries.
+      return reply
+        .status(503)
+        .header('Retry-After', String(deferred.retryAfterSec))
+        .send({ error: 'start_deferred', message: 'Many candidates are starting at the same time. Your exam will start in a moment; your exam time has not started yet.', retryAfterSec: deferred.retryAfterSec });
+    }
     return state(req);
   });
 

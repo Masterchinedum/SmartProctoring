@@ -36,6 +36,7 @@ import {
   accumulate,
   CLEAR_MATCH_LLR,
   frameEvidence,
+  loadAwareDelayMs,
   nextSampleDelayMs,
   sampleLabel,
   POOR_LIGHT_GUIDANCE,
@@ -49,6 +50,7 @@ import {
   type EvidenceEntry,
   type FrameEvidence,
 } from './identity-evidence.js';
+import { currentCapacity, samplingPressure } from './capacity.js';
 import { aggregateBurst, scoreReference } from './identity-gallery.js';
 import { IDENTITY_SAMPLE_SHARE, sessionHasEvidenceCapacity } from './session-limits.js';
 import { holdNow, identityState, withSession, type SessionMutation, type SessionPreload } from './session-state.js';
@@ -799,7 +801,11 @@ async function applyEvidence(
   const poorLight = poorLightSuspect(st.evidence) && !st.openMismatchEventId;
   if (poorLight) await notePoorLightSuspect(m, st, row);
 
-  const nextSampleInMs = nextSampleDelayMs(env.policy.identity, { activeSince: st.activeSince, acc: st.evidence }, m.now);
+  // A busy face-analysis queue spaces routine samples out (never the faster cadence while evidence builds up).
+  const pressure = m.ctx.config.loadAwareSampling ? samplingPressure(m.ctx.config.capacity, currentCapacity(m.ctx).visionWaitMs) : 0;
+  const nextSampleInMs = loadAwareDelayMs(env.policy.identity, { activeSince: st.activeSince, acc: st.evidence }, m.now, pressure);
+  if (nextSampleInMs > nextSampleDelayMs(env.policy.identity, { activeSince: st.activeSince, acc: st.evidence }, m.now)) m.ctx.metrics.identitySamplesSpacedOut.inc();
+  st.cadenceMs = nextSampleInMs;
   const faster = st.evidence.state !== 'consistent' || st.evidence.unusableStreak > 0 || st.openMismatchEventId != null;
   const followUpInMs = faster ? nextSampleInMs : null;
   st.followUpRequestedAt = followUpInMs != null ? m.now : null;

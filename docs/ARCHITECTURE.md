@@ -50,7 +50,10 @@ No code copied from third parties. See `THIRD_PARTY_NOTICES.md`.
 * **initial check** (`POST /api/candidate/checks` purpose=`initial`): camera readiness, one face, quality gate,
   active liveness challenge, then the server builds the **protected identity reference** (multiple
   frontal embeddings, encrypted). Optional comparison with approved ID photo. → **ready**.
-* **start** → **active**, clock starts, `active` period opens.
+* **start** → **active**, clock starts, `active` period opens. Admission: while the instance is at capacity
+  (`services/capacity.ts`) the start is deferred (503 `start_deferred` + Retry-After; the session stays `ready`,
+  `startDeferredSince` records the first deferral, the client retries) for at most `EXAM_START_MAX_DEFER_SEC`; the
+  `session_started` event notes the delay (`details.startDeferredMs`).
 * **pause**: per policy (reason? approval?). Monitoring stops, `paused` period (unobserved) opens; clock
   stops or continues per `policy.pause.timerBehavior`. Candidate may close the browser.
 * **resume**: candidate reopens link → `requiredCheck='resume'` → same readiness + liveness + identity
@@ -131,7 +134,10 @@ disconnect if `disconnectTimerBehavior='continue'`).
    the images of its representative frame only. The candidate is told only whether an image was usable (and guidance
    about it), never a decision, score or evidence state. Cadence is server-driven (`nextSampleInMs`: start-up
    interval for `startupWindowSec` after a (re)start, else `periodicCheckIntervalSec`, faster while monitoring /
-   suspect — 5 s / 2.5 s whatever the policy). Routine (periodic) samples take `routineBurstSize` frames; every
+   suspect — 5 s / 2.5 s whatever the policy). Load-aware: while the instance's face-analysis queue is long, the
+   routine interval of a 'consistent' session is spaced out in proportion, at most to the Balanced intensity's
+   (`loadAwareDelayMs`); the faster intervals and client-triggered samples never are, and the watchdog waits at least
+   the interval last told (`identityState.cadenceMs`). Routine (periodic) samples take `routineBurstSize` frames; every
    triggered sample (exam start / resume, track break, appearance change, face return, camera reconnect, after
    multiple people / obstruction, follow-ups and server requests) takes `burstSize` (`burstSizeFor`). The per-exam
    *sampling intensity* (`samplingProfile`, a label the admin UI fills the numbers from; the numbers are the source of

@@ -184,6 +184,41 @@ afterEach(() => {
 
 /* ------------------------------------------------------------------ tests */
 
+describe('CandidateController — exam start deferred while the server is at capacity', () => {
+  it('waits as long as the server asks (plus a spread), tells the screen, then starts by itself', async () => {
+    server.status = 'ready';
+    const c = newController();
+    await c.load();
+    let calls = 0;
+    (h.api as CandidateApi).start = async () => {
+      calls++;
+      if (calls === 1) throw new CandidateApiError(503, 'start_deferred', 'Many candidates are starting at the same time.', undefined, 8_000);
+      server.status = 'active';
+      return { data: server.state(), timing: { sentAt: Date.now(), receivedAt: Date.now() } };
+    };
+    let told = 0;
+    const started = c.startExam(() => told++);
+    await tick(10);
+    expect([calls, told]).toEqual([1, 1]);
+    await tick(7_900);
+    expect(calls).toBe(1); // never before the server's Retry-After
+    await tick(4_200); // at most +50 %
+    expect(calls).toBe(2);
+    await started;
+    expect(c.getSnapshot().state?.session.status).toBe('active');
+  });
+
+  it('throws any other failure as before', async () => {
+    server.status = 'ready';
+    const c = newController();
+    await c.load();
+    (h.api as CandidateApi).start = async () => {
+      throw new CandidateApiError(409, 'invalid_state', 'The exam can only be started after the readiness check');
+    };
+    await expect(c.startExam()).rejects.toMatchObject({ code: 'invalid_state' });
+  });
+});
+
 describe('CandidateController — answers typed just after a staff-approved pause (P1-1)', () => {
   it('keeps the answer, does not signal a reporting outage, and saves it once the exam is active again', async () => {
     server.answers.set('q1', { questionId: 'q1', value: 'before', clientSeq: 1, savedAt: 1 });

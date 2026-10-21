@@ -11,6 +11,7 @@ import type {
 } from '@sp/shared';
 import type { AttentionState } from '@sp/detection';
 import {
+  busyRetryDelayMs,
   CandidateApiError,
   classifyApiError,
   createCandidateApi,
@@ -790,9 +791,23 @@ export class CandidateController {
     await this.applyState(next);
   }
 
-  async startExam(): Promise<void> {
-    const { data, timing } = await this.api.start();
-    await this.applyState(data, timing);
+  /**
+   * Start the exam. A server at capacity defers the start (503 start_deferred + Retry-After; the exam clock has not
+   * started): wait as long as it asks, plus a random spread so candidates deferred together do not return together,
+   * and try again. `onDeferred` lets the screen say so. Any other failure is thrown as before.
+   */
+  async startExam(onDeferred?: () => void): Promise<void> {
+    for (;;) {
+      try {
+        const { data, timing } = await this.api.start();
+        await this.applyState(data, timing);
+        return;
+      } catch (e) {
+        if (!(e instanceof CandidateApiError) || e.code !== 'start_deferred') throw e;
+        onDeferred?.();
+        await new Promise((res) => setTimeout(res, busyRetryDelayMs(e, 5_000)));
+      }
+    }
   }
 
   /**

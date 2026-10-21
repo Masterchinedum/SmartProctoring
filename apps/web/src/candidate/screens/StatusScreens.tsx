@@ -11,6 +11,7 @@ export function ReadyScreen() {
   const snap = useSnapshot();
   const state = snap.state!;
   const [busy, setBusy] = useState(false);
+  const [deferred, setDeferred] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showNotice, setShowNotice] = useState(false);
   const p = state.exam.policy;
@@ -25,10 +26,12 @@ export function ReadyScreen() {
     setError(null);
     if (p.browser.requireFullscreen) await enterFullscreen();
     try {
-      await ctrl.startExam();
+      // While the server is busy the start is retried by itself (the exam clock has not started).
+      await ctrl.startExam(() => setDeferred(true));
     } catch (e) {
       setError(errorMessage(e));
       setBusy(false);
+      setDeferred(false);
     }
   };
 
@@ -85,9 +88,13 @@ export function ReadyScreen() {
           )}
           <div className="row">
             <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy} data-testid="start-exam">
-              {busy ? 'Starting…' : 'Start exam'}
+              {busy ? (deferred ? 'Waiting to start…' : 'Starting…') : 'Start exam'}
             </button>
           </div>
+          {/* Persistent live region: announced once when the start is held back. */}
+          <p role="status" className="muted" data-testid="start-deferred">
+            {deferred ? 'Many candidates are starting at the same time. Your exam will start by itself in a moment — your exam time has not started yet.' : ''}
+          </p>
         </section>
       </main>
       {showNotice && <PrivacyNoticeDialog notice={state.consent.notice} onClose={() => setShowNotice(false)} />}

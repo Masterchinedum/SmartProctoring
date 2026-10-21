@@ -34,6 +34,16 @@ export function assessCapacity(limits: Config['capacity'], vision: VisionLoad | 
   return { accepting: reasons.length === 0, reasons, visionWaitMs };
 }
 
+/**
+ * How hard to space routine identity samples out (0..1): 0 while a new sample would wait less than half the vision
+ * limit, rising linearly to 1 at the limit (services/identity-evidence.ts loadAwareDelayMs).
+ */
+export function samplingPressure(limits: Config['capacity'], visionWaitMs: number | null): number {
+  if (visionWaitMs == null) return 0;
+  const from = limits.maxVisionWaitMs / 2;
+  return Math.min(1, Math.max(0, (visionWaitMs - from) / (limits.maxVisionWaitMs - from)));
+}
+
 /** This instance, now (the event-loop and database numbers are the load monitor's last 10-s sample). */
 export function currentCapacity(ctx: Pick<Ctx, 'config' | 'vision' | 'loadMonitor'>): CapacityStatus {
   return assessCapacity(ctx.config.capacity, ctx.vision.load, ctx.loadMonitor.snapshot);

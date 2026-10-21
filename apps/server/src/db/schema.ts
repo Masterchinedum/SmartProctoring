@@ -278,6 +278,11 @@ export interface IdentityEngineState {
   openNoSamplesEventId?: string | null;
   /** Server receipt time of the latest identity sample (frame) while active — the watchdog's measure of silence. */
   lastSampleReceivedAt?: number | null;
+  /**
+   * The routine interval the client was last told (nextSampleInMs; longer than the policy's while the server was
+   * busy, identity-evidence.ts loadAwareDelayMs): the watchdog never calls samples overdue before it has passed.
+   */
+  cadenceMs?: number | null;
 }
 
 /** A burst of identity frames being collected (IdentitySampleQuery burstId / burstIndex / burstSize). */
@@ -364,6 +369,11 @@ export const examSessions = pgTable(
     checkAttemptsResetAt: ts('check_attempts_reset_at'),
     pauseCount: integer('pause_count').notNull().default(0),
     startedAt: ts('started_at'),
+    /**
+     * First time the exam start was deferred because the server was at capacity (admission at exam start,
+     * candidate-actions.ts); cleared when the exam starts. Bounds how long a candidate can be kept waiting.
+     */
+    startDeferredSince: ts('start_deferred_since'),
     endedAt: ts('ended_at'),
     legalHold: boolean('legal_hold').notNull().default(false),
     evidencePurgedAt: ts('evidence_purged_at'),

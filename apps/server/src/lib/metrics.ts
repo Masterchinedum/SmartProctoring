@@ -11,7 +11,7 @@ import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from '@pro
 import { and, count, gte, inArray, isNotNull, min, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { emailAlerts, examSessions, webhookDeliveries, webhooks } from '../db/schema.js';
-import { CAPACITY_REASONS, currentCapacity } from '../services/capacity.js';
+import { CAPACITY_REASONS, currentCapacity, samplingPressure } from '../services/capacity.js';
 import { CALIBRATION } from '../vision/calibration.js';
 import { EMBEDDING_MODEL_CURRENT } from '../vision/embeddings.js';
 import type { VisionObserver, VisionPriority } from '../vision/types.js';
@@ -77,6 +77,16 @@ export class AppMetrics {
   readonly jobLastSuccess = new Gauge({ name: 'sp_job_last_success_timestamp_seconds', help: 'When the job last completed without error on this instance (unix seconds).', labelNames: ['job'] as const, registers: [this.registry] });
   readonly retentionFailures = new Counter({ name: 'sp_retention_failures_total', help: 'Sessions whose evidence or event metadata the retention job could not purge (it retries next run).', registers: [this.registry] });
   readonly storageErrors = new Counter({ name: 'sp_evidence_storage_errors_total', help: 'Evidence store operations that failed (put / get / delete).', labelNames: ['op'] as const, registers: [this.registry] });
+  readonly identitySamplesSpacedOut = new Counter({
+    name: 'sp_identity_samples_spaced_out_total',
+    help: 'Identity samples answered with a longer routine interval because the face-analysis queue was busy (load-aware sampling).',
+    registers: [this.registry],
+  });
+  readonly examStartsDeferred = new Counter({
+    name: 'sp_exam_starts_deferred_total',
+    help: 'Exam starts deferred because this instance was at capacity (the candidate app retries; the exam clock has not started).',
+    registers: [this.registry],
+  });
   readonly staffSockets = new Gauge({ name: 'sp_staff_websockets', help: 'Open staff dashboard WebSockets on this instance.', registers: [this.registry] });
 
   constructor() {
@@ -147,6 +157,15 @@ export class AppMetrics {
         if (!self.ctx) return;
         const reasons = currentCapacity(self.ctx).reasons;
         for (const r of CAPACITY_REASONS) this.set({ reason: r }, reasons.includes(r) ? 1 : 0);
+      },
+    });
+    new Gauge({
+      name: 'sp_identity_sampling_pressure',
+      help: 'How far routine identity samples are being spaced out because of the face-analysis queue (0 = not, 1 = to the Balanced intensity).',
+      registers: reg,
+      collect() {
+        const c = self.ctx;
+        if (c) this.set(c.config.loadAwareSampling ? samplingPressure(c.config.capacity, currentCapacity(c).visionWaitMs) : 0);
       },
     });
     new Gauge({

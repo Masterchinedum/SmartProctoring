@@ -472,6 +472,7 @@ export class SessionMutation {
       secondOpinionVeto: null,
       activeSince: active ? this.now : null,
       sampleRequest: active ? { trigger: 'exam_start', since: this.now } : null,
+      cadenceMs: null,
     });
   }
 
@@ -539,11 +540,19 @@ export function assertStatus(m: SessionMutation, allowed: SessionStatus[], messa
 export async function startExam(m: SessionMutation): Promise<void> {
   assertStatus(m, ['ready'], 'The exam can only be started after the readiness check');
   const policy = await m.policy();
-  m.set({ status: 'active', startedAt: m.session.startedAt ?? new Date(m.now), policy, currentQuestionIndex: m.session.currentQuestionIndex ?? 0 });
+  // Admission at exam start (candidate-actions.ts startSession) may have held the start back while the server was busy.
+  const deferredMs = m.session.startDeferredSince ? Math.max(0, m.now - m.session.startDeferredSince.getTime()) : null;
+  m.set({ status: 'active', startedAt: m.session.startedAt ?? new Date(m.now), policy, currentQuestionIndex: m.session.currentQuestionIndex ?? 0, startDeferredSince: null });
   m.clockStart();
   await m.switchPeriod('active', m.now);
   m.resetIdentityCounters();
-  await m.addEvent({ type: 'session_started', details: { durationMs: m.session.durationMs } });
+  await m.addEvent({
+    type: 'session_started',
+    details: { durationMs: m.session.durationMs, ...(deferredMs != null ? { startDeferredMs: deferredMs } : {}) },
+    ...(deferredMs != null
+      ? { observation: `The exam was started. The start was held back ${Math.round(deferredMs / 1000)} s while the server was busy; the exam clock started only now.` }
+      : {}),
+  });
 }
 
 /** active -> paused (formal pause). Monitoring stops; paused period (unobserved) opens. */

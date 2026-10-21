@@ -23,6 +23,7 @@ import { badRequest, conflict, invalidState, notFound, validationFailed } from '
 import { assertInControl, buildCandidateState, instanceInControl, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { recordMultipleInstances } from './checks.js';
 import { applyInstanceUsage, evaluateInstanceUsage } from './instance-usage.js';
+import { currentCapacity } from './capacity.js';
 import { identitySampleRequest, sampleWatchdog } from './identity-evidence.js';
 import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
 import { assertStatus, finalizeSession, identityState, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession, type SessionMutation } from './session-state.js';
@@ -44,11 +45,37 @@ export async function acceptConsent(ctx: Ctx, sessionId: string, body: ConsentRe
 
 /* ------------------------------------------------------------------ start / submit */
 
-export async function startSession(ctx: Ctx, sessionId: string, instanceId: string): Promise<void> {
-  await withSession(ctx, sessionId, async (m) => {
+/** Retry-After of a deferred exam start: about how long the face-analysis backlog needs, within these bounds. */
+export const START_RETRY_AFTER_SEC = Object.freeze({ min: 5, max: 30 });
+
+/**
+ * Start the exam — unless this instance is at capacity (services/capacity.ts): then the start is deferred and the
+ * candidate app tries again after `retryAfterSec`. A scheduled exam starts everyone at once, and every start adds a
+ * burst of identity samples for its first minutes (PERFORMANCE.md §6), so letting starts through only while there is
+ * room staggers them by itself and keeps swap detection prompt for those already writing. The exam clock does not run
+ * while a start is deferred, and no candidate waits longer than `examStartAdmission.maxDeferMs` in total (from the
+ * first deferral); the start then goes ahead whatever the load. The delay is noted on the "Exam started" timeline entry.
+ */
+export async function startSession(ctx: Ctx, sessionId: string, instanceId: string): Promise<{ deferred: { retryAfterSec: number } | null }> {
+  return withSession(ctx, sessionId, async (m) => {
     assertInControl(m.session, instanceId);
+    const deferred = examStartDeferral(m);
+    if (deferred) return { deferred };
     await startExam(m);
+    return { deferred: null };
   });
+}
+
+function examStartDeferral(m: SessionMutation): { retryAfterSec: number } | null {
+  const admission = m.ctx.config.examStartAdmission;
+  if (!admission.enabled || m.session.status !== 'ready') return null; // startExam explains a wrong state
+  const capacity = currentCapacity(m.ctx);
+  const since = m.session.startDeferredSince?.getTime() ?? null;
+  if (capacity.accepting || (since != null && m.now - since >= admission.maxDeferMs)) return null;
+  if (since == null) m.set({ startDeferredSince: new Date(m.now) });
+  m.ctx.metrics.examStartsDeferred.inc();
+  const waitSec = Math.ceil((capacity.visionWaitMs ?? 0) / 1000);
+  return { retryAfterSec: Math.min(START_RETRY_AFTER_SEC.max, Math.max(START_RETRY_AFTER_SEC.min, waitSec)) };
 }
 
 export async function candidateSubmit(ctx: Ctx, sessionId: string, instanceId: string): Promise<void> {

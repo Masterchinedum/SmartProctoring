@@ -69,6 +69,23 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
   Stagger start times to cut the peak: with starts spread over S minutes, the peak is ≈ (0.2 + 0.9 ÷ S)
   frames/s per candidate. Beyond capacity, identity bursts wait seconds, then answer 503 (retried by the
   client), and check-ins slow down. Check frames are analysed before routine identity samples.
+* **Built-in protection at the peak** (both on by default; they use the capacity signal of §5):
+  - *Admission at exam start.* While an instance is at capacity, "Start exam" is deferred: HTTP 503
+    `start_deferred` with `Retry-After` (5–30 s). The candidate app says "Many candidates are starting at the same
+    time…", waits as asked plus a random spread and tries again by itself. The exam clock has not started, the
+    passed check-in stays valid, and nobody waits longer than `EXAM_START_MAX_DEFER_SEC` (default 300) in total:
+    after that the start goes ahead whatever the load. Starts are thereby staggered automatically. Staff see the
+    delay on the "Exam started" timeline entry ("The start was held back 40 s while the server was busy"); metric
+    `sp_exam_starts_deferred_total`. Off: `EXAM_START_ADMISSION=false`.
+  - *Load-aware sampling.* While the face-analysis queue is long, routine identity samples of sessions whose
+    evidence is consistent are spaced out, in proportion to the queue, **at most to the Balanced sampling
+    intensity** (12 s in the start-up window, 30 s after), whose accuracy was measured (§7.7). Never slowed: the
+    faster sampling while evidence builds up (*suspect*, *monitoring*, unusable images), and every sample the
+    candidate's browser takes on its own (exam start and resume, a break in the face track, an abrupt appearance
+    change, a face returning). Metrics `sp_identity_sampling_pressure`, `sp_identity_samples_spaced_out_total`.
+    Off: `LOAD_AWARE_SAMPLING=false`.
+  These smooth a peak; they do not replace sizing. Plan capacity as below and treat sustained deferrals or
+  spacing as a signal to add instances.
 * **Tuning**: `VISION_THREADS` (default CPU count − 1) = CPU threads for face analysis; `PG_POOL_MAX` (default
   20 per instance; instances × `PG_POOL_MAX` < Postgres `max_connections`); `PG_STATEMENT_TIMEOUT_MS`
   (default 60 s). Memory ≈ 400 MB + 100 MB per vision thread. Postgres: ≈ 0.25 vCPU and ≈ 1,500 queries/s per

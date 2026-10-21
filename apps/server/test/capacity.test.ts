@@ -2,12 +2,17 @@
  * Behaviour at the face-analysis capacity limit (docs/PERFORMANCE.md §6–§7): what refused clients are told, the
  * health / readiness / capacity signals, admission at exam start and the load-aware sampling cadence.
  */
+import { SAMPLING_PROFILES } from '@sp/shared';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { assessCapacity } from '../src/services/capacity.js';
+import { events, examSessions } from '../src/db/schema.js';
+import { assessCapacity, samplingPressure } from '../src/services/capacity.js';
+import { CADENCE, loadAwareDelayMs, nextSampleDelayMs, sampleWatchdog } from '../src/services/identity-evidence.js';
+import { identityState } from '../src/services/session-state.js';
 import type { LoadSnapshot } from '../src/lib/load-monitor.js';
 import type { VisionLoad } from '../src/vision/index.js';
-import { sample, startedSession } from './flow.js';
-import { createTestEnv, type TestEnv } from './helpers.js';
+import { burst, consent, hb, runCheck, sample, startedSession } from './flow.js';
+import { createTestEnv, type CandidateClient, type TestEnv } from './helpers.js';
 
 let env: TestEnv;
 beforeAll(async () => {
@@ -99,5 +104,133 @@ describe('a full face-analysis queue', () => {
     expect(refused.json()).toMatchObject({ error: 'vision_busy', retryAfterSec: 7 });
     const retried = await sample(env, c, { person: 'alice' }, 'periodic', sampleId);
     expect(retried.statusCode).toBe(200);
+  });
+});
+
+/** A queue that makes a new identity sample wait `ms` (background work). */
+const busyFor = (ms: number) => env.vision.setLoad({ queued: { interactive: 0, background: Math.round(ms / 30) }, estimatedWaitMs: { interactive: 0, background: ms } });
+const sessionRow = async (id: string) => (await env.ctx.db.select().from(examSessions).where(eq(examSessions.id, id)))[0];
+
+/** Invite -> consent -> passed check-in: ready to start. */
+async function readySession(): Promise<{ id: string; c: CandidateClient }> {
+  const s = await env.newSession();
+  const c = env.candidateClient(s.token);
+  await consent(c);
+  expect((await runCheck(env, c, 'initial', { spec: { person: 'alice' } })).complete!.outcome).toBe('passed');
+  return { id: s.id, c };
+}
+const start = (c: CandidateClient) => c.req('POST', '/api/candidate/start');
+
+describe('admission at exam start', () => {
+  it('defers a start while the server is at capacity (503 start_deferred + Retry-After), without starting the clock', async () => {
+    const { id, c } = await readySession();
+    busyFor(9_000);
+    const res = await start(c);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['retry-after']).toBe('9');
+    expect(res.json()).toMatchObject({ error: 'start_deferred', retryAfterSec: 9 });
+    const row = await sessionRow(id);
+    expect(row).toMatchObject({ status: 'ready', runningSince: null, usedMs: 0 });
+    expect(row.startDeferredSince?.getTime()).toBe(env.clock.t);
+
+    // Room again: the start goes ahead, and staff see how long it was held back.
+    env.clock.advance(40_000);
+    env.vision.setLoad({});
+    const ok = await start(c);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().session.status).toBe('active');
+    expect((await sessionRow(id)).startDeferredSince).toBeNull();
+    const [started] = await env.ctx.db.select().from(events).where(and(eq(events.sessionId, id), eq(events.type, 'session_started')));
+    expect(started.details).toMatchObject({ startDeferredMs: 40_000 });
+    expect(started.observation).toMatch(/held back 40 s while the server was busy/);
+  });
+
+  it('keeps Retry-After between 5 and 30 s', async () => {
+    const a = await readySession();
+    busyFor(2_500);
+    expect((await start(a.c)).headers['retry-after']).toBe('5');
+    busyFor(120_000);
+    expect((await start(a.c)).headers['retry-after']).toBe('30');
+  });
+
+  it('never keeps a candidate waiting longer than EXAM_START_MAX_DEFER_SEC in total (counted from the first deferral)', async () => {
+    const { id, c } = await readySession();
+    busyFor(9_000);
+    expect((await start(c)).statusCode).toBe(503);
+    env.clock.advance(env.config.examStartAdmission.maxDeferMs - 1_000);
+    expect((await start(c)).statusCode).toBe(503); // still within the limit: the first deferral counts, not the latest
+    env.clock.advance(1_000);
+    const res = await start(c); // the server is still busy, but this candidate has waited long enough
+    expect(res.statusCode).toBe(200);
+    expect((await sessionRow(id)).status).toBe('active');
+  });
+
+  it('does not defer a session that is not ready (the usual state error), and can be switched off', async () => {
+    busyFor(9_000);
+    const s = await env.newSession();
+    const c = env.candidateClient(s.token);
+    await consent(c);
+    expect((await start(c)).statusCode).toBe(409);
+
+    const off = await createTestEnv({ env: { EXAM_START_ADMISSION: 'false' } });
+    try {
+      off.vision.setLoad({ estimatedWaitMs: { interactive: 0, background: 9_000 } });
+      await startedSession(off, off.candidateClient()); // asserts a 200 start
+    } finally {
+      await off.close();
+    }
+  });
+});
+
+describe('load-aware sampling cadence', () => {
+  const policy = SAMPLING_PROFILES.maximum;
+  const consistent = { state: 'consistent' as const, unusableStreak: 0 };
+  const t0 = 1_000_000;
+
+  it('spaces routine samples out with the queue pressure, at most to the Balanced intensity', () => {
+    const inStartup = { activeSince: t0, acc: consistent };
+    const later = { activeSince: t0 - 10 * 60_000, acc: consistent };
+    expect(loadAwareDelayMs(policy, inStartup, t0 + 30_000, 0)).toBe(6_000);
+    expect(loadAwareDelayMs(policy, inStartup, t0 + 30_000, 0.5)).toBe(9_000);
+    expect(loadAwareDelayMs(policy, inStartup, t0 + 30_000, 1)).toBe(SAMPLING_PROFILES.balanced.startupIntervalSec * 1000);
+    expect(loadAwareDelayMs(policy, later, t0, 1)).toBe(SAMPLING_PROFILES.balanced.periodicCheckIntervalSec * 1000);
+    expect(loadAwareDelayMs(policy, later, t0, 7)).toBe(30_000); // pressure is capped at 1
+  });
+
+  it('never slows the faster cadence while evidence builds up, nor exams already at the Balanced intensity', () => {
+    const at = { activeSince: t0, acc: consistent };
+    expect(loadAwareDelayMs(policy, { ...at, acc: { state: 'suspect', unusableStreak: 0 } }, t0, 1)).toBe(CADENCE.suspectMs);
+    expect(loadAwareDelayMs(policy, { ...at, acc: { state: 'monitoring', unusableStreak: 0 } }, t0, 1)).toBe(CADENCE.monitoringMs);
+    expect(loadAwareDelayMs(policy, { ...at, acc: { state: 'consistent', unusableStreak: 1 } }, t0, 1)).toBe(nextSampleDelayMs(policy, { ...at, acc: { state: 'consistent', unusableStreak: 1 } }, t0));
+    expect(loadAwareDelayMs(SAMPLING_PROFILES.balanced, at, t0, 1)).toBe(12_000);
+  });
+
+  it('pressure: 0 below half the vision limit, 1 at the limit', () => {
+    const limits = env.config.capacity;
+    expect(samplingPressure(limits, null)).toBe(0);
+    expect(samplingPressure(limits, limits.maxVisionWaitMs / 2)).toBe(0);
+    expect(samplingPressure(limits, limits.maxVisionWaitMs * 0.75)).toBe(0.5);
+    expect(samplingPressure(limits, limits.maxVisionWaitMs * 3)).toBe(1);
+  });
+
+  it('the watchdog waits for the interval the client was told, so a spaced-out cadence is not "overdue"', () => {
+    const st = { activeSince: t0 - 10 * 60_000, evidence: { state: 'consistent' as const, unusableStreak: 0 }, lastSampleReceivedAt: t0 };
+    expect(sampleWatchdog(policy, st, t0 + 50_000)).toBe('request'); // 3 x 15 s
+    expect(sampleWatchdog(policy, { ...st, cadenceMs: 30_000 }, t0 + 50_000)).toBe('ok');
+    expect(sampleWatchdog(policy, { ...st, cadenceMs: 30_000 }, t0 + 95_000)).toBe('request'); // 3 x 30 s
+  });
+
+  it('on a real session: the answer to a sample carries the spaced-out interval, and a resume starts afresh', async () => {
+    const s = await env.newSession();
+    const c = env.candidateClient(s.token);
+    await startedSession(env, c);
+    const quiet = await burst(env, c, [{ person: 'alice' }, { person: 'alice' }, { person: 'alice' }], { trigger: 'exam_start' });
+    expect(quiet.last.nextSampleInMs).toBe(6_000);
+    env.clock.advance(6_000);
+    busyFor(env.config.capacity.maxVisionWaitMs);
+    const busy = await burst(env, c, [{ person: 'alice' }, { person: 'alice' }, { person: 'alice' }]);
+    expect(busy.last.nextSampleInMs).toBe(12_000);
+    expect(identityState(await sessionRow(s.id)).cadenceMs).toBe(12_000);
+    expect((await hb(c)).json().identitySample ?? null).toBeNull(); // not overdue
   });
 });

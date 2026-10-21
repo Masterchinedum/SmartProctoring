@@ -37,7 +37,7 @@
  *     (a swap can only happen at a break). With the LLR clamp (5) and weight, a single sample can never reach
  *     `sprt.confirm` (7): at least two fair / good samples are always needed.
  */
-import { burstSizeFor, type FaceQuality, type IdentityCheckTrigger, type IdentityDecision, type IdentityEvidenceDTO, type IdentityPolicy, type IdentitySampleRequestDTO, type IdentityThresholds, type SessionStatus } from '@sp/shared';
+import { burstSizeFor, SAMPLING_PROFILES, type FaceQuality, type IdentityCheckTrigger, type IdentityDecision, type IdentityEvidenceDTO, type IdentityPolicy, type IdentitySampleRequestDTO, type IdentityThresholds, type SessionStatus } from '@sp/shared';
 import { GENUINE_DRIFT, windowEvidence } from '../vision/calibration.js';
 import { bucketModel, CALIBRATION, continuousApplies, decideIdentity, posteriorSwap, qualityBucket, referenceClass, sampleLLR, type EvidenceContext, type QualityBucket } from '../vision/index.js';
 
@@ -438,14 +438,37 @@ export interface CadenceInput {
   acc: Pick<EvidenceAccumulator, 'state' | 'unusableStreak'>;
 }
 
+type CadencePolicy = Pick<IdentityPolicy, 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>;
+
+function inStartupWindow(policy: CadencePolicy, activeSince: number | null, now: number): boolean {
+  return activeSince != null && now - activeSince < policy.startupWindowSec * 1000;
+}
+
 /** Server-driven delay until the next routine sample (ms). */
-export function nextSampleDelayMs(policy: Pick<IdentityPolicy, 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>, st: CadenceInput, now: number): number {
-  const inStartup = st.activeSince != null && now - st.activeSince < policy.startupWindowSec * 1000;
-  let ms = (inStartup ? policy.startupIntervalSec : policy.periodicCheckIntervalSec) * 1000;
+export function nextSampleDelayMs(policy: CadencePolicy, st: CadenceInput, now: number): number {
+  let ms = (inStartupWindow(policy, st.activeSince, now) ? policy.startupIntervalSec : policy.periodicCheckIntervalSec) * 1000;
   if (st.acc.state === 'suspect') ms = Math.min(ms, CADENCE.suspectMs);
   else if (st.acc.state === 'monitoring' || st.acc.state === 'confirmed_mismatch') ms = Math.min(ms, CADENCE.monitoringMs);
   if (st.acc.unusableStreak > 0) ms = Math.min(ms, CADENCE.unusableMs);
   return ms;
+}
+
+/**
+ * The routine delay while this server's face-analysis queue is under `pressure` (0..1, services/capacity.ts
+ * samplingPressure): spaced out in proportion, at most to the measured Balanced sampling intensity (12 s in the
+ * start-up window, 30 s after; PERFORMANCE.md §7.7, accuracy/identity-v2.md §6.4), so the queue drains instead of
+ * refusing frames. Only the routine interval of a 'consistent' session stretches. The faster cadence while evidence
+ * builds up (suspect / monitoring / unusable samples) is kept, and the samples the client takes on its own (exam start
+ * and resume, track break, appearance change, face return, ...) are not scheduled here at all. Exams already sampling
+ * at or below the Balanced intensity are not stretched.
+ */
+export function loadAwareDelayMs(policy: CadencePolicy, st: CadenceInput, now: number, pressure: number): number {
+  const base = nextSampleDelayMs(policy, st, now);
+  if (!(pressure > 0) || st.acc.state !== 'consistent' || st.acc.unusableStreak > 0) return base;
+  const balanced = SAMPLING_PROFILES.balanced;
+  const ceilingMs = (inStartupWindow(policy, st.activeSince, now) ? balanced.startupIntervalSec : balanced.periodicCheckIntervalSec) * 1000;
+  if (ceilingMs <= base) return base;
+  return Math.round(base + (ceilingMs - base) * Math.min(1, pressure));
 }
 
 /**
@@ -458,7 +481,7 @@ export function nextSampleDelayMs(policy: Pick<IdentityPolicy, 'periodicCheckInt
  */
 export const SAMPLE_WATCHDOG = Object.freeze({ requestAfterIntervals: 3, observeAfterIntervals: 6, minObserveMs: 60_000 });
 
-export type WatchdogState = { activeSince?: number | null; evidence?: Partial<EvidenceAccumulator> | null; lastSampleReceivedAt?: number | null };
+export type WatchdogState = { activeSince?: number | null; evidence?: Partial<EvidenceAccumulator> | null; lastSampleReceivedAt?: number | null; cadenceMs?: number | null };
 
 /** 'request' / 'unanswered' when samples are overdue (see SAMPLE_WATCHDOG); 'ok' otherwise. Pure. */
 export function sampleWatchdog(
@@ -469,7 +492,8 @@ export function sampleWatchdog(
   // Silence since the latest sample (server receipt time, else its capture time) or the start of the period.
   const last = Math.max(state.lastSampleReceivedAt ?? -Infinity, state.evidence?.lastSampleAt ?? -Infinity, state.activeSince ?? -Infinity);
   if (!Number.isFinite(last)) return 'ok';
-  const interval = nextSampleDelayMs(policy, { activeSince: state.activeSince ?? null, acc: { state: state.evidence?.state ?? 'consistent', unusableStreak: state.evidence?.unusableStreak ?? 0 } }, now);
+  // At least the interval the client was last told: a cadence spaced out under load is not "overdue" (loadAwareDelayMs).
+  const interval = Math.max(nextSampleDelayMs(policy, { activeSince: state.activeSince ?? null, acc: { state: state.evidence?.state ?? 'consistent', unusableStreak: state.evidence?.unusableStreak ?? 0 } }, now), state.cadenceMs ?? 0);
   const quiet = now - last;
   if (quiet > Math.max(SAMPLE_WATCHDOG.observeAfterIntervals * interval, SAMPLE_WATCHDOG.minObserveMs)) return 'unanswered';
   if (quiet > SAMPLE_WATCHDOG.requestAfterIntervals * interval) return 'request';
