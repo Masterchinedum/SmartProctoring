@@ -7,6 +7,7 @@ import type { MonitoringStatus } from './observation';
 import { IDENTITY_CHECK_TRIGGERS } from './identity';
 import { externalVerifierUpdateSchema, type ExternalVerifierSettingsDTO } from './verifiers';
 import type { AccommodationKind, SessionAccommodationsDTO } from './accommodations';
+import { MFA_REQUIREMENTS, type MfaRequirement } from './mfa';
 
 /**
  * HTTP API contract. Paths are relative to the server origin.
@@ -444,6 +445,8 @@ export interface StaffUserDTO {
   role: StaffRole;
   disabled: boolean;
   createdAt: number;
+  /** Two-step sign-in set up (time it was turned on; null: not set up). */
+  mfaEnabledAt?: number | null;
 }
 
 export const loginRequestSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
@@ -873,6 +876,8 @@ export interface OrgSettingsDTO {
   emailAlerts: EmailAlertToggles;
   /** Optional external second-opinion face verifier (./verifiers.ts, docs/EXTERNAL_VERIFIER.md). Off by default. */
   externalVerifier: ExternalVerifierSettingsDTO;
+  /** Who must use two-step sign-in (./mfa.ts). Only an owner can change it. */
+  requireMfa: MfaRequirement;
 }
 
 export interface EmailAlertToggles {
@@ -939,9 +944,15 @@ export type { IdentityCheckTrigger };
 /* =================================================================== staff endpoint index
  *
  * Auth (no prefix):
- *   POST /api/auth/login   {email,password}        -> { user: StaffUserDTO, org: { id, name } }
+ *   POST /api/auth/login   {email,password}        -> { user, org, security } | MfaChallengeResponse (two-step sign-in)
+ *   POST /api/auth/login/mfa {code}|{recoveryCode}  -> { user, org, security }   (needs the challenge cookie)
  *   POST /api/auth/logout                          -> { ok: true }
- *   GET  /api/auth/me                              -> { user: StaffUserDTO, org: { id, name } }   (401 if not logged in)
+ *   GET  /api/auth/me                              -> { user: StaffUserDTO, org: { id, name }, security: StaffSecurityDTO }   (401 if not logged in)
+ *   POST /api/auth/mfa/totp/setup                  -> TotpSetupDTO        (allowed while enrolment is required)
+ *   POST /api/auth/mfa/totp/confirm {code,currentCode?} -> RecoveryCodesDTO
+ *   POST /api/auth/mfa/recovery-codes {code}       -> RecoveryCodesDTO
+ *   POST /api/auth/mfa/disable {password,code}     -> { ok }   (409 when the organisation requires it)
+ *   POST /api/admin/users/:id/mfa/reset            -> StaffUserDTO   [admin; an owner's only by an owner; not oneself]
  *
  * Staff API (prefix /api/admin, cookie auth; role in brackets = minimum role):
  *   GET  /dashboard                                -> DashboardDTO                                  [reviewer]
@@ -1067,6 +1078,8 @@ export const settingsUpdateSchema = z.object({
   alertRecipients: z.array(z.string().trim().email().max(254)).max(20).optional(),
   emailAlerts: z.object({ holds: z.boolean(), pauseRequests: z.boolean(), highSeverity: z.boolean() }).partial().optional(),
   externalVerifier: externalVerifierUpdateSchema.optional(),
+  /** Owner only. */
+  requireMfa: z.enum(MFA_REQUIREMENTS).optional(),
 });
 export const legalHoldSchema = z.object({ enabled: z.boolean() });
 export const staffSubmitSchema = z.object({ note: z.string().max(1000).optional() });

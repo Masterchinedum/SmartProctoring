@@ -1,9 +1,9 @@
-import type { LiveMessage } from '@sp/shared';
+import { mfaRequiredFor, type LiveMessage } from '@sp/shared';
 import { and, eq, gt } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { getStaff, requireStaff, type StaffPrincipal } from '../auth/staff.js';
 import type { Ctx } from '../context.js';
-import { staffSessions, staffUsers } from '../db/schema.js';
+import { organizations, staffSessions, staffUsers } from '../db/schema.js';
 
 /** WebSocket close code sent when the staff session behind the socket is no longer valid. */
 export const WS_CLOSE_UNAUTHORIZED = 4401;
@@ -26,14 +26,19 @@ export const LIVE_REVALIDATION = { periodicMs: 60_000, onBroadcastAfterMs: 5_000
  */
 export const LIVE_LIMITS = { maxHeldMessages: 1000, maxBufferedBytes: 4 * 1024 * 1024 };
 
-/** Is the staff session still valid: not logged out / revoked / expired, user not disabled, same organisation? */
+/**
+ * Is the staff session still valid: not logged out / revoked / expired, user not disabled, same organisation, and
+ * not since required to set up two-step sign-in first (the staff app then shows the set-up page)?
+ */
 export async function staffSessionStillValid(ctx: Pick<Ctx, 'db' | 'now'>, staff: Pick<StaffPrincipal, 'staffSessionId' | 'id' | 'orgId'>): Promise<boolean> {
   const [row] = await ctx.db
-    .select({ userId: staffUsers.id, orgId: staffUsers.orgId, disabled: staffUsers.disabled })
+    .select({ userId: staffUsers.id, orgId: staffUsers.orgId, disabled: staffUsers.disabled, role: staffUsers.role, mfaEnabledAt: staffUsers.mfaEnabledAt, orgSettings: organizations.settings })
     .from(staffSessions)
     .innerJoin(staffUsers, eq(staffUsers.id, staffSessions.staffUserId))
+    .innerJoin(organizations, eq(organizations.id, staffUsers.orgId))
     .where(and(eq(staffSessions.id, staff.staffSessionId), gt(staffSessions.expiresAt, new Date(ctx.now()))));
-  return !!row && !row.disabled && row.userId === staff.id && row.orgId === staff.orgId;
+  if (!row || row.disabled || row.userId !== staff.id || row.orgId !== staff.orgId) return false;
+  return row.mfaEnabledAt != null || !mfaRequiredFor(row.orgSettings?.requireMfa, row.role);
 }
 
 /**

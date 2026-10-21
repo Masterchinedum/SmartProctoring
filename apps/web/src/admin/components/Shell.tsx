@@ -43,6 +43,7 @@ export function staffPageTitle(pathname: string): string {
     [/^\/admin\/exams\/[^/]+$/, 'Exam details'],
     [/^\/admin\/candidates\/[^/]+$/, 'Candidate details'],
     [/^\/admin\/tools\/camera-test$/, 'Camera & identity test'],
+    [/^\/admin\/account$/, 'Account & security'],
   ];
   for (const [re, t] of rules) if (re.test(p)) return `${t} — SmartProctoring staff`;
   const nav = NAV.find((n) => n.to !== '/admin' && p === n.to);
@@ -115,6 +116,9 @@ export function Shell({ children }: { children: ReactNode }) {
             {user.email}
           </div>
           <div className="muted small">{ROLE_LABELS[user.role]}</div>
+          <NavLink to="/admin/account" className="small">
+            Account &amp; security
+          </NavLink>
           <button type="button" className="btn btn-sm" onClick={logout} disabled={loggingOut}>
             {loggingOut ? 'Signing out…' : 'Sign out'}
           </button>

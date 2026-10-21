@@ -41,6 +41,7 @@ import type {
   IdentityDecision,
   LivenessAction,
   LivenessResultDTO,
+  MfaRequirement,
   MonitoringStatus,
   PeriodKind,
   PolicyExceptionDTO,
@@ -82,6 +83,8 @@ export interface OrgSettings {
   emailAlerts: EmailAlertToggles;
   /** Optional external second-opinion face verifier (src/verifiers/settings.ts; key pair stored encrypted). */
   externalVerifier: ExternalVerifierStoredSettings;
+  /** Who must use two-step sign-in (services/mfa.ts). */
+  requireMfa: MfaRequirement;
 }
 
 export const organizations = pgTable('organizations', {
@@ -106,10 +109,53 @@ export const staffUsers = pgTable(
     disabled: boolean('disabled').notNull().default(false),
     lastLoginAt: ts('last_login_at'),
     passwordChangedAt: ts('password_changed_at'),
+    /** Two-step sign-in (services/mfa.ts): the TOTP secret, encrypted (AAD totp:<userId>); null when off. */
+    totpSecretEnc: bytea('totp_secret_enc'),
+    /** The last TOTP time step accepted: a code is never accepted twice (replay). */
+    totpLastStep: integer('totp_last_step'),
+    mfaEnabledAt: ts('mfa_enabled_at'),
+    /** A secret being set up, not active until confirmed (AAD totp-pending:<userId>). */
+    totpPendingEnc: bytea('totp_pending_enc'),
+    totpPendingAt: ts('totp_pending_at'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [uniqueIndex('staff_users_email_uq').on(sql`lower(${t.email})`), index('staff_users_org_idx').on(t.orgId)],
+);
+
+/** Single-use recovery codes for two-step sign-in (sha256 of the normalised code; a code is used once). */
+export const staffRecoveryCodes = pgTable(
+  'staff_recovery_codes',
+  {
+    id: id(),
+    staffUserId: uuid('staff_user_id')
+      .notNull()
+      .references(() => staffUsers.id, { onDelete: 'cascade' }),
+    codeHash: text('code_hash').notNull(),
+    createdAt: createdAt(),
+    usedAt: ts('used_at'),
+  },
+  (t) => [index('staff_recovery_codes_user_idx').on(t.staffUserId)],
+);
+
+/**
+ * The second step of a sign-in with two-step sign-in: created when the password was right, carried by a signed
+ * httpOnly cookie (sha256 of its token stored), valid for 5 minutes and a few attempts.
+ */
+export const staffLoginChallenges = pgTable(
+  'staff_login_challenges',
+  {
+    id: id(),
+    tokenHash: text('token_hash').notNull(),
+    staffUserId: uuid('staff_user_id')
+      .notNull()
+      .references(() => staffUsers.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+    expiresAt: ts('expires_at').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    ip: text('ip'),
+  },
+  (t) => [uniqueIndex('staff_login_challenges_token_uq').on(t.tokenHash), index('staff_login_challenges_user_idx').on(t.staffUserId)],
 );
 
 export const staffSessions = pgTable(

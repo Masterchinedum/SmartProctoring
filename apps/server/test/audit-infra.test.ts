@@ -10,7 +10,7 @@ import type { EventUpsert, LiveMessage, SessionDetailDTO, SessionSummaryDTO } fr
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
-import { events, evidence, identityChecks, sessionPeriods, staffUsers } from '../src/db/schema.js';
+import { events, evidence, identityChecks, organizations, sessionPeriods, staffUsers } from '../src/db/schema.js';
 import { appLoggerOptions, redactUrl } from '../src/lib/log-redact.js';
 import { LIVE_REVALIDATION, WS_CLOSE_UNAUTHORIZED } from '../src/realtime/live-route.js';
 import { loadEventDTO } from '../src/services/dto.js';
@@ -195,7 +195,7 @@ describe('P2-8: the staff WebSocket re-validates the staff session', () => {
     return { ws, msgs, closed };
   }
 
-  it('closes the socket with 4401 after logout (checked before the next broadcast) and after the user is disabled (periodic check)', async () => {
+  it('closes the socket with 4401 after logout (checked before the next broadcast), after the user is disabled and when two-step sign-in becomes required (periodic check)', async () => {
     await env.app.listen({ port: 0, host: '127.0.0.1' });
     const port = (env.app.server.address() as { port: number }).port;
     LIVE_REVALIDATION.onBroadcastAfterMs = 0;
@@ -225,6 +225,16 @@ describe('P2-8: the staff WebSocket re-validates the staff session', () => {
     const C = await openSocket(port, tempApi.cookie);
     await env.ctx.db.update(staffUsers).set({ disabled: true }).where(eq(staffUsers.id, temp.id));
     expect(await C.closed).toBe(WS_CLOSE_UNAUTHORIZED);
+
+    // The organisation starts requiring two-step sign-in: sockets of staff without it close (the app shows set-up).
+    const D = await openSocket(port, cookieB);
+    const [org] = await env.ctx.db.select().from(organizations).where(eq(organizations.id, env.org.id));
+    await env.ctx.db.update(organizations).set({ settings: { ...org.settings, requireMfa: 'everyone' } }).where(eq(organizations.id, env.org.id));
+    try {
+      expect(await D.closed).toBe(WS_CLOSE_UNAUTHORIZED);
+    } finally {
+      await env.ctx.db.update(organizations).set({ settings: org.settings }).where(eq(organizations.id, env.org.id));
+    }
   });
 });
 

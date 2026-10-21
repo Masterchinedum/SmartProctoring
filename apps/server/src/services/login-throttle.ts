@@ -11,8 +11,13 @@
  *    30 s · 2^(failures − 5), capped at 15 min. While locked, attempts are refused with 429 without checking the
  *    password and are NOT counted (they cannot extend the lock).
  *  - The counter resets after LOGIN_FAILURE_WINDOW_MS (15 min) without a failed attempt.
+ *
+ * Scopes: `login` is the sign-in (password and second step). Re-authentication on a signed-in account has its own
+ * counters, so a session left open (or stolen) cannot be used to guess faster: `password` (changing the password)
+ * and `reauth` (a code or recovery code to manage two-step sign-in). They are separate so that knowing one secret
+ * never resets the counter of another (a successful password change does not reset code guessing).
  */
-import { and, eq, lt, lte, or, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, lte, or, isNull, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/index.js';
 import { loginThrottle } from '../db/schema.js';
 import { sha256Hex } from '../lib/crypto.js';
@@ -25,8 +30,11 @@ export const LOGIN_MAX_DELAY_MS = 15 * 60_000;
 /** Rows untouched for this long are deleted by the cleanup job. */
 export const LOGIN_THROTTLE_RETENTION_MS = 24 * 3600_000;
 
-export function loginThrottleKey(email: string): string {
-  return sha256Hex(`login:${email.trim().toLowerCase()}`);
+export type ThrottleScope = 'login' | 'password' | 'reauth';
+export const THROTTLE_SCOPES: readonly ThrottleScope[] = ['login', 'password', 'reauth'];
+
+export function loginThrottleKey(email: string, scope: ThrottleScope = 'login'): string {
+  return sha256Hex(`${scope}:${email.trim().toLowerCase()}`);
 }
 
 /** Lock duration after the n-th consecutive failure (0 = no lock). */
@@ -42,8 +50,8 @@ export type LoginAdmission = { admitted: true; failures: number; lockedUntil: nu
  * Charge one attempt for `email` (counted as a failure until clearLoginFailures() is called after a successful
  * login). Refused while the address is locked.
  */
-export async function admitLoginAttempt(db: DbOrTx, email: string, now: number): Promise<LoginAdmission> {
-  const key = loginThrottleKey(email);
+export async function admitLoginAttempt(db: DbOrTx, email: string, now: number, scope: ThrottleScope = 'login'): Promise<LoginAdmission> {
+  const key = loginThrottleKey(email, scope);
   const nowD = new Date(now);
   const windowStart = new Date(now - LOGIN_FAILURE_WINDOW_MS);
   // failures' = 1 after a quiet window, else failures + 1; lock computed from failures' in the same statement.
@@ -67,9 +75,9 @@ export async function admitLoginAttempt(db: DbOrTx, email: string, now: number):
   return { admitted: false, retryAfterMs: Math.max(1000, until - now) };
 }
 
-/** After a successful login (or a password reset): forget the address's failures. */
-export async function clearLoginFailures(db: DbOrTx, email: string): Promise<void> {
-  await db.delete(loginThrottle).where(eq(loginThrottle.key, loginThrottleKey(email)));
+/** After a successful login (or a password reset): forget the address's failures (in `scopes`). */
+export async function clearLoginFailures(db: DbOrTx, email: string, scopes: readonly ThrottleScope[] = ['login']): Promise<void> {
+  await db.delete(loginThrottle).where(inArray(loginThrottle.key, scopes.map((s) => loginThrottleKey(email, s))));
 }
 
 /** Delete rows without activity for a day whose lock has expired (the table only needs recent attempts). */

@@ -17,7 +17,7 @@ pnpm --filter @sp/e2e typecheck
 E2E_NO_SKIP=1 pnpm test:e2e                     # a missing face image fails the run instead of skipping tests (CI)
 ```
 
-CI (`.github/workflows/ci.yml`) runs scenarios 01–18 on every pull request with `E2E_NO_SKIP=1`, so a green run
+CI (`.github/workflows/ci.yml`) runs scenarios 01–19 (including 11b) on every pull request with `E2E_NO_SKIP=1`, so a green run
 means every scenario ran; `nightly.yml` runs the whole suite, the realistic scenarios included.
 
 Runtime (65 tests, 4-core machine): ~31 minutes with the default 2 workers — scenarios 01–18 (33 tests) take
@@ -57,10 +57,11 @@ server and the other specs are unaffected; they stop it in `afterAll`:
 |---|---|---|---|
 | `18-integrations` | `E2E_PORT`+1 (8099) | `proctor_e2e_integr` | SMTP pointed at an in-process SMTP sink; an https webhook receiver (self-signed certificate in `e2e/.artifacts/tls`, trusted by the server through `NODE_EXTRA_CA_CERTS`; `WEBHOOK_ALLOW_PRIVATE_NETWORKS=true` because it listens on 127.0.0.1) |
 | `17-retention-rekey` (key rotation) | `E2E_PORT`+2 (8100) | `proctor_e2e_rekey` | restarted three times with different `EVIDENCE_KEY` / `EVIDENCE_KEYS_OLD` |
+| `11b-staff-mfa` | `E2E_PORT`+3 (8101) | `proctor_e2e_mfa` | its organisation requires two-step sign-in for everyone (must not affect the other specs' organisation); SMTP pointed at an in-process SMTP sink for the security emails |
 
-Both use `PUBLIC_URL=http://127.0.0.1:<port>` (a different host than the main server's `localhost`, so staff
+All use `PUBLIC_URL=http://127.0.0.1:<port>` (a different host than the main server's `localhost`, so staff
 cookies never mix), `NODE_ENV=production` and `VISION_THREADS=2`. Their databases are re-created by the spec
-(names must contain `e2e`); logs: `e2e/.artifacts/server-integrations.log`, `server-rekey-{1,2,3}.log`.
+(names must contain `e2e`); logs: `e2e/.artifacts/server-integrations.log`, `server-rekey-{1,2,3}.log`, `server-mfa.log`.
 
 ## Environment variables
 
@@ -194,6 +195,7 @@ the run id); `pnpm --filter @sp/e2e rw:report [-- --run <id> | --all]` prints th
 | 9 | `09-offline` | ~40 s offline: candidate banner; dashboard shows disconnected + "Reporting interrupted since"; afterwards the tab switch made offline arrives with its original timestamps, `deliveredLate`, exactly once; answers typed offline are saved |
 | 10 | `10-reconnect` | reload → reconnect check → same question/answers; `disconnected` (unobserved) gap in the timeline; second browser supersedes the first ("continues in another window"); `?trace=1` evaluation trace download |
 | 11 | `11-staff-ui` | UI login; dashboard groups + status tabs + monitoring labels; live flag without reload; event drawer with screenshot + lightbox; review with note, event note, dismiss; filters (category, only unreviewed, type); session note; CSV download; report sections, print button, print stylesheet, PDF; reviewer cannot see/open Settings, Users (UI and API 403) |
+| 11b | `11b-staff-mfa` | dedicated instance with an SMTP sink. **a:** an administrator sets up two-step sign-in on *Account & security* (QR code and key; a code computed from the displayed key like an authenticator app; 10 recovery codes shown once, *Done* only after "I have saved my recovery codes"; security email) → signs out → signs in with a recovery code ("I don't have my phone"; 9 left) → signs out → a wrong code is refused with guidance, a code from the next 30-second step signs in. **b:** the owner (two-step sign-in on through the API) requires it for everyone: a reviewer signing in gets only the set-up page (API 403 `mfa_enrollment_required`) until set up, then the dashboard; the owner resets the reviewer's two-step sign-in on the Users page (confirmation, *On* → *Off*, email naming the owner) → the reviewer's open page is signed out and the next sign-in leads to set-up again |
 | 12 | `12-extend-expiry` | 1-minute exam + 1 minute added in the admin UI → candidate clock jumps without reload → expiry auto-submits (`time_expired`), answers graded |
 | 13 | `13-degraded-and-context` | (folded in from the candidate app's drafts) vision models unavailable → the exam still runs, `monitoring_degraded`; resume from another seat on the same browser → match + neutral `environment_changed` only; manual staff hold → release without a new check → continues |
 | 14 | `14-accessibility` | WCAG 2.1 AA checks with the in-repo checker `lib/a11y.ts` (Chromium's accessibility tree over CDP: accessible names, landmarks, `<h1>`, lang/title, id references, text contrast). **a:** keyboard-only candidate walkthrough — consent → camera check → start → every question type → question navigation → submit / privacy / pause dialogs (focus moves to each new heading, dialogs trap focus and return it, Escape, inert background, error tied to its field, countdown announced at the 10-minute mark only, 320 px reflow); staff: new flag announced (rate-limited), status tabs, session tabs, events row → drawer, reference image → viewer (arrows, Escape). **b:** phone-sized screen without a camera → friendly notice, consent still possible, reflow, reduced motion; staff sign-in page. **c:** every staff page passes the checker (titles, skip link). See `docs/ACCESSIBILITY.md` |

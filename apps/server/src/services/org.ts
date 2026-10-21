@@ -20,6 +20,7 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   alertRecipients: [],
   emailAlerts: { holds: true, pauseRequests: true, highSeverity: true },
   externalVerifier: DEFAULT_EXTERNAL_VERIFIER_SETTINGS,
+  requireMfa: 'off',
 };
 
 /** Organisation settings with every field filled from defaults. */
@@ -35,6 +36,7 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
     alertRecipients: Array.isArray(s.alertRecipients) ? s.alertRecipients : [],
     emailAlerts: { ...DEFAULT_ORG_SETTINGS.emailAlerts, ...(s.emailAlerts ?? {}) },
     externalVerifier: normalizeExternalVerifierSettings(s.externalVerifier),
+    requireMfa: s.requireMfa === 'admins' || s.requireMfa === 'everyone' ? s.requireMfa : 'off',
   };
 }
 

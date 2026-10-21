@@ -36,6 +36,8 @@ import { badRequest, conflict, forbidden, notFound, validationFailed } from '../
 import { toStaffUserDTO } from '../../services/dto.js';
 import { mergePolicy, orgSettings } from '../../services/org.js';
 import { clearLoginFailures } from '../../services/login-throttle.js';
+import { disableMfa } from '../../services/mfa.js';
+import { notifySecurityChange } from '../../services/security-notices.js';
 import { applyExternalVerifierUpdate, externalVerifierAuditMeta, toExternalVerifierDTO } from '../../verifiers/settings.js';
 import { blankToUndefined, escapeLike, idParam, loadOrgRow, pagingSchema, sanitizePolicyInput } from './common.js';
 
@@ -58,6 +60,7 @@ export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
     alertRecipients: [...s.alertRecipients],
     emailAlerts: { ...s.emailAlerts },
     externalVerifier: toExternalVerifierDTO(s.externalVerifier),
+    requireMfa: s.requireMfa,
   };
 }
 
@@ -113,6 +116,11 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         mergePolicy(undefined, policy); // throws ZodError (400) with field paths when invalid
         stored.defaultPolicy = policy;
       }
+      // Who must use two-step sign-in: an owner's decision (an admin could otherwise switch off the requirement for admins).
+      if (body.requireMfa !== undefined && body.requireMfa !== cur.requireMfa) {
+        if (staff.role !== 'owner') throw forbidden('Only an owner can change who must use two-step sign-in', 'owner_required');
+        stored.requireMfa = body.requireMfa;
+      }
       // External second-opinion verifier: the key pair is encrypted here and never returned (verifiers/settings.ts).
       const verifier = body.externalVerifier !== undefined ? applyExternalVerifierUpdate({ keyring: ctx.keyring, config: ctx.config.externalVerifiers, orgId: staff.orgId, now }, cur.externalVerifier, body.externalVerifier) : null;
       if (verifier) stored.externalVerifier = verifier.next;
@@ -152,6 +160,7 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
           ...(changed.includes('abandonAfterDays') ? { abandonAfterDays: { from: cur.abandonAfterDays, to: next.abandonAfterDays } } : {}),
           ...(changed.includes('alertRecipients') ? { alertRecipients: { count: next.alertRecipients.length } } : {}),
           ...(changed.includes('emailAlerts') ? { emailAlerts: next.emailAlerts } : {}),
+          ...(changed.includes('requireMfa') ? { requireMfa: { from: cur.requireMfa, to: next.requireMfa } } : {}),
           ...(changed.includes('externalVerifier') && verifier ? { externalVerifier: externalVerifierAuditMeta(cur.externalVerifier, next.externalVerifier, verifier.credentials) } : {}),
         },
         ip: req.ip,
@@ -259,7 +268,7 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
     });
     if (revoke) await revokeStaffSessions(ctx, id);
     // An administrator's password reset also lifts the per-account sign-in backoff.
-    if (passwordHash !== undefined) await clearLoginFailures(ctx.db, user.email);
+    if (passwordHash !== undefined) await clearLoginFailures(ctx.db, user.email, ['login', 'password']);
     return toStaffUserDTO(user);
   });
 
@@ -301,5 +310,26 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         meta: entry.meta ?? {},
       })),
     };
+  });
+
+  /** Reset another user's two-step sign-in (a lost phone and no recovery codes): they set it up again at next sign-in. */
+  app.post('/users/:id/mfa/reset', admin, async (req) => {
+    const staff = getStaff(req);
+    const id = idParam(req, 'id', 'User', 'user_not_found');
+    if (id === staff.id) throw badRequest('Manage your own two-step sign-in on your account page.', undefined, 'use_account_page');
+    const now = ctx.now();
+    const target = await ctx.db.transaction(async (tx) => {
+      const t = await loadScopedUser(tx, staff.orgId, id, true);
+      if (t.role === 'owner' && staff.role !== 'owner') throw forbidden('Only an owner can reset an owner’s two-step sign-in');
+      if (!t.mfaEnabledAt) throw conflict('mfa_not_enabled', 'This user has not set up two-step sign-in.');
+      await disableMfa(tx, id, now);
+      await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'user.mfa_reset', targetType: 'staff_user', targetId: id, meta: { email: t.email }, ip: req.ip, at: now });
+      return t;
+    });
+    // Signed-in browsers of that user end: the next sign-in is without the old factor.
+    await revokeStaffSessions(ctx, id);
+    await notifySecurityChange(ctx, target, 'mfa_reset_by_admin', { by: staff.name });
+    const [u] = await ctx.db.select().from(staffUsers).where(eq(staffUsers.id, id));
+    return toStaffUserDTO(u);
   });
 };

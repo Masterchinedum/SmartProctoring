@@ -17,6 +17,13 @@ describe('sign-in error messages', () => {
     expect(loginErrorMessage(new ApiError(429, 'server_error', '429 Too Many Requests'))).toBe('Too many attempts. Wait a minute and try again.');
   });
 
+  it('shows the two-step sign-in messages as they are', () => {
+    expect(loginErrorMessage(new ApiError(401, 'invalid_mfa_code', 'That code is not right.'))).toBe('That code is not right.');
+    expect(loginErrorMessage(new ApiError(401, 'mfa_challenge_expired', 'This sign-in has expired. Enter your email and password again.'))).toBe(
+      'This sign-in has expired. Enter your email and password again.',
+    );
+  });
+
   it('falls back to the generic error text', () => {
     expect(loginErrorMessage(new ApiError(0, 'network_error', 'Could not reach the server. Check your connection and try again.'))).toMatch(/Could not reach the server/);
     expect(loginErrorMessage(new ApiError(403, 'forbidden', 'nope'))).toMatch(/disabled/);

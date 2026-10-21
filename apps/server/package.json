@@ -18,7 +18,8 @@
     "eval:identity": "tsx src/eval/identity-eval-cli.ts",
     "eval:fetch-faces": "tsx src/eval/fetch-facesets-cli.ts",
     "retention:run": "tsx src/scripts/retention-cli.ts",
-    "rekey": "tsx src/scripts/rekey-cli.ts"
+    "rekey": "tsx src/scripts/rekey-cli.ts",
+    "staff-access": "tsx src/scripts/staff-access-cli.ts"
   },
   "dependencies": {
     "@aws-sdk/client-rekognition": "^3.1139.0",

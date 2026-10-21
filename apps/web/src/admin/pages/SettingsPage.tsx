@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { DEFAULT_IDENTITY_THRESHOLDS, DEFAULT_POLICY, type OrgSettingsDTO } from '@sp/shared';
+import { DEFAULT_IDENTITY_THRESHOLDS, DEFAULT_POLICY, MFA_REQUIREMENT_LABEL, MFA_REQUIREMENTS, mfaRequiredFor, type MfaRequirement, type OrgSettingsDTO } from '@sp/shared';
+import { useAuth } from '../auth';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { normalizePolicy, validatePolicy } from '../lib/policyForm';
@@ -12,7 +13,65 @@ export function SettingsPage() {
   const q = useQuery({ queryKey: qk.settings, queryFn: api.settings, retry: shouldRetry });
   if (q.isPending) return <Loading />;
   if (q.isError) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
-  return <SettingsForm key={JSON.stringify(q.data)} initial={q.data} />;
+  return (
+    <div className="stack">
+      <SettingsForm key={JSON.stringify(q.data)} initial={q.data} />
+      <SecuritySection settings={q.data} />
+    </div>
+  );
+}
+
+/** Who must use two-step sign-in. Only an owner can change it (an admin could otherwise exempt administrators). */
+function SecuritySection({ settings }: { settings: OrgSettingsDTO }) {
+  const { isOwner } = useAuth();
+  const qc = useQueryClient();
+  const [value, setValue] = useState<MfaRequirement>(settings.requireMfa);
+  const users = useQuery({ queryKey: qk.users, queryFn: api.users, retry: shouldRetry });
+  const m = useMutation({
+    mutationFn: () => api.updateSettings({ requireMfa: value }),
+    onSuccess: (s) => {
+      qc.setQueryData(qk.settings, s);
+      void qc.invalidateQueries({ queryKey: qk.me });
+    },
+  });
+  const active = (users.data?.items ?? []).filter((u) => !u.disabled);
+  const without = active.filter((u) => !u.mfaEnabledAt && mfaRequiredFor(value, u.role));
+  return (
+    <section className="card stack" aria-labelledby="security-title" data-testid="settings-security">
+      <h2 id="security-title">Two-step sign-in</h2>
+      <p className="small muted">
+        Staff who must use it and have not set it up can only set it up at their next request — nothing else is available to them until they have. Everyone can turn it on for
+        themselves under Account &amp; security.
+      </p>
+      <label>
+        Requirement
+        <select value={value} disabled={!isOwner || m.isPending} onChange={(e) => setValue(e.target.value as MfaRequirement)} aria-describedby="mfa-req-hint">
+          {MFA_REQUIREMENTS.map((r) => (
+            <option key={r} value={r}>
+              {MFA_REQUIREMENT_LABEL[r]}
+            </option>
+          ))}
+        </select>
+        <span id="mfa-req-hint" className="small muted">
+          {isOwner ? 'Changes are recorded in the audit log.' : 'Only an owner can change this.'}
+        </span>
+      </label>
+      {users.data ? (
+        <div className="small">
+          {active.filter((u) => u.mfaEnabledAt).length} of {active.length} active staff use two-step sign-in.
+          {value !== 'off' && without.length ? ` ${without.length} required staff have not set it up yet: ${without.map((u) => u.name).join(', ')}.` : ''}
+        </div>
+      ) : null}
+      {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+      {isOwner ? (
+        <div className="row">
+          <button type="button" className="btn btn-primary" disabled={value === settings.requireMfa || m.isPending} onClick={() => m.mutate()}>
+            {m.isPending ? 'Saving…' : 'Save requirement'}
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 interface Draft {

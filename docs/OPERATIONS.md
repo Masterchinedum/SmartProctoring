@@ -124,6 +124,11 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
   to the page that was open. After 5 failed sign-ins in a row for an address (no 15-minute pause), further
   attempts for it wait 30 s, then 1, 2, 4 … up to 15 minutes, whatever the client IP (`auth.login_failed`
   audit entries, reason `throttled`). An administrator's password reset lifts the wait.
+* **Two-step sign-in**: staff turn it on under *Account & security* (any authenticator app: Microsoft / Google
+  Authenticator, 1Password, Authy …); owners can require it for administrators and owners or for everyone under
+  *Settings → Two-step sign-in*. Authenticator codes depend on the clock: keep the servers on NTP (codes are accepted one
+  30-second step early or late, so a server clock more than ~30 s off starts refusing correct codes). With SMTP configured, staff are emailed about every change to their
+  two-step sign-in and whenever a recovery code is used.
 
 ## 4. Backups
 
@@ -245,6 +250,24 @@ the old secret stops working immediately — update the receiver at the same tim
 test email** (a 502 shows the SMTP server's answer). Check SPF/DKIM for `SMTP_FROM` and the recipients'
 spam folders. Alerts are throttled to one email per session per 5 minutes (later ones are combined);
 failed sends are retried for about 50 minutes.
+
+**A staff member lost their phone (two-step sign-in).** They sign in with one of their recovery codes and set up
+the new phone under *Account & security → Move to a new phone*. Without recovery codes: an administrator (an
+owner for an owner) uses **Users → Reset two-step sign-in** after confirming who they are talking to (the person is
+signed out and emailed; with the organisation's requirement they set it up again at their next sign-in).
+
+**Nobody can sign in as an owner any more** (the only owner lost their phone and recovery codes, or forgot their
+password, and no other owner exists). An operator with server access verifies the person's identity out of band
+and runs, with the server's environment:
+
+    pnpm --filter @sp/server staff-access --email owner@example.edu --reset-mfa --reason "Ticket 1234: called back on the number on file"
+    pnpm --filter @sp/server staff-access --email owner@example.edu --reset-password --reason "…"   # prints a temporary password once
+    # in the Docker image: node apps/server/dist/scripts/staff-access.js --email … --reset-mfa --reason "…"
+
+It ends the account's sessions, lifts its sign-in backoff, writes `user.mfa_reset` / `user.updated` (actor
+*system*, with the reason) to the organisation's audit log and emails the person. Hand a temporary password over
+through a trusted channel; they change it on their account page. Exit codes: 0 done, 2 bad arguments, 4 no such
+address. Afterwards, add a second owner so this is not needed again.
 
 **An API key was leaked.** Integrations → API keys → **Revoke** (effective immediately), create a new key
 and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) shows what the key did.

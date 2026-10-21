@@ -119,7 +119,7 @@ export function toHoldDTO(s: Pick<ExamSession, 'status' | 'holdReason' | 'holdSi
 }
 
 export function toStaffUserDTO(u: StaffUser): StaffUserDTO {
-  return { id: u.id, email: u.email, name: u.name, role: u.role, disabled: u.disabled, createdAt: msReq(u.createdAt) };
+  return { id: u.id, email: u.email, name: u.name, role: u.role, disabled: u.disabled, createdAt: msReq(u.createdAt), mfaEnabledAt: ms(u.mfaEnabledAt) };
 }
 
 export function toNoteDTO(n: Note, authorName: string): NoteDTO {

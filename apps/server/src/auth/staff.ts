@@ -6,7 +6,7 @@
  *   app.get('/x', { preHandler: requireStaff('reviewer') }, async (req) => { const staff = getStaff(req); ... })
  * Role order: reviewer < admin < owner (requireStaff('admin') admits admin and owner).
  */
-import type { StaffRole } from '@sp/shared';
+import { mfaRequiredFor, type StaffRole } from '@sp/shared';
 import { and, eq, gt } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
 import type { Ctx } from '../context.js';
@@ -32,6 +32,11 @@ export interface StaffPrincipal {
   name: string;
   staffSessionId: string;
   ip: string;
+  /**
+   * The organisation requires two-step sign-in for this role and the user has not set it up: only the set-up
+   * endpoints (requireStaff(…, { allowMfaEnrollment: true })) admit them (403 mfa_enrollment_required otherwise).
+   */
+  mfaEnrollmentRequired: boolean;
 }
 
 declare module 'fastify' {
@@ -48,9 +53,10 @@ export async function authenticateStaffToken(ctx: Ctx, rawCookie: string | undef
   const tokenHash = sha256Hex(un.value);
   const now = ctx.now();
   const rows = await ctx.db
-    .select({ sess: staffSessions, user: staffUsers })
+    .select({ sess: staffSessions, user: staffUsers, orgSettings: organizations.settings })
     .from(staffSessions)
     .innerJoin(staffUsers, eq(staffUsers.id, staffSessions.staffUserId))
+    .innerJoin(organizations, eq(organizations.id, staffUsers.orgId))
     .where(and(eq(staffSessions.tokenHash, tokenHash), gt(staffSessions.expiresAt, new Date(now))));
   const row = rows[0];
   if (!row || row.user.disabled) return null;
@@ -59,7 +65,8 @@ export async function authenticateStaffToken(ctx: Ctx, rawCookie: string | undef
     const expiresAt = Math.min(now + ctx.config.staffSessionIdleMs, row.sess.createdAt.getTime() + ctx.config.staffSessionMaxMs);
     await ctx.db.update(staffSessions).set({ lastSeenAt: new Date(now), expiresAt: new Date(expiresAt) }).where(eq(staffSessions.id, row.sess.id));
   }
-  return { user: row.user, id: row.user.id, orgId: row.user.orgId, role: row.user.role, name: row.user.name, staffSessionId: row.sess.id, ip };
+  const mfaEnrollmentRequired = row.user.mfaEnabledAt == null && mfaRequiredFor(row.orgSettings?.requireMfa, row.user.role);
+  return { user: row.user, id: row.user.id, orgId: row.user.orgId, role: row.user.role, name: row.user.name, staffSessionId: row.sess.id, ip, mfaEnrollmentRequired };
 }
 
 function allowedOrigins(ctx: Ctx, req: FastifyRequest): string[] {
@@ -97,8 +104,11 @@ export async function requireSameOrigin(req: FastifyRequest, _reply: FastifyRepl
   if (!isSameOriginRequest(req.server.ctx, req)) throw forbidden('Cross-origin request refused', 'bad_origin');
 }
 
-/** preHandler factory: require a logged-in staff user with at least `min` role. */
-export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHandler {
+/**
+ * preHandler factory: require a logged-in staff user with at least `min` role. A user who must set up two-step
+ * sign-in first is refused (403 mfa_enrollment_required) unless `allowMfaEnrollment` (sign-in state, set-up, sign-out).
+ */
+export function requireStaff(min: StaffRole = 'reviewer', opts: { allowMfaEnrollment?: boolean } = {}): preHandlerAsyncHookHandler {
   return async function (this: unknown, req: FastifyRequest, reply: FastifyReply) {
     const ctx = req.server.ctx;
     // CSRF / cross-site WebSocket defence in depth (cookie is SameSite=Lax): state-changing requests and
@@ -108,6 +118,9 @@ export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHa
     }
     const principal = req.staff ?? (await authenticateStaffToken(ctx, req.cookies?.[STAFF_COOKIE], (v) => req.unsignCookie(v), req.ip));
     if (!principal) throw unauthorized();
+    if (principal.mfaEnrollmentRequired && !opts.allowMfaEnrollment) {
+      throw forbidden('Your organisation requires two-step sign-in. Set it up to continue.', 'mfa_enrollment_required');
+    }
     if (!roleAtLeast(principal.role, min)) throw forbidden(`This action requires the ${min} role`);
     if (!req.staff) bindRequestLog(req, reply, { staffId: principal.id, orgId: principal.orgId });
     req.staff = principal;

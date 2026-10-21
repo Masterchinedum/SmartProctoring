@@ -1,4 +1,5 @@
 import type { ExamVersionChangesDTO, ExamVersionQuestionDTO, ExamVersionReason, ExamVersionSummaryDTO } from '@sp/shared';
+import { downloadText } from './download';
 import { pluralize } from './format';
 
 /** Exam versions in the staff UI: labels, change summaries, answer-key text and export downloads. */
@@ -73,15 +74,7 @@ export function exportFileName(title: string, version?: number | null): string {
 
 /** Save a JSON document as a file in the browser. */
 export function downloadJson(doc: unknown, filename: string): void {
-  const blob = new Blob([`${JSON.stringify(doc, null, 2)}\n`], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  downloadText(`${JSON.stringify(doc, null, 2)}\n`, filename, 'application/json');
 }
 
 /** Largest exam document the import accepts (the server's body limit). */

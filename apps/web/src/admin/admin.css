@@ -17,10 +17,12 @@
 .admin-user .user-name { color: #fff; font-weight: 600; }
 .admin-user .muted { color: #8f9ab0; }
 .admin-user .user-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-user a { color: #cfd6e4; text-decoration: underline; text-underline-offset: 2px; }
+.admin-user a:hover, .admin-user a.active { color: #fff; }
 .admin-user .btn { align-self: flex-start; background: transparent; color: #cfd6e4; border-color: #3a4459; }
 .admin-user .btn:hover:not(:disabled) { background: #20283a; }
 /* Focus ring on the dark navigation / viewer backgrounds. */
-.admin-nav :focus-visible, .lightbox :focus-visible { outline-color: var(--focus-on-dark); }
+.admin-nav :focus-visible, .admin-user :focus-visible, .lightbox :focus-visible { outline-color: var(--focus-on-dark); }
 .admin-main { padding: 20px 24px 60px; min-width: 0; }
 @media (max-width: 900px) {
   .admin-shell { grid-template-columns: 1fr; background: none; }
@@ -502,6 +504,16 @@ details.policy-group > summary h3 { display: inline-flex; }
 .camtest-box-warn { border-color: #f0a830; }
 @media (prefers-reduced-motion: reduce) { .camtest-box { transition: none; } }
 .nav-group { margin: 10px 10px 2px; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #9aa5ba; }
+
+/* two-step sign-in */
+.btn.btn-link { background: none; border: none; color: var(--primary); text-decoration: underline; padding: 4px 0; box-shadow: none; }
+.qr-code { display: block; border: 1px solid var(--border); border-radius: 8px; }
+.mfa-qr { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-top: 8px; }
+.mfa-secret { font-size: 15px; letter-spacing: 0.04em; margin: 4px 0 8px; word-break: break-all; }
+.mfa-steps { padding-left: 20px; }
+.mfa-code-input { font-family: var(--mono); font-size: 20px; letter-spacing: 0.2em; max-width: 12ch; }
+.recovery-codes { columns: 2; column-gap: 32px; margin: 0; padding-left: 24px; font-size: 15px; }
+.recovery-codes li { margin: 2px 0; }
 
 /* accommodations */
 .accommodation-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }

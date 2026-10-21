@@ -12,9 +12,16 @@ const LIMIT = 50;
 
 /** Common audit actions offered as suggestions (the filter accepts any text). */
 const COMMON_ACTIONS = [
+  'accommodation.granted',
+  'accommodation.revoked',
   'auth.login',
   'auth.login_failed',
+  'auth.mfa_disabled',
+  'auth.mfa_enabled',
+  'auth.mfa_recovery_codes_regenerated',
+  'auth.mfa_replaced',
   'auth.password_changed',
+  'auth.recovery_code_used',
   'candidate.consent',
   'candidate.created',
   'candidate.deleted',
@@ -22,8 +29,6 @@ const COMMON_ACTIONS = [
   'candidate.id_photo_rejected',
   'candidate.id_photo_removed',
   'candidate.updated',
-  'accommodation.granted',
-  'accommodation.revoked',
   'event.review',
   'evidence.view',
   'exam.archived',
@@ -52,6 +57,7 @@ const COMMON_ACTIONS = [
   'session.time_extended',
   'settings.updated',
   'user.created',
+  'user.mfa_reset',
   'user.updated',
 ];
 

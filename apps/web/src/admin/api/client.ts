@@ -25,7 +25,9 @@ import type {
   LiveEventDTO,
   NoteDTO,
   OrgSettingsDTO,
+  MfaChallengeResponse,
   Paged,
+  RecoveryCodesDTO,
   RegradeRequest,
   RegradeResultDTO,
   ReviewStatus,
@@ -33,8 +35,10 @@ import type {
   SessionReportDTO,
   SessionSummaryDTO,
   StaffRole,
+  StaffSecurityDTO,
   StaffUserDTO,
   StaffVerificationMethod,
+  TotpSetupDTO,
   TimelineItemDTO,
   WebhookDTO,
   WebhookDeliveryDTO,
@@ -57,6 +61,12 @@ export class ApiError extends Error {
 }
 
 let unauthorizedHandler: (() => void) | null = null;
+let mfaEnrollmentHandler: (() => void) | null = null;
+
+/** Called when the staff API answers 403 mfa_enrollment_required (the organisation now requires two-step sign-in). */
+export function setMfaEnrollmentHandler(handler: (() => void) | null): void {
+  mfaEnrollmentHandler = handler;
+}
 /** Called when any staff request (except auth probes) returns 401. */
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
@@ -111,6 +121,7 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
   if (!res.ok) {
     let parsed: Partial<ApiErrorBody> | null = null;
     if (contentType.includes('json')) parsed = (await res.json().catch(() => null)) as Partial<ApiErrorBody> | null;
+    if (res.status === 403 && parsed?.error === 'mfa_enrollment_required') mfaEnrollmentHandler?.();
     throw new ApiError(
       res.status,
       parsed?.error ?? httpCode(res.status),
@@ -153,6 +164,11 @@ const enc = encodeURIComponent;
 export interface MeResponse {
   user: StaffUserDTO;
   org: { id: string; name: string };
+  security: StaffSecurityDTO;
+}
+
+export function isMfaChallenge(r: MeResponse | MfaChallengeResponse): r is MfaChallengeResponse {
+  return (r as MfaChallengeResponse).mfaRequired === true;
 }
 
 export interface SessionListParams {
@@ -167,7 +183,14 @@ export interface SessionListParams {
 export const api = {
   // ---- auth
   me: () => request<MeResponse>('GET', '/api/auth/me', { noAuthRedirect: true }),
-  login: (email: string, password: string) => request<MeResponse>('POST', '/api/auth/login', { body: { email, password }, noAuthRedirect: true }),
+  login: (email: string, password: string) => request<MeResponse | MfaChallengeResponse>('POST', '/api/auth/login', { body: { email, password }, noAuthRedirect: true }),
+  loginMfa: (factor: { code: string } | { recoveryCode: string }) => request<MeResponse>('POST', '/api/auth/login/mfa', { body: factor, noAuthRedirect: true }),
+  changePassword: (currentPassword: string, newPassword: string) => request<{ ok: true }>('POST', '/api/auth/password', { body: { currentPassword, newPassword } }),
+  mfaSetup: () => request<TotpSetupDTO>('POST', '/api/auth/mfa/totp/setup'),
+  mfaConfirm: (code: string, currentCode?: string) => request<RecoveryCodesDTO>('POST', '/api/auth/mfa/totp/confirm', { body: { code, currentCode: currentCode || undefined } }),
+  regenerateRecoveryCodes: (code: string) => request<RecoveryCodesDTO>('POST', '/api/auth/mfa/recovery-codes', { body: { code } }),
+  disableMfa: (password: string, code: string) => request<{ ok: true }>('POST', '/api/auth/mfa/disable', { body: { password, code } }),
+  resetUserMfa: (id: string) => request<StaffUserDTO>('POST', `/api/admin/users/${encodeURIComponent(id)}/mfa/reset`),
   logout: () => request<{ ok: true }>('POST', '/api/auth/logout', { noAuthRedirect: true }),
 
   // ---- dashboard / sessions

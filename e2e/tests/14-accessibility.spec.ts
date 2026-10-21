@@ -425,6 +425,7 @@ test('every staff page: accessible names, landmarks, headings, titles, contrast'
     ['/admin/settings', /^Settings/],
     ['/admin/integrations', /^Integrations/],
     ['/admin/users', /^Users/],
+    ['/admin/account', /^Account & security/],
   ];
   for (const [path, title] of pages) {
     await sp.goto(path);

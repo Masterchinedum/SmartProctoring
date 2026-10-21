@@ -9,3 +9,4 @@ export * from './pose';
 export * from './integrations';
 export * from './verifiers';
 export * from './accommodations';
+export * from './mfa';

@@ -19,7 +19,7 @@ observed).
 |---|---|---|
 | Candidate (browser) | Access link token (256-bit, bearer) + `X-Client-Instance` | Nothing beyond its own session. The client is assumed hostile: it may be modified, replayed or scripted. |
 | Accomplice | The candidate's link, if shared | Nothing — must not be able to act as the verified browser or skip identity checks. |
-| Reviewer / admin / owner | Staff session cookie (`sp_session`) | Their own organisation only, by role (reviewer < admin < owner). |
+| Reviewer / admin / owner | Password + (when on, or required by the organisation) a TOTP / recovery code → staff session cookie (`sp_session`) | Their own organisation only, by role (reviewer < admin < owner). |
 | Integration (LMS/HR) | Organisation API key (`sp_live_…`) | Its organisation's exams, candidates, sessions, reports and events — never images or face data. |
 | Webhook receiver | Verifies our HMAC signature | Receives notifications only; never images, templates or similarity scores. |
 | External face verifier (optional, e.g. AWS Rekognition) | Our request, signed with the organisation's IAM key or the server's role | Off by default. When an admin enables it: receives face images for the selected identity checks; its answer is advisory — combined by a fixed table, it never records a "possible different person" on its own (`docs/EXTERNAL_VERIFIER.md`). |
@@ -48,6 +48,32 @@ server-side identity match, read other sessions, or change category/severity (th
   12). Logout deletes the server-side session; password change/reset and disabling a user revoke sessions;
   the realtime WebSocket re-validates and closes with 4401 (the staff app then re-checks the sign-in and returns
   to the login page with the current page as return path).
+* Two-step sign-in (staff): RFC 6238 TOTP (HMAC-SHA1, 30 s, 6 digits — what every authenticator app supports),
+  accepting the previous/current/next step only, each step at most once per account (the last used step is
+  stored and advanced by compare-and-set, so a code seen over a shoulder or replayed from a log is refused even
+  within its 30 s). The secret (160 bits) is stored AES-GCM encrypted (AAD `totp:<userId>`; a not-yet-confirmed
+  one under `totp-pending:<userId>`, valid 15 min) and is only ever shown during set-up; it is turned on by a
+  correct code, never by the set-up request alone, and replacing it needs a code from the current factor too.
+  10 recovery codes (`XXXXX-XXXXX`, ≈ 49 bits each, uniform from a 31-letter alphabet without look-alikes) are
+  shown once and stored as `sha256("recovery:" + normalised code)`; each is consumed atomically (single use
+  under concurrency); new codes replace all old ones and need a TOTP code. Sign-in with two-step sign-in on:
+  the correct password creates no session, only a login challenge (256-bit token, sha256 stored, signed
+  `HttpOnly`, `SameSite=Strict` cookie `sp_mfa` limited to `/api/auth`, 5 min, 5 code attempts, same-origin
+  only). Every code attempt is charged to the account's backoff exactly like a password attempt, and the
+  backoff is cleared only by a complete sign-in, so codes cannot be guessed faster than passwords.
+  Re-authentication inside a signed-in session — the current password to change it; a code to create recovery
+  codes, move to a new phone or turn it off — is charged to its own per-account backoff with the same schedule
+  (one counter per secret, so a successful password change never resets code guessing), so a session left open
+  or stolen cannot be used to guess faster than the sign-in allows (429, audited as `auth.login_failed` with
+  `step`). Turning it on
+  or moving it to a new phone signs out the account's other sessions. Turning it off needs the password and a
+  code; it is refused (409 `mfa_required_by_organisation`) while the organisation requires it for the
+  account's role. Owners can require it for administrators and owners or for everyone (`requireMfa`); staff
+  without it then get only the set-up endpoints (403 `mfa_enrollment_required` everywhere else) until they
+  set it up. An administrator can reset a lost factor (not their own; an owner's only by an owner), which also
+  signs the person out. Every change is audited (`auth.mfa_enabled|mfa_replaced|mfa_disabled|
+  mfa_recovery_codes_regenerated`, `auth.recovery_code_used`, `user.mfa_reset`, `auth.login` with `mfa`) and,
+  with SMTP configured, emailed to the account owner so an unexpected change is noticed.
 * Candidates: access token = 256 random bits (only sha256 + an AES-GCM copy for staff re-display stored),
   regenerating a link invalidates the old one immediately. Every write also requires the browser instance
   that passed the camera/identity check (`X-Client-Instance`); a new instance must pass a reconnect check.
@@ -92,7 +118,7 @@ server-side identity match, read other sessions, or change category/severity (th
 ### Cryptography
 * AES-256-GCM for every blob and template, random 96-bit IV per object, AAD binding each ciphertext to its
   row (`evidence:<id>`, `reference:<id>`, `idphoto:<candidateId>`, `access-token:<sessionId>`,
-  `webhook-secret:<id>`, `frame:<id>`, `external-verifier:<orgId>`), key id embedded for rotation (`EVIDENCE_KEYS_OLD`). After a rotation
+  `webhook-secret:<id>`, `frame:<id>`, `external-verifier:<orgId>`, `totp:<userId>`, `totp-pending:<userId>`), key id embedded for rotation (`EVIDENCE_KEYS_OLD`). After a rotation
   the `rekey` CLI re-encrypts every encrypted column and evidence blob under the current key (batched,
   resumable, compare-and-set per row, `--dry-run`, audit `keys.rekeyed`), so old keys can be retired
   (`docs/OPERATIONS.md` §3).
@@ -149,7 +175,7 @@ against a running instance and with integration tests (`apps/server/test/securit
 | 6 | Low | CSRF defence relied on `Origin` only when present; logout had no check (cross-origin logout worked). | Fixed (`Sec-Fetch-Site`/`Referer` fallback; logout same-origin only) |
 | 7 | Medium | A colluding candidate can still copy their own instance id (DevTools) to a second device. | Fixed (detection) — UA change, networks alternating within 60 s or interleaved heartbeat `seq` for the verified instance → `multiple_instances` event (hashed IPs) + mandatory reconnect check; binding the instance to a server-issued secret remains a possible hardening |
 | 8 | Medium | Key rotation is incomplete: no re-encryption tool, and long-lived ciphertexts (ID-photo templates, access tokens, webhook secrets, legal-hold evidence) keep needing old keys indefinitely. | Fixed — `rekey` CLI re-encrypts every encrypted column and evidence blob (batched, resumable, `--dry-run`, audited); retire an old key once `rekey --dry-run` reports nothing under it |
-| 9 | Low | Login throttling is per IP only (no per-account backoff); no MFA/SSO for staff who can view biometric evidence; scrypt N=2^15 is below current guidance (2^17). | Fixed — scrypt N=2^17 (old hashes upgraded at sign-in), per-account backoff 30 s → 15 min after 5 failures (IP-independent, no enumeration), failed logins audited; MFA/SSO still open |
+| 9 | Low | Login throttling is per IP only (no per-account backoff); no MFA/SSO for staff who can view biometric evidence; scrypt N=2^15 is below current guidance (2^17). | Fixed — scrypt N=2^17 (old hashes upgraded at sign-in), per-account backoff 30 s → 15 min after 5 failures (IP-independent, no enumeration), failed logins audited; two-step sign-in (TOTP + recovery codes, organisation-wide requirement, admin reset, security emails); SSO still open |
 | 10 | Low | Candidate-controlled text (event `observation` ≤ 500 chars, camera label) is forwarded into staff alert emails (escaped) and webhooks — phishing from a trusted sender. | Fixed — catalog wording for client-reported events; links stripped from pause reasons and other user-controlled text in webhooks and emails |
 | 11 | Low | Rate-limit counters are in memory per instance (not shared through Redis). | Fixed — Redis store for all rate limits when `REDIS_URL` is set |
 | 12 | Low | Default staff session lifetime is long (8 h idle / 7 days absolute). | Fixed — defaults 60 min idle / 12 h absolute (env overridable); the staff app returns to the sign-in page with a return path |
@@ -211,7 +237,7 @@ fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, 
       instance); add rate limiting at the proxy/WAF as well, e.g. `/api/auth/login` ≤ 10/min per IP,
       `/api/candidate/*` ≤ 20 req/s per IP, request bodies ≤ 5 MB.
 - [ ] Alert on bursts of `auth.login_failed` (reason `throttled` = an account under attack), `evidence.view` by one user, `api_key.created`,
-      `user.updated` (role changes), `webhook.auto_disabled`, and on `503 vision_busy` rates.
+      `user.updated` (role changes), `auth.mfa_disabled`, `user.mfa_reset`, `auth.recovery_code_used`, `webhook.auto_disabled`, and on `503 vision_busy` rates.
 - [ ] Ship logs to central storage with restricted access; they contain staff emails and IP addresses but
       never tokens.
 - [ ] Keep dependencies patched (`pnpm audit --prod` in CI).
@@ -219,6 +245,9 @@ fixed in 4.1.11; esbuild in drizzle-kit's loader and tsup — dev servers only, 
 **Accounts and process**
 - [ ] Give most staff the reviewer role; limit owners/admins; disable accounts on departure (revokes sessions
       immediately).
+- [ ] Require two-step sign-in (Settings → Two-step sign-in): at least for administrators and owners, preferably for
+      everyone who can see candidate evidence. Configure SMTP so staff are emailed about changes to their
+      two-step sign-in; verify the caller's identity out of band before resetting someone's two-step sign-in.
 - [ ] Keep staff session lifetimes short (defaults `STAFF_SESSION_IDLE_MIN=60`, `STAFF_SESSION_MAX_HOURS=12`;
       shorten further where staff use shared or unmanaged devices).
 - [ ] Review the audit log regularly (evidence views, re-enrolments, legal holds, settings changes).
