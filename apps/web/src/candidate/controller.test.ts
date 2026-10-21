@@ -152,6 +152,7 @@ class FakeServer {
       pause: fail,
       cancelPause: fail,
       submit: fail,
+      withdrawConsent: fail,
     };
   }
 }
@@ -397,6 +398,46 @@ describe('CandidateController — "Check complete" waits for the click (P1-2, P2
     expect(c.getSnapshot().state?.session.status).toBe('on_hold');
     expect(c.getSnapshot().awaitingContinue).toBeNull();
     expect(h.runtimes).toHaveLength(0);
+  });
+});
+
+describe('CandidateController — withdrawing consent', () => {
+  it('delivers the answers first, then ends the exam, stops monitoring and deletes images queued on this device', async () => {
+    const c = newController();
+    await c.load();
+    await tick(10);
+    expect(h.runtimes).toHaveLength(1);
+    const api = h.api as CandidateApi;
+    api.uploadEvidence = async () => {
+      throw new CandidateApiError(0, 'network_error', 'Could not reach the server.');
+    };
+    await c.outbox!.putEvidence({ id: 'e1', eventId: 'ev', capturedAt: Date.now(), reason: 'onset', jpeg: new Uint8Array([1, 2, 3]) });
+    await c.outbox!.putSample({ id: 's1', trigger: 'periodic', capturedAt: Date.now(), jpeg: new Uint8Array([4, 5, 6]), busy: true });
+    c.answers!.set('q1', 'my answer');
+    const calls: { reason?: string; savedBefore: boolean }[] = [];
+    api.withdrawConsent = async (req) => {
+      calls.push({ reason: req.reason, savedBefore: server.answers.get('q1')?.value === 'my answer' });
+      server.status = 'terminated';
+      return { ...server.state(), session: { ...server.state().session, status: 'terminated', endReason: 'candidate_withdrew' } };
+    };
+    await c.withdrawConsent('  I prefer an exam centre.  ');
+    expect(calls).toEqual([{ reason: 'I prefer an exam centre.', savedBefore: true }]);
+    expect(h.runtimes[0].stopped).toBe(true);
+    expect(c.getSnapshot()).toMatchObject({ monitoringActive: false, state: { session: { status: 'terminated', endReason: 'candidate_withdrew' } } });
+    expect(c.outbox!.stats()).toMatchObject({ pendingAnswers: 0 });
+    expect(c.outbox!.stats().size).toBe(0);
+  });
+
+  it('keeps the exam going when the request cannot reach the server, and says so', async () => {
+    const c = newController();
+    await c.load();
+    await tick(10);
+    (h.api as CandidateApi).withdrawConsent = async () => {
+      throw new CandidateApiError(0, 'network_error', 'Could not reach the server.');
+    };
+    await expect(c.withdrawConsent()).rejects.toThrow(/could not reach the server/i);
+    expect(h.runtimes[0].stopped).toBe(false);
+    expect(c.getSnapshot().state?.session.status).toBe('active');
   });
 });
 

@@ -98,7 +98,7 @@ export function ReadyScreen() {
           </p>
         </section>
       </main>
-      {showNotice && <PrivacyNoticeDialog notice={state.consent.notice} onClose={() => setShowNotice(false)} />}
+      {showNotice && <PrivacyNoticeDialog notice={state.consent.notice} onClose={() => setShowNotice(false)} canWithdraw={state.consent.accepted} />}
       <Toasts />
     </Page>
   );

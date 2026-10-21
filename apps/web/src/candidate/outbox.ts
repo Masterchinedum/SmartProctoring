@@ -574,6 +574,20 @@ export class Outbox {
     }
   }
 
+  /**
+   * Delete every queued image (screenshots and identity samples) from this device without sending it — after the
+   * candidate withdrew consent, the server refuses them anyway and they must not leave the device. Events and
+   * answers stay queued. Returns how many images were deleted.
+   */
+  async discardImages(): Promise<number> {
+    const evidence = await this.backend.getAll('evidence');
+    const samples = await this.backend.getAll('samples');
+    for (const r of evidence) await this.removeEvidence(r.id);
+    for (const r of samples) await this.removeSample(r.id);
+    this.changed();
+    return evidence.length + samples.length;
+  }
+
   private async removeEvidence(id: string): Promise<void> {
     const rec = await this.backend.get('evidence', id);
     await this.backend.delete('evidence', id);

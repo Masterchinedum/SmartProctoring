@@ -870,6 +870,32 @@ export class CandidateController {
     }
   }
 
+  /**
+   * Withdraw consent (from the privacy notice): answers typed so far are delivered first (they are kept), then the
+   * server ends the exam and deletes its face images. Monitoring and the camera stop, and images still queued on
+   * this device are deleted without being sent. Throws with a candidate-facing message on failure.
+   */
+  async withdrawConsent(reason?: string): Promise<void> {
+    if (this.transitioning) return;
+    this.transitioning = true;
+    try {
+      await this.answers?.flushPending();
+      await this.outbox?.flushNow(ANSWER_FLUSH_BEFORE_SUBMIT_MS, 'answers');
+      let next: CandidateSessionState;
+      try {
+        next = await this.api.withdrawConsent({ confirm: true, reason: reason?.trim() || undefined });
+      } catch (e) {
+        if (e instanceof CandidateApiError && e.status === 0) throw new Error('Your request could not reach the server. Check your connection and try again; your exam continues until it does.');
+        throw e;
+      }
+      await this.stopMonitoring('consent_withdrawn', { flush: false, stopCamera: true });
+      await this.outbox?.discardImages();
+      await this.applyState(next);
+    } finally {
+      this.transitioning = false;
+    }
+  }
+
   /* ================================================================ window events */
 
   private readonly onOnline = () => {

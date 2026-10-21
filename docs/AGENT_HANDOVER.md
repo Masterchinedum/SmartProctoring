@@ -9,7 +9,7 @@ For the next agent picking this up. Read this first, then `docs/HANDOVER.md` (pr
 | # | Area | State |
 |---|---|---|
 | 1–11 | Node 24, busy-server handling, health checks, metrics, load-aware sampling, CI, exam versions, accommodations, staff MFA, reviewer workflow, model governance | **Done and pushed** |
-| 12 | Privacy operations (request register, personal-data export, erasure, consent withdrawal, deletion schedule, operational checks) | **Done and pushed** (see §2), except the exam-app "withdraw consent" button (left on purpose, §2) |
+| 12 | Privacy operations (request register, personal-data export, erasure, consent withdrawal, deletion schedule, operational checks) | **Done and pushed** (see §2), including the exam-app "withdraw consent" button |
 | 13–21 | See §3 | Not started — **#13 is next** |
 
 **Before resuming, read §6 (loose ends) — in particular, check CI on the branch head first.**
@@ -38,9 +38,11 @@ Verification at the time of writing (all green on the pushed branch):
 * Docs: `PRIVACY.md` §2, §4, §5; `OPERATIONS.md` §6 + runbooks; `SECURITY.md` (privacy operations);
   `ARCHITECTURE.md` §8; `INTEGRATION_API.md` (end reason / webhook reason); `HANDOVER.md` (round 4 row, legal note).
 
-Deliberately left for the owner: the **exam-app button for withdrawing consent** (the server path is done; the
-candidate-facing wording should be reviewed first, then linked from the privacy notice and the exam screen —
-`apps/web/src/candidate`, with an e2e step clicking it instead of calling the API as 11e does now).
+Exam-app button for withdrawing consent: in the privacy notice dialog (`apps/web/src/candidate/components/common.tsx`
+`PrivacyNoticeDialog` / `WithdrawConsentDialog`, reachable on the start screen and in the exam), controller
+`withdrawConsent` (answers delivered first; queued images deleted on the device via `Outbox.discardImages`); the notice's
+"Your choices" paragraph says withdrawal is possible (notice version `2026-10-21`). e2e 11e clicks it. The wording is the
+owner's to have reviewed by counsel (HANDOVER §4 item 6).
 
 ## 3. Remaining roadmap (from the original plan, in order)
 
@@ -117,7 +119,7 @@ Do these checks first, in this order:
    fixing it comes before any new task. Fetch the failing job's log (the GitHub MCP `get_job_logs` result is saved to a
    file when large: grep it for `✘`, `failed`, `Error:`).
 2. **Two sessions pushed to this branch** (`session_01EXCTMLZ92wByrEjQWUCpEF` and `session_017yjpdaeHzuYAYFpJxt51TL`).
-   Only one agent should work on the branch at a time. Always `git fetch` and fast-forward before committing, and
+   The owner stopped the first one; the second continues. Only one session should work on the branch at a time. Always `git fetch` and fast-forward before committing, and
    check `git log origin/claude/sweet-hamilton-46bh7e` right before pushing.
 3. **Two CI flakes were fixed in the tests only** — watch whether they come back:
    * `14-accessibility` "small screens…" (`26f0d54`): CI once measured the enabled "Agree and continue" button at
@@ -129,11 +131,12 @@ Do these checks first, in this order:
      guidance and "We couldn't confirm your identity…", which embeds the same guidance
      (`apps/web/src/candidate/monitoring/runtime.ts`, around line 560). The spec now takes the first match. Product
      question for the owner: should the candidate see the same guidance twice? Possibly show only the combined prompt.
-4. **Exam-app button to withdraw consent** (rest of #12): see §2. Needs reviewed candidate-facing wording first.
+4. ~~Exam-app button to withdraw consent~~ — done (see §2).
 5. **PR #1's description is stale** (it still describes only Phase 1; the branch now carries #1–#12). Rewrite it in #21
    (or earlier if the owner asks). Note its base branch is `claude/loving-hamilton-sszj2x`, not `main`.
-6. A scheduled check-in on PR #1 exists (routine "Re-check PR #1 state"); it only re-checks CI / merge state / review
-   threads and does nothing else.
+6. ~~A scheduled check-in on PR #1~~ — none is active any more.
+7. **The container can restart while idle**: Postgres and Redis then come back down. `service postgresql start;
+   service redis-server start` (the trust config and databases survive on disk).
 
 ### Definition of done for each remaining task (#13–#21)
 

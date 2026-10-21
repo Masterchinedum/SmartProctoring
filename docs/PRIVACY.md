@@ -86,8 +86,12 @@ browser — see the interaction-timing row above), pointer positions, location.
   period), images still in the candidate's browser are refused when they arrive, and a consent-withdrawal request is
   added to the register so staff arrange an alternative assessment. A session under legal hold keeps its images
   (the request says so). The approved ID photo belongs to the candidate record and is kept unless staff remove it.
-  The exam app does not show a withdrawal button yet: the endpoint is ready, the candidate-facing wording is to be
-  reviewed first (then link it from the privacy notice and the exam screen).
+  In the exam app it is reached from the privacy notice ("What is monitored?" on the start screen and in the exam):
+  *Withdraw my consent…* explains what happens (the exam ends now and cannot be continued, monitoring and the camera
+  stop, images and identity data are deleted straight away, answers are kept but not scored, the provider will be in
+  touch), takes an optional reason (passed to staff in the register entry) and needs an explicit "I understand"
+  before it ends the exam. Images still queued in the browser are deleted on the device, not sent. The notice itself
+  (version 2026-10-21) tells candidates under "Your choices" that they can withdraw at any time.
 * **Showing that deletion happens**: Privacy → *Deletion schedule* lists what is due over the next 30 days, what is
   past its date but not yet deleted, the sessions under legal hold, and the retention job's last run (recorded in the
   database whichever server ran it); *Operational checks* turns a failing or stalled job into a warning.

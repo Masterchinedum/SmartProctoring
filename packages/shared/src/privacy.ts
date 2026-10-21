@@ -1,6 +1,6 @@
 import type { PrivacyNoticeDTO } from './api';
 
-export const PRIVACY_NOTICE_VERSION = '2026-09-29';
+export const PRIVACY_NOTICE_VERSION = '2026-10-21';
 
 /** Builds the candidate-facing notice of what is monitored and what evidence is kept. */
 export function buildPrivacyNotice(opts: {
@@ -84,7 +84,7 @@ export function buildPrivacyNotice(opts: {
       },
       {
         heading: 'Your choices',
-        body: `You must consent to proceed with a proctored exam. If you do not consent, or need an accommodation, contact ${opts.contact} before starting.`,
+        body: `You must consent to proceed with a proctored exam. If you do not consent, or need an accommodation, contact ${opts.contact} before starting. You can withdraw your consent at any time, also during the exam (open this notice and choose “Withdraw my consent”): your exam then ends without a score, the images and identity data recorded for it are deleted straight away, and ${opts.orgName} will contact you about another way to take it.`,
       },
     ],
   };

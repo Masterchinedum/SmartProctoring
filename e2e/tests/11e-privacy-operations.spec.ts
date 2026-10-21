@@ -14,8 +14,9 @@ import type { AuditLogEntryDTO, Paged, PrivacyRequestsDTO } from '../../packages
 /**
  * Scenario 11e — privacy operations, on a dedicated server instance (the register, the deletion schedule and the
  * operational checks are organisation-wide; the other scenarios' legal holds and sessions must not show up here).
- *  - A candidate withdraws consent during the exam: their exam ends ("You withdrew your consent"), its images are
- *    deleted (410), and a consent-withdrawal request appears in the register, made in the exam app.
+ *  - A candidate withdraws consent during the exam from the privacy notice (confirmation step): their exam ends ("You
+ *    withdrew your consent"), its images are deleted (410), and a consent-withdrawal request appears in the register,
+ *    made in the exam app, with the reason they gave.
  *  - An administrator records an access request in the staff app, exports the candidate's data as a ZIP (records and
  *    decrypted images; the export is recorded on the request), then erases the candidate through an erasure request:
  *    refused while a session is under legal hold, done once it is lifted; the requests stay, without the candidate.
@@ -71,14 +72,18 @@ test.describe('privacy operations', () => {
     await w.checkInAndStart();
     await expect.poll(() => liveEvidence(withdrawn.sessionId), { message: 'the check-in kept identity images' }).toBeGreaterThan(0);
     const evidenceIds = (await sql<{ id: string }>(databaseUrl, 'SELECT id FROM evidence WHERE session_id = $1 AND purged_at IS NULL', [withdrawn.sessionId])).map((r) => r.id);
-    // The exam app has no button for it yet (its wording is under review): the request the button will send.
-    const res = await fetch(`${server.url}/api/candidate/consent/withdraw`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${withdrawn.token}`, 'x-client-instance': 'e2e-withdraw-request', 'content-type': 'application/json' },
-      body: JSON.stringify({ confirm: true, reason: 'I prefer to sit the exam in person.' }),
-    });
-    expect(res.status, await res.clone().text()).toBe(200);
-    expect((await res.json()).session).toMatchObject({ status: 'terminated', endReason: 'candidate_withdrew' });
+    // From the privacy notice in the exam: what happens is spelled out, a reason is optional, ending needs a tick.
+    await w.page.getByTestId('what-is-monitored').click();
+    const notice = w.page.getByRole('dialog', { name: 'What is monitored during your exam' });
+    await expect(notice).toContainText('You can withdraw your consent at any time');
+    await notice.getByTestId('withdraw-consent').click();
+    const confirmWithdraw = w.page.getByRole('dialog', { name: 'Withdraw your consent?' });
+    await expect(confirmWithdraw).toContainText('your exam ends now');
+    await expect(confirmWithdraw.getByTestId('withdraw-confirm')).toBeDisabled();
+    await expectNoA11yIssues(w.page, 'withdraw consent dialog');
+    await confirmWithdraw.getByTestId('withdraw-reason').fill('I prefer to sit the exam in person.');
+    await confirmWithdraw.getByTestId('withdraw-understood').check();
+    await confirmWithdraw.getByTestId('withdraw-confirm').click();
     await expect(w.page.getByTestId('ended-screen')).toContainText('You withdrew your consent', { timeout: 30_000 });
     await w.close();
     expect(await liveEvidence(withdrawn.sessionId)).toBe(0);
@@ -92,6 +97,11 @@ test.describe('privacy operations', () => {
     const withdrawal = register.locator('tbody tr', { hasText: 'Consent withdrawn' });
     await expect(withdrawal).toContainText('Wanda Withdraw');
     await expect(withdrawal).toContainText('made in the exam app');
+    await withdrawal.getByRole('button', { name: 'Consent withdrawn' }).click();
+    const withdrawalDetail = sp.getByRole('dialog', { name: 'Consent withdrawn' });
+    await expect(withdrawalDetail).toContainText('Reason given by the candidate: I prefer to sit the exam in person.');
+    await sp.keyboard.press('Escape');
+    await expect(withdrawalDetail).toBeHidden();
     await expect(sp.getByTestId('ops-checks').getByTestId('ops-privacy_requests')).toContainText('1 open request');
     await expectNoA11yIssues(sp, 'privacy page');
 

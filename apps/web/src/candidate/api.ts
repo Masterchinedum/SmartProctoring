@@ -16,6 +16,7 @@ import type {
   SaveAnswerResponse,
   StartCheckRequest,
   StartCheckResponse,
+  WithdrawConsentRequest,
 } from '@sp/shared';
 
 /**
@@ -161,6 +162,8 @@ export interface CandidateApi {
   pause(reason?: string): Promise<PauseResponse>;
   cancelPause(): Promise<Timed<CandidateSessionState>>;
   submit(): Promise<Timed<CandidateSessionState>>;
+  /** Withdraw consent: the exam ends and its face images are deleted (POST /api/candidate/consent/withdraw). */
+  withdrawConsent(req: WithdrawConsentRequest): Promise<CandidateSessionState>;
 }
 
 export interface CandidateApiOptions {
@@ -322,6 +325,7 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
     pause: (reason) => json<PauseResponse>('POST', '/api/candidate/pause', reason ? { reason } : {}),
     cancelPause: () => request<CandidateSessionState>('POST', '/api/candidate/pause/cancel'),
     submit: () => request<CandidateSessionState>('POST', '/api/candidate/submit'),
+    withdrawConsent: (req) => json<CandidateSessionState>('POST', '/api/candidate/consent/withdraw', req),
   };
 }
 

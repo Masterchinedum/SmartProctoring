@@ -194,7 +194,7 @@ export function ExamScreen() {
 
       {dialog === 'pause' && <PauseDialog state={state} onClose={() => setDialog(null)} />}
       {dialog === 'submit' && <SubmitDialog total={questions.length} answered={answeredCount} onClose={() => setDialog(null)} />}
-      {dialog === 'privacy' && <PrivacyNoticeDialog notice={state.consent.notice} onClose={() => setDialog(null)} />}
+      {dialog === 'privacy' && <PrivacyNoticeDialog notice={state.consent.notice} onClose={() => setDialog(null)} canWithdraw={state.consent.accepted} />}
       <Toasts />
     </div>
   );
