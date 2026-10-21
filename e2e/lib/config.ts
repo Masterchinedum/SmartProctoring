@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
  *   E2E_WORKERS          parallel workers (default 2; every camera test runs its own Chromium)
  *   E2E_HEADED=1         show the candidate browsers
  *   E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD   owner created via BOOTSTRAP_ADMIN_* (and used by the tests)
+ *   E2E_NO_SKIP=1        a test that would be skipped because its face images are missing FAILS instead, and global
+ *                        setup stops when a fixture cannot be built (CI: a green run means every scenario ran)
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +40,7 @@ export const EVIDENCE_KEY = Buffer.alloc(32, 7).toString('base64');
 export const SESSION_SECRET = 'e2e-session-secret-0123456789abcdefghijklmnopqrstuvwxyz';
 export const HEADED = env.E2E_HEADED === '1';
 export const WORKERS = Number(env.E2E_WORKERS || 2);
+export const NO_SKIP = env.E2E_NO_SKIP === '1';
 
 export function faceImage(name: string): string {
   return join(FACES_DIR, name);

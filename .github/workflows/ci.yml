@@ -4,6 +4,20 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Public face photos (fetched at pinned commits with SHA-256 checks, never committed): the real-model tests and the
+  # camera scenarios read them. With the REQUIRE / NO_SKIP switches a missing image fails the run instead of skipping
+  # tests, so green means every scenario ran.
+  FACES_DIR: /tmp/sp-faces
+  FACESETS_DIR: /tmp/sp-facesets
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -18,6 +32,9 @@ jobs:
     env:
       PGHOST: 127.0.0.1
       PGUSER: postgres
+      SP_TEST_FACES_DIR: /tmp/sp-faces
+      SP_TEST_FACESETS_DIR: /tmp/sp-facesets
+      SP_REQUIRE_TEST_IMAGES: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -26,7 +43,92 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/sp-faces
+            /tmp/sp-facesets
+          key: face-images-${{ hashFiles('e2e/scripts/fetch-faces.ts', 'apps/server/src/eval/datasets.ts') }}
+      - run: E2E_FACES_DIR=$FACES_DIR pnpm --filter @sp/e2e fetch-faces
+      - run: pnpm --filter @sp/server eval:fetch-faces -- --dir $FACESETS_DIR
       - run: psql -c 'create database proctor_test' && psql -c 'create database proctor'
       - run: pnpm typecheck
+      - run: pnpm --filter @sp/e2e typecheck
       - run: pnpm test
       - run: pnpm --filter @sp/web build && pnpm --filter @sp/server build
+
+  e2e:
+    # The core end-to-end scenarios (tests 01–18: real server, real models, Chromium with a fake camera). The
+    # webcam-realistic accuracy scenarios (20–24) run nightly (nightly.yml).
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      E2E_FACES_DIR: /tmp/sp-faces
+      E2E_NO_SKIP: "1"
+      E2E_SKIP_REALISTIC: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/sp-faces
+            /tmp/sp-facesets
+          key: face-images-${{ hashFiles('e2e/scripts/fetch-faces.ts', 'apps/server/src/eval/datasets.ts') }}
+      - run: pnpm --filter @sp/e2e fetch-faces
+      - run: pnpm --filter @sp/e2e exec playwright install --with-deps chromium
+      - run: pnpm --filter @sp/e2e exec playwright test 'tests/[01]'
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-core-artifacts
+          path: |
+            e2e/.artifacts
+            e2e/test-results
+            e2e/playwright-report
+          retention-days: 7
+
+  docker:
+    # Builds the production image and boots it: migrations, the vision workers on Node 24, the web app, health probes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t smartproctoring:ci .
+      - name: Boot the image and probe it
+        run: |
+          docker run -d --name sp --network host \
+            -e PORT=8080 -e DATABASE_URL=postgres://postgres@127.0.0.1:5432/postgres \
+            -e EVIDENCE_KEY="$(openssl rand -base64 32)" -e SESSION_SECRET="$(openssl rand -base64 48)" \
+            -e PUBLIC_URL=http://localhost:8080 -e COOKIE_SECURE=false \
+            -e BOOTSTRAP_ADMIN_EMAIL=owner@example.com -e BOOTSTRAP_ADMIN_PASSWORD="$(openssl rand -hex 16)" \
+            smartproctoring:ci
+          for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health/ready && break; sleep 2; done
+          curl -sf http://localhost:8080/api/health/ready
+          curl -sf http://localhost:8080/api/health/live
+          curl -sf http://localhost:8080/api/health/capacity | grep -q '"accepting":true'
+          curl -sf -o /dev/null http://localhost:8080/admin
+          test "$(docker exec sp node -p 'process.versions.node.split(".")[0]')" = 24
+      - if: always()
+        run: docker logs sp || true

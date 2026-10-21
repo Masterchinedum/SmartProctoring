@@ -1,0 +1,58 @@
+name: Nightly end-to-end
+# The whole end-to-end suite, including the webcam-realistic identity accuracy scenarios (tests 20–24,
+# docs/accuracy/end-to-end.md), which take long and need the public identity sets. Scheduled runs use the default
+# branch; run it on any branch from the Actions tab (workflow_dispatch).
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      E2E_FACES_DIR: /tmp/sp-faces
+      E2E_FACESETS_DIR: /tmp/sp-facesets
+      # A missing image fails the run: green means every scenario, the realistic ones included, ran.
+      E2E_NO_SKIP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/sp-faces
+            /tmp/sp-facesets
+          key: face-images-${{ hashFiles('e2e/scripts/fetch-faces.ts', 'apps/server/src/eval/datasets.ts') }}
+      - run: pnpm --filter @sp/e2e fetch-faces
+      - run: pnpm --filter @sp/server eval:fetch-faces -- --dir $E2E_FACESETS_DIR
+      - run: pnpm --filter @sp/e2e exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - if: always()
+        run: pnpm --filter @sp/e2e rw:report || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-nightly-${{ github.run_id }}
+          path: |
+            e2e/.artifacts
+            e2e/test-results
+            e2e/playwright-report
+          retention-days: 14

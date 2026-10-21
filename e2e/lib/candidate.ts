@@ -1,5 +1,6 @@
-import { chromium, expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { chromium, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { BASE_URL, HEADED } from './config';
+import { requireImages } from './require-images';
 import { fixtureAvailable, fixturePath, type FixtureName } from './fixtures';
 
 /**
@@ -37,8 +38,10 @@ import { fixtureAvailable, fixturePath, type FixtureName } from './fixtures';
  */
 
 export function skipUnlessFixtures(...names: FixtureName[]): void {
-  const missing = names.filter((n) => !fixtureAvailable(n));
-  test.skip(missing.length > 0, `face images for fixture(s) ${missing.join(', ')} not found (set E2E_FACES_DIR)`);
+  requireImages(
+    names.filter((n) => !fixtureAvailable(n)),
+    'face images (set E2E_FACES_DIR; pnpm --filter @sp/e2e fetch-faces) for fixture(s)',
+  );
 }
 
 export async function launchCamera(fixture: FixtureName): Promise<Browser> {

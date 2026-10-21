@@ -12,8 +12,13 @@ pnpm --filter @sp/e2e exec playwright test -g "reconnect"
 E2E_SKIP_BUILD=1 pnpm test:e2e                  # reuse apps/web/dist (faster when iterating on tests)
 E2E_HEADED=1 E2E_WORKERS=1 pnpm test:e2e        # watch the candidate browsers (needs a display / xvfb-run)
 pnpm --filter @sp/e2e fixtures                  # (re)build the fake-camera videos only
+pnpm --filter @sp/e2e fetch-faces               # download the face photos (pinned commits, SHA-256 checked) to E2E_FACES_DIR
 pnpm --filter @sp/e2e typecheck
+E2E_NO_SKIP=1 pnpm test:e2e                     # a missing face image fails the run instead of skipping tests (CI)
 ```
+
+CI (`.github/workflows/ci.yml`) runs scenarios 01–18 on every pull request with `E2E_NO_SKIP=1`, so a green run
+means every scenario ran; `nightly.yml` runs the whole suite, the realistic scenarios included.
 
 Runtime (65 tests, 4-core machine): ~31 minutes with the default 2 workers — scenarios 01–18 (33 tests) take
 ~14 minutes; the realistic-webcam scenarios 20–24 (32 tests, incl. two 5-minute genuine-candidate runs) ~17 minutes.
@@ -61,7 +66,8 @@ cookies never mix), `NODE_ENV=production` and `VISION_THREADS=2`. Their database
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `E2E_FACES_DIR` | `/tmp/claude-0/faces` | Folder with the source face images |
+| `E2E_FACES_DIR` | `/tmp/claude-0/faces` | Folder with the source face images (`pnpm --filter @sp/e2e fetch-faces` fills it) |
+| `E2E_NO_SKIP` | — | `1` = a test whose face images are missing fails instead of being skipped, and global setup stops when a fixture cannot be built |
 | `E2E_PORT` | `8098` | Port of the server started by global setup |
 | `E2E_BASE_URL` | — | Test an already running server instead (no DB reset, no build, no server start) |
 | `E2E_DATABASE_URL` | `postgres://postgres@127.0.0.1:5432/proctor_e2e` | Throwaway database (name must contain `e2e`) |
@@ -80,7 +86,10 @@ cookies never mix), `NODE_ENV=production` and `VISION_THREADS=2`. Their database
 
 ## Face images and fixtures
 
-The face images are **never copied into the repository**. Global setup reads them from `E2E_FACES_DIR`
+The face images are **never copied into the repository**. `pnpm --filter @sp/e2e fetch-faces` downloads them from
+pinned commits of ageitgey/face_recognition and serengil/deepface (MIT) and checks each file's SHA-256
+(`scripts/fetch-faces.ts`); it also fetches `obama_small.jpg` and `biden.jpg`, which the server's real-model tests read
+from `SP_TEST_FACES_DIR`. Global setup reads them from `E2E_FACES_DIR`
 and writes derived stills and videos to `e2e/.fixtures/` (gitignored):
 
 | File in `E2E_FACES_DIR` | Used as |

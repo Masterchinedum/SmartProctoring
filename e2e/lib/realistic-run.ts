@@ -2,10 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { cpus, loadavg } from 'node:os';
 import { join } from 'node:path';
-import { expect, test, type Browser, type TestInfo } from '@playwright/test';
+import { expect, type Browser, type TestInfo } from '@playwright/test';
 import { SAMPLING_PROFILES, type ProctoringPolicyInput, type SamplingProfile } from '../../packages/shared/src/policy';
 import { CandidatePage, launchCameraFile, type CheckOutcome } from './candidate';
 import { ARTIFACTS_DIR } from './config';
+import { requireImages } from './require-images';
 import { rwFixtureAvailable, rwFixturePath, type RwFixtureName } from './realistic';
 import { QUESTIONS, type SessionHandle, type StaffApi } from './staff-api';
 
@@ -25,8 +26,10 @@ export function reps(): number[] {
 }
 
 export function skipUnlessRw(...names: RwFixtureName[]): void {
-  const missing = names.filter((n) => !rwFixtureAvailable(n));
-  test.skip(missing.length > 0, `identity-set images for realistic fixture(s) ${missing.join(', ')} not found (set E2E_FACESETS_DIR)`);
+  requireImages(
+    names.filter((n) => !rwFixtureAvailable(n)),
+    'identity-set images (set E2E_FACESETS_DIR; pnpm --filter @sp/server eval:fetch-faces) for realistic fixture(s)',
+  );
 }
 
 export function launchRw(name: RwFixtureName): Promise<Browser> {

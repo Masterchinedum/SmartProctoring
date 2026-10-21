@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, st
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FullConfig } from '@playwright/test';
-import { ARTIFACTS_DIR, BASE_URL, DATABASE_URL, EXTERNAL_SERVER, FACES_DIR, PORT, REPO_DIR } from './lib/config';
+import { ARTIFACTS_DIR, BASE_URL, DATABASE_URL, EXTERNAL_SERVER, FACES_DIR, NO_SKIP, PORT, REPO_DIR } from './lib/config';
 import { ensureFixtures } from './lib/fixtures';
 import { ensureRealisticFixtures, FACESETS_DIR, type RwFixtureName } from './lib/realistic';
 import { resetDatabase, startServer, waitForHealth } from './lib/server';
@@ -50,11 +50,13 @@ export default async function globalSetup(_config: FullConfig): Promise<() => Pr
   const fx = await ensureFixtures(log);
   if (fx.built.length) log(`fixtures built: ${fx.built.join(', ')}`);
   if (fx.skipped.length) log(`face images missing in ${FACES_DIR}: camera fixtures ${fx.skipped.join(', ')} unavailable (their tests are skipped)`);
+  if (fx.skipped.length && NO_SKIP) throw new Error(`E2E_NO_SKIP=1: camera fixtures ${fx.skipped.join(', ')} cannot be built (face images missing in ${FACES_DIR}; pnpm --filter @sp/e2e fetch-faces)`);
   if (process.env.E2E_SKIP_REALISTIC !== '1') {
     const only = (process.env.E2E_RW_ONLY ?? '').split(',').filter(Boolean) as RwFixtureName[];
     const rw = ensureRealisticFixtures(log, only);
     if (rw.built.length) log(`realistic fixtures built: ${rw.built.join(', ')}`);
     if (rw.skipped.length) log(`identity sets missing in ${FACESETS_DIR}: realistic fixtures ${rw.skipped.join(', ')} unavailable (their tests are skipped)`);
+    if (rw.skipped.length && NO_SKIP) throw new Error(`E2E_NO_SKIP=1: realistic fixtures ${rw.skipped.join(', ')} cannot be built (identity sets missing in ${FACESETS_DIR}; pnpm --filter @sp/server eval:fetch-faces)`);
   }
 
   if (EXTERNAL_SERVER) {
