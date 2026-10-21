@@ -603,7 +603,7 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
       context: ctxInfo,
     })
     .returning();
-  m.publishIdentityCheck(row.id);
+  m.publishIdentityCheck(row);
   if (d.burst) {
     const ids = d.frames.map((f) => f.frameRow!.id);
     await m.tx.update(identitySampleFrames).set({ identityCheckId: row.id, embeddingEnc: null }).where(inArray(identitySampleFrames.id, ids));

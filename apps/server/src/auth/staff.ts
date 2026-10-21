@@ -13,6 +13,7 @@ import type { Ctx } from '../context.js';
 import { organizations, staffSessions, staffUsers, type StaffUser } from '../db/schema.js';
 import { randomToken, sha256Hex } from '../lib/crypto.js';
 import { forbidden, unauthorized } from '../lib/errors.js';
+import { bindRequestLog } from '../lib/request-log.js';
 
 export const STAFF_COOKIE = 'sp_session';
 
@@ -98,7 +99,7 @@ export async function requireSameOrigin(req: FastifyRequest, _reply: FastifyRepl
 
 /** preHandler factory: require a logged-in staff user with at least `min` role. */
 export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHandler {
-  return async function (this: unknown, req: FastifyRequest, _reply: FastifyReply) {
+  return async function (this: unknown, req: FastifyRequest, reply: FastifyReply) {
     const ctx = req.server.ctx;
     // CSRF / cross-site WebSocket defence in depth (cookie is SameSite=Lax): state-changing requests and
     // WebSocket upgrades must come from our own origin when the browser says where they come from.
@@ -108,6 +109,7 @@ export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHa
     const principal = req.staff ?? (await authenticateStaffToken(ctx, req.cookies?.[STAFF_COOKIE], (v) => req.unsignCookie(v), req.ip));
     if (!principal) throw unauthorized();
     if (!roleAtLeast(principal.role, min)) throw forbidden(`This action requires the ${min} role`);
+    if (!req.staff) bindRequestLog(req, reply, { staffId: principal.id, orgId: principal.orgId });
     req.staff = principal;
   };
 }

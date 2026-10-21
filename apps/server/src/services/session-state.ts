@@ -39,6 +39,7 @@ import {
   type EventRow,
   type Exam,
   type ExamSession,
+  type IdentityCheck,
   type IdentityEngineState,
   type Organization,
   type SessionPeriod,
@@ -127,7 +128,7 @@ export class SessionMutation {
   readonly now: number;
   private patch: Partial<typeof examSessions.$inferInsert> = {};
   private readonly touchedEvents = new Set<string>();
-  private readonly identityChecksToPublish: string[] = [];
+  private readonly identityChecksToPublish: Pick<IdentityCheck, 'id' | 'checkId' | 'trigger' | 'decision'>[] = [];
   private readonly pauseRequestsToPublish: string[] = [];
   private readonly afterCommit: (() => void | Promise<void>)[] = [];
   /** Bursts dropped undecided (resetIdentityCounters / dropPendingBursts): their frame embeddings are erased at flush. */
@@ -207,8 +208,9 @@ export class SessionMutation {
   touchEvent(id: string): void {
     this.touchedEvents.add(id);
   }
-  publishIdentityCheck(id: string): void {
-    this.identityChecksToPublish.push(id);
+  /** A recorded identity decision: staff dashboards are told, and it is counted (metrics), once committed. */
+  publishIdentityCheck(row: Pick<IdentityCheck, 'id' | 'checkId' | 'trigger' | 'decision'>): void {
+    this.identityChecksToPublish.push(row);
   }
   publishPauseRequest(id: string): void {
     this.pauseRequestsToPublish.push(id);
@@ -252,7 +254,10 @@ export class SessionMutation {
     const orgId = this.session.orgId;
     // Events / identity checks / pause requests refresh the summary themselves (counts, last decision...).
     for (const id of this.touchedEvents) live.eventChanged(id, sid, orgId);
-    for (const id of this.identityChecksToPublish) live.identityCheck(sid, id, orgId);
+    for (const c of this.identityChecksToPublish) {
+      live.identityCheck(sid, c.id, orgId);
+      this.ctx.metrics.identityDecision(c.checkId ? 'check' : 'sample', c.trigger, c.decision);
+    }
     for (const id of this.pauseRequestsToPublish) live.pauseRequest(sid, id, orgId);
     // A routine heartbeat (only timestamps changed) only keeps the summary fresh at the keepalive rate.
     live.sessionChanged(sid, { orgId, visible: this.staffVisibleChange });

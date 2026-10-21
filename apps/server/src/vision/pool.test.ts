@@ -115,6 +115,27 @@ describe('VisionWorkerPool', () => {
     expect(pool.load.estimatedWaitMs).toEqual({ interactive: 0, background: 0 });
   });
 
+  it('tells its observer about every analysis (queue wait, worker time, outcome) and every refusal', async () => {
+    const ended: { priority: string; waitMs: number; runMs: number; ok: boolean }[] = [];
+    const refused: string[] = [];
+    const pool = await VisionWorkerPool.start({
+      size: 1,
+      maxQueue: 1,
+      script,
+      workerData: { engine: { modelsDir: 'ok', threads: 1 }, nice: 0 },
+      observer: { analysisEnded: (i) => ended.push(i), analysisRefused: (p) => refused.push(p) },
+    });
+    pools.push(pool);
+    const settled = await Promise.allSettled([pool.analyze(img('sleep:80'), {}), pool.analyze(img('sleep:10'), {}), pool.analyze(img('x'), {}), pool.analyze(img('bad'), { priority: 'background' })]);
+    expect(settled.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled', 'rejected', 'rejected']);
+    expect(refused).toEqual(['interactive']);
+    expect(ended).toHaveLength(3);
+    expect(ended[0]).toMatchObject({ priority: 'interactive', ok: true });
+    expect(ended[0].runMs).toBeGreaterThanOrEqual(70);
+    expect(ended[1].waitMs).toBeGreaterThanOrEqual(70); // queued behind the first
+    expect(ended[2]).toMatchObject({ priority: 'background', ok: false });
+  });
+
   it('keeps Retry-After within 1 s and MAX_RETRY_AFTER_SEC', () => {
     expect(retryAfterSecFor(0)).toBe(1);
     expect(retryAfterSecFor(1001)).toBe(2);

@@ -78,6 +78,14 @@ export type VisionPriority = 'interactive' | 'background';
 /** One number per queue priority. */
 export type VisionByPriority = Record<VisionPriority, number>;
 
+/** Told about every analysis of the worker pool (metrics). Must not throw or block. */
+export interface VisionObserver {
+  /** An analysis finished (ok) or failed: how long it waited in the queue and how long a worker took (ms). */
+  analysisEnded(info: { priority: VisionPriority; waitMs: number; runMs: number; ok: boolean }): void;
+  /** An analysis was refused because its queue was full (VisionBusyError, HTTP 503). */
+  analysisRefused(priority: VisionPriority): void;
+}
+
 /** Snapshot of the face-analysis queue of one server instance. */
 export interface VisionLoad {
   /** Workers able to analyse right now (0: none started, e.g. models unreadable). */

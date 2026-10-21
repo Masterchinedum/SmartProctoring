@@ -62,6 +62,7 @@ Full text: https://www.apache.org/licenses/LICENSE-2.0 — the models and librar
 | nodemailer | MIT-0 | optional (email alerts over SMTP) |
 | zod | MIT | |
 | pino | MIT | |
+| @prometheus-io/client (formerly prom-client) | Apache-2.0 | `/metrics` exposition (served only when `METRICS_TOKEN` is set) |
 | react, react-dom, react-router-dom | MIT | |
 | @tanstack/react-query | MIT | |
 | idb | ISC | |

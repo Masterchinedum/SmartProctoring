@@ -673,7 +673,7 @@ async function settleAbandoned(m: SessionMutation, check: Check, how: AbandonHow
       },
     })
     .returning();
-  m.publishIdentityCheck(row.id);
+  m.publishIdentityCheck(row);
   m.set({ lastIdentityDecision: row.decision, lastIdentityAt: row.at, lastIdentitySimilarity: row.similarity ?? null });
   const policy = await m.policy();
   const max = policy.identity.maxVerificationAttempts;
@@ -1208,7 +1208,7 @@ async function insertIdentityCheck(a: ApplyCtx, fields: Partial<typeof identityC
       ...fields,
     })
     .returning();
-  m.publishIdentityCheck(row.id);
+  m.publishIdentityCheck(row);
   m.set({ lastIdentityDecision: row.decision, lastIdentityAt: row.at, lastIdentitySimilarity: row.similarity ?? null });
   return row;
 }

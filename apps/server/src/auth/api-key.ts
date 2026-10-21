@@ -17,6 +17,7 @@ import type { Ctx } from '../context.js';
 import { apiKeys, type ApiKey } from '../db/schema.js';
 import { randomToken, sha256Hex } from '../lib/crypto.js';
 import { HttpError } from '../lib/errors.js';
+import { bindRequestLog } from '../lib/request-log.js';
 
 export const API_KEY_DISPLAY_PREFIX_LENGTH = API_KEY_PREFIX.length + 8;
 const LAST_USED_WRITE_INTERVAL_MS = 60_000;
@@ -87,6 +88,7 @@ export async function requireApiKey(req: FastifyRequest, reply: FastifyReply): P
   const principal = await authenticateApiKey(req.server.ctx, key, req.ip);
   if (!principal) throw invalidKey(reply);
   req.apiKey = principal;
+  bindRequestLog(req, reply, { apiKeyId: principal.id, orgId: principal.orgId });
 }
 
 /** The API key principal inside a handler guarded by requireApiKey. */

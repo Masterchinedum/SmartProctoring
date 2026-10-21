@@ -1,0 +1,165 @@
+# SmartProctoring — suggested Prometheus alerting rules (docs/OPERATIONS.md §5).
+# Scrape GET /metrics with `Authorization: Bearer $METRICS_TOKEN`. Thresholds are starting points: tune them to your
+# deployment once you have a few exam days of data. `sp_cluster_*` series are the same on every instance (max, not sum).
+#   promtool check rules docs/prometheus-alerts.yml
+groups:
+  - name: smartproctoring-face-analysis
+    rules:
+      - alert: SmartProctoringNoFaceAnalysisWorker
+        expr: sp_vision_workers == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }}: no face-analysis worker"
+          description: Identity checks and samples cannot be analysed on this instance; it also fails /api/health/ready.
+
+      - alert: SmartProctoringIdentitySamplesDelayed
+        expr: max by (instance) (max_over_time(sp_vision_oldest_wait_seconds{priority="background"}[5m])) > 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }}: identity samples wait more than 10 s for face analysis"
+          description: Swap detection slows down. Add an instance or CPU, stagger exam starts, or use the Balanced sampling intensity (docs/PERFORMANCE.md §6).
+
+      - alert: SmartProctoringCheckInsSlow
+        expr: histogram_quantile(0.95, sum by (instance, le) (rate(sp_vision_queue_wait_seconds_bucket{priority="interactive"}[5m]))) > 2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }}: check-in / resume frames wait more than 2 s (p95) for face analysis"
+
+      - alert: SmartProctoringFaceAnalysisRefusing
+        expr: sum by (instance) (rate(sp_vision_refused_total[5m])) > 0.1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }}: face-analysis queue full, frames refused (503 vision_busy)"
+          description: Candidates are told the server is busy and retry; check-ins and exam starts are delayed.
+
+      - alert: SmartProctoringAtCapacity
+        expr: avg_over_time(sp_capacity_accepting[15m]) < 0.5
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }}: at capacity most of the last 15 minutes (GET /api/health/capacity)"
+          description: Add an instance or CPU before the next scheduled exam.
+
+  - name: smartproctoring-candidates
+    rules:
+      - alert: SmartProctoringReportingOutage
+        expr: |
+          max(sp_cluster_sessions_reporting_interrupted) > 5
+          and max(sp_cluster_sessions_reporting_interrupted) / clamp_min(max(sp_cluster_sessions{status="active"}), 1) > 0.2
+        for: 3m
+        labels: { severity: critical }
+        annotations:
+          summary: More than 20 % of active candidates have stopped reporting
+          description: Usually a network, proxy or WebSocket / TLS problem in front of the servers rather than at the candidates.
+
+      - alert: SmartProctoringIdentityMismatchRateHigh
+        expr: |
+          (
+            sum(increase(sp_identity_decisions_total{decision="mismatch"}[1h]))
+              / clamp_min(sum(increase(sp_identity_decisions_total[1h])), 1)
+          ) > 3 * (
+            sum(increase(sp_identity_decisions_total{decision="mismatch"}[1d]))
+              / clamp_min(sum(increase(sp_identity_decisions_total[1d])), 1)
+          )
+          and sum(increase(sp_identity_decisions_total[1h])) > 200
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: Identity mismatches are three times more frequent than over the last day
+          description: Check for a new browser or camera driver, a deploy that changed sp_identity_model_info, or a calibration problem before trusting the holds.
+
+      - alert: SmartProctoringUnableToVerifyRateHigh
+        expr: |
+          sum(increase(sp_identity_decisions_total{kind="check",decision="unable_to_verify"}[1h]))
+            / clamp_min(sum(increase(sp_identity_decisions_total{kind="check"}[1h])), 1) > 0.15
+          and sum(increase(sp_identity_decisions_total{kind="check"}[1h])) > 50
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: More than 15 % of identity checks end as "unable to verify"
+          description: Candidates' images are too poor to compare (lighting, cameras). They get guidance and retries, then human review; staff workload rises.
+
+  - name: smartproctoring-data
+    rules:
+      - alert: SmartProctoringRetentionNotRunning
+        expr: (time() - max(sp_job_last_success_timestamp_seconds{job="retention"}) > 3 * 3600) or absent(sp_job_last_success_timestamp_seconds{job="retention"})
+        for: 2h
+        labels: { severity: critical }
+        annotations:
+          summary: Evidence retention has not completed for more than 3 hours
+          description: Evidence may be kept longer than the privacy notice says (docs/PRIVACY.md §4). Check the "background job failed" log lines.
+
+      - alert: SmartProctoringRetentionFailures
+        expr: sum(increase(sp_retention_failures_total[2h])) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: Retention could not purge some sessions (retried every hour)
+
+      - alert: SmartProctoringEvidenceStorageErrors
+        expr: sum(increase(sp_evidence_storage_errors_total[10m])) > 0
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: The evidence store is failing (disk or S3)
+          description: Screenshots and identity images cannot be stored or read; check disk space, the volume or S3 credentials.
+
+      - alert: SmartProctoringBackgroundJobFailing
+        expr: sum by (job) (increase(sp_job_runs_total{result="failed"}[30m])) > 0
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "Background job {{ $labels.job }} keeps failing"
+
+  - name: smartproctoring-integrations
+    rules:
+      - alert: SmartProctoringWebhookBacklog
+        expr: max(sp_cluster_webhook_oldest_pending_seconds) > 900
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: A webhook delivery has been pending for more than 15 minutes
+          description: The receiver is failing or slow (Integrations → Webhooks → Deliveries shows the last error).
+
+      - alert: SmartProctoringWebhookDeadLetters
+        expr: max(sp_cluster_webhook_deliveries_failed_24h) > 0
+        for: 0m
+        labels: { severity: info }
+        annotations:
+          summary: Webhook deliveries gave up after every retry in the last 24 h
+
+      - alert: SmartProctoringEmailAlertBacklog
+        expr: max(sp_cluster_email_alert_oldest_pending_seconds) > 1800
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Staff alert emails have been waiting for more than 30 minutes (SMTP problem?)
+
+  - name: smartproctoring-service
+    rules:
+      - alert: SmartProctoringServerErrors
+        expr: |
+          sum(rate(sp_http_requests_total{status=~"5..", status!="503"}[5m]))
+            / clamp_min(sum(rate(sp_http_requests_total[5m])), 1) > 0.02
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: More than 2 % of requests fail with a server error (503 vision_busy excluded)
+
+      - alert: SmartProctoringDatabasePoolExhausted
+        expr: max by (instance) (sp_db_pool_connections{state="waiting"}) > 5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }}: requests are waiting for a Postgres connection"
+
+      - alert: SmartProctoringClusterMetricsDown
+        expr: max(sp_cluster_metrics_up) == 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: The sp_cluster_* metrics cannot be read from Postgres

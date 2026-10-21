@@ -54,6 +54,7 @@ export const liveRoute: FastifyPluginAsync = async (app) => {
     let lastValidated = Date.now();
     let checking: Promise<boolean> | null = null;
     const held: LiveMessage[] = [];
+    ctx.metrics.staffSockets.inc();
 
     const closeWith = (code: number, reason: string) => {
       if (closed) return;
@@ -136,6 +137,7 @@ export const liveRoute: FastifyPluginAsync = async (app) => {
     function cleanup() {
       if (closed) return;
       closed = true;
+      ctx.metrics.staffSockets.dec();
       clearInterval(ping);
       clearInterval(recheck);
       unsubscribe();

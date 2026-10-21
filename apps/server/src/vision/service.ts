@@ -15,7 +15,7 @@ import { disableOrtTelemetry, VisionEngine } from './engine';
 import { processIdPhoto } from './id-photo';
 import { resolveModelsDir } from './models';
 import { retryAfterSecFor, VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
-import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate, VisionLoad } from './types';
+import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate, VisionLoad, VisionObserver } from './types';
 import { DEFAULT_DETECT_THRESHOLD } from './detect';
 import { DEFAULT_MAX_DECODE_SIDE } from './image';
 import type { EmbeddingRecipe } from './embed-prep';
@@ -62,6 +62,8 @@ export interface VisionServiceOptions {
   workerScript?: WorkerScript;
   /** Unexpected worker exits (logging). */
   onWorkerExit?: (info: { code: number; error: Error | null }) => void;
+  /** Queue wait / analysis time of every analysis in pool mode (metrics; not reported in-process). */
+  observer?: VisionObserver;
 }
 
 export interface VisionStats {
@@ -236,6 +238,7 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
         workerData: { engine: engineOpts, nice: Math.max(0, Math.min(19, nice)) },
         script: options.workerScript,
         onWorkerExit: options.onWorkerExit,
+        observer: options.observer,
       });
     }
     return new OnnxVisionService(backend, modelsDir, threading);

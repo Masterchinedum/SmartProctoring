@@ -14,6 +14,8 @@ import { createKeyring } from './lib/crypto.js';
 import { HttpError } from './lib/errors.js';
 import { LoadMonitor } from './lib/load-monitor.js';
 import { appLoggerOptions } from './lib/log-redact.js';
+import { AppMetrics } from './lib/metrics.js';
+import { requestIdFor } from './lib/request-log.js';
 import { connectRateLimitRedis, RATE_LIMIT_NAMESPACE } from './lib/redis.js';
 import { createStorage, type BlobStorage } from './lib/storage.js';
 import { createBus, type RealtimeBus } from './realtime/bus.js';
@@ -21,6 +23,7 @@ import { liveRoute } from './realtime/live-route.js';
 import { LiveNotifier } from './realtime/notifier.js';
 import { adminRoutes } from './routes/admin/index.js';
 import { authRoutes } from './routes/auth.js';
+import { metricsRoute } from './routes/metrics.js';
 import { candidateRoutes } from './routes/candidate/index.js';
 import { publicRoutes } from './routes/public.js';
 import { bootstrapAdmin } from './services/bootstrap.js';
@@ -95,7 +98,8 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     logger: opts.logger ?? appLoggerOptions(config.logLevel),
     trustProxy: config.trustProxy,
     bodyLimit: 2 * 1024 * 1024,
-    genReqId: () => Math.random().toString(36).slice(2, 12),
+    // The proxy's X-Request-Id when it sent a plain one, else a UUID; echoed on every response (lib/request-log.ts).
+    genReqId: requestIdFor,
   });
   for (const w of config.warnings) app.log.warn(w);
 
@@ -103,6 +107,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   const database = opts.database ?? (owned.database = createDatabase(config.databaseUrl, { max: config.db.poolMax, statementTimeoutMs: config.db.statementTimeoutMs }));
   if (opts.migrate !== false) await migrate(database);
 
+  const metrics = new AppMetrics();
   let vision = opts.vision;
   if (!vision) {
     const { createVisionService } = await import('./vision/index.js');
@@ -112,9 +117,11 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       workers: config.visionWorkers ?? undefined,
       concurrency: config.visionWorkers === 0 ? config.visionConcurrency || undefined : undefined,
       onWorkerExit: ({ code, error }) => app.log.error({ err: error, code }, 'vision worker exited unexpectedly; restarting it'),
+      observer: metrics.visionObserver,
     });
   }
-  const storage = opts.storage ?? (owned.storage = createStorage(config.storage));
+  // Failed evidence-store operations are counted (sp_evidence_storage_errors_total).
+  const storage = metrics.instrumentStorage(opts.storage ?? (owned.storage = createStorage(config.storage)));
   const bus = opts.bus ?? (owned.bus = await createBus(config.redisUrl, (err) => app.log.error({ err }, 'redis bus error')));
   const keyring = createKeyring(config.evidenceKey, config.evidenceKeysOld);
   const ownedMailer = opts.mailer === undefined && config.smtp ? createSmtpMailer(config.smtp) : null;
@@ -133,7 +140,9 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     verifiers: opts.verifiers ?? createVerifierRegistry(),
     // Warns (at most once a minute) when this instance is at its knee: event loop lagging, DB pool or vision queue.
     loadMonitor: new LoadMonitor({ pool: database.pool, vision, log: app.log }),
+    metrics,
   } as Omit<Ctx, 'live' | 'jobs'> as Ctx;
+  metrics.bind(ctx);
   ctx.live = new LiveNotifier(ctx);
   ctx.jobs = new JobRunner(ctx);
   ctx.jobs.register(sweeperJob(config.sweeperIntervalMs));
@@ -144,6 +153,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     runAtStart: true,
     async run(c) {
       const summary = await runRetentionExclusive(c);
+      if (summary?.failures.length) c.metrics.retentionFailures.inc(summary.failures.length);
       if (summary && (summary.sessionsEvidencePurged || summary.sessionsEventMetadataPurged || summary.failures.length)) {
         const { sessions: _omit, ...rest } = summary;
         c.log.info({ retention: rest }, 'retention run completed');
@@ -179,6 +189,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   app.addContentTypeParser(['image/jpeg', 'image/jpg'], { parseAs: 'buffer', bodyLimit: JPEG_BODY_LIMIT }, (_req, body, done) => done(null, body));
 
   app.addHook('onSend', async (req, reply, payload) => {
+    reply.header('X-Request-Id', req.id);
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'no-referrer');
     reply.header('X-Frame-Options', 'DENY');
@@ -212,6 +223,12 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     return reply.status(500).send({ error: 'internal_error', message: 'An unexpected error occurred' });
   });
 
+  app.addHook('onResponse', async (req, reply) => {
+    // Route patterns (not URLs) keep the label set small; unmatched URLs (the web app, 404s) share one label.
+    metrics.httpRequest(req.method, req.routeOptions.url ?? 'unmatched', reply.statusCode, reply.elapsedTime);
+  });
+
+  await app.register(metricsRoute);
   await app.register(publicRoutes, { prefix: '/api' });
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(candidateRoutes, { prefix: '/api/candidate' });

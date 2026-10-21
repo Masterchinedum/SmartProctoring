@@ -131,7 +131,41 @@ backups until they expire; align backup retention with the privacy notice.
   5, requests waiting for a connection). **Never route load-balancer traffic on capacity**: a busy instance still
   serves its own candidates (heartbeats, answers and events stay fast), and taking it out of rotation at an exam-start
   peak would push its load onto the others. Sustained `accepting: false` means add an instance or CPU.
-* Structured JSON logs (pino) on stdout; `LOG_LEVEL` controls verbosity.
+* Structured JSON logs (pino) on stdout; `LOG_LEVEL` controls verbosity. Every request has an id: `reqId` on each of
+  its log lines and `X-Request-Id` on its response. A plain-token `X-Request-Id` from your proxy (e.g. nginx
+  `proxy_set_header X-Request-Id $request_id;`) is kept, so one id follows a request through both logs. Once
+  authenticated, a request's lines also carry `sessionId` + `orgId` (candidate), `staffId` + `orgId` (staff app) or
+  `apiKeyId` + `orgId` (integration API).
+* **Prometheus metrics**: set `METRICS_TOKEN` (≥ 24 characters, e.g. `openssl rand -hex 24`) and scrape `GET /metrics`
+  with `Authorization: Bearer <token>` (Prometheus `authorization: { credentials: … }`). Without the variable the
+  endpoint does not exist. Instance metrics describe one process; `sp_cluster_*` metrics are read from Postgres and
+  are the same on every instance (aggregate with `max`, not `sum`).
+
+  | Metric | What it tells you |
+  |---|---|
+  | `sp_vision_queued`, `sp_vision_oldest_wait_seconds`, `sp_vision_estimated_wait_seconds` `{priority}` | face-analysis backlog now (interactive = check frames, background = identity samples) |
+  | `sp_vision_queue_wait_seconds`, `sp_vision_analysis_seconds` (histograms) `{priority}` | queue latency and inference time per analysis |
+  | `sp_vision_analyses_total{priority,result}`, `sp_vision_refused_total{priority}` | analyses done / failed, refused with 503 `vision_busy` |
+  | `sp_vision_workers`, `sp_vision_in_flight` | workers ready (0 = no face analysis possible) |
+  | `sp_capacity_accepting`, `sp_capacity_limited{reason}` | `/api/health/capacity` as numbers |
+  | `sp_identity_decisions_total{kind,trigger,decision}` | identity outcomes (`kind` check / sample; `decision` match, inconclusive, mismatch, unable_to_verify): check completion, *unable to verify* and mismatch rates |
+  | `sp_identity_model_info{calibration,embedding_model}` | the decision calibration and face-template model running (a change between deploys changes decisions) |
+  | `sp_http_requests_total`, `sp_http_request_duration_seconds` `{method,route,status}` | request rate, errors and latency per route pattern |
+  | `sp_db_pool_connections{state}` | Postgres pool: total / idle / waiting |
+  | `sp_staff_websockets` | open staff dashboards |
+  | `sp_job_runs_total{job,result}`, `sp_job_duration_seconds`, `sp_job_last_success_timestamp_seconds` `{job}` | background jobs (`retention`, `webhooks`, `email-alerts`, `abandoned-sessions`, `sweeper`): ok / failed / skipped (another instance ran it) |
+  | `sp_retention_failures_total` | sessions retention could not purge (retried next hour) |
+  | `sp_evidence_storage_errors_total{op}` | evidence store put / get / delete failures (disk, S3) |
+  | `sp_cluster_sessions{status}`, `sp_cluster_sessions_reporting_interrupted` | sessions in progress; how many browsers stopped reporting |
+  | `sp_cluster_webhook_deliveries_pending`, `sp_cluster_webhook_oldest_pending_seconds`, `sp_cluster_webhook_deliveries_failed_24h`, `sp_cluster_webhooks_disabled` | webhook backlog, retry age, dead letters, disabled endpoints |
+  | `sp_cluster_email_alerts_pending`, `sp_cluster_email_alert_oldest_pending_seconds` | alert-email backlog |
+  | `sp_cluster_metrics_up` | 0 = the `sp_cluster_*` values could not be read in this scrape |
+  | `process_*`, `nodejs_*` | CPU, memory, heap, GC, event-loop lag |
+
+  Suggested alerts, as a Prometheus rules file to adapt: [`docs/prometheus-alerts.yml`](prometheus-alerts.yml)
+  (face-analysis latency and refusals, capacity, reporting outage, retention, evidence storage, webhook backlog,
+  identity mismatch and *unable to verify* rates, no vision worker). `rekey` (key rotation) is a command, not a
+  service: it reports progress on stderr and in its exit code (§3).
 * Capacity: a `server overloaded (event loop lagging | database pool exhausted | face analysis queue long)`
   warning (at most one a minute, with the numbers under `loadMonitor`) means this instance is at its limit —
   requests are queuing. Occasional warnings during check-in bursts are expected; sustained ones mean add an

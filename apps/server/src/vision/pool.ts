@@ -16,7 +16,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
-import type { AnalyzeOptions, DetectedFace, ImageAnalysis, VisionByPriority, VisionLoad, VisionPriority } from './types';
+import type { AnalyzeOptions, DetectedFace, ImageAnalysis, VisionByPriority, VisionLoad, VisionObserver, VisionPriority } from './types';
 import { reviveAnalysis, reviveError, type SerializedError, type VisionWorkerData, type WorkerRequest, type WorkerResponse } from './worker-protocol';
 
 /** Retry-After (seconds) when there is no better estimate. */
@@ -137,6 +137,8 @@ export interface VisionPoolOptions {
   backgroundMaxWaitMs?: number;
   /** Called when a worker dies unexpectedly (logging). */
   onWorkerExit?: (info: { code: number; error: Error | null }) => void;
+  /** Queue wait / analysis time of every analysis and every refusal (metrics). */
+  observer?: VisionObserver;
 }
 
 const START_TIMEOUT_MS = 120_000;
@@ -196,9 +198,17 @@ export class VisionWorkerPool {
     return Math.round(((ahead + 1) * this.serviceMs) / workers);
   }
 
-  private recordServiceTime(ms: number): void {
-    this.serviceMs = this.serviceMeasured ? this.serviceMs + SERVICE_MS_ALPHA * (ms - this.serviceMs) : ms;
-    this.serviceMeasured = true;
+  private taskEnded(task: Task, ok: boolean): void {
+    const runMs = Date.now() - task.startedAt;
+    if (ok) {
+      this.serviceMs = this.serviceMeasured ? this.serviceMs + SERVICE_MS_ALPHA * (runMs - this.serviceMs) : runMs;
+      this.serviceMeasured = true;
+    }
+    try {
+      this.opts.observer?.analysisEnded({ priority: task.priority, waitMs: task.startedAt - task.enqueuedAt, runMs, ok });
+    } catch {
+      /* metrics must never break analysis */
+    }
   }
 
   private get readyWorkers(): number {
@@ -245,7 +255,14 @@ export class VisionWorkerPool {
     if (this.closed) return Promise.reject(new VisionClosedError());
     const queue = this.queues[priority];
     const free = this.slots.some((s) => s.ready && !s.task);
-    if (!free && queue.length >= this.opts.maxQueue) return Promise.reject(new VisionBusyError(retryAfterSecFor(this.estimatedWaitMs(priority))));
+    if (!free && queue.length >= this.opts.maxQueue) {
+      try {
+        this.opts.observer?.analysisRefused(priority);
+      } catch {
+        /* metrics must never break analysis */
+      }
+      return Promise.reject(new VisionBusyError(retryAfterSecFor(this.estimatedWaitMs(priority))));
+    }
     return new Promise((resolve, reject) => {
       queue.push({ id: this.nextId++, req, priority, enqueuedAt: Date.now(), startedAt: 0, resolve, reject });
       this.pump();
@@ -314,7 +331,7 @@ export class VisionWorkerPool {
           const task = slot.task;
           if (!task || task.id !== msg.id) return;
           slot.task = null;
-          if (msg.ok) this.recordServiceTime(Date.now() - task.startedAt);
+          this.taskEnded(task, msg.ok);
           if (msg.ok) task.resolve((msg.analysis ?? msg.faces)!);
           else task.reject(reviveError(msg.error));
           if (!this.queued) worker.unref();
@@ -331,6 +348,7 @@ export class VisionWorkerPool {
         if (i >= 0) this.slots.splice(i, 1);
         const err = exitError ?? new Error(`Vision worker exited (code ${code})`);
         if (slot.task) {
+          this.taskEnded(slot.task, false);
           slot.task.reject(err);
           slot.task = null;
         }

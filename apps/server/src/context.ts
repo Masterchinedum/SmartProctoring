@@ -4,6 +4,7 @@ import type { Database, Db } from './db/index.js';
 import type { JobRunner } from './jobs/runner.js';
 import type { Keyring } from './lib/crypto.js';
 import type { LoadMonitor } from './lib/load-monitor.js';
+import type { AppMetrics } from './lib/metrics.js';
 import type { Mailer } from './lib/mailer.js';
 import type { BlobStorage } from './lib/storage.js';
 import type { RealtimeBus } from './realtime/bus.js';
@@ -36,4 +37,6 @@ export interface Ctx {
   verifiers: VerifierRegistry;
   /** Event-loop / database-pool / vision-queue sampling of this instance (snapshot null until it has run). */
   loadMonitor: LoadMonitor;
+  /** Prometheus metrics of this instance (lib/metrics.ts; served at /metrics when METRICS_TOKEN is set). */
+  metrics: AppMetrics;
 }

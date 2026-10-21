@@ -77,18 +77,25 @@ export class JobRunner {
     const p = (async () => {
       const client = await this.ctx.database.pool.connect();
       const lock = lockIdFor(job.name);
+      const t0 = performance.now();
+      let outcome: 'ok' | 'failed' | 'skipped' = 'failed';
       try {
         const { rows } = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock($1) AS ok', [lock]);
-        if (!rows[0]?.ok) return;
+        if (!rows[0]?.ok) {
+          outcome = 'skipped'; // another instance runs it
+          return;
+        }
         try {
           ran = true;
           await job.run(this.ctx);
+          outcome = 'ok';
         } finally {
           await client.query('SELECT pg_advisory_unlock($1)', [lock]);
         }
       } catch (err) {
         this.ctx.log.error({ err, job: job.name }, 'background job failed');
       } finally {
+        this.ctx.metrics.jobRun(job.name, outcome, performance.now() - t0, this.ctx.now());
         client.release();
       }
     })();

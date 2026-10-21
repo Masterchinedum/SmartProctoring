@@ -54,6 +54,8 @@ export interface Config {
    * Postgres connection.
    */
   capacity: { maxVisionWaitMs: number; maxEventLoopP99Ms: number; maxDbWaiting: number };
+  /** Bearer token for GET /metrics (METRICS_TOKEN, ≥ 24 characters); null = /metrics is not served. */
+  metricsToken: string | null;
   webDistDir: string;
   bootstrap: { email: string | null; password: string | null; orgName: string };
   logLevel: string;
@@ -244,6 +246,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const cookieSecure = bool(env.COOKIE_SECURE, isProduction);
   if (isProduction && !cookieSecure) warnings.push('COOKIE_SECURE=false in production: staff cookies will be sent over plain HTTP.');
+  const metricsToken = env.METRICS_TOKEN || null;
+  if (metricsToken && metricsToken.length < 24) throw new Error('METRICS_TOKEN must be at least 24 characters (e.g. openssl rand -hex 24).');
 
   let smtp: SmtpConfig | null = null;
   if (env.SMTP_HOST) {
@@ -298,6 +302,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxEventLoopP99Ms: Math.max(10, int(env.CAPACITY_MAX_EVENT_LOOP_MS, 200)),
       maxDbWaiting: Math.max(0, int(env.CAPACITY_MAX_DB_WAITING, 5)),
     },
+    metricsToken,
     webDistDir: resolvePath(env.WEB_DIST_DIR || '../web/dist', root),
     bootstrap: {
       email: env.BOOTSTRAP_ADMIN_EMAIL || null,

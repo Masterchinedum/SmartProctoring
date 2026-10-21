@@ -66,6 +66,7 @@ describe('staff auth', () => {
         ip: '127.0.0.1',
         staff: null,
         protocol: 'http',
+        log: env.app.log,
       } as never;
     };
     await expect(pre.call(env.app as never, mkReq(reviewerCookie), {} as never)).rejects.toMatchObject({ statusCode: 403 });
