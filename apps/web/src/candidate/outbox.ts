@@ -243,6 +243,8 @@ export interface OutboxOptions {
   /** First / longest wait before re-sending an identity sample the server answered with 503/429 (busy). */
   sampleBusyMinMs?: number;
   sampleBusyMaxMs?: number;
+  /** Source of the random spread added to busy waits (default Math.random; tests pin it). */
+  random?: () => number;
   /** Called with the server's answer to an identity sample delivered from the queue. */
   onSampleResult?: (sample: SampleRecord, res: IdentitySampleResponse) => void;
   /** Delivery hit an error that ends this page's ability to report (invalid link / superseded). */
@@ -437,6 +439,8 @@ export class Outbox {
     capturedAt: number;
     jpeg: Blob | ArrayBuffer | Uint8Array;
     busy?: boolean;
+    /** The busy answer's Retry-After (ms), when the server sent one. */
+    retryAfterMs?: number | null;
     burstId?: string;
     burstIndex?: number;
     burstSize?: number;
@@ -447,7 +451,7 @@ export class Outbox {
     await this.backend.put('blobs', { id: rec.id, data });
     const burst = rec.burstId ? { burstId: rec.burstId, burstIndex: rec.burstIndex ?? 0, burstSize: rec.burstSize ?? 1 } : {};
     await this.backend.put('samples', { id: rec.id, trigger: rec.trigger, capturedAt: rec.capturedAt, bytes: data.byteLength, enqueuedAt: t, ...burst });
-    if (rec.busy) this.markSampleBusy(rec.id);
+    if (rec.busy) this.markSampleBusy(rec.id, rec.retryAfterMs ?? null);
     this.pendingIndex.set(`sample:${rec.id}`, t);
     await this.enforceSampleLimit();
     this.changed();
@@ -718,8 +722,9 @@ export class Outbox {
 
   /**
    * Identity samples (oldest first). While a request is open the sample waits in the server's vision
-   * queue — that is not a delivery delay. A 503/429 answer (server busy) makes it wait (2 s, doubling, up
-   * to 60 s) without counting as a failure; the pass stops there, as the next ones would be refused too.
+   * queue — that is not a delivery delay. A 503/429 answer (server busy) makes it wait (the server's Retry-After,
+   * at least 2 s doubling up to 60 s, plus a random spread) without counting as a failure; the pass stops there, as
+   * the next ones would be refused too.
    */
   private async flushSamples(sender: OutboxSender): Promise<number> {
     let n = 0;
@@ -750,7 +755,7 @@ export class Outbox {
           continue;
         }
         if (isServerBusy(e)) {
-          this.markSampleBusy(s.id);
+          this.markSampleBusy(s.id, e instanceof CandidateApiError ? e.retryAfterMs : null);
           break;
         }
         this.sampleWait.delete(s.id); // a real delivery failure: it counts as delayed again
@@ -771,12 +776,17 @@ export class Outbox {
     return n;
   }
 
-  private markSampleBusy(id: string): void {
+  /**
+   * The server refused a sample as busy: wait at least its Retry-After, doubling from `sampleBusyMinMs` on
+   * repeated refusals, plus a random 0–50 % so candidates refused together do not all retry together.
+   */
+  private markSampleBusy(id: string, retryAfterMs: number | null = null): void {
     const min = this.opts.sampleBusyMinMs ?? 2000;
     const max = this.opts.sampleBusyMaxMs ?? 60_000;
     const prev = this.sampleWait.get(id);
-    const delayMs = prev ? Math.min(max, prev.delayMs * 2) : min;
-    this.sampleWait.set(id, { until: this.now() + delayMs, delayMs });
+    const delayMs = Math.min(max, Math.max(prev ? prev.delayMs * 2 : min, retryAfterMs ?? 0));
+    const spread = 1 + 0.5 * (this.opts.random ?? Math.random)();
+    this.sampleWait.set(id, { until: this.now() + Math.round(delayMs * spread), delayMs });
   }
 
   private async applyEventResults(batch: EventRecord[], res: EventBatchResponse | null): Promise<number> {

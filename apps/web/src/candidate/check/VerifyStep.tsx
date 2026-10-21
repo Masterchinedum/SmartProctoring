@@ -8,6 +8,7 @@ import { captureFaceCrop } from '../monitoring/frames';
 import { AdaptiveCheck } from './adaptive';
 import { PoseSmoother } from './poseFilter';
 import { attemptsAfterText, CheckProgress } from './progress';
+import { frameSendRetry, type FrameSendState } from './sendRetry';
 import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrameAnalysis';
 
 /**
@@ -254,7 +255,8 @@ export function VerifyStep({
             return;
           }
           // Transient failures (network, server busy) are retried with the same image and timestamp.
-          for (let attempt = 0; ; attempt++) {
+          const retries: FrameSendState = { networkFailures: 0, busyWaitedMs: 0 };
+          for (;;) {
             try {
               const res = await api.uploadCheckFrame(c.checkId, crop.blob, {
                 step,
@@ -298,13 +300,13 @@ export function VerifyStep({
                 setPhaseBoth('error');
                 return;
               }
-              if (attempt >= 3) {
-                setGuidance(['We could not send the picture. Check your internet connection.']);
+              const next = frameSendRetry(e, retries);
+              setGuidance([next.guidance]);
+              if (!next.retry) {
                 onFail?.();
                 return;
               }
-              setGuidance(['Connection problem while sending the picture — retrying…']);
-              await new Promise((res) => setTimeout(res, 1000 * (attempt + 1)));
+              await new Promise((res) => setTimeout(res, next.delayMs));
               if (r.cancelled) return;
             }
           }

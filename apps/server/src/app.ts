@@ -195,7 +195,12 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     }
     const e = err as { statusCode?: number; code?: string; message: string; error?: string; name?: string };
     if (e.name === 'VisionInputError') return reply.status(400).send({ error: 'invalid_image', message: 'The image could not be read. Please try again.' });
-    if (e.name === 'VisionBusyError') return reply.status(503).header('Retry-After', '2').send({ error: 'vision_busy', message: 'The server is busy analysing images. Please retry in a moment.' });
+    if (e.name === 'VisionBusyError') {
+      // Retry-After: how long the analyses already queued are expected to take (vision/pool.ts), so refused clients
+      // come back when there is room rather than all at once two seconds later.
+      const retryAfterSec = (err as { retryAfterSec?: number }).retryAfterSec ?? 2;
+      return reply.status(503).header('Retry-After', String(retryAfterSec)).send({ error: 'vision_busy', message: 'The server is busy analysing images. Please retry in a moment.', retryAfterSec });
+    }
     if (e.code === 'FST_ERR_CTP_EMPTY_JSON_BODY') return reply.status(400).send({ error: 'validation_failed', message: 'Request body is required' });
     if (e.statusCode === 429) return reply.status(429).send({ error: 'rate_limited', message: e.message });
     if (e.code === 'FST_ERR_CTP_BODY_TOO_LARGE' || e.statusCode === 413) return reply.status(413).send({ error: 'payload_too_large', message: 'Request body is too large' });

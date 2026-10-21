@@ -279,7 +279,8 @@ of face analysis long before that, so grow by vision workers (a bigger instance)
 * **Beyond capacity** (measured, §7.2):
   - `server overloaded (face analysis queue long)` appears in the log first;
   - identity bursts then wait seconds (the client's cadence stretches);
-  - then frames answer 503 `vision_busy` (retried, then kept in the client's outbox);
+  - then frames answer 503 `vision_busy` with a `Retry-After` estimated from the queue (retried after it, with a
+    random spread, then kept in the client's outbox);
   - check-ins slow to minutes, which delays exam starts;
   - heartbeats, answers and events stay fast throughout.
 * **Cheaper policies** scale demand linearly (`burstSize`, `routineBurstSize`, `startupIntervalSec`,

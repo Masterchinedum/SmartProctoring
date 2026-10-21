@@ -69,6 +69,32 @@ export interface AnalyzeOptions {
 export interface VisionService {
   analyze(jpeg: Buffer, opts?: AnalyzeOptions): Promise<ImageAnalysis>;
   close(): Promise<void>;
+  /** The face-analysis queue right now (health, metrics, admission, sampling cadence); absent = not measured. */
+  readonly load?: VisionLoad;
+}
+
+export type VisionPriority = 'interactive' | 'background';
+
+/** One number per queue priority. */
+export type VisionByPriority = Record<VisionPriority, number>;
+
+/** Snapshot of the face-analysis queue of one server instance. */
+export interface VisionLoad {
+  /** Workers able to analyse right now (0: none started, e.g. models unreadable). */
+  workers: number;
+  inFlight: number;
+  queued: VisionByPriority;
+  /** How long the oldest waiting analysis of each priority has waited (ms; 0 when nothing waits). */
+  oldestWaitMs: VisionByPriority;
+  /** Measured moving average of one analysis on one worker (ms). */
+  serviceMs: number;
+  /**
+   * Expected wait before an analysis of each priority submitted now gets a worker (ms): the work queued ahead of it
+   * plus about one analysis for the work in flight, over the workers; 0 while a worker is free.
+   */
+  estimatedWaitMs: VisionByPriority;
+  /** Analyses waiting before new ones of a priority are refused with VisionBusyError. */
+  maxQueue: number;
 }
 
 export interface IdentityComparison {

@@ -14,8 +14,8 @@ import { availableParallelism } from 'node:os';
 import { disableOrtTelemetry, VisionEngine } from './engine';
 import { processIdPhoto } from './id-photo';
 import { resolveModelsDir } from './models';
-import { VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
-import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate } from './types';
+import { retryAfterSecFor, VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
+import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate, VisionLoad } from './types';
 import { DEFAULT_DETECT_THRESHOLD } from './detect';
 import { DEFAULT_MAX_DECODE_SIDE } from './image';
 import type { EmbeddingRecipe } from './embed-prep';
@@ -107,9 +107,11 @@ export function resolveVisionThreading(options: VisionServiceOptions, env: NodeJ
 class Limiter {
   private active = 0;
   private readonly waiting: (() => void)[] = [];
+  /** Moving average of one run (ms). */
+  serviceMs = 100;
   constructor(
-    private readonly max: number,
-    private readonly maxQueue: number,
+    readonly max: number,
+    readonly maxQueue: number,
   ) {}
   get inFlight() {
     return this.active;
@@ -117,15 +119,21 @@ class Limiter {
   get queued() {
     return this.waiting.length;
   }
+  estimatedWaitMs(): number {
+    return this.active < this.max ? 0 : Math.round(((this.waiting.length + 1) * this.serviceMs) / this.max);
+  }
   async run<T>(fn: () => Promise<T>): Promise<T> {
     if (this.active >= this.max) {
-      if (this.waiting.length >= this.maxQueue) throw new VisionBusyError();
+      if (this.waiting.length >= this.maxQueue) throw new VisionBusyError(retryAfterSecFor(this.estimatedWaitMs()));
       await new Promise<void>((res) => this.waiting.push(res));
     } else {
       this.active++;
     }
+    const t0 = performance.now();
     try {
-      return await fn();
+      const out = await fn();
+      this.serviceMs += 0.1 * (performance.now() - t0 - this.serviceMs);
+      return out;
     } finally {
       const next = this.waiting.shift();
       if (next) next();
@@ -139,6 +147,7 @@ interface Backend {
   detect(image: Buffer): Promise<DetectedFace[]>;
   readonly inFlight: number;
   readonly queued: number;
+  readonly load: VisionLoad;
   close(): Promise<void>;
 }
 
@@ -153,6 +162,20 @@ class InProcessBackend implements Backend {
   }
   get queued() {
     return this.limiter.queued;
+  }
+  /** One FIFO without priorities: everything counts as interactive; waits are not tracked per item. */
+  get load(): VisionLoad {
+    const l = this.limiter;
+    const wait = l.estimatedWaitMs();
+    return {
+      workers: this.closed ? 0 : l.max,
+      inFlight: l.inFlight,
+      queued: { interactive: l.queued, background: 0 },
+      oldestWaitMs: { interactive: 0, background: 0 },
+      serviceMs: Math.round(l.serviceMs * 10) / 10,
+      estimatedWaitMs: { interactive: wait, background: wait },
+      maxQueue: l.maxQueue,
+    };
   }
   analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis> {
     return this.limiter.run(async () => {
@@ -228,6 +251,11 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
       workers: this.threading.workers,
       threadsPerEngine: this.threading.threadsPerWorker,
     };
+  }
+
+  /** The face-analysis queue right now (VisionService.load). */
+  get load(): VisionLoad {
+    return this.backend.load;
   }
 
   async analyze(image: Buffer, opts: AnalyzeOptions = {}): Promise<ImageAnalysis> {

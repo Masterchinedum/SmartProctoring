@@ -25,7 +25,7 @@ import type {
   MonitoringStatus,
   ProctoringPolicy,
 } from '@sp/shared';
-import { classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api';
+import { CandidateApiError, classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api';
 import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
@@ -513,7 +513,7 @@ export class MonitoringRuntime {
     // Offline or server trouble: keep it for later delivery. A busy server (vision queue full) is told apart:
     // the sample waits, and that is not a reporting outage.
     try {
-      await this.deps.outbox.putSample({ id: f.sampleId, trigger: q.trigger, capturedAt: f.capturedAt, jpeg: f.jpeg, busy: isServerBusy(e), burstId: q.burstId, burstIndex: q.burstIndex, burstSize: q.burstSize });
+      await this.deps.outbox.putSample({ id: f.sampleId, trigger: q.trigger, capturedAt: f.capturedAt, jpeg: f.jpeg, busy: isServerBusy(e), retryAfterMs: e instanceof CandidateApiError ? e.retryAfterMs : null, burstId: q.burstId, burstIndex: q.burstIndex, burstSize: q.burstSize });
     } catch (err) {
       console.warn('[monitoring] failed to queue identity sample', err);
     }

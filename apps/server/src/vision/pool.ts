@@ -6,7 +6,8 @@
  *  - Two FIFO queues: 'interactive' work (a candidate waits: check frames) goes before 'background' work
  *    (identity samples); background work that waited BACKGROUND_MAX_WAIT_MS alternates with interactive work
  *    (no starvation either way). More than `maxQueue` waiting analyses of one priority => VisionBusyError
- *    (HTTP 503 + Retry-After).
+ *    (HTTP 503 + Retry-After: the estimated time the work ahead needs, from the measured analysis time).
+ *  - `load` is a snapshot of the queue (health, metrics, admission, sampling cadence).
  *  - A worker that crashes fails only its in-flight analysis and is replaced (with backoff).
  *  - Idle workers are unref'ed, so a forgotten pool never keeps a CLI process alive.
  */
@@ -15,14 +16,27 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
-import type { AnalyzeOptions, DetectedFace, ImageAnalysis } from './types';
+import type { AnalyzeOptions, DetectedFace, ImageAnalysis, VisionByPriority, VisionLoad, VisionPriority } from './types';
 import { reviveAnalysis, reviveError, type SerializedError, type VisionWorkerData, type WorkerRequest, type WorkerResponse } from './worker-protocol';
+
+/** Retry-After (seconds) when there is no better estimate. */
+export const DEFAULT_RETRY_AFTER_SEC = 2;
+/** A client is never asked to wait longer than this before retrying (seconds). */
+export const MAX_RETRY_AFTER_SEC = 30;
+
+/** Suggested wait before retrying, in whole seconds within 1..MAX_RETRY_AFTER_SEC. */
+export function retryAfterSecFor(waitMs: number): number {
+  return Math.min(MAX_RETRY_AFTER_SEC, Math.max(1, Math.ceil(waitMs / 1000)));
+}
 
 export class VisionBusyError extends Error {
   readonly code = 'vision_busy';
-  constructor() {
+  /** Suggested wait before retrying (whole seconds): how long the analyses ahead are expected to take. */
+  readonly retryAfterSec: number;
+  constructor(retryAfterSec = DEFAULT_RETRY_AFTER_SEC) {
     super('Vision service is overloaded; retry shortly');
     this.name = 'VisionBusyError';
+    this.retryAfterSec = retryAfterSec;
   }
 }
 
@@ -87,15 +101,23 @@ function createWorker(script: WorkerScript, workerData: VisionWorkerData): Worke
 
 type TaskRequest = { type: 'analyze'; image: Uint8Array; opts: AnalyzeOptions } | { type: 'detect'; image: Uint8Array };
 
-export type VisionPriority = 'interactive' | 'background';
+export type { VisionPriority };
 
 /** Background work that waited this long alternates with interactive work instead of waiting behind it. */
 export const BACKGROUND_MAX_WAIT_MS = 5_000;
 
+/** Analysis time assumed until one has been measured (ms; PERFORMANCE.md §7.4: ≈ 76–93 ms per frame). */
+const INITIAL_SERVICE_MS = 100;
+/** Weight of the newest measurement in the moving average of the analysis time. */
+const SERVICE_MS_ALPHA = 0.1;
+
 interface Task {
   id: number;
   req: TaskRequest;
+  priority: VisionPriority;
   enqueuedAt: number;
+  /** When a worker took it (0 while queued). */
+  startedAt: number;
   resolve: (v: ImageAnalysis | DetectedFace[]) => void;
   reject: (err: Error) => void;
 }
@@ -130,6 +152,8 @@ export class VisionWorkerPool {
   private respawnFailures = 0;
   private lastInitError: Error | null = null;
   private readonly idleWaiters: (() => void)[] = [];
+  private serviceMs = INITIAL_SERVICE_MS;
+  private serviceMeasured = false;
 
   private constructor(
     private readonly opts: VisionPoolOptions,
@@ -160,6 +184,44 @@ export class VisionWorkerPool {
     return this.queues.interactive.length + this.queues.background.length;
   }
 
+  /**
+   * Expected wait before work of `priority` submitted now gets a worker (ms; VisionLoad.estimatedWaitMs). Interactive
+   * work waits only behind interactive work; background work behind everything queued (it gets a turn when overdue,
+   * so this is an upper estimate).
+   */
+  estimatedWaitMs(priority: VisionPriority): number {
+    const ahead = priority === 'interactive' ? this.queues.interactive.length : this.queued;
+    if (ahead === 0 && this.slots.some((s) => s.ready && !s.task)) return 0;
+    const workers = Math.max(1, this.readyWorkers);
+    return Math.round(((ahead + 1) * this.serviceMs) / workers);
+  }
+
+  private recordServiceTime(ms: number): void {
+    this.serviceMs = this.serviceMeasured ? this.serviceMs + SERVICE_MS_ALPHA * (ms - this.serviceMs) : ms;
+    this.serviceMeasured = true;
+  }
+
+  private get readyWorkers(): number {
+    let n = 0;
+    for (const s of this.slots) if (s.ready) n++;
+    return n;
+  }
+
+  get load(): VisionLoad {
+    const now = Date.now();
+    const oldest = (q: Task[]) => (q.length ? Math.max(0, now - q[0].enqueuedAt) : 0);
+    const per = (f: (p: VisionPriority) => number): VisionByPriority => ({ interactive: f('interactive'), background: f('background') });
+    return {
+      workers: this.readyWorkers,
+      inFlight: this.inFlight,
+      queued: per((p) => this.queues[p].length),
+      oldestWaitMs: per((p) => oldest(this.queues[p])),
+      serviceMs: Math.round(this.serviceMs * 10) / 10,
+      estimatedWaitMs: per((p) => this.estimatedWaitMs(p)),
+      maxQueue: this.opts.maxQueue,
+    };
+  }
+
   analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis> {
     const req: TaskRequest = {
       type: 'analyze',
@@ -183,9 +245,9 @@ export class VisionWorkerPool {
     if (this.closed) return Promise.reject(new VisionClosedError());
     const queue = this.queues[priority];
     const free = this.slots.some((s) => s.ready && !s.task);
-    if (!free && queue.length >= this.opts.maxQueue) return Promise.reject(new VisionBusyError());
+    if (!free && queue.length >= this.opts.maxQueue) return Promise.reject(new VisionBusyError(retryAfterSecFor(this.estimatedWaitMs(priority))));
     return new Promise((resolve, reject) => {
-      queue.push({ id: this.nextId++, req, enqueuedAt: Date.now(), resolve, reject });
+      queue.push({ id: this.nextId++, req, priority, enqueuedAt: Date.now(), startedAt: 0, resolve, reject });
       this.pump();
     });
   }
@@ -212,6 +274,7 @@ export class VisionWorkerPool {
       const slot = this.slots.find((s) => s.ready && !s.task);
       if (!slot) return;
       const task = this.nextTask()!;
+      task.startedAt = Date.now();
       slot.task = task;
       slot.worker.ref();
       // The image is copied (structured clone): the caller keeps using its buffer (evidence storage).
@@ -251,6 +314,7 @@ export class VisionWorkerPool {
           const task = slot.task;
           if (!task || task.id !== msg.id) return;
           slot.task = null;
+          if (msg.ok) this.recordServiceTime(Date.now() - task.startedAt);
           if (msg.ok) task.resolve((msg.analysis ?? msg.faces)!);
           else task.reject(reviveError(msg.error));
           if (!this.queued) worker.unref();

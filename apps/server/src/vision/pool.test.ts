@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { VisionInputError } from './image';
-import { BACKGROUND_MAX_WAIT_MS, resolveWorkerScript, VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
+import { BACKGROUND_MAX_WAIT_MS, MAX_RETRY_AFTER_SEC, resolveWorkerScript, retryAfterSecFor, VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
 
 const FAKE_WORKER = `
 import { parentPort, workerData } from 'node:worker_threads';
@@ -84,6 +84,41 @@ describe('VisionWorkerPool', () => {
     // The background queue has its own budget.
     const bg = await Promise.allSettled([pool.analyze(img('sleep:30'), {}), ...Array.from({ length: 3 }, () => pool.analyze(img('x'), { priority: 'background' }))]);
     expect(bg.filter((s) => s.status === 'rejected')).toHaveLength(1);
+  });
+
+  it('reports its load and asks refused clients to come back when the work ahead should be done (Retry-After)', async () => {
+    const pool = await start(2, 4);
+    expect(pool.load).toMatchObject({ workers: 2, inFlight: 0, queued: { interactive: 0, background: 0 }, estimatedWaitMs: { interactive: 0, background: 0 }, maxQueue: 4 });
+    await pool.analyze(img('sleep:600'), {}); // the first measured analysis replaces the initial guess
+    expect(pool.load.serviceMs).toBeGreaterThanOrEqual(590);
+    expect(pool.load.serviceMs).toBeLessThan(700);
+
+    const work = [...Array.from({ length: 6 }, () => pool.analyze(img('sleep:600'), {})), ...Array.from({ length: 4 }, () => pool.analyze(img('x'), { priority: 'background' }))];
+    await new Promise((r) => setTimeout(r, 50));
+    const load = pool.load;
+    expect(load.inFlight).toBe(2);
+    expect(load.queued).toEqual({ interactive: 4, background: 4 });
+    expect(load.oldestWaitMs.interactive).toBeGreaterThanOrEqual(40);
+    // 4 interactive analyses ahead (+ about one for the work in flight) of ≈ 600 ms on 2 workers ≈ 1.5 s;
+    // background work also waits behind the interactive queue: 9 × 600 / 2 ≈ 2.7 s.
+    expect(load.estimatedWaitMs.interactive).toBeGreaterThan(1400);
+    expect(load.estimatedWaitMs.interactive).toBeLessThan(1800);
+    expect(load.estimatedWaitMs.background).toBeGreaterThan(2600);
+    expect(load.estimatedWaitMs.background).toBeLessThan(3200);
+
+    const refused = await Promise.allSettled([pool.analyze(img('x'), {}), pool.analyze(img('x'), { priority: 'background' })]);
+    const reasons = refused.map((r) => (r.status === 'rejected' ? r.reason : null));
+    expect(reasons[0]).toBeInstanceOf(VisionBusyError);
+    expect(reasons[0].retryAfterSec).toBe(2);
+    expect(reasons[1].retryAfterSec).toBe(3);
+    await Promise.all(work);
+    expect(pool.load.estimatedWaitMs).toEqual({ interactive: 0, background: 0 });
+  });
+
+  it('keeps Retry-After within 1 s and MAX_RETRY_AFTER_SEC', () => {
+    expect(retryAfterSecFor(0)).toBe(1);
+    expect(retryAfterSecFor(1001)).toBe(2);
+    expect(retryAfterSecFor(10 * 60_000)).toBe(MAX_RETRY_AFTER_SEC);
   });
 
   it('fails only the analysis of a crashed worker and replaces the worker', async () => {

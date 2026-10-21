@@ -32,13 +32,16 @@ export class CandidateApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: unknown;
+  /** The server's Retry-After (ms) on a busy / rate-limited answer; null when it sent none. */
+  readonly retryAfterMs: number | null;
 
-  constructor(status: number, code: string, message: string, details?: unknown) {
+  constructor(status: number, code: string, message: string, details?: unknown, retryAfterMs: number | null = null) {
     super(message);
     this.name = 'CandidateApiError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.retryAfterMs = retryAfterMs;
   }
 
   get isNetwork(): boolean {
@@ -79,6 +82,23 @@ export function classifyApiError(err: unknown): ApiErrorKind {
  */
 export function isServerBusy(err: unknown): boolean {
   return err instanceof CandidateApiError && (err.status === 503 || err.status === 429 || err.code === 'vision_busy');
+}
+
+/**
+ * How long to wait before retrying a request the server refused as busy: at least the server's Retry-After (its
+ * estimate of when the queued work is done) and at least `fallbackMs`, stretched by a random 0–50 %. Candidates of
+ * a scheduled exam start together, so without the spread everyone refused at the same moment would come back at
+ * the same moment and be refused again.
+ */
+export function busyRetryDelayMs(err: unknown, fallbackMs: number, random: () => number = Math.random): number {
+  const serverMs = err instanceof CandidateApiError && err.retryAfterMs != null ? err.retryAfterMs : 0;
+  return Math.round(Math.max(fallbackMs, serverMs) * (1 + 0.5 * random()));
+}
+
+/** Retry-After in seconds (the only form the server sends), as ms; null when absent or unusable. */
+export function parseRetryAfterMs(value: string | null): number | null {
+  if (value == null || !/^\s*\d+\s*$/.test(value)) return null;
+  return Math.min(300, Number(value)) * 1000;
 }
 
 /** True when retrying the same request later may succeed. */
@@ -183,7 +203,7 @@ async function readError(res: Response): Promise<CandidateApiError> {
   } catch {
     /* non-JSON error body */
   }
-  return new CandidateApiError(res.status, code, message, details);
+  return new CandidateApiError(res.status, code, message, details, parseRetryAfterMs(res.headers.get('Retry-After')));
 }
 
 export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
