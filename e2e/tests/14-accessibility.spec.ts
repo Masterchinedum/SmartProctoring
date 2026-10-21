@@ -380,6 +380,9 @@ test('small screens and missing cameras get a friendly notice; 320 px reflow; re
     // A warning, not a block: consent is still possible.
     await page.getByTestId('consent-checkbox').check();
     await expect(page.getByTestId('consent-continue')).toBeEnabled();
+    // The contrast check reads the button's effective opacity (.btn:disabled sets 0.55): wait until the enabled look
+    // is in place before scanning, so the check measures the button as the candidate sees it.
+    await expect(page.getByTestId('consent-continue')).toHaveCSS('opacity', '1');
     expect(await page.evaluate(() => document.documentElement.scrollWidth), 'no horizontal scrolling at 320 px').toBeLessThanOrEqual(320);
     await expectNoA11yIssues(page, 'welcome screen at 320 px');
 
