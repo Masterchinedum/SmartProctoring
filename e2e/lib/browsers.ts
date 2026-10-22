@@ -48,4 +48,8 @@ export const FIREFOX_PREFS: Record<string, string | number | boolean> = {
   // CI runners have no GPU and Firefox blocklists software WebGL there; MediaPipe needs a WebGL context even for
   // its CPU delegate (image input), so allow the software renderer (users' machines have a GPU).
   'webgl.force-enabled': true,
+  // WebGL in the content process: out of process (the default) every texture read MediaPipe does is a synchronous
+  // round trip to the GPU process, which on a software renderer kept the page's main thread blocked for seconds
+  // (camera frames and clicks seconds late in CI).
+  'webgl.out-of-process': false,
 };

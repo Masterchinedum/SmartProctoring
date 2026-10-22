@@ -77,7 +77,8 @@ export const test = base.extend<{ staffPage: (b?: Browser) => Promise<Page>; dia
         i++;
         const shim = c.cameraShimSummary();
         const webgl = await c.webglSummary();
-        const body = [`# candidate page ${i}: identity API answers`, ...c.apiLog, '', '# identity check screen (on change)', ...c.verifyTrace, '', '# console errors / warnings', ...c.logs, '', '# HTTP errors', ...c.httpErrors, ...(shim ? ['', `# ${shim}`] : []), ...(webgl ? ['', `# ${webgl}`] : [])].join('\n');
+        const text = await c.visibleText();
+        const body = [`# candidate page ${i}: identity API answers`, ...c.apiLog, '', '# identity check screen (on change)', ...c.verifyTrace, '', '# console errors / warnings', ...c.logs, '', '# HTTP errors', ...c.httpErrors, ...(shim ? ['', `# ${shim}`] : []), ...(webgl ? ['', `# ${webgl}`] : []), ...(text ? ['', '# visible text at the end of the test', text] : [])].join('\n');
         const file = testInfo.outputPath(`candidate-${i}.log`);
         writeFileSync(file, body);
         await testInfo.attach(`candidate-${i}.log`, { path: file, contentType: 'text/plain' });

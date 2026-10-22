@@ -255,6 +255,16 @@ export class CandidatePage {
     return `camera shim: ${s.fetched} frames fetched, ${s.failed} failed, ${(s.msTotal / Math.max(1, s.fetched)).toFixed(0)} ms mean / ${s.msMax.toFixed(0)} ms max per frame, largest lag ${s.lagMax} frames, ${s.mutes} track mute events (as of the last frame request)`;
   }
 
+  /** The page's visible text when a test fails (e.g. the readiness checklist's messages), null once the page is closed. */
+  async visibleText(maxChars = 4000): Promise<string | null> {
+    if (this.page.isClosed()) return null;
+    try {
+      return (await this.page.locator('body').innerText({ timeout: 3_000 })).replace(/\n{2,}/g, '\n').slice(0, maxChars);
+    } catch {
+      return null;
+    }
+  }
+
   /** The page's WebGL renderer, probed when the page opened (the page may be closed by the time a test fails). */
   webglSummary(): Promise<string | null> {
     return this.webglProbe ?? Promise.resolve(null);
