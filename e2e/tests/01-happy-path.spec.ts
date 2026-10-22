@@ -70,6 +70,7 @@ test('happy path: check-in, answers, pause with browser closed, resume, submit, 
     await expect(c.tid('question')).toContainText('bell-shaped');
     // Read as soon as the exam is back (the clock runs again from here; the checks below take seconds in a slow browser).
     const afterResume = await c.countdownMs();
+    const afterResumeAt = Date.now();
     await expect(c.tid('answer-input')).toHaveValue('normal');
     for (const i of [0, 1, 2, 3, 4]) await expect(c.tid(`qnav-${i}`)).toHaveClass(/answered/);
     await c.gotoQuestion(0);
@@ -78,11 +79,16 @@ test('happy path: check-in, answers, pause with browser closed, resume, submit, 
     await expect(c.page.getByRole('checkbox', { name: 'Variance' })).toBeChecked();
     await expect(c.page.getByRole('checkbox', { name: 'Range' })).toBeChecked();
     await expect(c.page.getByRole('checkbox', { name: 'Mean' })).not.toBeChecked();
-    console.log(`paused (wall) ${since(pausedAtWall)}; countdown before pause ${beforePause} ms, at the pause ${onPause} ms, after resume ${afterResume} ms`);
+    // The server restarts the clock when the resume check passes (its session_resumed event; same machine clock).
+    const resumedAt = Math.max(...(await staff.events(s.sessionId)).filter((e) => e.type === 'session_resumed').map((e) => e.startedAt));
+    const sinceResumedMs = afterResumeAt - resumedAt;
+    console.log(`paused (wall) ${since(pausedAtWall)}; countdown before pause ${beforePause} ms, at the pause ${onPause} ms, after resume ${afterResume} ms (${sinceResumedMs} ms after the clock restarted)`);
     expect(pausedWallMs).toBeGreaterThan(15_000);
-    // Only the seconds since the resume check passed were used — not the time spent paused/closed/checking. (From the
-    // clock at the pause: the seconds the pause itself took are bounded above.)
-    expect(onPause - afterResume).toBeLessThan(6_000);
+    // Only the seconds since the resume check passed were used — not the time spent paused, closed or checking (over
+    // 15 s): at most the wall time since the server restarted the clock, plus 1 s because the countdown shows whole
+    // seconds. (From the clock at the pause: the seconds the pause itself took are bounded above.)
+    expect(sinceResumedMs).toBeGreaterThanOrEqual(0);
+    expect(onPause - afterResume).toBeLessThanOrEqual(sinceResumedMs + 1_000);
     expect(onPause - afterResume).toBeGreaterThanOrEqual(0);
 
     /* ---------------- submit */

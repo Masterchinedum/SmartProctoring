@@ -272,8 +272,9 @@ interface ShimConfig {
   binding: string;
   prefetch: number;
   /**
-   * WebKit: capture the canvas at this frame rate (a timer) and keep the 2 px canvas opaque — with change-driven
-   * capture its <video> stayed on the first frame. Other engines: change-driven capture plus requestFrame().
+   * WebKit: capture the canvas at this frame rate (a timer) and show it opaque at 64×48 px in the corner — with
+   * change-driven capture of a 2 px transparent canvas its <video> stayed on the first frame. Other engines:
+   * change-driven capture plus requestFrame().
    */
   captureFps?: number;
 }
@@ -476,7 +477,8 @@ function fakeCameraInit(cfg: ShimConfig): void {
       c.height = height;
       c.setAttribute('aria-hidden', 'true');
       c.setAttribute('data-sp-e2e-camera', '');
-      Object.assign(c.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: cfg.captureFps ? '1' : '0', pointerEvents: 'none' });
+      const size = cfg.captureFps ? { width: '64px', height: '48px', opacity: '1' } : { width: '2px', height: '2px', opacity: '0' };
+      Object.assign(c.style, { position: 'fixed', left: '0', top: '0', ...size, pointerEvents: 'none' });
       // In the document (not only in memory) and inside the viewport, so that every engine keeps painting it and
       // capturing its frames (engines may skip work for content outside the viewport).
       document.documentElement.appendChild(c);
