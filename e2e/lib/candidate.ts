@@ -294,7 +294,7 @@ export class CandidatePage {
   /** The readiness checklist's items (ok or not, with their messages) and the page's status line, for failures. */
   async readinessSummary(): Promise<string> {
     try {
-      return await this.page.evaluate(() => {
+      return await this.page.evaluate(async () => {
         const items = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="readiness-checklist"] [data-item]')).map(
           (el) => `${el.dataset.item}=${el.dataset.ok === '1' ? 'ok' : 'NOT ok'} "${(el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160)}"`,
         );
@@ -326,12 +326,17 @@ export class CandidatePage {
             }
             const n = d.length / 4;
             const mean = sum / n;
-            return `mean ${mean.toFixed(0)} sd ${Math.sqrt(Math.max(0, sq / n - mean * mean)).toFixed(1)}`;
+            return `mean ${mean.toFixed(2)} sd ${Math.sqrt(Math.max(0, sq / n - mean * mean)).toFixed(2)}`;
           } catch (err) {
             return `unreadable (${(err as Error).name})`;
           }
         };
-        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''}${banners.length ? ` | banners: ${banners.join(' / ').slice(0, 300)}` : ''} | ${video}, pixels ${pixels(v)}${cam ? ` | shim canvas ${cam.width}x${cam.height}, pixels ${pixels(cam)}` : ''}`;
+        // Frozen or changing: the same reading twice, 600 ms apart (the fixtures change every 200 ms).
+        const before = [pixels(v), cam ? pixels(cam) : ''];
+        await new Promise((r) => setTimeout(r, 600));
+        const moving = (a: string, b: string) => (a === b ? 'FROZEN' : 'changing');
+        const after = [pixels(v), cam ? pixels(cam) : ''];
+        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''}${banners.length ? ` | banners: ${banners.join(' / ').slice(0, 300)}` : ''} | ${video}, pixels ${after[0]} (${moving(before[0]!, after[0]!)})${cam ? ` | shim canvas ${cam.width}x${cam.height}, pixels ${after[1]} (${moving(before[1]!, after[1]!)})` : ''}`;
       });
     } catch (e) {
       return `(unreadable: ${(e as Error).message.slice(0, 120)})`;

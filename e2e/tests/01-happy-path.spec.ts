@@ -68,6 +68,8 @@ test('happy path: check-in, answers, pause with browser closed, resume, submit, 
 
     /* ---------------- same question, answers restored, time preserved */
     await expect(c.tid('question')).toContainText('bell-shaped');
+    // Read as soon as the exam is back (the clock runs again from here; the checks below take seconds in a slow browser).
+    const afterResume = await c.countdownMs();
     await expect(c.tid('answer-input')).toHaveValue('normal');
     for (const i of [0, 1, 2, 3, 4]) await expect(c.tid(`qnav-${i}`)).toHaveClass(/answered/);
     await c.gotoQuestion(0);
@@ -76,7 +78,6 @@ test('happy path: check-in, answers, pause with browser closed, resume, submit, 
     await expect(c.page.getByRole('checkbox', { name: 'Variance' })).toBeChecked();
     await expect(c.page.getByRole('checkbox', { name: 'Range' })).toBeChecked();
     await expect(c.page.getByRole('checkbox', { name: 'Mean' })).not.toBeChecked();
-    const afterResume = await c.countdownMs();
     console.log(`paused (wall) ${since(pausedAtWall)}; countdown before pause ${beforePause} ms, after resume ${afterResume} ms`);
     expect(pausedWallMs).toBeGreaterThan(15_000);
     // Only the seconds since the resume check passed were used — not the time spent paused/closed/checking.

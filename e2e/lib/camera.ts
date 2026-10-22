@@ -438,7 +438,11 @@ function fakeCameraInit(cfg: ShimConfig): void {
       dev.ctx!.drawImage(img, 0, 0, width, height);
     } catch {
       /* image closed in the meantime: the next frame follows */
+      return;
     }
+    // Capture this frame now on every track: without an explicit request an engine captures only when it notices the
+    // canvas changed, and WebKit's tracks kept showing an old frame while the video clock ran on.
+    for (const t of dev.tracks) (t as MediaStreamTrack & { requestFrame?: () => void }).requestFrame?.();
   };
   const show = async (n: number) => {
     const img = await frame(n % frames);
