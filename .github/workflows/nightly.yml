@@ -86,7 +86,7 @@ jobs:
       # Firefox / WebKit headed under Xvfb: headless they have no WebGL on a runner without a GPU (ci.yml e2e-browsers).
       E2E_HEADED: ${{ matrix.browser != 'chromium' && '1' || '' }}
       E2E_WORKERS: "1"
-      E2E_DELEGATE: ${{ matrix.browser == 'firefox' && 'gpu' || '' }}
+      E2E_DELEGATE: ${{ matrix.browser == 'firefox' && 'gpu' || matrix.browser == 'webkit' && 'cpu' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

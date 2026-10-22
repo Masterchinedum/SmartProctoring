@@ -130,9 +130,11 @@ jobs:
       # One test at a time: a headed browser rendering through software GL plus the in-page face analysis starve a
       # second candidate browser on a 4-vCPU runner (camera frames seconds late, clicks timing out).
       E2E_WORKERS: "1"
-      # Firefox: MediaPipe on its GPU delegate (WebGL, run by Firefox's GPU process) instead of the app's choice for a
-      # software renderer (CPU: WASM on the page's main thread, which starved the camera shim and the clicks).
-      E2E_DELEGATE: ${{ matrix.browser == 'firefox' && 'gpu' || '' }}
+      # MediaPipe's delegate on this GPU-less runner. Firefox: GPU (WebGL, run by Firefox's GPU process) instead of the
+      # app's choice for a software renderer (CPU: WASM on the page's main thread, which starved the camera shim and the
+      # clicks). WebKit: CPU, the app's own choice for a software renderer, which it cannot make there because WebKit
+      # reports every renderer as "Apple GPU" (the GPU delegate then runs in software in the page's process).
+      E2E_DELEGATE: ${{ matrix.browser == 'firefox' && 'gpu' || 'cpu' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -182,6 +184,8 @@ jobs:
       E2E_WORKERS: "1"
       # Headed (macOS runners have a display): headless, Playwright's WebKit on macOS exposed no media capture API.
       E2E_HEADED: "1"
+      # The browser processes' own output in the test log (WebKit says there why a page crashed).
+      DEBUG: pw:browser
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -206,6 +210,28 @@ jobs:
       - run: pnpm --filter @sp/e2e fetch-faces
       - run: pnpm --filter @sp/e2e exec playwright install webkit
       - run: pnpm --filter @sp/e2e exec playwright test --project=webkit
+      - if: failure()
+        name: Print macOS crash reports (a "Page crashed" leaves the WebKit process's crashing stack here)
+        run: |
+          ls -lt ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -20 || true
+          python3 - <<'PY'
+          import glob, json, os
+          files = sorted(glob.glob(os.path.expanduser('~/Library/Logs/DiagnosticReports/*.ips')), key=os.path.getmtime, reverse=True)[:4]
+          for f in files:
+              head, _, body = open(f, errors='replace').read().partition('\n')
+              try:
+                  h, b = json.loads(head), json.loads(body)
+              except Exception as e:
+                  print('=====', os.path.basename(f), 'unparsed:', e); print(head[:500]); continue
+              print('=====', os.path.basename(f), h.get('app_name'), h.get('bug_type'), h.get('timestamp'))
+              print('exception:', json.dumps(b.get('exception')), 'termination:', json.dumps(b.get('termination')))
+              images = b.get('usedImages') or []
+              threads = b.get('threads') or []
+              t = threads[b.get('faultingThread', 0)] if threads else {}
+              for fr in (t.get('frames') or [])[:45]:
+                  img = images[fr['imageIndex']].get('name', '?') if images and 'imageIndex' in fr else '?'
+                  print('   ', img, fr.get('symbol', '?'), fr.get('symbolLocation', ''))
+          PY
       - if: failure()
         name: Print the browser-side diagnostics of failed tests
         run: |
