@@ -124,6 +124,9 @@ jobs:
       E2E_NO_SKIP: "1"
       E2E_SKIP_REALISTIC: "1"
       E2E_BROWSERS: ${{ matrix.browser }}
+      # Headed under Xvfb (24-bit, so Mesa's software GL has visuals): headless Firefox / WebKit on a runner without a
+      # GPU have no WebGL, which MediaPipe needs even on its CPU path. Users' browsers have WebGL.
+      E2E_HEADED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -140,7 +143,7 @@ jobs:
           key: face-images-${{ hashFiles('e2e/scripts/fetch-faces.ts', 'apps/server/src/eval/datasets.ts') }}
       - run: pnpm --filter @sp/e2e fetch-faces
       - run: pnpm --filter @sp/e2e exec playwright install --with-deps ${{ matrix.browser }}
-      - run: pnpm --filter @sp/e2e exec playwright test --project=${{ matrix.browser }}
+      - run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" pnpm --filter @sp/e2e exec playwright test --project=${{ matrix.browser }}
       - if: failure()
         name: Print the browser-side diagnostics of failed tests
         # Candidate logs (identity API answers, console errors, HTTP errors, camera shim statistics) and page snapshots,

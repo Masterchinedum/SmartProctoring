@@ -83,6 +83,8 @@ jobs:
       E2E_SKIP_REALISTIC: "1"
       E2E_BROWSERS: ${{ matrix.browser }}
       E2E_CAMERA: shim
+      # Firefox / WebKit headed under Xvfb: headless they have no WebGL on a runner without a GPU (ci.yml e2e-browsers).
+      E2E_HEADED: ${{ matrix.browser != 'chromium' && '1' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -99,7 +101,7 @@ jobs:
           key: face-images-${{ hashFiles('e2e/scripts/fetch-faces.ts', 'apps/server/src/eval/datasets.ts') }}
       - run: pnpm --filter @sp/e2e fetch-faces
       - run: pnpm --filter @sp/e2e exec playwright install --with-deps ${{ matrix.browser }}
-      - run: pnpm --filter @sp/e2e exec playwright test --project=${{ matrix.browser }} --grep @cross-browser
+      - run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" pnpm --filter @sp/e2e exec playwright test --project=${{ matrix.browser }} --grep @cross-browser
       - if: failure()
         name: Print the browser-side diagnostics of failed tests
         run: |

@@ -151,6 +151,7 @@ export type CheckOutcome = 'ready' | 'passed' | 'retry' | 'hold' | 'problem' | '
 export class CandidatePage {
   readonly logs: string[] = [];
   readonly httpErrors: string[] = [];
+  private webglProbe: Promise<string | null> | null = null;
   /** Identity-relevant API answers (check frames, check completes, identity samples), one line each. */
   readonly apiLog: string[] = [];
   /** What the identity check screen showed over time (phase / stage / instruction / progress), on change. */
@@ -198,6 +199,7 @@ export class CandidatePage {
     OPEN_CANDIDATE_PAGES.add(c);
     c.attach(page);
     await page.goto(new URL(link, BASE_URL).pathname + new URL(link, BASE_URL).search);
+    c.webglProbe = c.probeWebgl();
     return c;
   }
 
@@ -251,6 +253,28 @@ export class CandidatePage {
     const s = shimStats(this.page);
     if (!s) return null;
     return `camera shim: ${s.fetched} frames fetched, ${s.failed} failed, ${(s.msTotal / Math.max(1, s.fetched)).toFixed(0)} ms mean / ${s.msMax.toFixed(0)} ms max per frame, largest lag ${s.lagMax} frames, ${s.mutes} track mute events (as of the last frame request)`;
+  }
+
+  /** The page's WebGL renderer, probed when the page opened (the page may be closed by the time a test fails). */
+  webglSummary(): Promise<string | null> {
+    return this.webglProbe ?? Promise.resolve(null);
+  }
+
+  /**
+   * For the failure diagnostics: MediaPipe needs a WebGL context even on its CPU path, and a headless browser on a
+   * machine without a GPU may have none (Firefox / WebKit in CI run headed under Xvfb for that).
+   */
+  private probeWebgl(): Promise<string | null> {
+    const probe = this.page.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      const gl = (canvas.getContext('webgl2') ?? canvas.getContext('webgl')) as WebGLRenderingContext | null;
+      if (!gl) return 'WebGL: not available';
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      const version = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext ? 'WebGL 2' : 'WebGL 1';
+      return `${version}: ${String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER))}`;
+    });
+    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000));
+    return Promise.race([probe, timeout]).catch(() => null);
   }
 
   get pageErrors(): string[] {
