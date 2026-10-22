@@ -8,7 +8,7 @@ decisions to review, open questions), `docs/HANDOVER.md` (product handover: what
 ## 1. Where things stand
 
 **The roadmap is complete: items 1–21 are shipped and pushed**, one commit per item (`docs/ROADMAP.md` §1 maps each
-item to its commit and documentation). One CI signal is open: the WebKit job (§5). Nothing else is in progress. There is no next task until the owner picks one. The likely
+item to its commit and documentation). Nothing is in progress. There is no next task until the owner picks one. The likely
 candidates are the open questions in `docs/ROADMAP.md` §4, the deferred parts in §2, and HANDOVER §4 item 11 (security
 keys, SCIM Groups, single logout, localisation).
 
@@ -20,8 +20,8 @@ Verification at the end of the roadmap (head `fbf2e28`, the last code change):
 * Browser suite, Chromium, everything (`playwright test`, 84 tests incl. the 32 realistic-webcam scenarios), run locally
   on the integrated roadmap (`b00c7c0`, before the cross-browser follow-ups): 82 passed; the 2 failures are the realistic
   liveness case `rwTurnA2_other` (`docs/ROADMAP.md` §4 item 6), which fails the same way at the PR's base `d4be596`.
-* CI on the head: `test`, `docker` (image boot, in-process and remote vision worker), `e2e` (core 01–19, Chromium) and
-  `e2e-browsers (firefox)` — see §5 for WebKit.
+* CI on the head: `test`, `docker` (image boot, in-process and remote vision worker), `e2e` (core 01–19, Chromium),
+  `e2e-browsers (firefox)` and `e2e-webkit-macos` (the `@cross-browser` scenarios), on Playwright 1.64.1.
 
 ## 2. Map of the roadmap's code (for orientation)
 
@@ -65,10 +65,12 @@ Migrations are numbered in the order the items landed, not by item number (13 �
   (~20 min with 2 workers). Single scenario: `… playwright test tests/11d`. **CI's core job only runs `tests/[01]*`**:
   name a new spec so it starts with `0` or `1` (e.g. `19f-…`), or it runs only nightly. Dedicated-instance specs
   (e2e README table) start their own server from source at test time: do not change imported server source while they
-  run. Firefox / WebKit: `pnpm --filter @sp/e2e exec playwright install firefox webkit` on a developer machine, then
-  `E2E_BROWSERS=webkit pnpm --filter @sp/e2e exec playwright test --project=webkit` (only `@cross-browser` scenarios;
-  the cloud container has only Chromium — never run `playwright install` there). `E2E_CAMERA=shim` runs Chromium with
-  the same camera shim.
+  run. **In the cloud container** the preinstalled Chromium (141) is not Playwright 1.64.1's own: add
+  `E2E_CHROMIUM_EXECUTABLE=/opt/pw-browsers/chromium` (the core suite passes with it), and never run
+  `playwright install` there. Firefox / WebKit: `pnpm --filter @sp/e2e exec playwright install firefox webkit` on a
+  developer machine, then `E2E_BROWSERS=webkit pnpm --filter @sp/e2e exec playwright test --project=webkit` (only
+  `@cross-browser` scenarios; WebKit on macOS — on Linux its canvas camera freezes, e2e README). `E2E_CAMERA=shim` runs
+  Chromium with the same camera shim.
 * Several checkouts at once (parallel agents): give each its own `E2E_PORT` (dedicated instances use up to `PORT + 40`)
   and `E2E_DATABASE_URL`, never kill processes you did not start, and never use broad `pkill -f` patterns.
 * Patterns to follow: mutations through `withSession` / `m.addEvent`; audit every staff action with `audit(tx, …)`;
@@ -107,24 +109,24 @@ Migrations are numbered in the order the items landed, not by item number (13 �
 
 ## 5. Loose ends (as of 2026-10-22)
 
-1. **CI**: `test`, `docker`, `e2e` (Chromium) and `e2e-browsers (firefox)` are green; WebKit is not fully green:
-   `e2e-webkit-macos` 9/10 (`d8adb14`), `e2e-browsers (webkit)` on Linux 6/10. Check CI on the head first; a red
-   Chromium / Firefox / unit / docker job comes before anything else.
-2. **WebKit job (red)**: Playwright's WebKit on Linux delivers the camera shim's canvas to the app's `<video>` only
-   intermittently. History, all visible in the job logs' diagnostics (candidate logs end with the WebGL renderer; a
-   readiness failure names each checklist item, the analysis video's state and whether video / canvas are changing):
-   no WebGL headless → headed under Xvfb; MediaPipe "GLctx" → the app's OffscreenCanvas fix (`61c8eb7`); analysis video
-   paused off-viewport → in the viewport (`e2afb6c`); video frozen on its first frame while the canvas changed →
-   timer-driven `captureStream(fps)` from an opaque 64×48 px canvas (WebKit only, `e2e/lib/camera.ts`). Now the
-   readiness check passes everywhere and 6 of 10 scenarios pass on Linux (slow / uneven frames). The new
-   `e2e-webkit-macos` job (headed, Postgres from Homebrew) needed the shim to supply `navigator.mediaDevices` and to sit
-   on `MediaDevices.prototype` (macOS WebKit hands the page another MediaDevices object, whose native getUserMedia
-   waits for a permission prompt); it then passed 9 of 10 — the failure, on every run, is the staff browser's page
-   crashing on a reload in 04 (`sp.reload()` after Identity tab → Compare images → back → Release hold); not yet known
-   whether real Safari crashes there. Owner's call (`docs/ROADMAP.md` §4 item 7): make the macOS job the WebKit check and drop or demote the
-   Linux entry. Do not skip or quarantine the WebKit scenarios to get green.
-   Firefox needed: headed under Xvfb, one worker, `E2E_DELEGATE=gpu` (CPU delegate WASM starved the main thread; in-process
-   WebGL broke MediaPipe — keep `webgl.out-of-process` at its default).
+1. **CI**: all jobs green on the head (`test`, `docker`, `e2e`, `e2e-browsers (firefox)`, `e2e-webkit-macos`). Check CI
+   on the head first; a red job comes before anything else.
+2. **WebKit history** (all in the job logs' diagnostics: candidate logs end with the WebGL renderer, the camera opens,
+   the shim's fetch times and how late its frame timer ran; a readiness failure names each checklist item, the analysis
+   video's state and whether video / canvas are changing). WebKit runs on macOS only: on Linux Playwright's WebKitGTK
+   stops showing the shim's canvas frames in the app's video (26.0 and 27.2 alike), after these fixes had been tried
+   there — headed under Xvfb (no WebGL headless), the app's OffscreenCanvas fix (`61c8eb7`), the analysis video inside
+   the viewport (`e2afb6c`), timer-driven `captureStream(fps)` from an opaque 64×48 px canvas (`e2e/lib/camera.ts`).
+   macOS needed the shim to supply `navigator.mediaDevices` and to sit on `MediaDevices.prototype`. The staff-page crash
+   on a reload in 04 was a Navigation API bug of Playwright 1.56.1's WebKit 26.0 (`pushState`, `pushState`, back,
+   reload crashed it on a bare page; Safari 26.6.2 and WebKit 27.2 do not), fixed by Playwright 1.64.1 (`f3125f2`).
+   **Watch for flakes on the 3-vCPU macOS runners:** 03b failed once on 1.56.1 when the page was slow (shim frames
+   601 ms mean; the head-turn fixture's 15 s frontal hold was over before the check started), and one of four runs on
+   1.64.1 failed 01 and 10 while the candidate page's main thread stalled for up to 12.8 s, with one MediaPipe WASM
+   "out of bounds memory access" in WebKit. The other three runs passed all ten. If it recurs, look at the app's
+   analysis load in WebKit (`apps/web/src/candidate/check/useFrameAnalysis.ts` keeps the main thread busy whenever
+   detection takes longer than its 150 ms interval) before touching the tests. Firefox needed: headed under Xvfb, one worker, `E2E_DELEGATE=gpu` (CPU
+   delegate WASM starved the main thread; in-process WebGL broke MediaPipe — keep `webgl.out-of-process` at its default).
 3. **Flakes fixed in tests only — watch whether they come back:**
    * `14-accessibility` "small screens…" (`26f0d54`): the enabled "Agree and continue" button once measured 2.93:1 (the
      disabled opacity). The spec waits for `opacity: 1`. Root cause not confirmed (`candidate/screens/Welcome.tsx`,

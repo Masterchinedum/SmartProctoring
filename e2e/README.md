@@ -245,7 +245,8 @@ Status (see also `docs/HANDOVER.md` §4 item 3 and `docs/ROADMAP.md` §2):
 * **Chromium**: every `@cross-browser` scenario green in both camera modes.
 * **Firefox** (CI): all ten `@cross-browser` scenarios green.
 * **WebKit on macOS** (CI job `e2e-webkit-macos`): all ten `@cross-browser` scenarios green with Playwright 1.64.1
-  (WebKit 27.2). WebKit on macOS needed two shim changes: it exposes no `navigator.mediaDevices` headless, and it hands
+  (WebKit 27.2) in three of four runs; in the fourth, 01 and 10 failed while the candidate page's main thread stalled for
+  up to 12.8 s (the `frame timer late` figure of the `# camera shim` line). WebKit on macOS needed two shim changes: it exposes no `navigator.mediaDevices` headless, and it hands
   the page a different `MediaDevices` object than the init script saw, so the shim also installs itself on
   `MediaDevices.prototype` (the readiness failure reports whether the page's `getUserMedia` is native or the shim's,
   and every camera request the shim received). With Playwright 1.56.1 (WebKit 26.0) the staff page crashed on the

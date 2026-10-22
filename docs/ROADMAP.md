@@ -27,7 +27,7 @@ Status of the October 2026 roadmap carried by Masterchinedum/SmartProctoring#1 (
 | 17 | Data residency (evidence storage locations, `storage:move`) | Shipped | `c2ffcfc` | HANDOVER §3c, OPERATIONS §2 |
 | 18 | Dedicated vision worker | Shipped | `50dfea1` | HANDOVER §3c, PERFORMANCE §8 |
 | 19 | Chaos tests, upgrade tests from every migration, schema drift check, metrics | Shipped | `8cc8d45` | HANDOVER §3c, OPERATIONS §5, §7 |
-| 20 | Cross-browser e2e (Firefox, WebKit) | Shipped — Firefox green in CI; WebKit on macOS 9/10, on Linux 6/10 (§2) | `b00c7c0`, CI follow-ups `6191103`…`d8adb14` (app fixes `61c8eb7`, `e2afb6c`) | HANDOVER §3c and §4 item 3, e2e README |
+| 20 | Cross-browser e2e (Firefox, WebKit) | Shipped — Firefox (Linux) and WebKit (macOS) green in CI | `b00c7c0`, CI follow-ups `6191103`…`8dcc359` (app fixes `61c8eb7`, `e2afb6c`; Playwright 1.64.1 `f3125f2`) | HANDOVER §3c and §4 item 3, e2e README |
 | 21 | This document, final verification, PR description | Done | (this commit) | §5 below |
 
 ## 2. Deferred, and why
@@ -58,7 +58,7 @@ liveness scope, phone detection) are in `HANDOVER.md` §4 and are unchanged by t
 | 20 Cross-browser | The accessibility scan (14) and the PDF report check (11) in Firefox / WebKit | Both use Chromium-only Playwright features (the accessibility tree over CDP, `page.pdf()`); they test the app's markup and the server's PDF, not the browser |
 | 20 Cross-browser | Dedicated-instance scenarios and the realistic accuracy scenarios (20–24) in Firefox / WebKit | They test server behaviour; the browser only drives it |
 | 20 Cross-browser | Real Safari and Firefox with a real webcam (their camera prompts) | Playwright's WebKit is Safari's engine, not Safari; the CI camera is a canvas shim. One manual pass per browser before launch (HANDOVER §4 item 3) |
-| 20 Cross-browser | **A fully green WebKit check.** WebKit runs twice on every pull request. **On macOS** (`e2e-webkit-macos`, Apple's media stack) 9 of the 10 scenarios pass; in the one failure (04) the swap was held and released correctly, and then the *staff* browser's page crashed on a reload ("Page crashed", WebKit's web process) — on every run so far; whether real Safari crashes there is not known. **On Linux** (`e2e-browsers`, WebKitGTK) 6 of 10 pass, a different four failing each run | Linux: Playwright's WebKit delivers the camera shim's canvas to the app's video only intermittently (one frozen frame while the canvas changed; slow, uneven frames after timer-driven capture), so identity and head-turn checks retry. macOS needed two shim fixes: WebKit there exposes no `navigator.mediaDevices` headless and hands the page a different `MediaDevices` object than the init script saw (the shim now also sits on `MediaDevices.prototype`). Recommendation: make the macOS job the WebKit check and drop or demote the Linux entry (owner decision, §4 item 7) |
+| 20 Cross-browser | WebKit on Linux (WebKitGTK) in CI | Playwright's WebKitGTK shows the camera shim's canvas in the app's video only for a while, then one frozen frame while the canvas keeps changing and the video keeps playing; change-driven and timer-driven capture both freeze, in WebKit 26.0 (4–6 of 10 passed) and 27.2 (3 of 10). The same app code passes on macOS, so it is the test camera's path, not the app; WebKit runs on macOS (§3) |
 | 20 Cross-browser | Fullscreen on iPhone | iPhone Safari has no element fullscreen, so an exam that requires fullscreen cannot be taken there; the welcome-screen system check says so |
 
 ## 3. Decisions made on your behalf
@@ -124,13 +124,20 @@ All are documented where the feature is, and all can be changed. These are the o
 * Alert thresholds are starting points.
 
 **Cross-browser (20)**
-* Firefox and WebKit run the ten core scenarios tagged `@cross-browser` on every pull request (`e2e-browsers` job),
-  not nightly only; the nightly run adds Chromium with the same camera shim, so a failure can be pinned on the shim or
-  the browser.
+* Firefox and WebKit run the ten core scenarios tagged `@cross-browser` on every pull request, not nightly only:
+  Firefox on Linux (`e2e-browsers`), WebKit on macOS (`e2e-webkit-macos`, Safari's platform and Apple's media stack).
+  The nightly run adds Chromium with the same camera shim, so a failure can be pinned on the shim or the browser.
+* WebKit does not run on Linux in CI: Playwright's WebKitGTK stops showing the camera shim's frames in the app's video
+  (§2). The scenarios still run in WebKit on every pull request, on macOS.
+* Playwright 1.56.1 → **1.64.1** (Chromium 156, Firefox 157, WebKit 27.2). WebKit 26.0 of 1.56.1 crashed the staff page
+  on a reload in 04: its Navigation API lost track of same-document entries, and `pushState`, `pushState`, back, reload
+  crashed its web process on a bare page too (macOS and Linux). Safari 26.6.2 (checked on the CI runner through
+  safaridriver) and WebKit 27.2 run the same sequences without a crash. `E2E_CHROMIUM_EXECUTABLE` lets a machine with
+  another Chromium preinstalled (the Claude Code cloud sandbox: Chromium 141) run the suite; the core suite passes there.
 * The `headturn` fixture holds the face frontal for 15 s instead of 10 s before turning (Chromium too): on a loaded
   machine the app sometimes finished calibrating after the turn had begun.
-* In CI, Firefox and WebKit run headed under Xvfb (headless they have no WebGL on a runner without a GPU) and one test
-  at a time, and Firefox runs MediaPipe on its GPU delegate (`E2E_DELEGATE=gpu`; the app itself picks the CPU delegate
+* In CI, Firefox runs headed under Xvfb (headless it has no WebGL on a runner without a GPU), WebKit headed on macOS,
+  both one test at a time, and Firefox runs MediaPipe on its GPU delegate (`E2E_DELEGATE=gpu`; the app itself picks the CPU delegate
   on a software renderer, which starved headed Firefox).
 * Two candidate-app changes came out of the first cross-browser runs: MediaPipe gets a regular canvas where an
   OffscreenCanvas cannot hold WebGL 2 (WebKitGTK browsers such as GNOME Web), and the hidden analysis video sits inside
@@ -158,13 +165,10 @@ All are documented where the feature is, and all can be changed. These are the o
    Options: lower the browser's capture target towards the server's (a liveness-strength decision), or accept that
    such a camera needs a second attempt / staff review. Needs a decision and a pilot on real webcams (HANDOVER §4
    item 1).
-7. **The WebKit CI jobs.** On macOS 9 of 10 scenarios pass (the staff page crashes on a reload in 04, every run); on Linux 6 of 10
-   (the Linux build's canvas capture is unreliable). Make the macOS job the WebKit check and remove the Linux entry, or
-   keep the Linux entry as a non-required signal? Firefox and Chromium are green.
 
 ## 5. Verification at the end of the roadmap
 
-At the end of the roadmap (unit and browser suites on `fbf2e28`; the later commits change only the cross-browser test harness, CI, documentation and one code comment):
+At the end of the roadmap (unit and browser suites on `fbf2e28`; the later commits change only the cross-browser test harness, the Playwright version, CI, documentation and one code comment; the core Chromium suite, 52 tests, passed again locally on Playwright 1.64.1):
 
 * `pnpm run typecheck` (shared, detection, server, web) and the e2e typecheck: clean.
 * `pnpm test`: **1,509 tests** — shared 64, detection 169, server 881, web 395 — all pass, with the face images present
@@ -174,7 +178,9 @@ At the end of the roadmap (unit and browser suites on `fbf2e28`; the later commi
   of §4 item 6; it fails the same way at the PR's base commit `d4be596`.
 * CI: `test` (typecheck + all unit tests), `docker` (image built and booted; a dedicated vision worker and a
   remote-driver server probed), `e2e` (core scenarios 01–19 in Chromium) and `e2e-browsers (firefox)` (the ten
-  `@cross-browser` scenarios) **green**; WebKit **not yet green**: `e2e-webkit-macos` 9/10 (`d8adb14`),
-  `e2e-browsers (webkit)` on Linux 6/10 (§2, item 20).
+  `@cross-browser` scenarios) and `e2e-webkit-macos` (the same ten in WebKit on macOS) **green** on Playwright 1.64.1.
+  WebKit on the 3-vCPU macOS runners is not yet flake-free: of four runs on 1.64.1, three passed all ten; in one, 01 and
+  10 failed while the candidate page's main thread stalled for up to 12.8 s (a click had no effect, a test timed out;
+  MediaPipe also logged one WASM "out of bounds memory access" in WebKit).
 * Not run here: the nightly workflow (it runs only from the default branch), real SMTP / S3 / identity-provider tenants
   (HANDOVER §4 items 5 and 10).
