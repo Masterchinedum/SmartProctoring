@@ -208,7 +208,10 @@ export class CandidatePage {
     page.on('dialog', (d) => void d.accept().catch(() => undefined)); // beforeunload on reload/close
     page.on('console', (m) => {
       const t = m.text();
-      if ((m.type() === 'error' || m.type() === 'warning') && !/GL Driver|OpenGL|XNNPACK|gl_context|face_landmarker_graph|swiftshader|GroupMarkerNotSet|WebGL|TensorFlow Lite/i.test(t)) {
+      // Browser / MediaPipe driver noise is dropped, but never the app's own messages ("[check] …", "[vision] …"),
+      // whose errors can mention WebGL.
+      const own = /^\[(check|vision|monitoring|controller|camera)\]/i.test(t);
+      if ((m.type() === 'error' || m.type() === 'warning') && (own || !/GL Driver|OpenGL|XNNPACK|gl_context|face_landmarker_graph|swiftshader|GroupMarkerNotSet|WebGL|TensorFlow Lite/i.test(t))) {
         this.logs.push(`[${m.type()}] ${t.slice(0, 400)}`);
       }
     });
@@ -302,6 +305,7 @@ export class CandidatePage {
         const video = v
           ? `analysis video: readyState ${v.readyState}, ${v.videoWidth}x${v.videoHeight}, ${v.paused ? 'paused' : 'playing'}, t=${v.currentTime.toFixed(1)}s, tracks [${tracks.map((t) => `${t.readyState} ${t.muted ? 'muted' : 'unmuted'} ${t.enabled ? 'enabled' : 'disabled'}`).join(', ')}]${v.error ? `, error ${v.error.code} ${v.error.message}` : ''}`
           : 'no analysis video';
+        const banners = Array.from(document.querySelectorAll<HTMLElement>('.banner')).map((el) => (el.innerText || '').trim()).filter(Boolean);
         const cam = document.querySelector<HTMLCanvasElement>('canvas[data-sp-e2e-camera]');
         // What a 2D canvas reads from each (the app's analysis samples the video this way): mean / spread of luma.
         const pixels = (src: CanvasImageSource | null) => {
@@ -327,7 +331,7 @@ export class CandidatePage {
             return `unreadable (${(err as Error).name})`;
           }
         };
-        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''} | ${video}, pixels ${pixels(v)}${cam ? ` | shim canvas ${cam.width}x${cam.height}, pixels ${pixels(cam)}` : ''}`;
+        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''}${banners.length ? ` | banners: ${banners.join(' / ').slice(0, 300)}` : ''} | ${video}, pixels ${pixels(v)}${cam ? ` | shim canvas ${cam.width}x${cam.height}, pixels ${pixels(cam)}` : ''}`;
       });
     } catch (e) {
       return `(unreadable: ${(e as Error).message.slice(0, 120)})`;
