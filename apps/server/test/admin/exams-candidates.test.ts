@@ -6,7 +6,7 @@
 import type { CandidateDTO, ExamDTO, ExamInput } from '@sp/shared';
 import { and, eq } from 'drizzle-orm';
 import { existsSync } from 'node:fs';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { answers, auditLog, candidates, evidence, examSessions } from '../../src/db/schema.js';
 import { deserializeEmbeddings } from '../../src/vision/embeddings.js';
 import { FakeVisionService } from '../../src/vision/fake.js';
@@ -254,6 +254,9 @@ describe('candidates', () => {
     const assigned = json(await admin.post(`/exams/${env.exam.id}/assignments`, { candidateIds: [cand.id] }));
     const sid = assigned.items[0].sessionId;
     await startedSession(env, env.candidateClient(assigned.items[0].accessLink.split('/take/')[1]), 'dora');
+    // The passed check's frame images are purged after its response (afterCommit): let that finish before the images
+    // that remain are listed below.
+    await vi.waitFor(async () => expect((await env.ctx.db.select().from(evidence).where(eq(evidence.sessionId, sid))).filter((e) => e.kind === 'liveness_frame' && !e.purgedAt)).toHaveLength(0));
     const refused = await admin.del(`/candidates/${cand.id}`);
     expect(refused.statusCode).toBe(409);
     expect(refused.json()).toMatchObject({ error: 'candidate_has_open_sessions', details: { sessionIds: [sid] } });
