@@ -248,6 +248,57 @@ jobs:
             e2e/playwright-report
           retention-days: 7
 
+  webkit-reload-repro:
+    # Temporary diagnostic: does a reload after same-document history navigation crash WebKit (scenario 04 on macOS)?
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @sp/e2e exec playwright install --with-deps webkit
+      - if: runner.os == 'macOS'
+        name: Safari's WebDriver
+        run: |
+          sw_vers
+          defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true
+          sudo safaridriver --enable
+          (safaridriver -p 4444 > /tmp/safaridriver.log 2>&1 &)
+          sleep 3
+          echo "SAFARIDRIVER_URL=http://127.0.0.1:4444" >> "$GITHUB_ENV"
+      - run: pnpm --filter @sp/e2e exec tsx scripts/webkit-reload-repro.ts
+        timeout-minutes: 10
+      - if: runner.os == 'macOS'
+        name: WebKit crash reports
+        run: |
+          ls -lt ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -20 || true
+          python3 - <<'PY'
+          import glob, json, os
+          for f in sorted(glob.glob(os.path.expanduser('~/Library/Logs/DiagnosticReports/*.ips')), key=os.path.getmtime, reverse=True)[:6]:
+              head, _, body = open(f, errors='replace').read().partition('\n')
+              try:
+                  h, b = json.loads(head), json.loads(body)
+              except Exception as e:
+                  print('=====', os.path.basename(f), 'unparsed:', e); continue
+              print('=====', os.path.basename(f), h.get('app_name'), h.get('app_version'), h.get('timestamp'))
+              print('exception:', json.dumps(b.get('exception')))
+              images = b.get('usedImages') or []
+              threads = b.get('threads') or []
+              t = threads[b.get('faultingThread', 0)] if threads else {}
+              for fr in (t.get('frames') or [])[:12]:
+                  img = images[fr['imageIndex']].get('name', '?') if images and 'imageIndex' in fr else '?'
+                  print('   ', img, fr.get('symbol', '?'), fr.get('symbolLocation', ''))
+          PY
+          cat /tmp/safaridriver.log || true
+
   docker:
     # Builds the production image and boots it: migrations, the vision workers on Node 24, the web app, health probes.
     runs-on: ubuntu-latest
