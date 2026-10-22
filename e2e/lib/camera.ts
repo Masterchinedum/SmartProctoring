@@ -3,7 +3,7 @@ import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { chromium, firefox, test, webkit, type Browser, type BrowserContext, type BrowserContextOptions, type BrowserType, type LaunchOptions, type Page } from '@playwright/test';
 import sharp from 'sharp';
 import { cameraModeFor, FIREFOX_PREFS, type BrowserName, type CameraMode } from './browsers';
-import { HEADED } from './config';
+import { CHROMIUM_EXECUTABLE, HEADED } from './config';
 
 /**
  * The candidate's camera in browsers without Chromium's file-backed fake capture device (Firefox, WebKit) — and in
@@ -197,7 +197,7 @@ function launchOptions(name: BrowserName): LaunchOptions {
   if (name === 'firefox') return { headless: !HEADED, firefoxUserPrefs: FIREFOX_PREFS };
   if (name === 'webkit') return { headless: !HEADED };
   // Same flags as the device mode minus the fake capture device: timers and the camera keep running in background tabs.
-  return { headless: !HEADED, args: ['--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] };
+  return { headless: !HEADED, executablePath: CHROMIUM_EXECUTABLE, args: ['--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] };
 }
 
 /** A candidate browser (the project's browser type) whose camera shim plays `y4m` — or has no camera (null). */

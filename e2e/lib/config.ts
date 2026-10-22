@@ -43,6 +43,11 @@ export const ADMIN_PASSWORD = env.E2E_ADMIN_PASSWORD || 'e2e-owner-password-1';
 export const EVIDENCE_KEY = Buffer.alloc(32, 7).toString('base64');
 export const SESSION_SECRET = 'e2e-session-secret-0123456789abcdefghijklmnopqrstuvwxyz';
 export const HEADED = env.E2E_HEADED === '1';
+/**
+ * A Chromium binary to use instead of the one this Playwright version downloads (`playwright install chromium`):
+ * for machines that come with another Chromium build preinstalled and cannot download (e.g. a sandbox).
+ */
+export const CHROMIUM_EXECUTABLE = env.E2E_CHROMIUM_EXECUTABLE || undefined;
 /** The candidate app's MediaPipe delegate (its own `sp:delegate` switch); unset = the app's choice. */
 export const DELEGATE: 'gpu' | 'cpu' | null = env.E2E_DELEGATE === 'gpu' || env.E2E_DELEGATE === 'cpu' ? env.E2E_DELEGATE : null;
 export const WORKERS = Number(env.E2E_WORKERS || 2);

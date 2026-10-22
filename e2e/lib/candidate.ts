@@ -1,5 +1,5 @@
 import { chromium, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
-import { BASE_URL, DELEGATE, HEADED } from './config';
+import { BASE_URL, CHROMIUM_EXECUTABLE, DELEGATE, HEADED } from './config';
 import { requireImages } from './require-images';
 import { fixtureAvailable, fixturePath, type FixtureName } from './fixtures';
 import { cameraMode, cameraPermissions, installCamera, launchShimCamera, launchShimPersistentCamera, shimStats } from './camera';
@@ -58,6 +58,7 @@ export async function launchCameraFile(y4m: string): Promise<Browser> {
   if (cameraMode() === 'shim') return launchShimCamera(y4m);
   return chromium.launch({
     headless: !HEADED,
+    executablePath: CHROMIUM_EXECUTABLE,
     args: [
       '--use-fake-device-for-media-stream',
       '--use-fake-ui-for-media-stream',
@@ -79,6 +80,7 @@ export async function launchPersistentCamera(fixture: FixtureName, userDataDir: 
   if (cameraMode() === 'shim') return launchShimPersistentCamera(fixturePath(fixture), userDataDir, { baseURL: BASE_URL, viewport: { width: 1280, height: 900 } });
   return chromium.launchPersistentContext(userDataDir, {
     headless: !HEADED,
+    executablePath: CHROMIUM_EXECUTABLE,
     baseURL: BASE_URL,
     viewport: { width: 1280, height: 900 },
     permissions: ['camera'],

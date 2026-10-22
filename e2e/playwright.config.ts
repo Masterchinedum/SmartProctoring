@@ -1,13 +1,13 @@
 import { defineConfig, type Project } from '@playwright/test';
 import { CROSS_BROWSER_TAG, FIREFOX_PREFS, selectedBrowsers, type BrowserName } from './lib/browsers';
-import { BASE_URL, WORKERS } from './lib/config';
+import { BASE_URL, CHROMIUM_EXECUTABLE, WORKERS } from './lib/config';
 
 /**
  * Projects = browsers (E2E_BROWSERS, default `chromium` only, so a plain run is the Chromium suite). Firefox and
  * WebKit run the scenarios tagged @cross-browser with the camera shim (lib/camera.ts; README "Browsers").
  */
 const PROJECTS: Record<BrowserName, Project> = {
-  chromium: { name: 'chromium', use: { browserName: 'chromium' } },
+  chromium: { name: 'chromium', use: { browserName: 'chromium', launchOptions: { executablePath: CHROMIUM_EXECUTABLE } } },
   firefox: { name: 'firefox', grep: new RegExp(CROSS_BROWSER_TAG), use: { browserName: 'firefox', launchOptions: { firefoxUserPrefs: FIREFOX_PREFS } } },
   webkit: { name: 'webkit', grep: new RegExp(CROSS_BROWSER_TAG), use: { browserName: 'webkit' } },
 };
