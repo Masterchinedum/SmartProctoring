@@ -113,8 +113,8 @@ export type LivenessAction = (typeof LIVENESS_ACTIONS)[number];
 
 export const LIVENESS_INSTRUCTIONS: Record<LivenessAction | 'center', string> = {
   center: 'Look straight at the screen',
-  turn_left: 'Slowly turn your head to your LEFT',
-  turn_right: 'Slowly turn your head to your RIGHT',
+  turn_left: 'Slowly turn your head a little to your LEFT',
+  turn_right: 'Slowly turn your head a little to your RIGHT',
   look_up: 'Tilt your head UP slightly',
   look_down: 'Tilt your head DOWN slightly',
 };
