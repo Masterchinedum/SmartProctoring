@@ -180,6 +180,8 @@ jobs:
       E2E_SKIP_REALISTIC: "1"
       E2E_BROWSERS: webkit
       E2E_WORKERS: "1"
+      # Headed (macOS runners have a display): headless, Playwright's WebKit on macOS exposed no media capture API.
+      E2E_HEADED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

@@ -336,7 +336,8 @@ export class CandidatePage {
         await new Promise((r) => setTimeout(r, 600));
         const moving = (a: string, b: string) => (a === b ? 'FROZEN' : 'changing');
         const after = [pixels(v), cam ? pixels(cam) : ''];
-        const page = `secure context ${window.isSecureContext}, mediaDevices ${navigator.mediaDevices ? 'yes' : 'NO'}`;
+        const has = (x: unknown) => (x ? 'yes' : 'NO');
+        const page = `secure context ${window.isSecureContext}, mediaDevices ${has(navigator.mediaDevices)}, getUserMedia ${has(navigator.mediaDevices?.getUserMedia)}, MediaStream ${has(typeof MediaStream === 'function')}, canvas captureStream ${has(typeof HTMLCanvasElement.prototype.captureStream === 'function')}, shim ${has((window as unknown as { __spFakeCamera?: unknown }).__spFakeCamera)}`;
         return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''}${banners.length ? ` | banners: ${banners.join(' / ').slice(0, 300)}` : ''} | ${page} | ${video}, pixels ${after[0]} (${moving(before[0]!, after[0]!)})${cam ? ` | shim canvas ${cam.width}x${cam.height}, pixels ${after[1]} (${moving(before[1]!, after[1]!)})` : ''}`;
       });
     } catch (e) {
