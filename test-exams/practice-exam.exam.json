@@ -1,0 +1,65 @@
+{
+  "format": "smartproctoring.exam",
+  "formatVersion": 1,
+  "source": { "title": "Feature-test practice exam" },
+  "exam": {
+    "title": "Feature test — practice exam",
+    "description": "A short exam for trying every SmartProctoring feature. Not a real exam.",
+    "instructions": "You have 20 minutes. Keep your face visible to the camera. You may pause; the timer stops while paused and you repeat the identity check when you return.",
+    "durationSec": 1200,
+    "policy": {},
+    "questions": [
+      {
+        "type": "single_choice",
+        "prompt": "Which planet is closest to the Sun?",
+        "options": [
+          { "id": "a", "text": "Venus" },
+          { "id": "b", "text": "Mercury" },
+          { "id": "c", "text": "Mars" }
+        ],
+        "correct": ["b"],
+        "points": 1
+      },
+      {
+        "type": "multiple_choice",
+        "prompt": "Which of these are prime numbers? (Select all that apply.)",
+        "options": [
+          { "id": "a", "text": "2" },
+          { "id": "b", "text": "4" },
+          { "id": "c", "text": "7" },
+          { "id": "d", "text": "9" }
+        ],
+        "correct": ["a", "c"],
+        "points": 2
+      },
+      {
+        "type": "numeric",
+        "prompt": "What is 12 × 12?",
+        "options": [],
+        "correct": ["144"],
+        "points": 1
+      },
+      {
+        "type": "numeric",
+        "prompt": "What is 2.5 + 1.25? (You may type a comma or a point.)",
+        "options": [],
+        "correct": ["3.75"],
+        "points": 1
+      },
+      {
+        "type": "short_text",
+        "prompt": "What is the capital city of Nigeria?",
+        "options": [],
+        "correct": ["abuja"],
+        "points": 1
+      },
+      {
+        "type": "long_text",
+        "prompt": "In a few sentences, describe your favourite place and why you like it.",
+        "options": [],
+        "correct": [],
+        "points": 5
+      }
+    ]
+  }
+}
