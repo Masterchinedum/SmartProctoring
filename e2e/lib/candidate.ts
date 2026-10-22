@@ -287,6 +287,21 @@ export class CandidatePage {
     return Promise.race([probe, timeout]).catch(() => null);
   }
 
+  /** The readiness checklist's items (ok or not, with their messages) and the page's status line, for failures. */
+  async readinessSummary(): Promise<string> {
+    try {
+      return await this.page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="readiness-checklist"] [data-item]')).map(
+          (el) => `${el.dataset.item}=${el.dataset.ok === '1' ? 'ok' : 'NOT ok'} "${(el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160)}"`,
+        );
+        const status = Array.from(document.querySelectorAll<HTMLElement>('[role="status"], [role="alert"]')).map((el) => (el.innerText || '').trim()).filter(Boolean);
+        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''}`;
+      });
+    } catch (e) {
+      return `(unreadable: ${(e as Error).message.slice(0, 120)})`;
+    }
+  }
+
   get pageErrors(): string[] {
     return this.logs.filter((l) => l.startsWith('[pageerror]'));
   }
@@ -314,7 +329,11 @@ export class CandidatePage {
    */
   async passReadiness(timeout = 90_000, opts: { strict?: boolean } = {}): Promise<void> {
     await expect(this.tid('readiness-checklist')).toBeVisible();
-    await expect(this.tid('readiness-continue')).toBeEnabled({ timeout });
+    try {
+      await expect(this.tid('readiness-continue')).toBeEnabled({ timeout });
+    } catch (e) {
+      throw new Error(`readiness never completed; checklist: ${await this.readinessSummary()}\n${(e as Error).message}`);
+    }
     const item = (id: string) => this.page.locator(`[data-testid="readiness-checklist"] [data-item="${id}"]`);
     for (const id of ['frames', 'one_face']) await expect(item(id)).toHaveAttribute('data-ok', '1');
     for (const id of ['size_position', 'lighting', 'sharpness']) {

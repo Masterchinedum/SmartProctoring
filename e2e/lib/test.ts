@@ -78,7 +78,7 @@ export const test = base.extend<{ staffPage: (b?: Browser) => Promise<Page>; dia
         const shim = c.cameraShimSummary();
         const webgl = await c.webglSummary();
         const text = await c.visibleText();
-        const body = [`# candidate page ${i}: identity API answers`, ...c.apiLog, '', '# identity check screen (on change)', ...c.verifyTrace, '', '# console errors / warnings', ...c.logs, '', '# HTTP errors', ...c.httpErrors, ...(shim ? ['', `# ${shim}`] : []), ...(webgl ? ['', `# ${webgl}`] : []), ...(text ? ['', '# visible text at the end of the test', text] : [])].join('\n');
+        const body = [`# candidate page ${i}: identity API answers`, ...c.apiLog, '', '# identity check screen (on change)', ...c.verifyTrace, '', '# console errors / warnings', ...collapseRepeats(c.logs), '', '# HTTP errors', ...c.httpErrors, ...(shim ? ['', `# ${shim}`] : []), ...(webgl ? ['', `# ${webgl}`] : []), ...(text ? ['', '# visible text at the end of the test', text] : [])].join('\n');
         const file = testInfo.outputPath(`candidate-${i}.log`);
         writeFileSync(file, body);
         await testInfo.attach(`candidate-${i}.log`, { path: file, contentType: 'text/plain' });
@@ -87,5 +87,17 @@ export const test = base.extend<{ staffPage: (b?: Browser) => Promise<Page>; dia
     { auto: true },
   ],
 });
+
+/** Consecutive identical lines once, with their count (a failing detector can log the same warning thousands of times). */
+function collapseRepeats(lines: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; ) {
+    let j = i + 1;
+    while (j < lines.length && lines[j] === lines[i]) j++;
+    out.push(j - i > 1 ? `${lines[i]} (×${j - i})` : lines[i]!);
+    i = j;
+  }
+  return out;
+}
 
 export { expect };
