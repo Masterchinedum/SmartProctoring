@@ -29,7 +29,7 @@ const server = http.createServer((req, res) => {
 await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-type Step = { js?: string; back?: true; reload?: true; click?: string; wait?: number };
+type Step = { js?: string; back?: true; reload?: true; gotoSame?: true; click?: string; wait?: number };
 const push = (p: string) => ({ js: `history.pushState({ p: ${JSON.stringify(p)} }, '', ${JSON.stringify(p)})` });
 const replace = (p: string) => ({ js: `history.replaceState({ p: ${JSON.stringify(p)} }, '', ${JSON.stringify(p)})` });
 const jsBack = { js: `new Promise((r) => { addEventListener('popstate', () => r(), { once: true }); history.back(); })` };
@@ -49,6 +49,9 @@ const SEQUENCES: Record<string, Step[]> = {
   'router replaceState, push, replace, push, goBack(), reload': [routerInit, push('/b'), replace('/b?tab=identity'), push('/c'), { back: true }, { reload: true }],
   'replace, reload': [replace('/a?x=1'), { reload: true }],
   'push, replace, reload': [push('/b'), replace('/b?tab=identity'), { reload: true }],
+  // Loading the same URL again instead of reloading (a new navigation, not a reload).
+  'push, replace, push, goBack(), goto same URL': [push('/b'), replace('/b?tab=identity'), push('/c'), { back: true }, { gotoSame: true }],
+  'push, replace, push, goBack(), goto same URL, reload': [push('/b'), replace('/b?tab=identity'), push('/c'), { back: true }, { gotoSame: true }, { reload: true }],
   'cross-document link, goBack(), reload': [{ click: '#cross' }, { back: true }, { reload: true }],
 };
 
@@ -65,10 +68,11 @@ async function inPlaywright(headless: boolean) {
     try {
       await page.goto(`${base}/a`);
       for (const s of steps) {
-        if (s.reload) states.push(await page.evaluate('navState()'));
+        if (s.reload || s.gotoSame) states.push(await page.evaluate('navState()'));
         if (s.js) await page.evaluate(s.js);
         if (s.back) await page.goBack();
         if (s.reload) await page.reload();
+        if (s.gotoSame) await page.goto(page.url());
         if (s.click) await Promise.all([page.waitForURL('**/cross-doc'), page.click(s.click)]);
         if (s.wait) await page.waitForTimeout(s.wait);
       }
@@ -101,10 +105,11 @@ async function inSafari(url: string) {
       try {
         await call('POST', `/session/${sid}/url`, { url: `${base}/a` });
         for (const s of steps) {
-          if (s.reload) states.push(await exec('navState()'));
+          if (s.reload || s.gotoSame) states.push(await exec('navState()'));
           if (s.js) await exec(s.js);
           if (s.back) await call('POST', `/session/${sid}/back`, {});
           if (s.reload) await call('POST', `/session/${sid}/refresh`, {});
+          if (s.gotoSame) await call('POST', `/session/${sid}/url`, { url: await exec('location.href') });
           if (s.click) { await exec(`document.querySelector('${s.click}').click()`); await new Promise((r) => setTimeout(r, 1500)); }
           if (s.wait) await new Promise((r) => setTimeout(r, s.wait));
         }
