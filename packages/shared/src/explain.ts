@@ -315,6 +315,20 @@ function ruleFor(ev: ExplainEventInput, ctx: ExplainContext): { rule: string | n
       rule = `Recorded when the candidate’s browser stops reporting for more than ${secText(conn.heartbeatTimeoutSec)}.`;
       factors.push({ effect: 'context', text: 'Observations made during the outage arrive later with their original times.' });
       break;
+    case 'screen_share_stopped':
+      rule = 'The exam records the candidate’s entire screen. Recorded when the shared screen stopped being shared during the exam; the exam page was covered until the candidate shared their screen again.';
+      if (d.reason === 'not_entire_screen') measured.push('A window or tab was shared instead of the entire screen.');
+      factors.push({ effect: 'context', text: 'The candidate could not work on the exam while sharing was stopped. Sharing can stop by accident: the browser’s “Stop sharing” button, a sleeping computer, or a display being disconnected.' });
+      notConcluded = 'The screen was not recorded during this time; nothing is known about what it showed.';
+      break;
+    case 'recording_interrupted': {
+      rule = 'Recorded when the candidate’s browser could not make or keep part of the exam recording.';
+      const what = str(d.stream) === 'screen' ? 'Screen recording' : str(d.stream) === 'microphone' ? 'Microphone' : str(d.stream) === 'camera' ? 'Camera recording' : null;
+      if (what && str(d.reason)) measured.push(`${what}: ${String(d.reason).replace(/_/g, ' ')}.`);
+      else if (str(d.reason)) measured.push(`Reason: ${String(d.reason).replace(/_/g, ' ')}.`);
+      notConcluded = 'A technical problem, not an observation about the candidate: the recording has a gap for this time while the other monitoring continued.';
+      break;
+    }
     case 'monitoring_degraded': {
       rule = 'Recorded when camera analysis runs too slowly or a detector fails to load.';
       const fps = num(d.meanFps);

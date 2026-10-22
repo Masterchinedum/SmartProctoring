@@ -23,8 +23,10 @@ import { DAY_MS, evidenceDaysSql, eventDaysSql } from './retention.js';
 /** When a session's images are due for deletion (its end + the evidence retention days); joins exams and organizations. */
 export const evidenceDueSql = sql`(${examSessions.endedAt} + make_interval(days => (${evidenceDaysSql})::int))`;
 const eventsDueSql = sql`(${examSessions.endedAt} + make_interval(days => (${eventDaysSql})::int))`;
-/** Images of the session not deleted yet. */
-const liveEvidenceSql = sql<number>`(select count(*) from evidence where evidence.session_id = ${examSessions.id} and evidence.purged_at is null)::int`;
+/** Images of the session not deleted yet (recording segments are counted on their own). */
+const liveEvidenceSql = sql<number>`(select count(*) from evidence where evidence.session_id = ${examSessions.id} and evidence.purged_at is null and evidence.kind <> 'recording')::int`;
+/** Recording segments of the session not deleted yet (evidence kind `recording`, deleted with the images). */
+const liveRecordingsSql = sql<number>`(select count(*) from evidence where evidence.session_id = ${examSessions.id} and evidence.purged_at is null and evidence.kind = 'recording')::int`;
 
 export async function retentionPreview(ctx: Pick<Ctx, 'db'>, orgId: string, days: number, now: number): Promise<RetentionPreviewDTO> {
   const nowDate = new Date(now);
@@ -34,7 +36,12 @@ export async function retentionPreview(ctx: Pick<Ctx, 'db'>, orgId: string, days
   const dayExpr = sql<string>`to_char(${evidenceDueSql} at time zone 'UTC', 'YYYY-MM-DD')`;
   const [byDay, [overdue], [meta], holds, job] = await Promise.all([
     ctx.db
-      .select({ date: dayExpr, sessions: sql<number>`count(*)::int`, evidenceItems: sql<number>`coalesce(sum(${liveEvidenceSql}), 0)::int` })
+      .select({
+        date: dayExpr,
+        sessions: sql<number>`count(*)::int`,
+        evidenceItems: sql<number>`coalesce(sum(${liveEvidenceSql}), 0)::int`,
+        recordings: sql<number>`coalesce(sum(${liveRecordingsSql}), 0)::int`,
+      })
       .from(examSessions)
       .innerJoin(exams, eq(exams.id, examSessions.examId))
       .innerJoin(organizations, eq(organizations.id, examSessions.orgId))
@@ -43,7 +50,12 @@ export async function retentionPreview(ctx: Pick<Ctx, 'db'>, orgId: string, days
       .groupBy(sql`1`)
       .orderBy(sql`1`),
     ctx.db
-      .select({ sessions: sql<number>`count(*)::int`, evidenceItems: sql<number>`coalesce(sum(${liveEvidenceSql}), 0)::int`, oldestDueAt: sql<Date | null>`min(${evidenceDueSql})` })
+      .select({
+        sessions: sql<number>`count(*)::int`,
+        evidenceItems: sql<number>`coalesce(sum(${liveEvidenceSql}), 0)::int`,
+        recordings: sql<number>`coalesce(sum(${liveRecordingsSql}), 0)::int`,
+        oldestDueAt: sql<Date | null>`min(${evidenceDueSql})`,
+      })
       .from(examSessions)
       .innerJoin(exams, eq(exams.id, examSessions.examId))
       .innerJoin(organizations, eq(organizations.id, examSessions.orgId))
@@ -62,7 +74,7 @@ export async function retentionPreview(ctx: Pick<Ctx, 'db'>, orgId: string, days
         ),
       ),
     ctx.db
-      .select({ sessionId: examSessions.id, candidateName: candidates.name, examTitle: exams.title, endedAt: examSessions.endedAt, evidenceItems: liveEvidenceSql })
+      .select({ sessionId: examSessions.id, candidateName: candidates.name, examTitle: exams.title, endedAt: examSessions.endedAt, evidenceItems: liveEvidenceSql, recordings: liveRecordingsSql })
       .from(examSessions)
       .innerJoin(exams, eq(exams.id, examSessions.examId))
       .innerJoin(candidates, eq(candidates.id, examSessions.candidateId))
@@ -74,10 +86,17 @@ export async function retentionPreview(ctx: Pick<Ctx, 'db'>, orgId: string, days
   const oldest = overdue?.oldestDueAt ? new Date(overdue.oldestDueAt).getTime() : null;
   return {
     now,
-    days: byDay.map((d) => ({ date: d.date, sessions: d.sessions, evidenceItems: d.evidenceItems })),
-    overdue: { sessions: overdue?.sessions ?? 0, evidenceItems: overdue?.evidenceItems ?? 0, oldestDueAt: oldest },
+    days: byDay.map((d) => ({ date: d.date, sessions: d.sessions, evidenceItems: d.evidenceItems, recordings: d.recordings })),
+    overdue: { sessions: overdue?.sessions ?? 0, evidenceItems: overdue?.evidenceItems ?? 0, recordings: overdue?.recordings ?? 0, oldestDueAt: oldest },
     eventMetadataSessions: meta?.n ?? 0,
-    legalHolds: holds.map((h) => ({ sessionId: h.sessionId, candidateName: h.candidateName, examTitle: h.examTitle, endedAt: h.endedAt ? h.endedAt.getTime() : null, evidenceItems: h.evidenceItems })),
+    legalHolds: holds.map((h) => ({
+      sessionId: h.sessionId,
+      candidateName: h.candidateName,
+      examTitle: h.examTitle,
+      endedAt: h.endedAt ? h.endedAt.getTime() : null,
+      evidenceItems: h.evidenceItems,
+      recordings: h.recordings,
+    })),
     job: toRetentionJobStatusDTO(job, now),
   };
 }
@@ -166,7 +185,7 @@ export async function opsChecks(ctx: Ctx, orgId: string, now: number): Promise<O
           id: 'retention_overdue',
           label: 'Deletion on schedule',
           status: late > OVERDUE_FAILING_MS ? 'failing' : late > OVERDUE_WARNING_MS ? 'warning' : 'ok',
-          detail: `${od.evidenceItems} image(s) of ${od.sessions} session(s) are past their deletion date (oldest ${ago(now, od.oldestDueAt!)}).${late > OVERDUE_WARNING_MS ? ' See the retention job above.' : ' The next hourly run deletes them.'}`,
+          detail: `${od.evidenceItems} image(s)${od.recordings ? ` and ${od.recordings} recording segment(s)` : ''} of ${od.sessions} session(s) are past their deletion date (oldest ${ago(now, od.oldestDueAt!)}).${late > OVERDUE_WARNING_MS ? ' See the retention job above.' : ' The next hourly run deletes them.'}`,
         },
   );
 

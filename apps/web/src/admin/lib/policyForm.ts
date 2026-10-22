@@ -25,6 +25,8 @@ export interface PolicyGroup {
   id: string;
   title: string;
   description: string;
+  /** A note shown above the fields (e.g. what turning the group on means for storage and the candidate notice). */
+  note?: string;
   /** Rendered collapsed by default. */
   advanced?: boolean;
   fields: PolicyField[];
@@ -359,7 +361,7 @@ export const POLICY_GROUPS: PolicyGroup[] = [
   {
     id: 'evidence',
     title: 'Evidence',
-    description: 'Screenshots are taken only at moments when something was observed. No continuous video is stored.',
+    description: 'Screenshots are taken only at moments when something was observed. Unless the exam records (see Recording), no continuous video is stored.',
     fields: [
       { path: 'evidence.screenshots', label: 'Capture webcam screenshots for events', kind: 'boolean' },
       { path: 'evidence.maxScreenshotsPerEvent', label: 'Max screenshots per event', kind: 'integer', min: 1, max: 20 },
@@ -373,9 +375,22 @@ export const POLICY_GROUPS: PolicyGroup[] = [
     ],
   },
   {
+    id: 'recording',
+    title: 'Recording',
+    description:
+      'Records the whole exam — webcam video, microphone and the candidate’s entire screen — from the start to the end (never during a pause or a hold). Off by default. Staff with access to the session can watch it next to the timeline.',
+    note:
+      'Turning recording on changes what candidates agree to: they see a privacy notice that says what is recorded, that it is kept with the other evidence for the retention period and who can watch it, and they must accept it before the exam starts. Candidates must share their entire screen before they can start (a desktop browser is needed). Recordings take storage: roughly 300 MB per candidate per hour with all three on, kept in your evidence storage location and deleted with the other evidence.',
+    fields: [
+      { path: 'recording.enabled', label: 'Record the exam', kind: 'boolean', help: 'Webcam video is recorded whenever this is on and the exam uses a camera (not for candidates with the no-camera arrangement).' },
+      { path: 'recording.audio', label: 'Record the microphone', kind: 'boolean', help: 'Sound from the candidate’s microphone, together with the webcam video.' },
+      { path: 'recording.screen', label: 'Record the screen', kind: 'boolean', help: 'The candidate shares their entire screen before the start; if sharing stops, the exam is covered until they share it again.' },
+    ],
+  },
+  {
     id: 'retention',
     title: 'Retention',
-    description: 'Screenshots and identity references are deleted this many days after the session ends (unless under legal hold).',
+    description: 'Screenshots, identity references and recordings are deleted this many days after the session ends (unless under legal hold).',
     fields: [
       { path: 'retention.evidenceDays', label: 'Keep evidence for', kind: 'nullableInteger', min: 1, max: 3650, unit: 'days', nullLabel: 'Organisation default' },
     ],

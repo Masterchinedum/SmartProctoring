@@ -13,6 +13,7 @@ import { reviewSlaSchema, type QueueView, type ReviewDecisionDTO, type ReviewRes
 import type { EventExplanation } from './explain';
 import type { Incident } from './incidents';
 import { evidenceLocationSchema } from './residency';
+import type { SessionRecordingSummaryDTO } from './recording';
 
 /**
  * HTTP API contract. Paths are relative to the server origin.
@@ -36,7 +37,8 @@ export interface ApiError {
 
 export interface EvidenceRefDTO {
   id: string;
-  kind: 'event_screenshot' | 'identity_probe' | 'identity_reference' | 'id_photo' | 'liveness_frame';
+  /** `recording`: a part of the exam recording (only on a recording's own evidence row; never attached to events). */
+  kind: 'event_screenshot' | 'identity_probe' | 'identity_reference' | 'id_photo' | 'liveness_frame' | 'recording';
   capturedAt: number;
   /** false once purged by retention policy */
   available: boolean;
@@ -142,6 +144,8 @@ export interface PrivacyNoticeDTO {
   stored: string[];
   notStored: string[];
   contact: string;
+  /** What the exam records (policy.recording); absent when it records nothing. The notice above says so in words. */
+  recording?: { camera: boolean; audio: boolean; screen: boolean };
 }
 
 /** GET /api/candidate/session */
@@ -654,6 +658,8 @@ export interface SessionDetailDTO {
   review: SessionReviewDTO;
   /** Whether staff may reopen the exam for recovery now (POST /sessions/:id/reopen), and why (not). */
   reopen?: ReopenEligibilityDTO;
+  /** What was recorded of the exam (policy.recording; ./recording.ts); null when nothing was. */
+  recording?: SessionRecordingSummaryDTO | null;
 }
 
 export const STAFF_VERIFICATION_METHODS = ['video_call', 'in_person', 'id_document_on_camera', 'other'] as const;
@@ -778,6 +784,8 @@ export interface SessionReportDTO {
   incidents?: Incident[];
   /** Why each notable event was recorded (./explain.ts), by event id. */
   explanations?: Record<string, EventExplanation>;
+  /** What was recorded of the exam (./recording.ts); null when nothing was. Staff only (not in the integration API). */
+  recording?: SessionRecordingSummaryDTO | null;
 }
 
 /* ---- exams, candidates, assignments */

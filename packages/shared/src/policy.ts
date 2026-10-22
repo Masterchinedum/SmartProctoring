@@ -247,6 +247,22 @@ export const retentionPolicySchema = z.object({
   evidenceDays: z.number().int().min(1).max(3650).nullable().default(null),
 });
 
+/**
+ * Recording of the whole exam (off by default). When on, the candidate's browser records from the start of the exam to
+ * its end — never during a pause or a hold — in short, individually playable segments that are uploaded to the
+ * organisation's evidence storage, encrypted, and deleted with the other evidence (retention, legal hold, erasure):
+ *  - the webcam video, whenever recording is on and the exam uses a camera (no camera recording without a camera);
+ *  - the microphone (`audio`), together with the webcam video (so also only with a camera);
+ *  - the screen (`screen`): the candidate shares their entire screen before the exam starts.
+ * The candidate is told before consenting (privacy notice, ./privacy.ts). Readers use recordingPlan(), which applies
+ * the camera rule.
+ */
+export const recordingPolicySchema = z.object({
+  enabled: z.boolean().default(false),
+  audio: z.boolean().default(true),
+  screen: z.boolean().default(true),
+});
+
 export const proctoringPolicySchema = z
   .object({
     identity: identityPolicySchema.default({}),
@@ -258,6 +274,7 @@ export const proctoringPolicySchema = z
     detection: detectionPolicySchema.default({}),
     evidence: evidencePolicySchema.default({}),
     retention: retentionPolicySchema.default({}),
+    recording: recordingPolicySchema.default({}),
   })
   .transform(enforceModes);
 
@@ -286,7 +303,29 @@ export type BrowserPolicy = z.infer<typeof browserPolicySchema>;
 export type DetectionPolicy = z.infer<typeof detectionPolicySchema>;
 export type EvidencePolicy = z.infer<typeof evidencePolicySchema>;
 export type CameraPolicy = z.infer<typeof cameraPolicySchema>;
+export type RecordingPolicy = z.infer<typeof recordingPolicySchema>;
 export type ProctoringPolicy = z.infer<typeof proctoringPolicySchema>;
+
+/** What an exam records (policy.recording with the camera rule applied): camera video, microphone, screen. */
+export interface RecordingPlan {
+  /** Anything at all (false: the exam records nothing). */
+  any: boolean;
+  /** Webcam video (recording on and the exam uses a camera). */
+  camera: boolean;
+  /** Microphone audio, recorded together with the webcam video. */
+  audio: boolean;
+  /** The candidate's entire screen. */
+  screen: boolean;
+}
+
+export function recordingPlan(policy: { recording?: Partial<RecordingPolicy> | null; camera?: { enabled?: boolean } | null }): RecordingPlan {
+  const r = policy.recording;
+  const on = r?.enabled === true;
+  const camera = on && policy.camera?.enabled !== false;
+  const audio = camera && r?.audio !== false;
+  const screen = on && r?.screen !== false;
+  return { any: camera || screen, camera, audio, screen };
+}
 export type ProctoringPolicyInput = z.input<typeof proctoringPolicySchema>;
 
 /** Parse (and fill defaults for) a stored/partial policy. */

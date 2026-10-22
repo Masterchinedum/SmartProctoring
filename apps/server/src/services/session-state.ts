@@ -11,9 +11,11 @@ import {
   ACCOMMODATION_CATALOG,
   clockStart as clockStartFn,
   clockStop as clockStopFn,
+  consentCoversRecording,
   displayReport,
   EVENT_CATALOG,
   OBSERVED_PERIOD_KINDS,
+  recordingPlan,
   type CandidateCommand,
   type CheckPurpose,
   type DisplayReport,
@@ -613,6 +615,11 @@ export async function startExam(m: SessionMutation, opts: { instanceId?: string 
   const examPolicy = mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, version.policy as Record<string, unknown>);
   const acc = m.session.accommodations;
   const { policy, exceptions } = withAccommodations(examPolicy, acc, m.session.durationMs);
+  // An exam that records needs the candidate's consent to the recording notice (staff may have turned recording on
+  // after the candidate agreed to the notice without it): nothing starts until they agree to it.
+  if (!consentCoversRecording(m.session.consentNoticeVersion, recordingPlan(policy))) {
+    throw conflict('consent_required', 'This exam is recorded. Please read the updated privacy notice and agree to it before you start.');
+  }
   const displays = policy.browser.requireSingleDisplay ? await displaysAtStart(m, opts.instanceId ?? m.session.activeInstanceId, opts.screen) : null;
   if (displays === 'extended') throw conflict('single_display_required', SINGLE_DISPLAY_MESSAGE);
   // Admission at exam start (candidate-actions.ts startSession) may have held the start back while the server was busy.

@@ -56,6 +56,7 @@ import type {
   PrivacyRequestStatus,
   ProctoringPolicyInput,
   QuestionType,
+  RecordingStream,
   ReviewResolution,
   ReviewSlaSettings,
   ReviewStatus,
@@ -1088,7 +1089,8 @@ export const events = pgTable(
   ],
 );
 
-export type EvidenceKind = 'event_screenshot' | 'identity_probe' | 'identity_reference' | 'id_photo' | 'liveness_frame';
+/** `recording`: a segment of the exam recording (policy.recording; its metadata in recording_segments). */
+export type EvidenceKind = 'event_screenshot' | 'identity_probe' | 'identity_reference' | 'id_photo' | 'liveness_frame' | 'recording';
 
 export const evidence = pgTable(
   'evidence',
@@ -1111,7 +1113,7 @@ export const evidence = pgTable(
      */
     storageLocation: text('storage_location'),
     byteSize: integer('byte_size').notNull(),
-    /** sha256 of the plaintext JPEG. */
+    /** sha256 of the plaintext (the JPEG, or the recording segment). */
     sha256: text('sha256').notNull(),
     keyId: text('key_id').notNull(),
     contentType: text('content_type').notNull().default('image/jpeg'),
@@ -1129,6 +1131,46 @@ export const evidence = pgTable(
     index('evidence_org_location_idx').on(t.orgId, t.storageLocation, t.id).where(sql`${t.purgedAt} IS NULL`),
     // Locations still holding evidence, checked at start-up (all null — the default location — until one is used).
     index('evidence_location_idx').on(t.storageLocation).where(sql`${t.storageLocation} IS NOT NULL AND ${t.purgedAt} IS NULL`),
+  ],
+);
+
+/**
+ * Segments of an exam recording (policy.recording; services/recordings.ts). Each segment is a complete media file
+ * stored as an evidence row (kind `recording`: encrypted blob in the organisation's storage location, retention,
+ * legal hold, erasure, export, storage:move and rekey as for images); this row says which stream it belongs to and
+ * when it plays. Kept as a tombstone with its purged evidence row until event retention deletes that row (cascade).
+ */
+export const recordingSegments = pgTable(
+  'recording_segments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    sessionId: uuid('session_id')
+      .notNull()
+      .references(() => examSessions.id, { onDelete: 'cascade' }),
+    /** The media blob (evidence.kind = 'recording'). */
+    evidenceId: uuid('evidence_id')
+      .notNull()
+      .references(() => evidence.id, { onDelete: 'cascade' }),
+    stream: text('stream').$type<RecordingStream>().notNull(),
+    /** Counts from 0 per stream and recording browser instance. */
+    seq: integer('seq').notNull(),
+    startedAt: ts('started_at').notNull(),
+    durationMs: integer('duration_ms').notNull(),
+    /** As the browser produced it, e.g. video/webm;codecs=vp8,opus (evidence.content_type holds the container type). */
+    mimeType: text('mime_type').notNull(),
+    byteSize: integer('byte_size').notNull(),
+    /** The browser instance (page load) that recorded it. */
+    clientInstanceId: text('client_instance_id').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Re-uploads of the same segment (after an ambiguous failure, or by a reloaded page) are recognised.
+    uniqueIndex('recording_segments_upload_uq').on(t.sessionId, t.stream, t.clientInstanceId, t.seq),
+    // A session's segments in time order (staff player, report, export).
+    index('recording_segments_session_idx').on(t.sessionId, t.startedAt),
+    index('recording_segments_evidence_idx').on(t.evidenceId),
+    check('recording_segments_stream_check', sql`${t.stream} in ('camera', 'screen')`),
   ],
 );
 
@@ -1575,6 +1617,7 @@ export type CheckFrame = typeof checkFrames.$inferSelect;
 export type IdentityCheck = typeof identityChecks.$inferSelect;
 export type EventRow = typeof events.$inferSelect;
 export type EvidenceRow = typeof evidence.$inferSelect;
+export type RecordingSegmentRow = typeof recordingSegments.$inferSelect;
 export type Answer = typeof answers.$inferSelect;
 export type Note = typeof notes.$inferSelect;
 export type AuditLogRow = typeof auditLog.$inferSelect;

@@ -38,11 +38,16 @@ export const OUTBOX_DELAY_MS = 30_000;
 
 /* ------------------------------------------------------------------ consent */
 
-export async function acceptConsent(ctx: Ctx, sessionId: string, body: ConsentRequest, meta: { ip: string; userAgent: string }): Promise<void> {
-  if (body.noticeVersion !== PRIVACY_NOTICE_VERSION) throw conflict('notice_outdated', 'The privacy notice has been updated. Please read the current version.', { currentVersion: PRIVACY_NOTICE_VERSION });
+/**
+ * `noticeVersion`: the version of the notice this session's candidate must accept (services/privacy.ts noticeFor: the
+ * recording notice when the exam records). A candidate who agreed to another version agrees again (staff turned
+ * recording on after they agreed); the record keeps the latest consent.
+ */
+export async function acceptConsent(ctx: Ctx, sessionId: string, body: ConsentRequest, meta: { ip: string; userAgent: string }, noticeVersion: string = PRIVACY_NOTICE_VERSION): Promise<void> {
+  if (body.noticeVersion !== noticeVersion) throw conflict('notice_outdated', 'The privacy notice has been updated. Please read the current version.', { currentVersion: noticeVersion });
   await withSession(ctx, sessionId, async (m) => {
     if (TERMINAL.includes(m.session.status)) throw invalidState('The exam has ended');
-    if (m.session.consentAcceptedAt) return;
+    if (m.session.consentAcceptedAt && m.session.consentNoticeVersion === body.noticeVersion) return;
     m.set({ consentAcceptedAt: new Date(m.now), consentNoticeVersion: body.noticeVersion, consentIp: meta.ip, consentUserAgent: meta.userAgent.slice(0, 500) });
     await audit(m.tx, { orgId: m.session.orgId, actorType: 'candidate', action: 'candidate.consent', targetType: 'session', targetId: m.session.id, meta: { noticeVersion: body.noticeVersion }, ip: meta.ip, at: m.now });
   });

@@ -8,6 +8,7 @@ import { useAuth } from '../../auth';
 import { formatDuration } from '../../lib/format';
 import { QUESTION_TYPE_LABELS } from '../../lib/examForm';
 import { ALL_POLICY_FIELDS, changedFromDefault, formatPolicyValue, getPath, POLICY_GROUPS } from '../../lib/policyForm';
+import { describeRecording } from '../../lib/recording';
 import { CategoryCounts, ConnectionBadge, StatusBadge } from '../../components/Badges';
 import { CopyButton, EmptyState, ErrorState, Loading, PageHeader } from '../../components/Common';
 import { ConfirmDialog } from '../../components/Modal';
@@ -206,6 +207,10 @@ function PolicySummary({ exam }: { exam: ExamDTO }) {
           <tr>
             <th>Screenshots</th>
             <td>{key('evidence.screenshots')}</td>
+          </tr>
+          <tr>
+            <th>Recording</th>
+            <td data-testid="exam-recording">{describeRecording(p)}</td>
           </tr>
           <tr>
             <th>Evidence retention</th>

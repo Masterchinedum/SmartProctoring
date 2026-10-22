@@ -34,6 +34,7 @@ import {
   type PeriodDTO,
   type PeriodKind,
   type ProctoringPolicy,
+  type SessionRecordingSummaryDTO,
   type SessionReportDTO,
   type StaffVerificationDTO,
   type TimelineItemDTO,
@@ -51,6 +52,7 @@ import { capturesWithin, GAP_NOT_REPORTING, GAP_NOT_RETURNED, loadLateCaptures, 
 import { mergePolicy } from './org.js';
 import { effectivePolicy } from './session-state.js';
 import { loadSessionReviewRows, toSessionReviewDTO } from './review.js';
+import { recordingSummary } from './recordings.js';
 
 export const NOTABLE_EVENTS_LIMIT = 200;
 const MAX_BEHAVIOUR_LINES = 8;
@@ -271,9 +273,11 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
   const explanations = Object.fromEntries(notableEvents.map((e) => [e.id, explainEvent(e, explainCtx)]));
   const reviewRows = await loadSessionReviewRows(db, [sessionId]);
   const review = await toSessionReviewDTO(db, summary.review!, reviewRows.get(sessionId));
+  const recording = await recordingSummary(db, sessionId);
 
   /* -------------------------------------------------------------- narrative */
   const observations = buildObservations({ clock, session, exam, periods, events: evs, checks, identity, totals, uncoveredMs: totalsRaw.uncoveredMs, endAt, notableTruncated: notableAll.length - notableEvents.length });
+  if (recording) observations.push(recordingObservation(recording, clock));
   const limitations = [
     ...buildLimitations({ clock, periods, events: evs, policy: examRules, endAt, evidencePurgedAt: session.evidencePurgedAt?.getTime() ?? null, lateCaptures }),
     ...accommodationLimitations(session.accommodations),
@@ -299,7 +303,17 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     review,
     incidents,
     explanations,
+    recording,
   };
+}
+
+/** One factual sentence about the exam recording (what was recorded, or that it was deleted). */
+export function recordingObservation(r: SessionRecordingSummaryDTO, clock: Clock): string {
+  const parts = [r.cameraMs > 0 ? `${formatDuration(r.cameraMs)} of webcam video` : null, r.screenMs > 0 ? `${formatDuration(r.screenMs)} of the screen` : null].filter((x): x is string => !!x);
+  const what = `The exam was recorded: ${listJoin(parts.length ? parts : ['nothing playable'])} (${plural(r.segments, 'part')}).`;
+  if (r.deletedAt != null) return `${what} The recording was deleted on ${clock.dateTime(r.deletedAt)}${r.deletedBecause === 'retention' ? ' under the retention policy' : r.deletedBecause ? ` (${r.deletedBecause.replace(/_/g, ' ')})` : ''}.`;
+  if (r.available < r.segments) return `${what} ${plural(r.segments - r.available, 'part')} of it ${r.segments - r.available === 1 ? 'was' : 'were'} deleted.`;
+  return what;
 }
 
 /* ================================================================== identity summary */

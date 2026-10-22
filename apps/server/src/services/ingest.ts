@@ -10,7 +10,7 @@
  * A new `additional_display_detected` puts an active exam on hold when its rules require a single display
  * (policy.browser.requireSingleDisplay; hold reason 'additional_display').
  */
-import { EVENT_CATALOG, isClientReportable, type EventBatchResponse, type EventType, type EventUpsert, type EvidenceUploadResponse, type ProctoringPolicy } from '@sp/shared';
+import { EVENT_CATALOG, isClientReportable, recordingPlan, type EventBatchResponse, type EventType, type EventUpsert, type EvidenceUploadResponse, type ProctoringPolicy } from '@sp/shared';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { events, evidence, examSessions, sessionPeriods, type EventRow, type ExamSession, type SessionPeriod } from '../db/schema.js';
@@ -54,6 +54,10 @@ function disabledByPolicy(type: EventType, p: ProctoringPolicy): boolean {
     case 'phone_detected':
     case 'unauthorized_object':
       return !en.objects;
+    case 'screen_share_stopped':
+      return !recordingPlan(p).screen;
+    case 'recording_interrupted':
+      return !recordingPlan(p).any;
     default:
       return false;
   }

@@ -8,6 +8,9 @@ import {
   heartbeatRequestSchema,
   identitySampleQuerySchema,
   pauseRequestSchema,
+  RECORDING_CONTAINER_TYPES,
+  RECORDING_MAX_SEGMENT_BYTES,
+  recordingSegmentQuerySchema,
   saveAnswerRequestSchema,
   startCheckRequestSchema,
   startExamRequestSchema,
@@ -35,6 +38,8 @@ import { processIdentitySample } from '../../services/identity-samples.js';
 import { ingestEvents, uploadEventEvidence } from '../../services/ingest.js';
 import { trackInstanceRequest } from '../../services/instance-usage.js';
 import { withdrawConsent } from '../../services/privacy-requests.js';
+import { noticeFor } from '../../services/privacy.js';
+import { uploadRecordingSegment } from '../../services/recordings.js';
 
 const uuid = z.string().uuid();
 const optNum = z.preprocess((v) => (v === '' || v == null ? undefined : v), z.coerce.number().finite().optional());
@@ -102,6 +107,8 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     }
   });
   app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer', bodyLimit: 1024 * 1024 }, (_req, body, done) => done(null, body));
+  // Exam recording segments (services/recordings.ts): WebM (Chromium, Firefox) or MP4 (Safari), codecs parameters allowed.
+  app.addContentTypeParser([...RECORDING_CONTAINER_TYPES], { parseAs: 'buffer', bodyLimit: RECORDING_MAX_SEGMENT_BYTES }, (_req, body, done) => done(null, body));
 
   const state = (req: FastifyRequest): Promise<CandidateSessionState> => {
     const c = getCandidate(req);
@@ -113,7 +120,9 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
   app.post('/consent', { config: limit(30) }, async (req) => {
     const c = getCandidate(req);
     const body = consentRequestSchema.parse(req.body);
-    await acceptConsent(ctx, c.session.id, body, { ip: req.ip, userAgent: String(req.headers['user-agent'] ?? '') });
+    // The notice this candidate is shown (the recording notice when the exam records): the version they must accept.
+    const noticeVersion = noticeFor(c.org, c.policy, c.candidate).version;
+    await acceptConsent(ctx, c.session.id, body, { ip: req.ip, userAgent: String(req.headers['user-agent'] ?? '') }, noticeVersion);
     return state(req);
   });
 
@@ -194,6 +203,15 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     const instanceId = requireInstanceId(req);
     const q = identitySampleQuerySchema.parse(req.query);
     return processIdentitySample(ctx, c.session, instanceId, q, jpegBody(req), c);
+  });
+
+  // Exam recording: one segment per ~30 s per stream, plus the backlog after a lost connection (uploaded in order).
+  app.post('/recordings/segments', { config: limit(120) }, async (req) => {
+    const c = getCandidate(req);
+    const instanceId = requireInstanceId(req);
+    const q = recordingSegmentQuerySchema.parse(req.query);
+    const type = req.headers['content-type'];
+    return uploadRecordingSegment(ctx, c, instanceId, q, Array.isArray(type) ? type[0] : type, req.body as Buffer);
   });
 
   app.post('/pause', { config: limit(30) }, async (req): Promise<PauseResponse> => {

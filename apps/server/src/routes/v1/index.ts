@@ -432,8 +432,9 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     const report = await buildSessionReport(ctx, id, key.orgId, { timeZone: tz });
     await apiAudit(ctx.db, key, ctx.now(), 'api.session.report_read', 'session', id);
     // Explanations are reviewer-facing (they quote detector and identity measurements): not for integrations; nor
-    // are the internal decision versions (Quality page). Reports never carry the candidate's link.
-    const { explanations: _explanations, ...rest } = report;
+    // are the internal decision versions (Quality page), nor the exam recording's summary (staff only, like the evidence
+    // it describes). Reports never carry the candidate's link.
+    const { explanations: _explanations, recording: _recording, ...rest } = report;
     const { versions: _versions, ...identity } = rest.identity;
     return withoutFaceScores({
       ...rest,

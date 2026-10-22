@@ -332,6 +332,8 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_retention_failures_total` | sessions retention could not purge (retried next hour) |
   | `sp_evidence_storage_errors_total{op,location}` | evidence store put / get / delete failures (disk, S3), per storage location (§2) |
   | `sp_evidence_storage_seconds{op,location}` (histogram) | evidence store latency per operation and storage location (failures included); a check frame or identity sample holds its database transaction while its image is written |
+  | `sp_recording_segments_total{stream}`, `sp_recording_bytes_total{stream}` | exam recording parts stored and their bytes (before encryption), by stream (`camera`, `screen`): the storage the recording feature is adding (§2 *Exam recording*) |
+  | `sp_recording_refused_total{reason}` | recording parts refused: `limit` (a session reached `RECORDING_MAX_SESSION_MB`), `closed` (after the late-upload period, a consent withdrawal or deletion), `invalid` (not a WebM / MP4 file) |
   | `sp_cluster_sessions{status}`, `sp_cluster_sessions_reporting_interrupted` | sessions in progress; how many browsers stopped reporting |
   | `sp_cluster_webhook_deliveries_pending`, `sp_cluster_webhook_oldest_pending_seconds`, `sp_cluster_webhook_deliveries_failed_24h`, `sp_cluster_webhooks_disabled` | webhook backlog, retry age, dead letters, disabled endpoints |
   | `sp_cluster_email_alerts_pending`, `sp_cluster_email_alert_oldest_pending_seconds` | alert-email backlog |

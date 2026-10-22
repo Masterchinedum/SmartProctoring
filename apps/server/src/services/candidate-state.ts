@@ -1,4 +1,4 @@
-import { CANDIDATE_END_REASONS, type CandidateAnswerDTO, type CandidateEndReason, type CandidateQuestionDTO, type CandidateSessionState } from '@sp/shared';
+import { CANDIDATE_END_REASONS, consentCoversRecording, recordingPlan, type CandidateAnswerDTO, type CandidateEndReason, type CandidateQuestionDTO, type CandidateSessionState } from '@sp/shared';
 import { and, desc, eq, gte } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
@@ -105,7 +105,9 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
     // A sandbox organisation (practice / testing): the candidate app says so on the welcome screen.
     sandbox: org?.kind === 'sandbox',
     consent: {
-      accepted: s.consentAcceptedAt != null,
+      // A consent to the notice without recording does not cover an exam that records (staff turned recording on
+      // after the candidate agreed): the candidate is asked again, with the recording notice.
+      accepted: s.consentAcceptedAt != null && consentCoversRecording(s.consentNoticeVersion, recordingPlan(policy)),
       acceptedAt: ms(s.consentAcceptedAt),
       notice: noticeFor(org, policy, candidate),
     },

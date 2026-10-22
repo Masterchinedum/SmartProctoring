@@ -20,3 +20,4 @@ export * from './scheduling';
 export * from './openapi';
 export * from './sso';
 export * from './quotas';
+export * from './recording';
