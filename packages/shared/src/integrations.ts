@@ -302,7 +302,7 @@ export interface IntegrationStatusDTO {
  */
 
 /** Version of the integration API contract (the OpenAPI document's `info.version`). Bump it with every change. */
-export const INTEGRATION_API_VERSION = '1.2.0';
+export const INTEGRATION_API_VERSION = '1.3.0';
 
 const uuid = (description?: string) => (description ? z.string().uuid().describe(description) : z.string().uuid());
 const epochMs = (description = 'Epoch milliseconds (UTC).') => z.number().int().describe(description);

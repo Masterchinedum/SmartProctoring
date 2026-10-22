@@ -31,7 +31,9 @@ observed).
 **Trust boundaries.** Identity decisions run on the server against a reference the client never sees; the
 browser only uploads JPEG frames. Behavioural detection runs in the browser and is therefore
 *advisory*: a tampered client can suppress its own events (documented limitation), but it cannot forge a
-server-side identity match, read other sessions, or change category/severity (they come from the catalog).
+server-side identity match, read other sessions, or change category/severity (they come from the catalog). The same
+holds for the single-display rule: the server refuses the start and holds the exam on what the browser reports
+(`screen.isExtended`), so a tampered client can hide a second display, as any browser can that does not report it.
 
 ## 2. Controls
 

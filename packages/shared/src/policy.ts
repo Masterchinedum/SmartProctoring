@@ -138,6 +138,15 @@ export const resumePolicySchema = z.object({
 
 export const browserPolicySchema = z.object({
   requireFullscreen: z.boolean().default(true),
+  /**
+   * Only one display may be connected (off by default). Browsers report more than one display through the Window
+   * Management API (`screen.isExtended`: Chrome and Edge; Firefox and Safari cannot tell). On: the exam cannot be
+   * started while the browser reports more than one display (409 `single_display_required`), and a display connected
+   * during the exam puts it on hold for staff (hold reason 'additional_display'). Where the browser cannot tell,
+   * nothing is blocked and the start records that the display count is unknown. Off: an additional display is only
+   * recorded as a neutral event.
+   */
+  requireSingleDisplay: z.boolean().default(false),
   blockClipboard: z.boolean().default(true),
   flagTabHidden: z.boolean().default(true),
   flagWindowBlur: z.boolean().default(true),

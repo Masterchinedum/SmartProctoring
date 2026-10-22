@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import { formatDuration } from '@sp/shared';
 import { errorMessage, useController, useSnapshot } from '../context';
 import { BrandHeader, Page, PrivacyNotice, ScreenHeading, Spinner } from '../components/common';
+import { useDisplays } from '../displays';
 import { checkSystemRequirements, type RequirementResult } from '../sysreq';
 
 /** Viewport narrower than this (on a small device) → "you need a computer with a webcam" notice. */
@@ -39,14 +40,17 @@ export function WelcomeScreen() {
   const consentHintId = useId();
 
   const requireFullscreen = state?.exam.policy.browser.requireFullscreen ?? false;
+  const requireSingleDisplay = state?.exam.policy.browser.requireSingleDisplay ?? false;
   const cameraUsed = state?.exam.policy.camera?.enabled !== false;
+  // Checked again when a display is connected or disconnected (where the browser reports it): no reload needed.
+  const { displays } = useDisplays();
   useEffect(() => {
     let alive = true;
-    void checkSystemRequirements({ requireFullscreen, camera: cameraUsed }).then((r) => alive && setReqs(r));
+    void checkSystemRequirements({ requireFullscreen, camera: cameraUsed, requireSingleDisplay }).then((r) => alive && setReqs(r));
     return () => {
       alive = false;
     };
-  }, [requireFullscreen, cameraUsed]);
+  }, [requireFullscreen, cameraUsed, requireSingleDisplay, displays]);
 
   if (!state) return null;
   const { exam, candidate, consent } = state;
@@ -105,6 +109,12 @@ export function WelcomeScreen() {
               <dt>Fullscreen</dt>
               <dd>{p.browser.requireFullscreen ? 'Required' : 'Not required'}</dd>
             </div>
+            {p.browser.requireSingleDisplay && (
+              <div>
+                <dt>Displays</dt>
+                <dd data-testid="rule-single-display">One display only</dd>
+              </div>
+            )}
           </dl>
           {exam.instructions && (
             <div>
@@ -147,7 +157,7 @@ export function WelcomeScreen() {
           ) : (
             <ul className="cand-checklist" data-testid="requirements">
               {reqs.map((r) => (
-                <li key={r.id} className={r.ok ? 'ok' : r.required ? 'fail' : 'warn'}>
+                <li key={r.id} data-item={r.id} className={r.ok ? 'ok' : r.required ? 'fail' : 'warn'}>
                   <span className="cand-check-icon" aria-hidden="true">
                     {r.ok ? '✓' : r.required ? '✕' : '!'}
                   </span>

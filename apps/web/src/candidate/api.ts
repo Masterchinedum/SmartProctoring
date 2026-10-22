@@ -15,6 +15,7 @@ import type {
   SaveAnswerRequest,
   SaveAnswerResponse,
   StartCheckRequest,
+  StartExamRequest,
   StartCheckResponse,
   WithdrawConsentRequest,
 } from '@sp/shared';
@@ -153,7 +154,8 @@ export interface CandidateApi {
   startCheck(req: StartCheckRequest): Promise<StartCheckResponse>;
   uploadCheckFrame(checkId: string, jpeg: JpegBody, q: FrameUploadQuery): Promise<CheckFrameResponse>;
   completeCheck(checkId: string): Promise<CompleteCheckResponse>;
-  start(): Promise<Timed<CandidateSessionState>>;
+  /** `req.screen`: what the browser reports about its displays now (an exam that allows only one checks it). */
+  start(req?: StartExamRequest): Promise<Timed<CandidateSessionState>>;
   saveAnswer(questionId: string, req: SaveAnswerRequest): Promise<SaveAnswerResponse>;
   heartbeat(req: HeartbeatRequest): Promise<Timed<HeartbeatResponse>>;
   sendEvents(events: EventUpsert[]): Promise<EventBatchResponse>;
@@ -293,7 +295,7 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
         )
       ).data,
     completeCheck: (checkId) => json<CompleteCheckResponse>('POST', `/api/candidate/checks/${encodeURIComponent(checkId)}/complete`),
-    start: () => request<CandidateSessionState>('POST', '/api/candidate/start'),
+    start: (req) => request<CandidateSessionState>('POST', '/api/candidate/start', req),
     saveAnswer: (questionId, req) => json<SaveAnswerResponse>('PUT', `/api/candidate/answers/${encodeURIComponent(questionId)}`, req),
     heartbeat: (req) => request<HeartbeatResponse>('POST', '/api/candidate/heartbeat', req),
     sendEvents: (events) => json<EventBatchResponse>('POST', '/api/candidate/events/batch', { events, engineVersion: DETECTION_ENGINE_VERSION }),

@@ -67,7 +67,11 @@ implementations fail). `pnpm audit --prod` reported no advisory for any of these
 * **start** → **active**, clock starts, `active` period opens. Admission: while the instance is at capacity
   (`services/capacity.ts`) the start is deferred (503 `start_deferred` + Retry-After; the session stays `ready`,
   `startDeferredSince` records the first deferral, the client retries) for at most `EXAM_START_MAX_DEFER_SEC`; the
-  `session_started` event notes the delay (`details.startDeferredMs`).
+  `session_started` event notes the delay (`details.startDeferredMs`). **Single display** (`policy.browser.requireSingleDisplay`,
+  off by default): the start is refused (409 `single_display_required`) while the browser reports more than one display
+  — `screen.isExtended` as sent with the start (`startExamRequestSchema`), else as this browser's last check recorded it
+  (`device_records.screen`). A browser that cannot tell (Firefox, Safari) is not held back; `session_started.details.displays`
+  records `single` / `unknown`, and `unknown` adds a report limitation.
 * **pause**: per policy (reason? approval?). Monitoring stops, `paused` period (unobserved) opens; clock
   stops or continues per `policy.pause.timerBehavior`. Candidate may close the browser.
 * **resume**: candidate reopens link → `requiredCheck='resume'` → same readiness + liveness + identity
@@ -79,6 +83,11 @@ implementations fail). `pnpm audit --prod` reported no advisory for any of these
   un-verified instances is rejected. A second instance supersedes the first (`multiple_instances` event).
 * **on_hold**: clock stopped. Staff release (optionally requiring a fresh check, optionally authorising
   re-enrolment of the reference) or terminate.
+* **additional display** (single-display rule): the browser's `additional_display_detected` event (a `change` of
+  `screen.isExtended` to true, also reported when monitoring starts with two displays) received while the exam is
+  `active` → `on_hold` with reason `additional_display` (`ingest.ts`, after the batch is stored). Without the rule the
+  event stays a neutral observation. A display still connected when monitoring restarts after the release holds the
+  exam again.
 * **expiry**: server sweeper auto-submits when the clock hits zero.
 * **scheduling window** (optional): the exam can be *started* only inside the session's window; the check-in may begin
   30 minutes earlier. Only the start is bounded — an exam in progress is never cut off when the window closes.
@@ -119,7 +128,7 @@ Approved per-candidate exceptions to exam rules, granted and revoked (never edit
 audit-logged without its encrypted note. Every kind only *relaxes* rules and is expressed as overrides of resolved
 policy fields (`applyAccommodations`), so the server, the candidate client and the reports read one consistent
 policy: extra time (added to `duration_ms`), rest breaks (never stricter than the exam), no head-turn challenge,
-assistive technology (no fullscreen / blur recording / clipboard block), behaviour detectors off, a support person
+assistive technology (no fullscreen / blur recording / clipboard block / single-display rule), behaviour detectors off, a support person
 (other people in view not observed), **identity verified by staff** and **no camera**. Those two are policy modes
 (`identity.verification: 'staff'`, `camera.enabled: false`) whose invariants the policy schema enforces (staff mode:
 no live-person or ID-photo check; no camera: every camera detector and screenshot off, staff verification forced).
@@ -371,8 +380,10 @@ Browser support. Nothing in the candidate app is Chromium-only: the camera uses 
 constraints (an HD refusal retries in SD), the Permissions API for the camera is optional, MediaPipe loads its
 self-hosted WASM (SIMD or not) with the GPU delegate and falls back to CPU (CPU first on a software renderer),
 the outbox stores ArrayBuffers in IndexedDB, and fullscreen goes through `candidate/fullscreen.ts` (standard API,
-WebKit-prefixed fallback for Safari 16.0–16.3; "not supported" where neither exists, e.g. iPhone). The e2e suite
-runs every scenario in Chromium and the core ones in Firefox and WebKit with a camera shim (`e2e/README.md`).
+WebKit-prefixed fallback for Safari 16.0–16.3; "not supported" where neither exists, e.g. iPhone). Connected displays
+come from the Window Management API (`screen.isExtended` and its `change` event, `candidate/displays.ts`), which only
+Chrome and Edge implement: elsewhere the display count is `unknown` and the single-display rule blocks nothing. The e2e
+suite runs every scenario in Chromium and the core ones in Firefox and WebKit with a camera shim (`e2e/README.md`).
 
 ## 6. Events, evidence, delivery
 

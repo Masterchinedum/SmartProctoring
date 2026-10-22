@@ -4,6 +4,7 @@ import type { CheckFrameResponse, CheckPurpose, CompleteCheckResponse, DeviceInf
 import { classifyApiError, type CandidateApi } from '../api';
 import { errorMessage, useController, useSnapshot } from '../context';
 import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
+import { screenInfo } from '../displays';
 import { captureFaceCrop } from '../monitoring/frames';
 import { AdaptiveCheck } from './adaptive';
 import { PoseSmoother } from './poseFilter';
@@ -68,12 +69,11 @@ type Phase = 'starting' | 'frontal' | 'liveness' | 'completing' | 'expired' | 'e
 
 export async function deviceInfo(ctrl: { camera: { state: { info: { label: string; deviceIdHash: string; width: number; height: number } | null } }; }): Promise<DeviceInfo> {
   const info = ctrl.camera.state.info;
-  const scr = window.screen as Screen & { isExtended?: boolean };
   return {
     cameraLabel: (info?.label ?? '').slice(0, 300),
     cameraIdHash: info?.deviceIdHash ?? '',
     userAgent: navigator.userAgent.slice(0, 1000),
-    screen: { width: scr.width, height: scr.height, isExtended: typeof scr.isExtended === 'boolean' ? scr.isExtended : null },
+    screen: screenInfo(),
     videoWidth: info?.width || undefined,
     videoHeight: info?.height || undefined,
   };

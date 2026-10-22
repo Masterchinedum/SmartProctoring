@@ -80,6 +80,18 @@ describe('applyAccommodations', () => {
     expect(DEFAULT_POLICY.browser.requireFullscreen).toBe(true); // not mutated
   });
 
+  it('assistive technology also allows a second display (for example for a magnifier)', () => {
+    const exam = resolvePolicy({ browser: { requireSingleDisplay: true } });
+    const items = [{ kind: 'assistive_technology' as const, params: {} }];
+    const p = applyAccommodations(exam, items);
+    expect(p.browser.requireSingleDisplay).toBe(false);
+    expect(exam.browser.requireSingleDisplay).toBe(true); // not mutated
+    const ex = policyExceptions(exam, p, items).find((e) => e.path === 'browser.requireSingleDisplay');
+    expect(ex).toEqual({ path: 'browser.requireSingleDisplay', label: 'Single display required', from: true, to: false, kinds: ['assistive_technology'] });
+    // An exam without the rule: nothing to change, so no exception is listed.
+    expect(policyExceptions(DEFAULT_POLICY, applyAccommodations(DEFAULT_POLICY, items), items).some((e) => e.path === 'browser.requireSingleDisplay')).toBe(false);
+  });
+
   it('rest breaks are never stricter than the exam', () => {
     const strict = resolvePolicy({ pause: { allowed: false } });
     expect(applyAccommodations(strict, [{ kind: 'rest_breaks', params: { maxPauses: 3, maxPauseMinutes: 10 } }]).pause).toEqual({

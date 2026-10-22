@@ -27,6 +27,7 @@ export const HOLD_REASONS = [
   'staff_verification', // identity is verified by staff (policy.identity.verification 'staff'): waiting for a staff member
   'resume_limit', // the exam was interrupted more often / longer than the exam's resume policy allows (policy.resume, onLimit 'hold')
   'recovery', // staff reopened an ended exam for recovery: waiting for the candidate's fresh identity check (./scheduling.ts)
+  'additional_display', // the browser reported another display during an exam that requires a single display (policy.browser.requireSingleDisplay)
 ] as const;
 export type HoldReason = (typeof HOLD_REASONS)[number];
 

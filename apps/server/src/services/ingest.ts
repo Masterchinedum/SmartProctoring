@@ -7,6 +7,8 @@
  * check-in or after the end are rejected; an episode running into a pause is cut at the pause start.
  * Episodes of a replaced browser instance (delivered late by the new one) are cut at the reconnect gap.
  * Screenshots count against the per-session storage budget and link only to events of the same session.
+ * A new `additional_display_detected` puts an active exam on hold when its rules require a single display
+ * (policy.browser.requireSingleDisplay; hold reason 'additional_display').
  */
 import { EVENT_CATALOG, isClientReportable, type EventBatchResponse, type EventType, type EventUpsert, type EvidenceUploadResponse, type ProctoringPolicy } from '@sp/shared';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -17,7 +19,7 @@ import { assertInControl } from './candidate-state.js';
 import { purgeEvidenceRows, storeEvidence } from './evidence.js';
 import { EVENT_SCREENSHOT_SHARE, sessionHasEvidenceCapacity, storageLimitError } from './session-limits.js';
 import { LATE_DELIVERY_MS } from './reporting-gaps.js';
-import { BLOCKING_PERIOD_KINDS, withSession, type SessionPreload } from './session-state.js';
+import { BLOCKING_PERIOD_KINDS, holdNow, withSession, type SessionPreload } from './session-state.js';
 
 export { LATE_DELIVERY_MS };
 export const MAX_EVENTS_PER_SESSION = 5000;
@@ -25,6 +27,7 @@ export const MAX_EVIDENCE_PER_SESSION = 3000;
 const MAX_DETAILS_BYTES = 16 * 1024;
 const CHECKIN_TOLERANCE_MS = 5_000;
 const FUTURE_TOLERANCE_MS = 60_000;
+const ADDITIONAL_DISPLAY_HOLD_OBSERVATION = 'The browser reported that more than one display is connected, and the exam allows only one, so it was put on hold for staff review.';
 
 /** Detector toggles in the policy that disable an event type (the server drops what the rules turned off). */
 function disabledByPolicy(type: EventType, p: ProctoringPolicy): boolean {
@@ -134,6 +137,7 @@ export async function ingestEvents(
     const existing = new Map<string, EventRow>(existingRows.map((r) => [r.id, r]));
     const [{ n }] = await m.tx.select({ n: sql<number>`count(*)::int` }).from(events).where(eq(events.sessionId, session.id));
     let count = n;
+    let displayEventId: string | null = null;
 
     for (const e of batch) {
       const reject = (reason: string) => results.push({ id: e.id, result: 'rejected', reason });
@@ -249,6 +253,7 @@ export async function ingestEvents(
         existing.set(e.id, { id: e.id, sessionId: session.id, type: e.type, version: e.version } as EventRow);
         m.touchEvent(e.id);
         results.push({ id: e.id, result: 'created' });
+        if (e.type === 'additional_display_detected') displayEventId ??= e.id;
       } else {
         const late = prev.deliveredLate || (endedAt != null && prev.status === 'open' && now - endedAt > LATE_DELIVERY_MS);
         const updated = await m.tx
@@ -272,6 +277,11 @@ export async function ingestEvents(
           results.push({ id: e.id, result: 'updated' });
         } else results.push({ id: e.id, result: 'stale' });
       }
+    }
+    // A display connected during an exam that requires a single display puts it on hold for staff (without the rule
+    // the event stays a neutral observation). After the whole batch is stored, so the hold closes whatever it opened.
+    if (displayEventId && policy.browser.requireSingleDisplay && m.session.status === 'active') {
+      await holdNow(m, { reason: 'additional_display', details: { eventId: displayEventId }, observation: ADDITIONAL_DISPLAY_HOLD_OBSERVATION });
     }
   }, preload);
   return { results };

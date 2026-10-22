@@ -264,7 +264,8 @@ A *session* is one candidate's attempt at one exam.
   score, its images deleted) or `abandoned` (closed automatically after the organisation's
   inactivity period — no score is implied). `hold` is set while the exam is `on_hold` (reason, since, message;
   `resume_limit` = held under the resume rules for a staff decision, `recovery` = staff reopened the ended exam and
-  the candidate has to pass a fresh identity check before it continues).
+  the candidate has to pass a fresh identity check before it continues, `additional_display` = the browser reported an
+  additional display and the exam allows only one; staff release it).
 * `window`: the scheduling window (null: the exam can be started any time). Abandoned-session housekeeping counts
   inactivity from the end of the window at the earliest.
 * **Reopened exams**: staff may reopen an exam that ended by time, by staff, after inactivity or under the resume
@@ -533,6 +534,9 @@ identity provider. Set-up runbooks for Microsoft Entra ID, Okta and Google: `doc
 The API version is `info.version` of the OpenAPI document. Within version 1, changes are additive: new endpoints,
 new optional request fields, new response fields and new enumeration values.
 
+* **1.3.0** (October 2026)
+  * Hold reason **`additional_display`**: the candidate's browser reported an additional display during an exam whose
+    rules require a single display (exam setting *Require a single display*); also as `reason` of `session.held`.
 * **1.2.0** (October 2026)
   * **Quotas**: `POST /candidates` (a new candidate) and `POST /exams/{examId}/assignments` (new sessions) answer
     409 `quota_exceeded` with `details { quota, limit, used, requested, resetsAt, kind }` at one of the organisation's

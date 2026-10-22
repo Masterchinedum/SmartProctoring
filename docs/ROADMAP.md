@@ -156,6 +156,16 @@ All are documented where the feature is, and all can be changed. These are the o
 * `01-happy-path` now bounds the exam time used after a resume by the wall time since the server restarted the clock
   (its `session_resumed` event) instead of a fixed 6 s, which a slow browser reached without any clock error.
 
+**Browser rules**
+* **Single-display rule (after the roadmap):** per exam, off by default (the owner's decision). Decided on your behalf:
+  a second display only *warns* on the welcome screen (consent and the check-in go ahead) and blocks the start on the
+  ready screen and in the server; a browser that cannot tell (Firefox, Safari) is never blocked — the start, the report
+  and the Devices tab record the unknown display count; the *Assistive technology* accommodation waives the rule (as it
+  waives fullscreen); a display still connected when a released exam continues holds it again (no "allow for the rest
+  of this exam" option); after a pause or reconnection the check-complete screen only warns before monitoring restarts.
+  The candidate privacy notice is unchanged (it never listed the display count, recorded before as a neutral event);
+  adding it needs a new notice version.
+
 ## 4. Open questions for the owner
 
 1. **Dark rooms: the same guidance twice.** In a dark room the candidate can see the darkness guidance and "We couldn't

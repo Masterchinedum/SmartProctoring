@@ -260,6 +260,12 @@ export const POLICY_GROUPS: PolicyGroup[] = [
     description: 'Signals available from the exam page. The system cannot observe other monitors, devices or applications.',
     fields: [
       { path: 'browser.requireFullscreen', label: 'Require fullscreen', kind: 'boolean' },
+      {
+        path: 'browser.requireSingleDisplay',
+        label: 'Require a single display',
+        kind: 'boolean',
+        help: 'The exam cannot start while another display is connected, and connecting one during the exam puts it on hold for staff. Only Chrome and Edge report extra displays; other browsers are not blocked.',
+      },
       { path: 'browser.blockClipboard', label: 'Block copy / paste', kind: 'boolean', help: 'Attempts are recorded; clipboard contents are never read.' },
       { path: 'browser.flagTabHidden', label: 'Record leaving the exam tab', kind: 'boolean' },
       { path: 'browser.flagWindowBlur', label: 'Record window losing focus', kind: 'boolean' },

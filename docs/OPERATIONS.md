@@ -432,6 +432,13 @@ outside their control (network, power), *Release hold* (keep the fresh identity 
 starts again; otherwise *Terminate* per your process. With *End the exam* in those rules the exam was submitted
 instead (end reason *Ended by the interruption rules*): reopen it for recovery if it should continue.
 
+**An exam is on hold because of an additional display** (hold reason *Additional display connected (the exam allows
+only one)*: the exam's *Require a single display* rule, Chrome and Edge only). The candidate's hold screen asks them to
+disconnect it and shows whether only one display is connected now. Contact them if needed, then *Release hold*. A
+display still connected when the exam continues puts it on hold again. For a
+candidate who needs a second display (a magnifier, for example), grant the *Assistive technology* accommodation before
+the exam starts: it waives the rule for that candidate.
+
 **Reopen an exam for recovery** (power cut at a test centre, an exam terminated or submitted by mistake, time lost to
 a technical problem, an exam closed after inactivity). Session page → *Reopen for recovery…* (admin): the dialog says
 whether it can be reopened and why not — never an exam the candidate submitted themselves, nor one whose consent was

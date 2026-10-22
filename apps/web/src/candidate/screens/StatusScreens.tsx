@@ -3,6 +3,7 @@ import { formatDuration, type CandidateEndReason } from '@sp/shared';
 import { CandidateApiError } from '../api';
 import { errorMessage, formatDateTime, formatTime, useController, useNow, useSnapshot } from '../context';
 import { formatWhen, startOpensAt, windowScreenText } from '../window';
+import { useDisplays } from '../displays';
 import { exitFullscreen } from '../fullscreen';
 import { BrandHeader, CameraPreview, ContactLine, CountdownDisplay, Page, PrivacyNoticeDialog, ReportingBanner, ScreenHeading, Spinner, Toasts, TraceDownload } from '../components/common';
 import { enterFullscreen } from './exam/ExamScreen';
@@ -22,6 +23,11 @@ export function ReadyScreen() {
   // ticks every second only while an opening time is ahead.
   useNow(state.session.window?.startsAt != null && state.session.window.startsAt > ctrl.serverNow() ? 1000 : 3_600_000);
   const opensAt = startOpensAt(state, ctrl.serverNow());
+  // An exam that allows only one display cannot be started while the browser reports more (the server refuses it too).
+  const { displays, recheck } = useDisplays();
+  const singleDisplay = p.browser.requireSingleDisplay;
+  const displayBlocked = singleDisplay && displays === 'extended';
+  useEffect(() => setError(null), [displays]); // a refused start's message is stale once a display changed
 
   // Keep the camera on so monitoring can start immediately with the exam (never for an exam without a camera).
   const cameraOn = p.camera?.enabled !== false;
@@ -42,6 +48,7 @@ export function ReadyScreen() {
       setDeferred(false);
       // Outside the scheduling window: the state shows when it opens / that it closed.
       if (e instanceof CandidateApiError && (e.code === 'exam_window_not_open' || e.code === 'exam_window_closed')) void ctrl.load();
+      if (e instanceof CandidateApiError && e.code === 'single_display_required') recheck();
     }
   };
 
@@ -73,6 +80,7 @@ export function ReadyScreen() {
                 <li>The clock starts when you press “Start exam”.</li>
                 <li>Your answers are saved automatically as you type.</li>
                 {p.browser.requireFullscreen && <li>The exam runs in fullscreen mode. Leaving fullscreen is recorded.</li>}
+                {singleDisplay && <li>Only one display may be connected. If another display is connected during the exam, your exam is put on hold until the administrator releases it.</li>}
                 {p.browser.blockClipboard && <li>Copy and paste are disabled during the exam.</li>}
                 {p.pause.allowed ? (
                   <li>
@@ -97,13 +105,31 @@ export function ReadyScreen() {
               becomes available by itself.
             </div>
           )}
-          {error && (
+          {displayBlocked && (
+            <div className="banner banner-danger stack" role="alert" data-testid="single-display-blocked">
+              <span>
+                <strong>More than one display is connected.</strong> This exam allows only one display. Disconnect any additional displays to start the exam; this page
+                notices when you do.
+              </span>
+              <div className="row">
+                <button type="button" className="btn" onClick={recheck} data-testid="single-display-recheck">
+                  Check again
+                </button>
+              </div>
+            </div>
+          )}
+          {singleDisplay && displays === 'unknown' && (
+            <div className="banner banner-info" role="note" data-testid="single-display-unknown">
+              This exam allows only one display, and this browser cannot tell how many are connected. Make sure any additional displays are disconnected before you start.
+            </div>
+          )}
+          {error && !displayBlocked && (
             <div className="banner banner-danger" role="alert">
               {error}
             </div>
           )}
           <div className="row">
-            <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy || opensAt != null} data-testid="start-exam">
+            <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy || opensAt != null || displayBlocked} data-testid="start-exam">
               {busy ? (deferred ? 'Waiting to start…' : 'Starting…') : 'Start exam'}
             </button>
           </div>
@@ -189,6 +215,9 @@ export function HoldScreen({ onReverify }: { onReverify: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   // Reopened for recovery by an administrator: not a hold the candidate has to wait out.
   const recovery = hold?.reason === 'recovery';
+  // Held because another display was connected: the candidate sees whether it is disconnected now.
+  const { displays } = useDisplays();
+  const displayHold = hold?.reason === 'additional_display';
   return (
     <Page>
       <BrandHeader title={state.exam.title} />
@@ -200,6 +229,11 @@ export function HoldScreen({ onReverify }: { onReverify: () => void }) {
           <p className="cand-lead" role="alert">
             {hold?.message ?? 'Your exam is on hold while an administrator reviews it.'}
           </p>
+          {/* Persistent live region: announced when the display is disconnected (or connected again). */}
+          <div role="status" data-testid="hold-displays" data-displays={displayHold ? displays : ''}>
+            {displayHold && displays === 'extended' && <div className="banner banner-warning">More than one display is still connected. Please disconnect the additional display.</div>}
+            {displayHold && displays === 'single' && <div className="banner banner-success">Only one display is connected now. Please wait for the administrator to release the hold.</div>}
+          </div>
           <dl className="cand-facts">
             {hold?.since && (
               <div>

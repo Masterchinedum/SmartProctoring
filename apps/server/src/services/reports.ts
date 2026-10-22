@@ -79,6 +79,7 @@ const HOLD_REASON_TEXT: Record<HoldReason, string> = {
   staff_verification: 'the candidate waited for a staff member to verify their identity',
   resume_limit: 'the exam was interrupted more often or for longer than the exam rules allow',
   recovery: 'an administrator reopened the ended exam and the candidate had to pass a fresh identity check',
+  additional_display: 'the browser reported an additional display and the exam allows only one display',
 };
 
 const DETECTOR_LABELS: Record<keyof ProctoringPolicy['detection']['enabled'], string> = {
@@ -803,6 +804,10 @@ export function buildLimitations(input: LimitationInput): string[] {
   if (policy.identity.liveness === 'off') out.push('The live-person check was turned off by the exam rules.');
   const browserOff = [policy.browser.flagTabHidden ? null : 'leaving the exam tab', policy.browser.flagWindowBlur ? null : 'the exam window losing focus'].filter((x): x is string => !!x);
   if (browserOff.length) out.push(`The exam rules turned off recording of ${listJoin(browserOff)}.`);
+  // The start recorded that the browser cannot tell how many displays are connected (session-state.ts startExam).
+  if (policy.browser.requireSingleDisplay && evs.some((e) => e.type === 'session_started' && e.details.displays === 'unknown')) {
+    out.push('The exam requires a single display, but the candidate’s browser does not report how many displays are connected (only Chrome and Edge do), so an additional display could not be detected.');
+  }
   if (!policy.evidence.screenshots) out.push('Screenshots were turned off by the exam rules, so events have no images.');
   if (input.evidencePurgedAt != null) out.push(`Screenshots and identity images were deleted on ${clock.dateTime(input.evidencePurgedAt)} under the retention policy; the event records remain.`);
   return out;

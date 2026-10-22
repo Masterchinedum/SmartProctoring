@@ -381,7 +381,8 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
     severity: 'info',
     title: 'Additional display connected',
     observation: 'The browser reports that more than one display is connected.',
-    reviewerNote: 'The system cannot observe activity on other displays.',
+    reviewerNote:
+      'The system cannot observe activity on other displays. If the exam requires a single display, the exam is put on hold until staff release it. Only Chrome and Edge report additional displays.',
     sources: ['client_browser'],
     span: false,
   },

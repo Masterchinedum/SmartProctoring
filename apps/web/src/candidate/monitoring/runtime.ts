@@ -27,6 +27,7 @@ import type {
 } from '@sp/shared';
 import { CandidateApiError, classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api';
 import { isFullscreen, onFullscreenChange } from '../fullscreen';
+import { onDisplaysChange, readDisplays } from '../displays';
 import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
@@ -652,11 +653,12 @@ export class MonitoringRuntime {
     if (block) on(document, 'contextmenu', (e) => e.preventDefault(), { capture: true });
     // Interaction timing for the engine's working-region model (key / pointer / scroll / answer — timing only).
     this.removers.push(this.activity.attach(document));
-    const scr = window.screen as Screen & { isExtended?: boolean };
+    // Another display connected: a neutral event — and, when the exam requires a single display, the server holds the exam.
     const reportDisplays = () => {
-      if (typeof scr.isExtended === 'boolean') this.pushEpisodes(tr.displays(scr.isExtended, this.now()));
+      const displays = readDisplays();
+      if (displays !== 'unknown') this.pushEpisodes(tr.displays(displays === 'extended', this.now()));
     };
-    if ('onchange' in scr) on(scr as unknown as EventTarget, 'change', reportDisplays);
+    this.removers.push(onDisplaysChange(reportDisplays));
 
     // Initial state.
     const t = this.now();

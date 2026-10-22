@@ -63,12 +63,15 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
 **Before the exam**
 
 - **Personal exam link.** Each candidate gets their own link. No account or password is needed.
-- **Welcome and consent.** Shows the exam title, duration, number of questions, pause rules and fullscreen rule.
+- **Welcome and consent.** Shows the exam title, duration, number of questions, pause rules and fullscreen rule (and
+  "Displays: One display only" when the exam requires a single display).
   It also shows approved arrangements (accommodations) and a full privacy notice: what is monitored, what is stored,
   what is not stored, and for how long. The candidate must tick a box and press "Agree and continue". Choosing "I do
   not agree" records nothing.
 - **System check.** Checks for a secure connection, camera support, WebAssembly, local storage (for offline safety),
-  a supported browser, a connected camera, fullscreen support and a single display.
+  a supported browser, a connected camera, fullscreen support and a single display. It updates by itself when a
+  display is connected or disconnected. When the exam requires a single display and the browser cannot tell (Firefox,
+  Safari), it says "The display check is not available in this browser" and recommends Chrome or Edge.
 - **Camera check.** Shows a live preview and lets the candidate pick a camera. A checklist confirms: camera
   delivering video, exactly one face visible, face close enough and centred, good lighting, sharp image, and a
   physical (not virtual) camera.
@@ -81,6 +84,9 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
 - **ID-photo comparison** (optional). If staff uploaded an approved ID photo, the live face is compared with it.
   This is either advisory (recorded only) or required (the exam is held if it does not match).
 - **Ready screen.** "You are ready to start". The clock only starts when the candidate presses "Start exam".
+- **Single display** (per exam, off by default). While a second display is connected, "Start exam" stays disabled
+  with "More than one display is connected." and a "Check again" button; it becomes available by itself once the
+  display is disconnected. Only Chrome and Edge report extra displays; other browsers are not blocked.
 - **Busy-server protection.** When many candidates start at once, starts are queued for up to 5 minutes and the
   clock does not run while waiting.
 
@@ -114,8 +120,9 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
 
   Brief glances (under 1.2 s) and single bad frames never create an event.
 - **Exam-page events.** Left the exam tab, window lost focus (2 s or longer), left fullscreen (with a "Return to
-  fullscreen" overlay), copy/paste attempts (blocked, right-click disabled), extra display connected (Chrome only),
-  and the exam opened in another browser.
+  fullscreen" overlay), copy/paste attempts (blocked, right-click disabled), extra display connected (Chrome and Edge
+  only; when the exam requires a single display, the exam is put on hold for staff), and the exam opened in another
+  browser.
 - **Continuous identity checks.** Small bursts of face pictures are checked on the server: at the start, every 6 s for
   the first 3 minutes, then every 15 s. Extra checks happen when the face leaves and returns, the camera reconnects,
   another person was visible, or the face changes suddenly. If a different person takes over, the exam is put on hold
@@ -130,7 +137,8 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
   shows "This exam continues in another window".
 - **Offline safety.** If the connection drops, a banner says "Live reporting is interrupted…". Answers and events are
   kept on the device and sent later with their original times, without duplicates.
-- **Hold screen.** "Your exam is on hold", with "Verify again" when staff allow it.
+- **Hold screen.** "Your exam is on hold", with "Verify again" when staff allow it. After an extra display was
+  connected, it asks the candidate to disconnect it and says when only one display is connected.
 - **Withdraw consent.** From "what is monitored?" → "Withdraw my consent…". The exam ends and the images are deleted.
 - **Submit.** "Submit your exam?" shows how many questions are unanswered, then the "Your exam has been submitted"
   screen.
@@ -184,9 +192,9 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
 - **Exams.**
   - Create, edit, import (`.exam.json`), export, publish and archive.
   - Questions editor for the 5 types, with answer keys and points.
-  - **Proctoring policy editor** with about 67 settings: identity and live-person check, ID photo, sampling intensity
-    (Maximum accuracy / Balanced), pausing rules, connection, interruption limits, browser rules, each detector on or
-    off, detection thresholds, screenshots and retention.
+  - **Proctoring policy editor** with about 68 settings: identity and live-person check, ID photo, sampling intensity
+    (Maximum accuracy / Balanced), pausing rules, connection, interruption limits, browser rules (including "Require a
+    single display"), each detector on or off, detection thresholds, screenshots and retention.
 - **Exam versions.** Every publish, and every edit of a published exam, creates a version. Each attempt keeps the
   version it started with. You can view versions, see what changed, export them, and **Regrade** finished attempts
   with a corrected answer key (with a preview).
@@ -705,6 +713,24 @@ the Edge window records "Exam window lost focus" on the candidate side — expec
 - [ ] **T13.7 Regenerate link.**
   **Do:** Tester 6's session → "Regenerate link…" → confirm. Open the **old** link.
   **Expect:** "This exam link is not valid". The new link works.
+- [ ] **T13.8 Single display** (needs a second monitor on the candidate computer, and Chrome).
+  **Do:** import the exam file again → "Edit" → Title "Feature test — single display". In "Proctoring policy" →
+  Browser rules → **Require fullscreen: Off**, **Require a single display: On** → "Save changes" → "Publish…". Add a
+  candidate "Tester 7" and assign them. With the second monitor connected, open Tester 7's link in Chrome.
+  **Expect:**
+  - Welcome: "Displays: One display only", and the system check item "Single display" says "More than one display is
+    connected. This exam allows only one display…". You can still agree and do the check-in.
+  - "You are ready to start" shows "More than one display is connected." and "Start exam" is disabled. Unplug the
+    second monitor: the message disappears by itself (no reload) and "Start exam" works.
+  - During the exam, plug the monitor back in: "Your exam is on hold" — "An additional display was connected to your
+    computer…", with "More than one display is still connected." Unplug it: "Only one display is connected now."
+  - Staff: the dashboard and the session page show "Additional display connected (the exam allows only one)".
+    "Release hold…" has a note about the display check; untick "Require a fresh identity check…" → "Release hold".
+    The candidate's exam continues. (With the monitor still connected, it goes on hold again.)
+  - The session's Devices tab shows "More than one" under Displays for the check-in.
+  - Optional: assign the exam to one more candidate and open the link in Firefox or Safari. The system check says
+    "The display check is not available in this browser…" and recommends Chrome or Edge; the exam can be started; the
+    timeline's "Exam started" entry and the report's limitations say the number of displays could not be checked.
 
 ## Stage 14 — Accommodations (Tester 6)
 

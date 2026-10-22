@@ -1,3 +1,5 @@
+import type { DisplayReport } from '@sp/shared';
+import { readDisplays } from './displays';
 import { fullscreenSupported } from './fullscreen';
 
 /**
@@ -60,8 +62,40 @@ async function indexedDbWorks(): Promise<boolean> {
   });
 }
 
-/** `camera: false` — an exam without a camera (an approved arrangement): no camera requirements are checked. */
-export async function checkSystemRequirements(opts: { requireFullscreen: boolean; camera?: boolean }): Promise<RequirementResult[]> {
+/**
+ * The display item. Without the single-display rule: a warning only when the browser reports more than one display
+ * (nothing otherwise). With it: always shown — met with one display; more than one is a warning here because the exam
+ * cannot be started until it is disconnected (the ready screen and the server refuse the start); a browser that cannot
+ * tell (Firefox, Safari) is told the check is not available there. Never `required`: consent and the check-in can go
+ * ahead, and the item updates when a display is connected or disconnected.
+ */
+export function displayRequirement(displays: DisplayReport, requireSingleDisplay: boolean): RequirementResult | null {
+  const base = { id: 'single_display', label: 'Single display', required: false } as const;
+  if (!requireSingleDisplay) {
+    return displays === 'extended'
+      ? { ...base, ok: false, help: 'More than one display is connected. This is recorded for the exam administrator; consider disconnecting additional displays.' }
+      : null;
+  }
+  if (displays === 'single') return { ...base, ok: true, help: '' };
+  if (displays === 'extended') {
+    return {
+      ...base,
+      ok: false,
+      help: 'More than one display is connected. This exam allows only one display: disconnect any additional displays before you start the exam. This check updates by itself.',
+    };
+  }
+  return {
+    ...base,
+    ok: false,
+    help: 'The display check is not available in this browser. This exam allows only one display, so disconnect any additional displays. To have this checked, use Chrome or Edge.',
+  };
+}
+
+/**
+ * `camera: false` — an exam without a camera (an approved arrangement): no camera requirements are checked.
+ * `requireSingleDisplay` — the exam allows only one display (displayRequirement).
+ */
+export async function checkSystemRequirements(opts: { requireFullscreen: boolean; camera?: boolean; requireSingleDisplay?: boolean }): Promise<RequirementResult[]> {
   const browser = detectBrowser(navigator.userAgent);
   const camera = opts.camera !== false;
   const results: RequirementResult[] = [];
@@ -125,15 +159,7 @@ export async function checkSystemRequirements(opts: { requireFullscreen: boolean
       help: 'This exam requires fullscreen mode, which your browser does not appear to support. Use a current desktop browser.',
     });
   }
-  const extended = (window.screen as Screen & { isExtended?: boolean }).isExtended;
-  if (extended === true) {
-    results.push({
-      id: 'single_display',
-      label: 'Single display',
-      ok: false,
-      required: false,
-      help: 'More than one display is connected. This is recorded for the exam administrator; consider disconnecting additional displays.',
-    });
-  }
+  const display = displayRequirement(readDisplays(), opts.requireSingleDisplay === true);
+  if (display) results.push(display);
   return results;
 }

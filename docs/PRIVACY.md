@@ -32,7 +32,7 @@ advice — review it with counsel for your jurisdictions.
 | Copy of the approved ID photo attached to an ID-photo identity event (the exact photo compared, for review) | Check-in | Evidence store | Yes | Evidence retention period of that session (also after the photo on file is replaced or removed; kept under legal hold) |
 | Event metadata (type, times, confidence, measurements) | During exam | Postgres `events`, `identity_checks` | — | Event retention period (default 365 days) |
 | Answers, timing, pauses, periods | During exam | Postgres | — | Your exam-records policy |
-| Device info (camera label, SHA-256 of camera id, user agent, screen size) | Check-in | `device_records` | — | With the session record |
+| Device info (camera label, SHA-256 of camera id, user agent, screen size, whether the browser reports more than one connected display — Chrome and Edge only; with the single-display rule also at the exam start) | Check-in (and the start) | `device_records`; the start in `events` (`session_started`) | — | With the session record |
 | Staff actions (reviews, notes, holds, evidence views) | Staff | `audit_log`, `notes` | — | Audit retention per your policy |
 | Review decisions (each conclusion on an event with its note, who, when) and the session review (assignee, escalation note, outcome and note) | Staff | `event_reviews`, `session_reviews`, `events` (current decision), `audit_log` | — | With the session (deleted with the candidate); audit copies per your audit retention. The outcome (never the notes) is sent to integrations |
 | Exam-page interaction timing: epoch ms of the last keydown, pointer movement / press, scroll and answer change — **no keys, no text, no pointer position** | Candidate's browser, during the exam | **Browser memory only** (the in-browser monitoring engine; its learned "working region" — head-pose statistics while typing / using the mouse — is kept in memory from one exam period to the next in the same page and discarded when the page closes or the camera changes). Never uploaded. It appears in the evaluation trace only when a tester opens the exam with `?trace=1` and downloads the file themselves | — | Until the page is closed |
@@ -52,8 +52,8 @@ advice — review it with counsel for your jurisdictions.
 | **Staff** accounts created or updated by SCIM / at a first single sign-on: email, name, role, the SCIM client's external id, active state, how the account was created | The organisation's identity provider | `staff_users`, `audit_log` (actor `scim` / system) | — | Like other staff accounts (SCIM "delete" disables and hides the account; the record stays for the audit trail) |
 | Identity provider configuration (issuer / entity ID, client id, signing certificates, claimed email domains) and the OIDC client secret | Owner | `identity_providers`, `sso_domains` | Client secret: yes (AES-256-GCM, write-only) | Until the provider is deleted |
 
-Not collected: continuous video/audio, screen contents, other applications, other monitors or
-devices, clipboard contents, keystrokes (which keys; only the time of the last key press is used, in the
+Not collected: continuous video/audio, screen contents, other applications, other monitors (only whether more
+than one is connected, where the browser reports it) or devices, clipboard contents, keystrokes (which keys; only the time of the last key press is used, in the
 browser — see the interaction-timing row above), pointer positions, location.
 
 **Where it is stored (data residency).** "Evidence store" above means the storage location the organisation

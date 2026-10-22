@@ -200,6 +200,10 @@ function PolicySummary({ exam }: { exam: ExamDTO }) {
             <td>{key('browser.requireFullscreen')}</td>
           </tr>
           <tr>
+            <th>Single display required</th>
+            <td>{key('browser.requireSingleDisplay')}</td>
+          </tr>
+          <tr>
             <th>Screenshots</th>
             <td>{key('evidence.screenshots')}</td>
           </tr>

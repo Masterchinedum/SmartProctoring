@@ -20,6 +20,7 @@ import {
   type RequestTiming,
 } from './api';
 import { AnswerStore } from './answers';
+import { screenInfo } from './displays';
 import { isFullscreen } from './fullscreen';
 import { ClockSync, Countdown } from './clock';
 import { Outbox, type OutboxStats } from './outbox';
@@ -805,7 +806,8 @@ export class CandidateController {
   async startExam(onDeferred?: () => void): Promise<void> {
     for (;;) {
       try {
-        const { data, timing } = await this.api.start();
+        // What the browser reports about its displays right now (an exam that allows only one display checks it).
+        const { data, timing } = await this.api.start({ screen: screenInfo() });
         await this.applyState(data, timing);
         return;
       } catch (e) {

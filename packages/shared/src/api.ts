@@ -197,12 +197,23 @@ export interface CandidateSessionState {
 export const consentRequestSchema = z.object({ noticeVersion: z.string(), accepted: z.literal(true) });
 export type ConsentRequest = z.infer<typeof consentRequestSchema>;
 
+/** `isExtended`: the browser reports more than one display (Window Management API); null where it cannot tell. */
+export const screenInfoSchema = z.object({ width: z.number(), height: z.number(), isExtended: z.boolean().nullable() }).partial();
+export type ScreenInfo = z.infer<typeof screenInfoSchema>;
+
+/** Connected displays as the browser reported them: 'unknown' where it cannot tell (Firefox, Safari). */
+export type DisplayReport = 'single' | 'extended' | 'unknown';
+
+export function displayReport(isExtended: unknown): DisplayReport {
+  return isExtended === true ? 'extended' : isExtended === false ? 'single' : 'unknown';
+}
+
 export const deviceInfoSchema = z.object({
   cameraLabel: z.string().max(300).default(''),
   /** SHA-256 of deviceId (never the raw id). */
   cameraIdHash: z.string().max(128).default(''),
   userAgent: z.string().max(1000).default(''),
-  screen: z.object({ width: z.number(), height: z.number(), isExtended: z.boolean().nullable() }).partial().default({}),
+  screen: screenInfoSchema.default({}),
   videoWidth: z.number().optional(),
   videoHeight: z.number().optional(),
 });
@@ -296,7 +307,16 @@ export interface CompleteCheckResponse {
  * (CHECK_IN_LEAD_MS before the opening) and after the closing.
  * A reconnect check started when the exam's resume policy limit is reached (policy.resume): 409 `resume_limit_reached`
  * after the exam was put on hold or ended (reload the state).
+ * An exam that requires a single display (policy.browser.requireSingleDisplay) is not started while the browser reports
+ * more than one: 409 `single_display_required`.
  */
+
+/**
+ * POST /api/candidate/start body. `screen`: what the browser reports about its displays at the moment of the start;
+ * without it the server goes by what this browser's last check reported.
+ */
+export const startExamRequestSchema = z.object({ screen: screenInfoSchema.optional() });
+export type StartExamRequest = z.infer<typeof startExamRequestSchema>;
 
 /** PUT /api/candidate/answers/:questionId */
 export const saveAnswerRequestSchema = z.object({
@@ -610,6 +630,8 @@ export interface DeviceRecordDTO {
   cameraIdHash: string;
   userAgent: string;
   purpose: CheckPurpose;
+  /** What the browser reported about connected displays at this check. */
+  displays: DisplayReport;
 }
 
 /** GET /api/admin/sessions/:id */

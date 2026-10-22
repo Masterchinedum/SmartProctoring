@@ -10,6 +10,7 @@ import {
   pauseRequestSchema,
   saveAnswerRequestSchema,
   startCheckRequestSchema,
+  startExamRequestSchema,
   withdrawConsentSchema,
   type CandidateSessionState,
   type PauseResponse,
@@ -148,7 +149,8 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/start', { config: limit(30) }, async (req, reply) => {
     const c = getCandidate(req);
-    const { deferred } = await startSession(ctx, c.session.id, requireInstanceId(req));
+    const body = startExamRequestSchema.parse(req.body ?? {});
+    const { deferred } = await startSession(ctx, c.session.id, requireInstanceId(req), body.screen);
     if (deferred) {
       // Not an error of the candidate's: the server is at capacity (admission at exam start). The app retries.
       return reply

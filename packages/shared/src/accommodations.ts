@@ -195,7 +195,8 @@ export const ACCOMMODATION_CATALOG: Record<AccommodationKind, AccommodationInfo>
   },
   assistive_technology: {
     title: 'Assistive technology',
-    description: 'For screen readers, magnifiers, dictation and similar tools: fullscreen is not required, copy and paste work, and switching to another window is not recorded.',
+    description:
+      'For screen readers, magnifiers, dictation and similar tools: fullscreen is not required, copy and paste work, switching to another window is not recorded, and a second display is allowed (for example for a magnifier).',
     label: () => 'Assistive technology',
     candidateLabel: () => 'Assistive technology: fullscreen is not required and switching to your tools is not recorded',
     limitation: () => 'Fullscreen was not required and switches to other windows were not recorded for this candidate (approved accommodation for assistive technology).',
@@ -279,7 +280,7 @@ export function applyAccommodations(policy: ProctoringPolicy, items: readonly Sp
         p.identity = { ...p.identity, liveness: 'off' };
         break;
       case 'assistive_technology':
-        p.browser = { ...p.browser, requireFullscreen: false, blockClipboard: false, flagWindowBlur: false };
+        p.browser = { ...p.browser, requireFullscreen: false, blockClipboard: false, flagWindowBlur: false, requireSingleDisplay: false };
         break;
       case 'detection_exemptions':
         for (const d of EXEMPTIBLE_DETECTORS) if (params[d]) p.detection.enabled[d] = false;
@@ -338,6 +339,7 @@ export const EXCEPTION_PATH_LABEL: Record<string, string> = {
   'identity.idPhotoComparison': 'ID photo comparison',
   'camera.enabled': 'Camera used',
   'browser.requireFullscreen': 'Fullscreen required',
+  'browser.requireSingleDisplay': 'Single display required',
   'browser.blockClipboard': 'Copy and paste blocked',
   'browser.flagWindowBlur': 'Switching windows recorded',
   'detection.enabled.absence': 'Absence observed',

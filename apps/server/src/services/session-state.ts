@@ -11,10 +11,13 @@ import {
   ACCOMMODATION_CATALOG,
   clockStart as clockStartFn,
   clockStop as clockStopFn,
+  displayReport,
   EVENT_CATALOG,
   OBSERVED_PERIOD_KINDS,
   type CandidateCommand,
   type CheckPurpose,
+  type DisplayReport,
+  type ScreenInfo,
   type SessionEndReason,
   type EventSource,
   type EventType,
@@ -28,6 +31,7 @@ import type { Ctx } from '../context.js';
 import type { Tx } from '../db/index.js';
 import {
   candidates,
+  deviceRecords,
   events,
   examSessions,
   exams,
@@ -45,7 +49,7 @@ import {
   type Organization,
   type SessionPeriod,
 } from '../db/schema.js';
-import { HttpError, notFound } from '../lib/errors.js';
+import { conflict, HttpError, notFound } from '../lib/errors.js';
 import { sessionClock, staffVisibleKey } from './dto.js';
 import { refreshSessionAccommodations, withAccommodations } from './accommodations.js';
 import { transactionWithEvidence } from './evidence.js';
@@ -571,8 +575,33 @@ export function assertStatus(m: SessionMutation, allowed: SessionStatus[], messa
   }
 }
 
-/** ready -> active: clock starts, active period opens, policy snapshot taken. */
-export async function startExam(m: SessionMutation): Promise<void> {
+export const SINGLE_DISPLAY_MESSAGE = 'More than one display is connected. This exam allows only one display: disconnect any additional displays, then start the exam.';
+const DISPLAYS_UNKNOWN_OBSERVATION =
+  'The exam requires a single display, but the candidate’s browser does not report how many displays are connected (only Chrome and Edge do), so this could not be checked.';
+
+/**
+ * What the starting browser reports about its displays: `screen` sent with the start, else what its last check
+ * recorded (device_records), else unknown.
+ */
+async function displaysAtStart(m: SessionMutation, instanceId: string | null, screen: ScreenInfo | undefined): Promise<DisplayReport> {
+  if (screen && 'isExtended' in screen) return displayReport(screen.isExtended);
+  if (!instanceId) return 'unknown';
+  const [last] = await m.tx
+    .select({ screen: deviceRecords.screen })
+    .from(deviceRecords)
+    .where(and(eq(deviceRecords.sessionId, m.session.id), eq(deviceRecords.clientInstanceId, instanceId)))
+    .orderBy(desc(deviceRecords.at))
+    .limit(1);
+  return displayReport(last?.screen?.isExtended);
+}
+
+/**
+ * ready -> active: clock starts, active period opens, policy snapshot taken. An exam that requires a single display
+ * (policy.browser.requireSingleDisplay) is not started while the browser reports more than one (409
+ * `single_display_required`); a browser that cannot tell is not held back, and `session_started` records that the
+ * display count is unknown (details.displays).
+ */
+export async function startExam(m: SessionMutation, opts: { instanceId?: string | null; screen?: ScreenInfo } = {}): Promise<void> {
   assertStatus(m, ['ready'], 'The exam can only be started after the readiness check');
   // The attempt is pinned to the exam's current version (questions, answer keys, the exam's own rules) for good:
   // later edits of the exam never reach it (services/exam-versions.ts).
@@ -584,6 +613,8 @@ export async function startExam(m: SessionMutation): Promise<void> {
   const examPolicy = mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, version.policy as Record<string, unknown>);
   const acc = m.session.accommodations;
   const { policy, exceptions } = withAccommodations(examPolicy, acc, m.session.durationMs);
+  const displays = policy.browser.requireSingleDisplay ? await displaysAtStart(m, opts.instanceId ?? m.session.activeInstanceId, opts.screen) : null;
+  if (displays === 'extended') throw conflict('single_display_required', SINGLE_DISPLAY_MESSAGE);
   // Admission at exam start (candidate-actions.ts startSession) may have held the start back while the server was busy.
   const deferredMs = m.session.startDeferredSince ? Math.max(0, m.now - m.session.startDeferredSince.getTime()) : null;
   m.set({
@@ -598,12 +629,14 @@ export async function startExam(m: SessionMutation): Promise<void> {
   m.clockStart();
   await m.switchPeriod('active', m.now);
   m.resetIdentityCounters();
+  const observation = [
+    deferredMs != null ? `The exam was started. The start was held back ${Math.round(deferredMs / 1000)} s while the server was busy; the exam clock started only now.` : null,
+    displays === 'unknown' ? `${deferredMs != null ? '' : 'The exam was started. '}${DISPLAYS_UNKNOWN_OBSERVATION}` : null,
+  ].filter((x): x is string => !!x);
   await m.addEvent({
     type: 'session_started',
-    details: { durationMs: m.session.durationMs, ...(deferredMs != null ? { startDeferredMs: deferredMs } : {}) },
-    ...(deferredMs != null
-      ? { observation: `The exam was started. The start was held back ${Math.round(deferredMs / 1000)} s while the server was busy; the exam clock started only now.` }
-      : {}),
+    details: { durationMs: m.session.durationMs, ...(deferredMs != null ? { startDeferredMs: deferredMs } : {}), ...(displays ? { displays } : {}) },
+    ...(observation.length ? { observation: observation.join(' ') } : {}),
   });
   if (acc?.items.length) {
     const labels = acc.items.map((i) => ACCOMMODATION_CATALOG[i.kind].label(i.params));
@@ -645,6 +678,8 @@ export const HOLD_MESSAGES: Record<HoldReason, string> = {
   resume_limit:
     'Your exam was interrupted more often or for longer than the exam rules allow, so it is on hold. An administrator needs to approve before you can continue. Your answers and remaining time are saved.',
   recovery: 'An administrator has reopened your exam. Complete the camera and identity check to continue where you stopped. Your answers are saved, and the exam clock starts again only after the check.',
+  additional_display:
+    'An additional display was connected to your computer, and this exam allows only one display, so your exam is on hold. Please disconnect the additional display. The exam administrator will review this and release the hold. Your answers and remaining time are saved.',
 };
 
 /** Put the session on hold (clock stopped, on_hold period opens, candidate gets a 'hold' command). */
