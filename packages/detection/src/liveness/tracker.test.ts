@@ -108,6 +108,20 @@ describe('LivenessTracker', () => {
     expect(q.readyToCapture).toBe(false);
   });
 
+  it('a center step after the centre is known accepts the server’s ±12°, not more', () => {
+    const tr = createLivenessTracker({ steps: steps('center'), targetYawDeg: 20, targetPitchDeg: 12, framesPerStep: 1 });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    expect(hold(tr, 0, 600, { yaw: 13, pitch: 0 }).readyToCapture).toBe(false);
+    expect(hold(tr, 700, 600, { yaw: 11, pitch: -11 }).readyToCapture).toBe(true);
+  });
+
+  it('the centre may sit up to 30° to the side (the server quality gate’s yaw limit)', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left'), targetYawDeg: 20, targetPitchDeg: 12 });
+    expect(hold(tr, 0, 600, { yaw: -28, pitch: 0 }).action).toBe('turn_left');
+    const far = createLivenessTracker({ steps: steps('turn_left'), targetYawDeg: 20, targetPitchDeg: 12 });
+    expect(hold(far, 0, 600, { yaw: -32, pitch: 0 }).action).toBe('center');
+  });
+
   it('an explicit center step sets the centre from its captured frames', () => {
     const tr = createLivenessTracker({ steps: steps('center', 'turn_right'), targetYawDeg: 20, targetPitchDeg: 12, framesPerStep: 1 });
     let p = hold(tr, 0, 500, { yaw: 8, pitch: 2 });

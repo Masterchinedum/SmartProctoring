@@ -4,9 +4,9 @@ import { QUALITY_GUIDANCE, type CameraState, type FaceObservation, type FrameMet
  * Readiness checklist evaluated live on the camera preview before any check is sent to the server.
  * Only a working camera and exactly one face BLOCK; size / position, lighting and sharpness are WARNINGS with
  * guidance — the server judges whether an image is usable (and guides the candidate live during the check),
- * so a borderline room never stops a genuine candidate at this step. The warning thresholds are a little
- * stricter than the server's identity quality gate (inter-eye ≥ 28 px, face brightness 40..220,
- * |yaw| ≤ 25°) so a frame without warnings is very likely usable there.
+ * so a borderline room never stops a genuine candidate at this step. The warning thresholds are stricter than
+ * the server's identity quality gate (QUALITY_GATE: inter-eye ≥ 20 px, face brightness 40..235, contrast ≥ 7,
+ * |yaw| ≤ 30°) so a frame without warnings is very likely usable there; as warnings they never block.
  */
 
 export type ReadinessItemId = 'frames' | 'one_face' | 'size_position' | 'lighting' | 'sharpness' | 'real_camera';

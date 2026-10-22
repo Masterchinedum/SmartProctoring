@@ -10,10 +10,10 @@ import { clamp01 } from '../util/math';
  *  - the host may set the centre from the frontal frames it captured (`setCentre`) — the same frames the
  *    server uses as its reference pose;
  *  - otherwise a 'center' step is satisfied by a steady pose (spread ≤ 5° over holdMs) inside a generous
- *    absolute window (|yaw| ≤ 25°, |pitch| ≤ 35°) and the frames captured for it define the centre; without a
+ *    absolute window (|yaw| ≤ 30°, |pitch| ≤ 35°) and the frames captured for it define the centre; without a
  *    'center' step the centre is established implicitly before the first action ("Look straight at the
  *    screen");
- *  - once a centre is known, a later 'center' step must return within ±8° of it.
+ *  - once a centre is known, a later 'center' step must return within ±12° of it (the server's tolerance).
  *
  * Action steps are captured at the PEAK of the movement, not at the first threshold crossing: the offset
  * toward the requested direction (turn_left: yaw − centre, yaw+ = subject-left per POSE_CONVENTION;
@@ -67,12 +67,18 @@ const CENTRE_STEADY_DEG = 5;
 /**
  * … and inside a generous ABSOLUTE sanity window. Absolute pose from landmarks carries a per-person /
  * per-camera offset (camera above or beside the screen, face shape), so the centre is never required to
- * be (0, 0); the server verifies each step relative to the frontal frames anyway.
+ * be (0, 0); the server verifies each step relative to the frontal frames anyway. The yaw limit is the server
+ * quality gate's (|yaw| ≤ 30°, QUALITY_GATE.maxAbsYawDeg); the browser's yaw reads larger than the server's
+ * for the same head, so the browser is never the stricter of the two here.
  */
-const CENTRE_MAX_YAW = 25;
+const CENTRE_MAX_YAW = 30;
 const CENTRE_MAX_PITCH = 35;
-/** A later 'center' step (centre already known) must come back within this many degrees of it. */
-const CENTER_TOL_KNOWN = 8;
+/**
+ * A later 'center' step (centre already known) must come back within this many degrees of it: the server's own
+ * tolerance (LIVENESS_DEFAULTS.centerToleranceDeg). It was 8°, which made "look straight at the screen" stricter
+ * in the browser than on the server.
+ */
+const CENTER_TOL_KNOWN = 12;
 /** Peak capture: the head has stopped (offset range over PLATEAU_MS) … */
 const PLATEAU_MS = 300;
 const PLATEAU_DEG = 4;
