@@ -142,6 +142,14 @@ jobs:
       - run: pnpm --filter @sp/e2e exec playwright install --with-deps ${{ matrix.browser }}
       - run: pnpm --filter @sp/e2e exec playwright test --project=${{ matrix.browser }}
       - if: failure()
+        name: Print the browser-side diagnostics of failed tests
+        # Candidate logs (identity API answers, console errors, HTTP errors, camera shim statistics) and page snapshots,
+        # readable in the job log without downloading the artifacts.
+        run: |
+          find e2e/test-results \( -name 'candidate-*.log' -o -name 'error-context.md' \) -not -path '*/attachments/*' | sort | while read -r f; do
+            echo "::group::$f"; head -c 12000 "$f"; echo; echo "::endgroup::"
+          done
+      - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-${{ matrix.browser }}-artifacts
