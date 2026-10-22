@@ -18,7 +18,7 @@ async function switchAway(page: Page, hidden: boolean): Promise<void> {
   }, hidden);
 }
 
-test('offline: interruption visible to both sides; buffered events delivered late, once, with original timestamps', async ({ staff, staffPage }) => {
+test('offline: interruption visible to both sides; buffered events delivered late, once, with original timestamps', { tag: '@cross-browser' }, async ({ staff, staffPage }) => {
   skipUnlessFixtures('a');
   const s = await staff.createSession({ policy: { connection: { heartbeatTimeoutSec: 10, disconnectTimerBehavior: 'continue' } } });
   const sp = await staffPage();

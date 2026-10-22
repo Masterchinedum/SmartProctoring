@@ -3,7 +3,7 @@
  */
 import type { IdentityDecision } from '@sp/shared';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_FUSION_POLICY, fuseWithExternal, fusionPolicyFor, type ExternalBand, type FusionOutcome, type InternalOpinion } from '../../src/verifiers/fusion.js';
+import { DEFAULT_FUSION_POLICY, fuseWithExternal, fusionPolicyFor, internalStrength, type ExternalBand, type FusionOutcome, type InternalOpinion } from '../../src/verifiers/fusion.js';
 import type { ExternalOpinion } from '../../src/verifiers/types.js';
 
 const policy = fusionPolicyFor({ match: 0.45, mismatch: 0.28 }); // margin 0.05, external same >= 0.95, different < 0.5
@@ -113,6 +113,24 @@ describe('fuseWithExternal decision table', () => {
       });
     }
   }
+
+  it('a mismatch decided on accumulated evidence takes its strength from it: a decisive SPRT is never overruled', () => {
+    // A look-alike at 0.40 is "borderline" by similarity (0.28 - 0.05 <= 0.40) ...
+    const lookAlike = { decision: 'mismatch' as const, similarity: 0.4 };
+    expect(internalStrength(lookAlike, policy)).toBe('borderline');
+    expect(fuseWithExternal(lookAlike, EXTERNAL.same, policy).decision).toBe('inconclusive');
+    // ... but not when the accumulated evidence reached the confirm threshold.
+    const decided = { ...lookAlike, evidence: { llr: 8.2, decisive: true } };
+    expect(internalStrength(decided, policy)).toBe('clear');
+    const r = fuseWithExternal(decided, EXTERNAL.same, policy);
+    expect(r).toMatchObject({ decision: 'mismatch', needsHumanReview: true, outcome: 'disagreement_flagged', internalStrength: 'clear' });
+    expect(r.record.internal).toEqual({ decision: 'mismatch', similarity: 0.4, evidence: { llr: 8.2, decisive: true } });
+    expect(r.explanation).toMatch(/accumulated evidence \(log-likelihood ratio 8\.20, decisive\)/);
+    // Evidence that is not decisive stays borderline.
+    expect(internalStrength({ ...lookAlike, evidence: { llr: 4, decisive: false } }, policy)).toBe('borderline');
+    // A match keeps the similarity rule (a provider's "different" can still downgrade a match just above the threshold).
+    expect(internalStrength({ decision: 'match', similarity: 0.47, evidence: { llr: -9, decisive: true } }, policy)).toBe('borderline');
+  });
 
   it('never produces "possible different person" unless the internal pipeline already said so', () => {
     for (const internal of Object.values(INTERNAL)) {

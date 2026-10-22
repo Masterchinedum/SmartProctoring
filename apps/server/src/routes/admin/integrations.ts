@@ -2,8 +2,8 @@
  * Staff API — integrations: API keys, webhooks, email-alert test, integration status. All [admin].
  *
  *   GET  /integrations/status                   -> IntegrationStatusDTO
- *   GET  /api-keys                              -> { items: ApiKeyDTO[] }   (newest first, revoked included)
- *   POST /api-keys {name}                       -> CreatedApiKeyDTO          (the key is returned ONCE)
+ *   GET  /api-keys                              -> { items: ApiKeyDTO[] }   (newest first, revoked and expired included)
+ *   POST /api-keys {name, scopes?, expiresAt?}  -> CreatedApiKeyDTO          (the key is returned ONCE; scopes default to all, expiresAt to never)
  *   POST /api-keys/:id/revoke                   -> ApiKeyDTO
  *   GET  /webhooks                              -> { items: WebhookDTO[] }
  *   POST /webhooks  WebhookInput                -> CreatedWebhookDTO         (the signing secret is returned ONCE)
@@ -21,8 +21,10 @@
  * audit entries or later responses; the audit log records the webhook host, not the full URL.
  */
 import {
+  API_KEY_MAX_LIFETIME_DAYS,
   apiKeyCreateSchema,
   emailTestSchema,
+  normaliseApiKeyScopes,
   webhookInputSchema,
   webhookUpdateSchema,
   type ApiKeyDTO,
@@ -32,7 +34,7 @@ import {
   type WebhookDTO,
   type WebhookDeliveryDTO,
 } from '@sp/shared';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { generateApiKey, toApiKeyDTO } from '../../auth/api-key.js';
 import { getStaff, requireStaff } from '../../auth/staff.js';
@@ -57,6 +59,9 @@ import {
 import { idParam, loadOrgRow, noStore } from './common.js';
 
 export const MAX_ACTIVE_API_KEYS_PER_ORG = 25;
+/** An expiry must be at least this far ahead when the key is created. */
+const MIN_API_KEY_LIFETIME_MS = 60 * 60_000;
+const DAY_MS = 86_400_000;
 
 function hostOf(url: string): string {
   try {
@@ -126,19 +131,47 @@ export const integrationRoutes: FastifyPluginAsync = async (app) => {
     const staff = getStaff(req);
     const body = apiKeyCreateSchema.parse(req.body ?? {});
     const now = ctx.now();
+    const scopes = normaliseApiKeyScopes(body.scopes);
+    if (body.expiresAt != null && body.expiresAt <= now + MIN_API_KEY_LIFETIME_MS) {
+      throw validationFailed('Request validation failed', [{ path: 'expiresAt', message: 'Choose an expiry at least an hour from now' }]);
+    }
+    if (body.expiresAt != null && body.expiresAt > now + API_KEY_MAX_LIFETIME_DAYS * DAY_MS) {
+      throw validationFailed('Request validation failed', [{ path: 'expiresAt', message: `A key can be valid for at most ${API_KEY_MAX_LIFETIME_DAYS} days` }]);
+    }
     const { key, prefix, hash } = generateApiKey();
     const row = await ctx.db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`api-keys:${staff.orgId}`}))`);
+      // Expired keys no longer count (they cannot be used); revoking them stays possible.
       const [{ n }] = await tx
         .select({ n: sql<number>`count(*)::int` })
         .from(apiKeys)
-        .where(and(eq(apiKeys.orgId, staff.orgId), isNull(apiKeys.revokedAt)));
+        .where(and(eq(apiKeys.orgId, staff.orgId), isNull(apiKeys.revokedAt), or(isNull(apiKeys.expiresAt), gt(apiKeys.expiresAt, new Date(now)))));
       if (n >= MAX_ACTIVE_API_KEYS_PER_ORG) throw conflict('too_many_api_keys', `An organisation can have at most ${MAX_ACTIVE_API_KEYS_PER_ORG} active API keys. Revoke unused keys first.`);
       const [k] = await tx
         .insert(apiKeys)
-        .values({ orgId: staff.orgId, name: body.name, prefix, keyHash: hash, scope: 'integration', createdBy: staff.id, createdAt: new Date(now) })
+        .values({
+          orgId: staff.orgId,
+          name: body.name,
+          prefix,
+          keyHash: hash,
+          scope: 'integration',
+          scopes,
+          expiresAt: body.expiresAt != null ? new Date(body.expiresAt) : null,
+          createdBy: staff.id,
+          createdAt: new Date(now),
+        })
         .returning();
-      await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'api_key.created', targetType: 'api_key', targetId: k.id, meta: { name: k.name, prefix }, ip: req.ip, at: now });
+      await audit(tx, {
+        orgId: staff.orgId,
+        actorType: 'staff',
+        actorId: staff.id,
+        action: 'api_key.created',
+        targetType: 'api_key',
+        targetId: k.id,
+        meta: { name: k.name, prefix, scopes, expiresAt: body.expiresAt },
+        ip: req.ip,
+        at: now,
+      });
       return k;
     });
     noStore(reply);

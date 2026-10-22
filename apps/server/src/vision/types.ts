@@ -69,6 +69,57 @@ export interface AnalyzeOptions {
 export interface VisionService {
   analyze(jpeg: Buffer, opts?: AnalyzeOptions): Promise<ImageAnalysis>;
   close(): Promise<void>;
+  /** The face-analysis queue right now (health, metrics, admission, sampling cadence); absent = not measured. */
+  readonly load?: VisionLoad;
+}
+
+export type VisionPriority = 'interactive' | 'background';
+
+/** One number per queue priority. */
+export type VisionByPriority = Record<VisionPriority, number>;
+
+/** An analysis and what it spent waiting in the queue and on a worker (ms). */
+export interface TimedAnalysis {
+  analysis: ImageAnalysis;
+  waitMs: number;
+  runMs: number;
+}
+
+/** Why a request (or load poll) to a dedicated vision worker failed (remote driver, vision/remote.ts). */
+export type RemoteFailureReason = 'connect' | 'timeout' | 'reset' | 'unauthorized' | 'bad_response' | 'server_error';
+
+/** Told about every analysis of the worker pool (metrics). Must not throw or block. */
+export interface VisionObserver {
+  /** An analysis finished (ok) or failed: how long it waited in the queue and how long a worker took (ms). */
+  analysisEnded(info: { priority: VisionPriority; waitMs: number; runMs: number; ok: boolean }): void;
+  /** An analysis was refused because its queue was full (VisionBusyError, HTTP 503). */
+  analysisRefused(priority: VisionPriority): void;
+  /**
+   * Remote driver only: an analysis request to a vision worker was answered. `overheadMs` = the round trip minus the
+   * worker's own queue wait and analysis time (transfer, encoding, both event loops: the cost of the HTTP hop).
+   */
+  remoteRequestEnded?(info: { overheadMs: number }): void;
+  /** Remote driver only: a request or load poll to a vision worker failed. */
+  remoteFailure?(reason: RemoteFailureReason): void;
+}
+
+/** Snapshot of the face-analysis queue of one server instance. */
+export interface VisionLoad {
+  /** Workers able to analyse right now (0: none started, e.g. models unreadable). */
+  workers: number;
+  inFlight: number;
+  queued: VisionByPriority;
+  /** How long the oldest waiting analysis of each priority has waited (ms; 0 when nothing waits). */
+  oldestWaitMs: VisionByPriority;
+  /** Measured moving average of one analysis on one worker (ms). */
+  serviceMs: number;
+  /**
+   * Expected wait before an analysis of each priority submitted now gets a worker (ms): the work queued ahead of it
+   * plus about one analysis for the work in flight, over the workers; 0 while a worker is free.
+   */
+  estimatedWaitMs: VisionByPriority;
+  /** Analyses waiting before new ones of a priority are refused with VisionBusyError. */
+  maxQueue: number;
 }
 
 export interface IdentityComparison {
@@ -77,6 +128,11 @@ export interface IdentityComparison {
   /** 0..1 confidence in the decision. */
   confidence: number;
   guidance: string[];
+  /**
+   * 'inconclusive' that a person must look at (never a verdict either way): the ID-photo comparison scored below its
+   * mismatch threshold on a frame too poor (or evidence too weak) to call it a different person.
+   */
+  needsHumanReview?: boolean;
 }
 
 export interface ReferenceBuildResult {
@@ -122,8 +178,15 @@ export interface QualityGate {
   /** Face-region mean luminance outside [min, max] => `too_dark` / `too_bright`. */
   minBrightness: number;
   maxBrightness: number;
-  /** Face-region luminance std-dev below this => `low_contrast`. */
+  /** Face-region luminance std-dev below this => `low_contrast` (unless the detection is confident, see below). */
   minContrast: number;
+  /**
+   * Optional (identity v2.1): a face whose detector score is at least `confidentDetectionScore` stays usable down
+   * to this contrast (a backlit face lifted by lens flare is flat but still clearly detected and recognisable).
+   * Absent => `minContrast` applies to every face.
+   */
+  minContrastConfident?: number;
+  confidentDetectionScore?: number;
   /** Contrast-normalised variance of Laplacian on the aligned crop below this => `blurry`. */
   minSharpness: number;
   /** |yaw| above this (degrees) => `face_turned`. */

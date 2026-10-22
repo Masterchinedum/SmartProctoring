@@ -9,7 +9,9 @@ import type {
   PauseResponse,
   SessionStatus,
 } from '@sp/shared';
+import type { AttentionState } from '@sp/detection';
 import {
+  busyRetryDelayMs,
   CandidateApiError,
   classifyApiError,
   createCandidateApi,
@@ -18,6 +20,7 @@ import {
   type RequestTiming,
 } from './api';
 import { AnswerStore } from './answers';
+import { isFullscreen } from './fullscreen';
 import { ClockSync, Countdown } from './clock';
 import { Outbox, type OutboxStats } from './outbox';
 import { CameraManager, type CameraSnapshot } from './monitoring/camera';
@@ -160,6 +163,12 @@ export class CandidateController {
   private baseline: Baseline | null = null;
   /** Baseline of the previous exam period (for environment comparison after resume/reconnect). */
   private previousBaseline: Baseline | null = null;
+  /**
+   * Where this candidate looks while working (the engine's learned working region), carried from one monitoring
+   * period to the next in this page — pause / resume keeps it; the engine resets it when the camera changes.
+   * Memory only: never stored or sent.
+   */
+  private attentionState: AttentionState | null = null;
   private transitioning = false;
   private answersRefusedAfterEnd = 0;
   private answersUnsentAtEnd = 0;
@@ -506,6 +515,7 @@ export class CandidateController {
         instanceId: this.instanceId,
         baseline: this.currentBaseline(),
         previousBaseline: this.previousBaseline,
+        attentionState: this.attentionState,
         trace: this.trace,
         onSignal: (sig) => {
           if (sig.kind === 'candidate_prompt') {
@@ -559,8 +569,14 @@ export class CandidateController {
     const rt = this.runtime;
     this.runtime = null;
     this.pendingServerSample = null;
-    if (rt) await rt.stop(reason, { stopCamera: opts.stopCamera });
-    else if (opts.stopCamera) this.camera.stop();
+    if (rt) {
+      await rt.stop(reason, { stopCamera: opts.stopCamera });
+      try {
+        this.attentionState = rt.attentionState();
+      } catch (e) {
+        console.warn('[controller] could not keep the attention state', e);
+      }
+    } else if (opts.stopCamera) this.camera.stop();
     this.patch({ monitoringActive: false, prompts: [] });
     if (opts.flush && this.outbox) await this.outbox.flushNow(FLUSH_BEFORE_TRANSITION_MS);
   }
@@ -647,7 +663,7 @@ export class CandidateController {
         outboxOldestAt: stats?.oldestAt ?? null,
         currentQuestionIndex: this.currentQuestionIndex,
         visibility: document.visibilityState === 'hidden' ? 'hidden' : 'visible',
-        fullscreen: !!document.fullscreenElement,
+        fullscreen: isFullscreen(),
       });
       this.patch({ heartbeatFailingSince: null });
       await this.onHeartbeat(data, timing);
@@ -741,6 +757,11 @@ export class CandidateController {
     return this.countdown.remaining(this.clock.now());
   }
 
+  /** Best estimate of the server's clock now (scheduling windows are server instants). */
+  serverNow(): number {
+    return this.clock.now();
+  }
+
   private checkTimeUp(): boolean {
     const s = this.snap.state;
     if (!s || s.session.status !== 'active' || !this.countdown.running) return false;
@@ -776,9 +797,23 @@ export class CandidateController {
     await this.applyState(next);
   }
 
-  async startExam(): Promise<void> {
-    const { data, timing } = await this.api.start();
-    await this.applyState(data, timing);
+  /**
+   * Start the exam. A server at capacity defers the start (503 start_deferred + Retry-After; the exam clock has not
+   * started): wait as long as it asks, plus a random spread so candidates deferred together do not return together,
+   * and try again. `onDeferred` lets the screen say so. Any other failure is thrown as before.
+   */
+  async startExam(onDeferred?: () => void): Promise<void> {
+    for (;;) {
+      try {
+        const { data, timing } = await this.api.start();
+        await this.applyState(data, timing);
+        return;
+      } catch (e) {
+        if (!(e instanceof CandidateApiError) || e.code !== 'start_deferred') throw e;
+        onDeferred?.();
+        await new Promise((res) => setTimeout(res, busyRetryDelayMs(e, 5_000)));
+      }
+    }
   }
 
   /**
@@ -836,6 +871,32 @@ export class CandidateController {
       const { data, timing } = await this.api.submit();
       await this.stopMonitoring('submit', { flush: true, stopCamera: true });
       await this.applyState(data, timing);
+    } finally {
+      this.transitioning = false;
+    }
+  }
+
+  /**
+   * Withdraw consent (from the privacy notice): answers typed so far are delivered first (they are kept), then the
+   * server ends the exam and deletes its face images. Monitoring and the camera stop, and images still queued on
+   * this device are deleted without being sent. Throws with a candidate-facing message on failure.
+   */
+  async withdrawConsent(reason?: string): Promise<void> {
+    if (this.transitioning) return;
+    this.transitioning = true;
+    try {
+      await this.answers?.flushPending();
+      await this.outbox?.flushNow(ANSWER_FLUSH_BEFORE_SUBMIT_MS, 'answers');
+      let next: CandidateSessionState;
+      try {
+        next = await this.api.withdrawConsent({ confirm: true, reason: reason?.trim() || undefined });
+      } catch (e) {
+        if (e instanceof CandidateApiError && e.status === 0) throw new Error('Your request could not reach the server. Check your connection and try again; your exam continues until it does.');
+        throw e;
+      }
+      await this.stopMonitoring('consent_withdrawn', { flush: false, stopCamera: true });
+      await this.outbox?.discardImages();
+      await this.applyState(next);
     } finally {
       this.transitioning = false;
     }

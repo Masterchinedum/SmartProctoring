@@ -1,4 +1,4 @@
-import type { DashboardDTO, HoldDTO, LiveEventDTO, PauseRequestDTO, SessionSummaryDTO } from '@sp/shared';
+import { isFlagCategory, type DashboardDTO, type HoldDTO, type LiveEventDTO, type PauseRequestDTO, type ReviewDueDTO, type SessionSummaryDTO } from '@sp/shared';
 
 /** A session summary plus the client time it was received (for local countdowns). */
 export type LiveSession = SessionSummaryDTO & { receivedAt: number };
@@ -17,7 +17,7 @@ export function toDashboardState(dto: DashboardDTO, receivedAt: number): Dashboa
   return {
     serverTime: dto.serverTime,
     sessions: dto.sessions.map((s) => ({ ...s, receivedAt })),
-    recentEvents: dto.recentEvents.filter((e) => e.category !== 'neutral'),
+    recentEvents: dto.recentEvents.filter((e) => isFlagCategory(e.category)),
     pending: dto.pending,
   };
 }
@@ -31,13 +31,13 @@ export function upsertSession<T extends SessionSummaryDTO>(list: T[], s: T): T[]
 }
 
 /**
- * Apply a live event to the flags feed. Neutral events never enter the feed. A new event is
+ * Apply a live event to the flags feed. Session changes and policy exceptions never enter the feed. A new event is
  * prepended (arrival order, so late-delivered events surface at the top); an update replaces the
  * existing entry in place so cards don't jump around.
  */
 export function applyFeedEvent(feed: LiveEventDTO[], ev: LiveEventDTO, limit = FEED_LIMIT): { feed: LiveEventDTO[]; isNew: boolean } {
   const i = feed.findIndex((e) => e.id === ev.id);
-  if (ev.category === 'neutral') {
+  if (!isFlagCategory(ev.category)) {
     return { feed: i === -1 ? feed : feed.filter((e) => e.id !== ev.id), isNew: false };
   }
   if (i !== -1) {
@@ -103,6 +103,8 @@ export interface AttentionHold {
   candidateName: string;
   examTitle: string;
   hold: HoldDTO;
+  /** The review target for deciding the hold (from the session summary). */
+  due?: ReviewDueDTO | null;
 }
 
 /**
@@ -117,7 +119,7 @@ export function needsAttention(state: Pick<DashboardState, 'sessions' | 'pending
     if (s.pendingPauseRequest && s.pendingPauseRequest.status === 'pending') {
       pauses.push({ sessionId: s.id, candidateName: s.candidate.name, examTitle: s.exam.title, request: s.pendingPauseRequest });
     }
-    if (s.status === 'on_hold' && s.hold) holds.push({ sessionId: s.id, candidateName: s.candidate.name, examTitle: s.exam.title, hold: s.hold });
+    if (s.status === 'on_hold' && s.hold) holds.push({ sessionId: s.id, candidateName: s.candidate.name, examTitle: s.exam.title, hold: s.hold, due: s.review?.due?.kind === 'hold' ? s.review.due : null });
   }
   for (const p of state.pending.pauseRequests) if (!known.has(p.sessionId) && p.request.status === 'pending') pauses.push(p);
   for (const h of state.pending.holds) if (!known.has(h.sessionId)) holds.push(h);

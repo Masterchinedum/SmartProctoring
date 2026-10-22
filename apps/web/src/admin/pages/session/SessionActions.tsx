@@ -1,15 +1,19 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { SessionDetailDTO, SessionSummaryDTO } from '@sp/shared';
+import { STAFF_VERIFICATION_METHOD_LABEL, STAFF_VERIFICATION_METHODS, type SessionDetailDTO, type SessionSummaryDTO, type StaffVerificationMethod } from '@sp/shared';
 import { api, errorMessage } from '../../api/client';
 import { afterSessionAction } from '../../api/queries';
 import { useAuth } from '../../auth';
 import { CopyButton } from '../../components/Common';
 import { ConfirmDialog, Modal } from '../../components/Modal';
 import { Clock, RelativeTime } from '../../components/Time';
+import { WindowFields } from '../../components/WindowFields';
+import { END_REASON_LABELS } from '../../lib/labels';
+import { formatDuration } from '../../lib/format';
+import { parseReopenMinutes, parseWindowForm, toLocalInput, type WindowFormValues } from '../../lib/scheduling';
 
-type Dialog = null | 'hold' | 'release' | 'terminate' | 'submit' | 'extend' | 'regenerate' | 'legal';
+type Dialog = null | 'hold' | 'release' | 'terminate' | 'submit' | 'extend' | 'regenerate' | 'legal' | 'reschedule' | 'reopen';
 
 /** Staff actions for a session, filtered by role and session state. */
 export function SessionActions({ d }: { d: SessionDetailDTO }) {
@@ -41,13 +45,15 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
 
   const canHold = s.status === 'active' || s.status === 'paused' || s.status === 'ready' || s.status === 'invited';
   const canSubmit = s.status === 'active' || s.status === 'paused' || s.status === 'on_hold';
+  // The window can change until the exam starts (services/scheduling.ts); an ended exam may be reopened (services/recovery.ts).
+  const canReschedule = !terminal && s.startedAt == null;
 
   return (
     <div className="actions-bar no-print">
       <div className="row">
         {s.status === 'on_hold' ? (
           <button type="button" className={s.hold?.canReverify ? 'btn' : 'btn btn-primary'} onClick={() => setDialog('release')}>
-            {s.hold?.canReverify ? 'Change release…' : 'Release hold…'}
+            {s.hold?.reason === 'staff_verification' ? 'Verify identity…' : s.hold?.canReverify ? 'Change release…' : 'Release hold…'}
           </button>
         ) : null}
         {canHold ? (
@@ -63,6 +69,16 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
         {isAdmin && canSubmit ? (
           <button type="button" className="btn" onClick={() => setDialog('submit')}>
             Submit on behalf…
+          </button>
+        ) : null}
+        {isAdmin && canReschedule ? (
+          <button type="button" className="btn" onClick={() => setDialog('reschedule')}>
+            Reschedule…
+          </button>
+        ) : null}
+        {isAdmin && terminal ? (
+          <button type="button" className="btn" onClick={() => setDialog('reopen')}>
+            Reopen for recovery…
           </button>
         ) : null}
         {isAdmin && !terminal ? (
@@ -116,6 +132,8 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
       ) : null}
       {dialog === 'release' ? <ReleaseDialog d={d} onDone={done} onCancel={() => setDialog(null)} /> : null}
       {dialog === 'extend' ? <ExtendDialog sessionId={s.id} onDone={done} onCancel={() => setDialog(null)} /> : null}
+      {dialog === 'reschedule' ? <RescheduleDialog d={d} onDone={done} onCancel={() => setDialog(null)} /> : null}
+      {dialog === 'reopen' ? <ReopenDialog d={d} onDone={done} onCancel={() => setDialog(null)} /> : null}
       {dialog === 'terminate' ? (
         <ConfirmDialog
           title="Terminate this exam?"
@@ -171,10 +189,73 @@ export function SessionActions({ d }: { d: SessionDetailDTO }) {
 }
 
 function ReleaseDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
+  if (d.summary.hold?.reason === 'staff_verification') return <VerifyIdentityDialog d={d} onDone={onDone} onCancel={onCancel} />;
+  return <ReleaseHoldDialog d={d} onDone={onDone} onCancel={onCancel} />;
+}
+
+/**
+ * Identity verified by staff (an accommodation): the staff member confirms they verified the candidate and how. That
+ * releases the hold without a further check; it is recorded on the timeline, in the report and the audit log.
+ */
+function VerifyIdentityDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
+  const [method, setMethod] = useState<StaffVerificationMethod | ''>('');
+  const [note, setNote] = useState('');
+  const [confirmed, setConfirmed] = useState(false);
+  const m = useMutation({
+    mutationFn: () => api.release(d.summary.id, { requireCheck: false, reEnroll: false, verification: { method: method as StaffVerificationMethod, note: note.trim() || undefined } }),
+    onSuccess: onDone,
+  });
+  const started = d.summary.startedAt != null;
+  return (
+    <Modal
+      title="Verify the candidate’s identity"
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn" onClick={onCancel} disabled={m.isPending}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-primary" data-testid="verify-identity" onClick={() => m.mutate()} disabled={!method || !confirmed || m.isPending}>
+            {m.isPending ? 'Saving…' : started ? 'Verified — continue the exam' : 'Verified — candidate may start'}
+          </button>
+        </>
+      }
+    >
+      <div className="stack">
+        <p className="small">
+          {d.summary.candidate.name}’s identity is verified by staff instead of the automated face check (an approved accommodation). Verify them by your organisation’s procedure —
+          for example a video call where they show photo ID — then record how.
+        </p>
+        <label>
+          How did you verify their identity?
+          <select value={method} onChange={(e) => setMethod(e.target.value as StaffVerificationMethod)}>
+            <option value="">Choose…</option>
+            {STAFF_VERIFICATION_METHODS.map((x) => (
+              <option key={x} value={x}>
+                {STAFF_VERIFICATION_METHOD_LABEL[x]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Note (optional; recorded in the timeline)
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} rows={2} placeholder="e.g. Student card shown on camera, name and photo match." />
+        </label>
+        <label className="inline">
+          <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />I confirm that I verified this person is {d.summary.candidate.name}.
+        </label>
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+      </div>
+    </Modal>
+  );
+}
+
+function ReleaseHoldDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
   const [note, setNote] = useState('');
   const [requireCheck, setRequireCheck] = useState(true);
   const [reEnroll, setReEnroll] = useState(false);
-  const m = useMutation({ mutationFn: () => api.release(d.summary.id, { note, requireCheck: requireCheck || reEnroll, reEnroll }), onSuccess: onDone });
+  const staffVerified = d.policy.identity.verification === 'staff';
+  const m = useMutation({ mutationFn: () => api.release(d.summary.id, { note, requireCheck: requireCheck || reEnroll, reEnroll: !staffVerified && reEnroll }), onSuccess: onDone });
   const reason = d.summary.hold?.reason;
   return (
     <Modal
@@ -206,10 +287,12 @@ function ReleaseDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (
           <input type="checkbox" checked={requireCheck || reEnroll} disabled={reEnroll} onChange={(e) => setRequireCheck(e.target.checked)} />
           Require a fresh identity check before the candidate continues (recommended)
         </label>
-        <label className="inline">
-          <input type="checkbox" checked={reEnroll} onChange={(e) => setReEnroll(e.target.checked)} />
-          Authorise re-enrolment of the identity reference
-        </label>
+        {staffVerified ? null : (
+          <label className="inline">
+            <input type="checkbox" checked={reEnroll} onChange={(e) => setReEnroll(e.target.checked)} />
+            Authorise re-enrolment of the identity reference
+          </label>
+        )}
         {reEnroll ? (
           <div className="banner banner-warning small">
             <strong>Only use this if you have confirmed by other means that the person now present is the registered candidate</strong> (for example a video call with photo ID).
@@ -267,6 +350,133 @@ function ExtendDialog({ sessionId, onDone, onCancel }: { sessionId: string; onDo
           Reason (e.g. accommodation, technical problem)
           <textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} rows={2} />
         </label>
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/** Set, change or clear the window in which the candidate can start the exam (before it starts). */
+function RescheduleDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
+  const w = d.summary.window ?? null;
+  const [form, setForm] = useState<WindowFormValues>({ opens: toLocalInput(w?.startsAt), closes: toLocalInput(w?.endsAt) });
+  const [note, setNote] = useState('');
+  const parsed = parseWindowForm(form, Date.now());
+  const m = useMutation({ mutationFn: () => api.reschedule(d.summary.id, parsed.ok ? parsed.window : null, note.trim()), onSuccess: onDone });
+  return (
+    <Modal
+      title="Reschedule the exam"
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn" onClick={onCancel} disabled={m.isPending}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-primary" onClick={() => m.mutate()} disabled={!parsed.ok || m.isPending}>
+            {m.isPending ? 'Saving…' : parsed.ok && !parsed.window ? 'Remove the window' : 'Save window'}
+          </button>
+        </>
+      }
+    >
+      <div className="stack">
+        <p className="small">
+          {d.summary.candidate.name} can start the exam only inside this window. The access link stays the same; tell the candidate about the new time. The change is recorded
+          in the timeline and the audit log.
+        </p>
+        <WindowFields idPrefix="reschedule-window" legend="When the candidate can start" value={form} onChange={setForm} error={parsed.ok ? null : { field: parsed.field, message: parsed.error }} />
+        <label>
+          Note (optional; recorded in the timeline)
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} rows={2} placeholder="e.g. Moved after the candidate reported illness." />
+        </label>
+        {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Reopen an ended exam for recovery. The server decides whether it may (SessionDetailDTO.reopen, shared
+ * reopenEligibility): when it may not, the dialog says why and offers nothing else.
+ */
+function ReopenDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDone: (s: SessionSummaryDTO) => void; onCancel: () => void }) {
+  const e = d.reopen;
+  const [reason, setReason] = useState('');
+  const [minutes, setMinutes] = useState(e && e.started && e.remainingMs < 60_000 ? '10' : '0');
+  const mins = parseReopenMinutes(minutes, e?.remainingMs ?? 0, e?.started ?? true);
+  const reasonOk = reason.trim().length >= 5;
+  const m = useMutation({ mutationFn: () => api.reopen(d.summary.id, reason.trim(), mins.ok ? mins.minutes : 0), onSuccess: onDone });
+  const allowed = e?.allowed === true;
+  const endedHow = d.summary.endReason ? END_REASON_LABELS[d.summary.endReason] : 'Ended';
+  return (
+    <Modal
+      title="Reopen the exam for recovery"
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn" onClick={onCancel} disabled={m.isPending}>
+            {allowed ? 'Cancel' : 'Close'}
+          </button>
+          {allowed ? (
+            <button type="button" className="btn btn-primary" data-testid="confirm-reopen" onClick={() => m.mutate()} disabled={!reasonOk || !mins.ok || m.isPending}>
+              {m.isPending ? 'Reopening…' : 'Reopen exam'}
+            </button>
+          ) : null}
+        </>
+      }
+    >
+      <div className="stack">
+        <p className="small">
+          How it ended: <strong>{endedHow}</strong>.
+          {e?.started ? <> Exam time left: {formatDuration(e.remainingMs)}.</> : null}
+        </p>
+        {!e ? (
+          <div className="banner banner-info small">The server did not say whether this exam can be reopened. Reload the page and try again.</div>
+        ) : !allowed ? (
+          <div className="banner banner-warning small" data-testid="reopen-refused">
+            {e.message}
+          </div>
+        ) : (
+          <>
+            <div className="banner banner-info small">
+              {e.message} Ask the candidate to open their exam link again (or reload the exam page). The reopening is recorded in the timeline, the report and the audit log,
+              and integrations are notified.
+            </div>
+            <label htmlFor="reopen-reason">
+              Reason (required; recorded in the timeline and the audit log, not sent to integrations)
+              <textarea
+                id="reopen-reason"
+                value={reason}
+                onChange={(ev) => setReason(ev.target.value)}
+                maxLength={1000}
+                rows={3}
+                placeholder="e.g. Power cut at the test centre; the candidate continues from where they stopped."
+                aria-describedby="reopen-reason-hint"
+              />
+            </label>
+            <div className="muted small" id="reopen-reason-hint">
+              At least 5 characters. Describe what happened factually.
+            </div>
+            <label htmlFor="reopen-minutes">
+              Minutes to add to the exam time
+              <input
+                id="reopen-minutes"
+                type="number"
+                min={0}
+                max={1440}
+                step={1}
+                value={minutes}
+                onChange={(ev) => setMinutes(ev.target.value)}
+                aria-invalid={!mins.ok}
+                aria-describedby={!mins.ok ? 'reopen-minutes-error' : undefined}
+              />
+            </label>
+            {!mins.ok ? (
+              <div className="text-danger small" id="reopen-minutes-error">
+                {mins.error}
+              </div>
+            ) : null}
+          </>
+        )}
         {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
       </div>
     </Modal>

@@ -9,7 +9,12 @@
  * appeared"), never a conclusion ("the candidate cheated").
  */
 
-export const EVENT_CATEGORIES = ['integrity', 'uncertain', 'neutral', 'technical'] as const;
+/**
+ * integrity: a potential integrity issue; uncertain: an observation the system could not assess reliably;
+ * technical: a technical problem; neutral: a session change; exception: the exam ran under different rules for
+ * this candidate (an approved accommodation / policy exception) — context for reviewers, never a flag.
+ */
+export const EVENT_CATEGORIES = ['integrity', 'uncertain', 'technical', 'neutral', 'exception'] as const;
 export type EventCategory = (typeof EVENT_CATEGORIES)[number];
 
 export const SEVERITIES = ['info', 'low', 'medium', 'high'] as const;
@@ -75,6 +80,13 @@ export const EVENT_TYPES = [
   'session_expired',
   'session_terminated',
   'time_extended',
+  'score_regraded',
+  'accommodations_applied',
+  'identity_verified_by_staff',
+  'review_completed',
+  'review_reopened',
+  'session_rescheduled',
+  'session_reopened',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -387,6 +399,69 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
   session_expired: { category: 'neutral', severity: 'info', title: 'Time expired', observation: 'The exam time ran out and answers were submitted automatically.', reviewerNote: '', sources: ['server_system'], span: false },
   session_terminated: { category: 'neutral', severity: 'info', title: 'Exam terminated', observation: 'The exam was terminated by an administrator.', reviewerNote: '', sources: ['staff'], span: false },
   time_extended: { category: 'neutral', severity: 'info', title: 'Time extended', observation: 'An administrator extended the exam time.', reviewerNote: 'Details include the added minutes and the reason.', sources: ['staff'], span: false },
+  score_regraded: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Score regraded',
+    observation: 'An administrator regraded the exam with corrected answer keys.',
+    reviewerNote: 'Details include the exam version whose answer keys were used, the score before and after, and the reason.',
+    sources: ['staff'],
+    span: false,
+  },
+  accommodations_applied: {
+    category: 'exception',
+    severity: 'info',
+    title: 'Accommodations applied',
+    observation: 'Approved accommodations were applied to this exam.',
+    reviewerNote: 'Details list each accommodation and every exam rule it changed. Observations an accommodation turned off are absent by design, not because nothing happened.',
+    sources: ['server_system'],
+    span: false,
+  },
+  identity_verified_by_staff: {
+    category: 'exception',
+    severity: 'info',
+    title: 'Identity verified by staff',
+    observation: 'A staff member verified the candidate’s identity.',
+    reviewerNote: 'Recorded when identity is verified by staff instead of the automated face check (an accommodation). Details include how it was verified and by whom.',
+    sources: ['staff'],
+    span: false,
+  },
+  review_completed: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Review completed',
+    observation: 'Staff completed the review of this exam.',
+    reviewerNote: 'Details include the outcome. The outcome is a staff decision, not an automated one.',
+    sources: ['staff'],
+    span: false,
+  },
+  review_reopened: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Review reopened',
+    observation: 'Staff reopened the review of this exam.',
+    reviewerNote: 'Details include the previous outcome and why it was reopened.',
+    sources: ['staff'],
+    span: false,
+  },
+  session_rescheduled: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Exam rescheduled',
+    observation: 'The window in which the candidate can start the exam was changed.',
+    reviewerNote: 'Details include the previous and the new window. Rescheduling is possible only before the exam starts.',
+    sources: ['staff'],
+    span: false,
+  },
+  session_reopened: {
+    category: 'neutral',
+    severity: 'info',
+    title: 'Exam reopened for recovery',
+    observation: 'An administrator reopened the exam after it had ended, so the candidate can continue.',
+    reviewerNote: 'Details include how the exam had ended, the reason given, any minutes added and the score before reopening. The candidate continues only after a fresh identity check.',
+    sources: ['staff'],
+    span: false,
+  },
 };
 
 /** Event types a candidate client is allowed to report. Everything else is server-authored. */
@@ -403,7 +478,12 @@ export const CATEGORY_LABELS: Record<EventCategory, string> = {
   uncertain: 'Uncertain observation',
   neutral: 'Session change',
   technical: 'Technical problem',
+  exception: 'Policy exception',
 };
+
+/** Categories that are flags for review (the others are context: session changes and policy exceptions). */
+export const FLAG_CATEGORIES: readonly EventCategory[] = ['integrity', 'uncertain', 'technical'];
+export const isFlagCategory = (c: EventCategory): boolean => FLAG_CATEGORIES.includes(c);
 
 export const SEVERITY_RANK: Record<Severity, number> = { info: 0, low: 1, medium: 2, high: 3 };
 

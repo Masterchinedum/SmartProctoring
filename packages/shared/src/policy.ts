@@ -6,25 +6,97 @@ import { z } from 'zod';
  * (nothing in it is secret) so detectors can use the same thresholds.
  */
 
-export const identityPolicySchema = z.object({
-  /** Active liveness challenge (random head-turn sequence verified server-side) at check-in and resume. */
-  liveness: z.enum(['active', 'off']).default('active'),
-  /** Number of randomized liveness actions. */
-  livenessSteps: z.number().int().min(2).max(4).default(2),
-  /** Compare live candidate to the candidate's approved ID photo (if one exists). */
-  idPhotoComparison: z.enum(['off', 'advisory', 'required']).default('advisory'),
-  /** Seconds between routine identity samples while the exam is active (after the start-up window). */
-  periodicCheckIntervalSec: z.number().int().min(5).max(600).default(15),
-  /** Faster sampling right after the exam starts / resumes (swaps are most likely then). */
-  startupIntervalSec: z.number().int().min(3).max(120).default(6),
-  startupWindowSec: z.number().int().min(0).max(1800).default(180),
-  /** Frames per identity sample (captured within ~0.6 s and decided together). */
-  burstSize: z.number().int().min(1).max(5).default(3),
-  /** What happens when there is strong evidence of a different person. */
-  onMismatch: z.enum(['hold_for_review', 'flag_only']).default('hold_for_review'),
-  /** Failed "unable to verify" attempts during a check before routing to human review. */
-  maxVerificationAttempts: z.number().int().min(1).max(20).default(5),
+export const identityPolicySchema = z
+  .object({
+    /**
+     * Who establishes the candidate's identity. 'automatic' (default): the camera check-in builds a protected face
+     * reference and later checks and samples compare against it. 'staff': a staff member verifies the candidate (video
+     * call, ID shown, in person) before the exam can start — the check-in confirms the camera only, no face reference
+     * is built and no automated identity comparisons are made. Usually an accommodation for one candidate (for example
+     * a face covering or a facial difference); forced on when the camera is not used.
+     */
+    verification: z.enum(['automatic', 'staff']).default('automatic'),
+    /** 'staff' verification: also after pauses and reconnections (a staff member confirms before the exam continues). */
+    staffReverifyOnContinue: z.boolean().default(false),
+    /** Active liveness challenge (random head-turn sequence verified server-side) at check-in and resume. */
+    liveness: z.enum(['active', 'off']).default('active'),
+    /** Number of randomized liveness actions. */
+    livenessSteps: z.number().int().min(2).max(4).default(2),
+    /** Compare live candidate to the candidate's approved ID photo (if one exists). */
+    idPhotoComparison: z.enum(['off', 'advisory', 'required']).default('advisory'),
+    /** Seconds between routine identity samples while the exam is active (after the start-up window). */
+    periodicCheckIntervalSec: z.number().int().min(5).max(600).default(15),
+    /** Faster sampling right after the exam starts / resumes (swaps are most likely then). */
+    startupIntervalSec: z.number().int().min(3).max(120).default(6),
+    startupWindowSec: z.number().int().min(0).max(1800).default(180),
+    /**
+     * Frames per TRIGGERED identity sample (captured within ~0.6 s and decided together): exam start / resume, face
+     * track break, appearance change, face return, camera reconnect, after multiple people / obstruction, follow-ups
+     * and every server request (a faster look, the watchdog).
+     */
+    burstSize: z.number().int().min(1).max(5).default(3),
+    /** Frames per ROUTINE (periodic) identity sample. Default: burstSize (3). */
+    routineBurstSize: z.number().int().min(1).max(5).optional(),
+    /**
+     * The "Sampling intensity" preset (SAMPLING_PROFILES) the admin UI fills the sampling fields from. A label only: the
+     * numeric fields remain the source of truth, and the label is re-derived from them when the policy is resolved
+     * ('custom' when they match no preset).
+     */
+    samplingProfile: z.enum(['maximum', 'balanced', 'custom']).default('maximum'),
+    /** What happens when there is strong evidence of a different person. */
+    onMismatch: z.enum(['hold_for_review', 'flag_only']).default('hold_for_review'),
+    /** Failed "unable to verify" attempts during a check before routing to human review. */
+    maxVerificationAttempts: z.number().int().min(1).max(20).default(5),
+  })
+  // routineBurstSize follows burstSize unless set (an older policy with burstSize 1 keeps one-frame routine samples);
+  // the profile label always describes the numbers.
+  .transform((p) => {
+    const routineBurstSize: number = p.routineBurstSize ?? p.burstSize;
+    const samplingProfile: SamplingProfile = samplingProfileOf({ ...p, routineBurstSize });
+    return { ...p, routineBurstSize, samplingProfile };
+  });
+
+/** The identity-sampling fields a sampling preset sets. */
+export interface SamplingValues {
+  burstSize: number;
+  routineBurstSize: number;
+  startupIntervalSec: number;
+  startupWindowSec: number;
+  periodicCheckIntervalSec: number;
+}
+export type SamplingField = keyof SamplingValues;
+export const SAMPLING_FIELDS: readonly SamplingField[] = ['burstSize', 'routineBurstSize', 'startupIntervalSec', 'startupWindowSec', 'periodicCheckIntervalSec'];
+export type SamplingProfile = 'maximum' | 'balanced' | 'custom';
+
+/**
+ * "Sampling intensity" presets (Exams → Policy). Face analysis on the server scales with frames per second per
+ * candidate (docs/PERFORMANCE.md §6–7):
+ *  - maximum (default): 3-frame samples every 6 s for 3 min after a (re)start, then every 15 s — 0.5 then 0.2 frames/s;
+ *  - balanced: 2-frame routine samples every 12 s, then every 30 s — 0.17 then 0.07 frames/s: measured ~2x the
+ *    candidates per server at a synchronised start (check-ins are unchanged) and ~2.5x in steady state (§7.7).
+ *    Swap detection relies more on the samples taken at once when the face changes (track break, face return, ...),
+ *    which keep 3 frames, as do server requests and the exam-start sample.
+ */
+export const SAMPLING_PROFILES: Readonly<Record<Exclude<SamplingProfile, 'custom'>, Readonly<SamplingValues>>> = Object.freeze({
+  maximum: Object.freeze({ burstSize: 3, routineBurstSize: 3, startupIntervalSec: 6, startupWindowSec: 180, periodicCheckIntervalSec: 15 }),
+  balanced: Object.freeze({ burstSize: 3, routineBurstSize: 2, startupIntervalSec: 12, startupWindowSec: 180, periodicCheckIntervalSec: 30 }),
 });
+
+/** The preset whose sampling fields these are, else 'custom'. */
+export function samplingProfileOf(identity: Readonly<SamplingValues>): SamplingProfile {
+  for (const [name, preset] of Object.entries(SAMPLING_PROFILES) as [Exclude<SamplingProfile, 'custom'>, SamplingValues][]) {
+    if (SAMPLING_FIELDS.every((f) => identity[f] === preset[f])) return name;
+  }
+  return 'custom';
+}
+
+/** Identity-sample triggers that are ROUTINE (policy.identity.routineBurstSize); every other trigger is triggered (burstSize). */
+export const ROUTINE_SAMPLE_TRIGGERS: readonly string[] = ['periodic'];
+
+/** Frames per identity sample for a trigger: routineBurstSize for routine samples, burstSize for triggered ones. */
+export function burstSizeFor(trigger: string, identity: { burstSize: number; routineBurstSize?: number | null }): number {
+  return ROUTINE_SAMPLE_TRIGGERS.includes(trigger) ? (identity.routineBurstSize ?? identity.burstSize) : identity.burstSize;
+}
 
 export const pausePolicySchema = z.object({
   allowed: z.boolean().default(true),
@@ -43,6 +115,25 @@ export const connectionPolicySchema = z.object({
   disconnectTimerBehavior: z.enum(['continue', 'stop']).default('continue'),
   /** Seconds without heartbeat before the session is shown as disconnected. */
   heartbeatTimeoutSec: z.number().int().min(10).max(300).default(20),
+});
+
+/**
+ * Resume policy: how often and how long an exam in progress may be interrupted WITHOUT a formal pause before staff
+ * have to decide (formal pauses follow pausePolicySchema). The defaults (no limits) keep the behaviour from before.
+ *  - maxReconnects: times the exam may be reopened in a new browser window during the exam (a reload, a crash, another
+ *    device: each needs a reconnect check). Checked when the next reconnect check starts; counted when one passes.
+ *    Reloading before the exam starts does not count. null = unlimited; 0 = none allowed.
+ *  - maxOfflineMinutes: how long the candidate's browser may be disconnected during the exam (no heartbeat), measured
+ *    from the last heartbeat (or from when the exam last continued). Enforced by the sweeper and when the candidate
+ *    returns. Paused or held exams are not counted. null = unlimited.
+ *  - onLimit: 'hold' (default, the less harsh choice) puts the exam on hold for staff review (hold reason
+ *    'resume_limit'; releasing it gives the allowance again); 'end' ends it and submits the saved answers (end reason
+ *    'resume_limit'). Either way staff can let the candidate continue (release, or reopen for recovery).
+ */
+export const resumePolicySchema = z.object({
+  maxReconnects: z.number().int().min(0).max(100).nullable().default(null),
+  maxOfflineMinutes: z.number().int().min(1).max(1440).nullable().default(null),
+  onLimit: z.enum(['hold', 'end']).default('hold'),
 });
 
 export const browserPolicySchema = z.object({
@@ -70,12 +161,33 @@ export const detectionPolicySchema = z.object({
   absenceSec: z.number().min(2).default(8),
   /** Additional face/person must persist this long (brief, but more than a single frame). */
   multiplePeopleSec: z.number().min(0.3).default(1.0),
-  /** Head/gaze away (relative to baseline) for this long => looking_away. */
+  /**
+   * Head/gaze away for this long => looking_away. Angles below are measured from the middle of the candidate's
+   * screen: their learned working region (attentionReference 'learned'), else the calibration baseline.
+   */
   lookAwaySec: z.number().min(1).default(5),
-  /** Yaw offset from baseline (degrees) that counts as "away". */
+  /** Sideways offset (degrees) that counts as "away". */
   lookAwayYawDeg: z.number().min(10).max(80).default(28),
-  /** Downward pitch offset from baseline (degrees) that counts as "looking down". */
+  /** Downward offset (degrees) that counts as "looking down" (the keyboard while typing is excused). */
   lookDownPitchDeg: z.number().min(8).max(60).default(20),
+  /**
+   * Upward offset (degrees) that counts as "looking up". Looking up to think is normal, so this is well above
+   * the down threshold (before 2026-09: always lookDownPitchDeg + 5).
+   */
+  lookUpPitchDeg: z.number().min(10).max(80).default(35),
+  /**
+   * Looking up (only) must last this long to be a sustained look-away: thinking look-ups last 2–8 s, and a stretch
+   * followed by a thinking look-up ~14 s.
+   */
+  lookUpSec: z.number().min(1).default(15),
+  /**
+   * Where "away" is measured from. 'learned' (default): the candidate's own working region, learned during the
+   * exam from where they look while using the mouse / keyboard (the calibration is the starting point).
+   * 'calibration': the calibration baseline only (the behaviour before 2026-09).
+   */
+  attentionReference: z.enum(['learned', 'calibration']).default('learned'),
+  /** Looking down at the keyboard is not "away" while the candidate typed within this long (0 = off). */
+  typingExcuseSec: z.number().min(0).max(10).default(3),
   /** A glance shorter than this is ignored entirely. */
   glanceMinSec: z.number().min(0.3).default(1.2),
   /** Number of qualifying glances within the window => repeated_looking_away. */
@@ -113,27 +225,58 @@ export const evidencePolicySchema = z.object({
   keepMatchingIdentitySamples: z.boolean().default(false),
 });
 
+export const cameraPolicySchema = z.object({
+  /**
+   * false: the exam runs without a camera (usually an accommodation for one candidate): no camera check, no camera
+   * monitoring and no images; identity is verified by staff. Browser rules (fullscreen, tab switches…) still apply.
+   */
+  enabled: z.boolean().default(true),
+});
+
 export const retentionPolicySchema = z.object({
   /** Days after the session ends before screenshots and identity references are deleted. null = use org default. */
   evidenceDays: z.number().int().min(1).max(3650).nullable().default(null),
 });
 
-export const proctoringPolicySchema = z.object({
-  identity: identityPolicySchema.default({}),
-  pause: pausePolicySchema.default({}),
-  connection: connectionPolicySchema.default({}),
-  browser: browserPolicySchema.default({}),
-  detection: detectionPolicySchema.default({}),
-  evidence: evidencePolicySchema.default({}),
-  retention: retentionPolicySchema.default({}),
-});
+export const proctoringPolicySchema = z
+  .object({
+    identity: identityPolicySchema.default({}),
+    camera: cameraPolicySchema.default({}),
+    pause: pausePolicySchema.default({}),
+    connection: connectionPolicySchema.default({}),
+    resume: resumePolicySchema.default({}),
+    browser: browserPolicySchema.default({}),
+    detection: detectionPolicySchema.default({}),
+    evidence: evidencePolicySchema.default({}),
+    retention: retentionPolicySchema.default({}),
+  })
+  .transform(enforceModes);
+
+/**
+ * Settings that cannot apply in a mode are switched off, so every reader of a resolved policy (server, candidate
+ * client, reports) sees one consistent picture: without a camera nothing camera-based runs and identity is verified
+ * by staff; with staff verification no automated face check (live-person, ID photo) runs.
+ */
+function enforceModes<P extends { identity: { verification: 'automatic' | 'staff'; liveness: 'active' | 'off'; idPhotoComparison: 'off' | 'advisory' | 'required' }; camera: { enabled: boolean }; detection: { enabled: Record<string, boolean> }; evidence: { screenshots: boolean; keepMatchingIdentitySamples: boolean } }>(p: P): P {
+  if (p.camera.enabled && p.identity.verification === 'automatic') return p;
+  const identity = { ...p.identity, verification: 'staff' as const, liveness: 'off' as const, idPhotoComparison: 'off' as const };
+  if (p.camera.enabled) return { ...p, identity };
+  return {
+    ...p,
+    identity,
+    detection: { ...p.detection, enabled: Object.fromEntries(Object.keys(p.detection.enabled).map((k) => [k, false])) },
+    evidence: { ...p.evidence, screenshots: false, keepMatchingIdentitySamples: false },
+  };
+}
 
 export type IdentityPolicy = z.infer<typeof identityPolicySchema>;
 export type PausePolicy = z.infer<typeof pausePolicySchema>;
 export type ConnectionPolicy = z.infer<typeof connectionPolicySchema>;
+export type ResumePolicy = z.infer<typeof resumePolicySchema>;
 export type BrowserPolicy = z.infer<typeof browserPolicySchema>;
 export type DetectionPolicy = z.infer<typeof detectionPolicySchema>;
 export type EvidencePolicy = z.infer<typeof evidencePolicySchema>;
+export type CameraPolicy = z.infer<typeof cameraPolicySchema>;
 export type ProctoringPolicy = z.infer<typeof proctoringPolicySchema>;
 export type ProctoringPolicyInput = z.input<typeof proctoringPolicySchema>;
 

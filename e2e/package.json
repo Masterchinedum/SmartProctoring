@@ -7,11 +7,12 @@
     "test": "playwright test",
     "fixtures": "tsx scripts/build-fixtures.ts",
     "typecheck": "tsc --noEmit -p .",
-    "rw:report": "tsx scripts/realistic-report.ts"
+    "rw:report": "tsx scripts/realistic-report.ts",
+    "fetch-faces": "tsx scripts/fetch-faces.ts"
   },
   "devDependencies": {
-    "@playwright/test": "1.56.1",
-    "@types/node": "^22.18.0",
+    "@playwright/test": "1.64.1",
+    "@types/node": "^24.0.0",
     "sharp": "^0.35.4",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"

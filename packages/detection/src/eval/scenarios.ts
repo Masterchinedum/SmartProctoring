@@ -1,4 +1,5 @@
 import type { EventType } from '@sp/shared';
+import { ExamScript, externalMonitorSetup, laptopSetup, lowLaptopSetup, randomSide, type Typist, type WorkSetup } from './behaviour';
 import { Rng } from './prng';
 import type { Segment, SynthSpec } from './synth';
 
@@ -23,6 +24,11 @@ export interface Scenario {
   description: string;
   /** Detections this scenario primarily measures (for the doc table). */
   measures: EventType[] | 'false_alerts';
+  /**
+   * Attention scenarios (realistic exam-taking with activity): 'attention_normal' must not flag,
+   * 'attention_offscreen' scripts off-screen behaviour to detect. Summarised separately (`--attention`).
+   */
+  group?: 'attention_normal' | 'attention_offscreen';
   build(seed: number): BuiltScenario;
 }
 
@@ -34,7 +40,8 @@ const lbl = (type: EventType, start: number, end: number, extra?: Partial<RelLab
  * seeds give different traces of the same situation. Every scenario starts with ≥ 25 s of normal
  * behaviour (the runner calibrates the baseline from the first 5 s, like check-in).
  */
-export const SCENARIOS: Scenario[] = [
+/** The original synthetic scenarios (detector timing, faults, nuisances). */
+export const CORE_SCENARIOS: Scenario[] = [
   {
     name: 'clean_30min',
     description: '30-minute session of normal exam behaviour with realistic noise (false alerts per hour).',
@@ -431,3 +438,226 @@ export const SCENARIOS: Scenario[] = [
     },
   },
 ];
+
+/* ------------------------------------------------------------------ attention scenarios */
+
+/** Calibration (check-in) at the start of each attention trace, like the app's check. */
+const CAL_SEC = 5;
+
+function attentionBuild(
+  seed: number,
+  salt: number,
+  durationSec: number,
+  setupOf: (r: Rng) => WorkSetup,
+  typist: Typist | null,
+  body: (sc: ExamScript, r: Rng) => void,
+  noise: SynthSpec['noise'] = {},
+): BuiltScenario {
+  const r = new Rng(seed * 131 + salt);
+  const setup = setupOf(r);
+  const sc = new ExamScript(r, setup, typist ?? (r.chance(0.5) ? 'hunt' : 'touch'), CAL_SEC + 0.5);
+  body(sc, r);
+  const labels = sc.labels.filter((l) => l.start < durationSec).map((l) => ({ ...l, end: Math.min(l.end, durationSec) }));
+  return {
+    spec: {
+      seed,
+      durationSec,
+      // Reading is part of the script; brief glances (0.3–0.9 s) stay as random nuisance.
+      noise: { readingPerMin: 0, ...noise },
+      attention: sc.attention(CAL_SEC, r),
+      activity: sc.act,
+      person: setup.person,
+    },
+    labels,
+  };
+}
+
+const EXAM_SEC = 1800;
+const OFF_SEC = 480;
+
+/**
+ * Warm-up (the exam starts: reading and answering with the mouse, then possibly typing), the off-screen
+ * behaviour, then normal work to the end. Any looking-away-family event during the behaviour is legitimate:
+ * the types a scenario does not require get optional labels over the behaviour's span.
+ */
+function offscreen(seed: number, salt: number, setupOf: (r: Rng) => WorkSetup, typist: Typist | null, act: (sc: ExamScript, r: Rng) => void, warmupSec: [number, number] = [60, 90]): BuiltScenario {
+  return attentionBuild(seed, salt, OFF_SEC, setupOf, typist, (sc, r) => {
+    const warm = r.range(warmupSec[0], warmupSec[1]);
+    const typing = r.chance(0.4);
+    sc.work(typing ? warm * 0.5 : warm, false);
+    if (typing) sc.work(warm * 0.5, true);
+    const first = sc.labels.length;
+    const from = sc.t;
+    act(sc, r);
+    const to = Math.max(...sc.labels.slice(first).map((l) => l.end), from);
+    for (const type of ['looking_away', 'repeated_looking_away', 'offscreen_attention_pattern'] as const) {
+      if (!sc.labels.slice(first).some((l) => l.type === type && !l.optional)) sc.label(type, from, to, true, 'during the off-screen behaviour');
+    }
+    sc.work(Math.max(0, OFF_SEC - sc.t), r.chance(0.4));
+  });
+}
+
+export const ATTENTION_SCENARIOS: Scenario[] = [
+  {
+    name: 'laptop_exam_hunt_typist',
+    description:
+      '30-min laptop exam, camera above the screen, check done looking at the camera (work pose 8–15° lower): reading with eye scanning, multiple-choice with the mouse, then an essay typed hunt-and-peck (keyboard glances 1–4 s, 20–35° down), thinking look-ups every 1–3 min, sipping, stretching (must not flag).',
+    measures: 'false_alerts',
+    group: 'attention_normal',
+    build: (seed) => attentionBuild(seed, 1, EXAM_SEC, laptopSetup, 'hunt', (sc) => sc.exam(EXAM_SEC)),
+  },
+  {
+    name: 'laptop_exam_touch_typist',
+    description: 'As laptop_exam_hunt_typist, with a touch typist (eyes on the text while typing, rare keyboard glances) (must not flag).',
+    measures: 'false_alerts',
+    group: 'attention_normal',
+    build: (seed) => attentionBuild(seed, 2, EXAM_SEC, laptopSetup, 'touch', (sc) => sc.exam(EXAM_SEC)),
+  },
+  {
+    name: 'external_monitor_cal_camera',
+    description: '30-min exam on an external monitor with the laptop camera beside it: work pose 20–35° to the side; the check was done looking at the laptop camera (must not flag).',
+    measures: 'false_alerts',
+    group: 'attention_normal',
+    build: (seed) => attentionBuild(seed, 3, EXAM_SEC, (r) => externalMonitorSetup(r, 'camera'), null, (sc) => sc.exam(EXAM_SEC)),
+  },
+  {
+    name: 'external_monitor_cal_monitor',
+    description: 'As external_monitor_cal_camera, with the check done on the monitor (the calibration pose is the turned work pose) (must not flag).',
+    measures: 'false_alerts',
+    group: 'attention_normal',
+    build: (seed) => attentionBuild(seed, 4, EXAM_SEC, (r) => externalMonitorSetup(r, 'monitor'), null, (sc) => sc.exam(EXAM_SEC)),
+  },
+  {
+    name: 'laptop_low',
+    description: '30-min exam on a small laptop held low (absolute head pitch ≈ −20°), keyboard 20–28° below the screen (must not flag).',
+    measures: 'false_alerts',
+    group: 'attention_normal',
+    build: (seed) => attentionBuild(seed, 5, EXAM_SEC, lowLaptopSetup, null, (sc) => sc.exam(EXAM_SEC)),
+  },
+  {
+    name: 'laptop_exam_restless',
+    description: 'Stress test: 20-min laptop exam by a restless candidate (head jitter ±6°, noisy gaze, 3 brief glances / min), hunt-and-peck essay (must not flag).',
+    measures: 'false_alerts',
+    group: 'attention_normal',
+    build: (seed) => attentionBuild(seed, 6, 1200, laptopSetup, 'hunt', (sc) => sc.exam(1200), { poseJitterDeg: 6, gazeJitter: 0.12, briefGlancePerMin: 3, dropFaceProb: 0.01 }),
+  },
+  {
+    name: 'offscreen_side_notes',
+    description: 'Laptop exam; notes on the desk to one side (25–40° sideways, 20–35° down): 6 glances of 2–8 s, 8–25 s of work in between, no typing during a glance.',
+    measures: ['offscreen_attention_pattern'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(seed, 11, laptopSetup, null, (sc, r) => {
+        const s = randomSide(r);
+        sc.glances({ x: s * r.range(25, 40), y: -r.range(20, 35), head: 0.7 }, 6, () => r.range(2, 8), () => r.range(8, 25), { typingBetween: r.chance(0.5) });
+      }),
+  },
+  {
+    name: 'offscreen_phone_lap',
+    description: 'Laptop exam; a phone in the lap (35–50° down): 3 looks of 5–30 s without typing, 40–80 s apart (looks ≥ 6 s must flag).',
+    measures: ['looking_away'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(seed, 12, laptopSetup, null, (sc, r) => {
+        for (let i = 0; i < 3; i++) {
+          sc.look({ x: r.range(-10, 10), y: -r.range(38, 50), head: 0.65 }, r.range(5, 30), 6, 'phone in the lap');
+          if (i < 2) sc.work(r.range(40, 80), r.chance(0.5));
+        }
+      }),
+  },
+  {
+    name: 'offscreen_phone_glances',
+    description: 'Laptop exam; 6 short checks (2–5 s) of a phone in the lap within ~2.5 min, between typing or reading (down pattern).',
+    measures: ['offscreen_attention_pattern'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(seed, 13, laptopSetup, null, (sc, r) => {
+        sc.glances({ x: r.range(-8, 8), y: -r.range(38, 50), head: 0.65 }, 6, () => r.range(2, 5), () => r.range(8, 22), { typingBetween: r.chance(0.5) });
+      }),
+  },
+  {
+    name: 'offscreen_second_screen',
+    description: 'Laptop exam; a second screen to one side (35–50°): 6 glances of 2–8 s, 8–25 s apart.',
+    measures: ['offscreen_attention_pattern'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(seed, 14, laptopSetup, null, (sc, r) => {
+        const s = randomSide(r);
+        sc.glances({ x: s * r.range(35, 50), y: r.range(-5, 5), head: 0.8 }, 6, () => r.range(2, 8), () => r.range(8, 25), { typingBetween: r.chance(0.5) });
+      }),
+  },
+  {
+    name: 'offscreen_talk_side',
+    description: 'Laptop exam; turning to talk to someone at the side (50–80°) for 6–20 s, twice.',
+    measures: ['looking_away'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(seed, 15, laptopSetup, null, (sc, r) => {
+        const s = randomSide(r);
+        sc.look({ x: s * r.range(50, 80), y: r.range(0, 5), head: 0.85 }, r.range(6, 20), 6, 'talking to someone');
+        sc.work(r.range(60, 120), r.chance(0.4));
+        sc.look({ x: s * r.range(50, 80), y: r.range(0, 5), head: 0.85 }, r.range(6, 20), 6, 'talking to someone');
+      }),
+  },
+  {
+    name: 'offscreen_sustained',
+    description: 'Laptop exam; looking away for 10–30 s (left / right / down-left / down-right / down), twice.',
+    measures: ['looking_away'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(seed, 16, laptopSetup, null, (sc, r) => {
+        for (let i = 0; i < 2; i++) {
+          const s = randomSide(r);
+          const spot = r.pick([
+            { x: s * r.range(35, 50), y: r.range(-3, 3), head: 0.75 },
+            { x: s * r.range(25, 35), y: -r.range(28, 35), head: 0.75 },
+            { x: r.range(-5, 5), y: -r.range(35, 45), head: 0.7 },
+          ]);
+          sc.look(spot, r.range(10, 30), 6, 'sustained look away');
+          if (i === 0) sc.work(r.range(60, 120), r.chance(0.4));
+        }
+      }),
+  },
+  {
+    name: 'offscreen_external_monitor_notes',
+    description: 'External monitor, check at the laptop camera (work pose 20–35° to the side); notes on the desk on the other side: 6 glances of 2–8 s.',
+    measures: ['offscreen_attention_pattern'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(seed, 17, (r) => externalMonitorSetup(r, 'camera'), null, (sc, r) => {
+        const s = -Math.sign(sc.setup.work.yaw) || 1;
+        sc.glances({ x: s * r.range(30, 45), y: -r.range(20, 35), head: 0.7 }, 6, () => r.range(2, 8), () => r.range(8, 25), { typingBetween: r.chance(0.5) });
+      }),
+  },
+  {
+    name: 'offscreen_notes_while_typing',
+    description: 'Touch typist copying from notes to one side (25–35° sideways, 18–28° down) while typing: 6 glances of 3–8 s, keys pressed during the glance (the typing excuse must not cover it).',
+    measures: ['offscreen_attention_pattern'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(seed, 18, laptopSetup, 'touch', (sc, r) => {
+        const s = randomSide(r);
+        sc.glances({ x: s * r.range(25, 35), y: -r.range(18, 28), head: 0.7 }, 6, () => r.range(3, 8), () => r.range(8, 20), { typeDuring: true, typingBetween: true });
+      }),
+  },
+  {
+    name: 'offscreen_early_sustained',
+    description: 'Laptop exam; a 10–20 s look away 20–40 s after the start, before the working region is learned (cold start).',
+    measures: ['looking_away'],
+    group: 'attention_offscreen',
+    build: (seed) =>
+      offscreen(
+        seed,
+        19,
+        laptopSetup,
+        null,
+        (sc, r) => {
+          const s = randomSide(r);
+          sc.look(r.chance(0.5) ? { x: s * r.range(35, 50), y: r.range(-3, 3), head: 0.75 } : { x: s * r.range(25, 35), y: -r.range(28, 35), head: 0.75 }, r.range(10, 20), 6, 'early look away');
+        },
+        [15, 35],
+      ),
+  },
+];
+
+export const SCENARIOS: Scenario[] = [...CORE_SCENARIOS, ...ATTENTION_SCENARIOS];

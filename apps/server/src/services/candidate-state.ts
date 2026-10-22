@@ -1,10 +1,12 @@
-import { END_REASONS, type CandidateAnswerDTO, type CandidateQuestionDTO, type CandidateSessionState, type EndReason } from '@sp/shared';
+import { CANDIDATE_END_REASONS, type CandidateAnswerDTO, type CandidateEndReason, type CandidateQuestionDTO, type CandidateSessionState } from '@sp/shared';
 import { and, desc, eq, gte } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
-import { answers, candidates, examSessions, exams, organizations, pauseRequests, questions, sessionPeriods, type ExamSession } from '../db/schema.js';
+import { answers, candidates, examSessions, exams, organizations, pauseRequests, sessionPeriods, type ExamSession } from '../db/schema.js';
 import { conflict, notFound } from '../lib/errors.js';
-import { ms, remainingMs, toHoldDTO, toPauseRequestDTO } from './dto.js';
+import { ms, remainingMs, sessionWindow, toHoldDTO, toPauseRequestDTO } from './dto.js';
+import { candidateAccommodationLabels } from './accommodations.js';
+import { sessionExamContent } from './exam-versions.js';
 import { identitySampleRequest } from './identity-evidence.js';
 import { noticeFor } from './privacy.js';
 import { effectivePolicy, requiredCheckFor } from './session-state.js';
@@ -39,13 +41,15 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
   const { session: s, exam, org, candidate } = row;
   const now = ctx.now();
   const policy = effectivePolicy(s, exam, org);
-  const qs = await db.select().from(questions).where(eq(questions.examId, exam.id)).orderBy(questions.position);
+  // The attempt's pinned exam version (before it starts: the version it would start with).
+  const { snapshot } = await sessionExamContent(db, s, exam);
+  const qs = snapshot.questions;
 
   const showQuestions = (s.status === 'active' && instanceInControl(s, instanceId)) || s.status === 'submitted';
   let qDTO: CandidateQuestionDTO[] | null = null;
   let aDTO: CandidateAnswerDTO[] | null = null;
   if (showQuestions) {
-    qDTO = qs.map((q, i) => ({ id: q.id, index: i, type: q.type, prompt: q.prompt, options: (q.options ?? []).map((o) => ({ id: o.id, text: o.text })), points: q.points }));
+    qDTO = qs.map((q, i) => ({ id: q.id, index: i, type: q.type, prompt: q.prompt, options: q.options.map((o) => ({ id: o.id, text: o.text })), points: q.points }));
     const ans = await db.select().from(answers).where(eq(answers.sessionId, s.id));
     aDTO = ans.map((a) => ({ questionId: a.questionId, value: a.value ?? null, clientSeq: a.clientSeq, savedAt: a.savedAt.getTime() }));
   }
@@ -72,7 +76,7 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
       id: s.id,
       status: s.status,
       // Housekeeping end reasons (e.g. 'abandoned') are not part of the candidate contract: the candidate sees a terminated exam.
-      endReason: s.endReason && (END_REASONS as readonly string[]).includes(s.endReason) ? (s.endReason as EndReason) : null,
+      endReason: s.endReason && (CANDIDATE_END_REASONS as readonly string[]).includes(s.endReason) ? (s.endReason as CandidateEndReason) : null,
       remainingMs: remainingMs(s, now),
       timerRunning: s.runningSince != null,
       durationMs: s.durationMs,
@@ -84,18 +88,22 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
       verifiedInstanceId: instanceId && s.verifiedInstanceId === instanceId ? s.verifiedInstanceId : null,
       hold: toHoldDTO(s),
       pauseRequest,
-      identitySample: instanceInControl(s, instanceId) ? identitySampleRequest(s.status, s.identityState, policy.identity.burstSize, now) : null,
+      identitySample: instanceInControl(s, instanceId) ? identitySampleRequest(s.status, s.identityState, policy.identity, now) : null,
+      window: sessionWindow(s),
     },
     exam: {
       id: exam.id,
-      title: exam.title,
-      description: exam.description,
-      instructions: exam.instructions,
+      title: snapshot.title,
+      description: snapshot.description,
+      instructions: snapshot.instructions,
       durationSec: Math.round(s.durationMs / 1000),
       questionCount: qs.length,
       policy,
     },
     candidate: { id: candidate.id, name: candidate.name, hasIdPhoto: !!candidate.idPhotoEmbedding },
+    accommodations: candidateAccommodationLabels(s.accommodations),
+    // A sandbox organisation (practice / testing): the candidate app says so on the welcome screen.
+    sandbox: org?.kind === 'sandbox',
     consent: {
       accepted: s.consentAcceptedAt != null,
       acceptedAt: ms(s.consentAcceptedAt),

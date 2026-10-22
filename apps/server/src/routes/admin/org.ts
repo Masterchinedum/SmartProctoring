@@ -3,7 +3,10 @@
  *
  *   GET  /settings                                  -> OrgSettingsDTO               [admin]
  *   PUT  /settings  Partial<OrgSettingsDTO>         -> OrgSettingsDTO               [admin]
- *        (externalVerifier takes ExternalVerifierUpdate: write-only key pair, see src/verifiers/settings.ts)
+ *        (externalVerifier takes ExternalVerifierUpdate: write-only key pair, see src/verifiers/settings.ts;
+ *         requireMfa, requireSso and evidenceLocation: owner only)
+ *   GET  /evidence-storage                          -> EvidenceStorageDTO           [admin]
+ *   GET  /usage                                     -> OrgUsageDTO                  [admin]  (kind and quotas: operator-only, services/quotas.ts)
  *   GET  /users                                     -> { items: StaffUserDTO[] }    [admin]
  *   POST /users {email,name,role,password}          -> StaffUserDTO                 [admin; only an owner may create owners/admins]
  *   PUT  /users/:id {name?,role?,disabled?,password?} -> StaffUserDTO               [admin]
@@ -16,34 +19,51 @@
  *   - disabling a user or resetting a password signs that user out everywhere.
  */
 import {
+  DEFAULT_EVIDENCE_LOCATION,
   settingsUpdateSchema,
   userCreateSchema,
   userUpdateSchema,
   type AuditLogEntryDTO,
+  type EvidenceStorageDTO,
   type OrgSettingsDTO,
+  type OrgUsageDTO,
   type Paged,
   type StaffRole,
 } from '@sp/shared';
-import { and, desc, eq, like, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, like, lte, ne, sql, type SQL } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { getStaff, requireStaff, revokeStaffSessions } from '../../auth/staff.js';
 import type { DbOrTx } from '../../db/index.js';
-import { apiKeys, auditLog, organizations, staffUsers, type Organization, type OrgSettings } from '../../db/schema.js';
+import { apiKeys, auditLog, organizations, staffSsoIdentities, staffUsers, type Organization, type OrgSettings } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { hashPassword } from '../../lib/crypto.js';
 import { badRequest, conflict, forbidden, notFound, validationFailed } from '../../lib/errors.js';
 import { toStaffUserDTO } from '../../services/dto.js';
+import { evidenceStorageSummary } from '../../services/evidence-storage.js';
 import { mergePolicy, orgSettings } from '../../services/org.js';
+import { orgUsageDTO } from '../../services/quotas.js';
 import { clearLoginFailures } from '../../services/login-throttle.js';
+import { disableMfa } from '../../services/mfa.js';
+import { notifySecurityChange } from '../../services/security-notices.js';
+import { enabledProviderCount } from '../../services/sso/providers.js';
 import { applyExternalVerifierUpdate, externalVerifierAuditMeta, toExternalVerifierDTO } from '../../verifiers/settings.js';
-import { blankToUndefined, escapeLike, idParam, loadOrgRow, pagingSchema, sanitizePolicyInput } from './common.js';
+import { blankToUndefined, escapeLike, idParam, loadOrgRow, noStore, pagingSchema, sanitizePolicyInput } from './common.js';
+import { CSV_BOM, csvRow } from '../../services/reports-csv.js';
 
-const auditQuerySchema = pagingSchema.extend({
+const auditFilterSchema = z.object({
   action: z.string().max(100).optional(),
   targetType: z.string().max(50).optional(),
   targetId: z.string().max(100).optional(),
+  /** Epoch ms, inclusive. */
+  from: z.coerce.number().int().min(0).optional(),
+  to: z.coerce.number().int().min(0).optional(),
 });
+const auditQuerySchema = pagingSchema.merge(auditFilterSchema);
+
+/** Rows in one audit-log CSV export at most (newest first; the response says when more matched). */
+export const AUDIT_EXPORT_MAX = 50_000;
+const AUDIT_CSV_COLUMNS = ['at', 'actorType', 'actorId', 'actorName', 'action', 'targetType', 'targetId', 'details'] as const;
 
 export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
   const s = orgSettings(org);
@@ -58,6 +78,11 @@ export function toOrgSettingsDTO(org: Organization): OrgSettingsDTO {
     alertRecipients: [...s.alertRecipients],
     emailAlerts: { ...s.emailAlerts },
     externalVerifier: toExternalVerifierDTO(s.externalVerifier),
+    requireMfa: s.requireMfa,
+    reviewSla: { ...s.reviewSla },
+    requireSso: s.requireSso,
+    decisionConfigVersion: s.decisionConfigVersion,
+    evidenceLocation: s.evidenceLocation,
   };
 }
 
@@ -98,9 +123,11 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       if (body.evidenceRetentionDays !== undefined) stored.evidenceRetentionDays = body.evidenceRetentionDays;
       if (body.eventRetentionDays !== undefined) stored.eventRetentionDays = body.eventRetentionDays;
       if (body.privacyContact !== undefined) stored.privacyContact = body.privacyContact.trim();
+      // Thresholds change only through an approved decision configuration (services/decision-configs.ts); a form that
+      // posts back the values in use is fine.
       if (body.identityThresholds) {
-        const provided = Object.fromEntries(Object.entries(body.identityThresholds).filter(([, v]) => v !== undefined));
-        stored.identityThresholds = { ...(stored.identityThresholds ?? {}), ...provided } as OrgSettings['identityThresholds'];
+        const differs = Object.entries(body.identityThresholds).some(([k, v]) => v !== undefined && v !== cur.identityThresholds[k as keyof OrgSettings['identityThresholds']]);
+        if (differs) throw conflict('decision_config_required', 'Identity thresholds are changed through a decision configuration: proposed with a reason and approved by a second administrator (Detection quality page).');
       }
       if (body.abandonAfterDays !== undefined) stored.abandonAfterDays = body.abandonAfterDays;
       if (body.alertRecipients !== undefined) stored.alertRecipients = [...new Set(body.alertRecipients.map((e) => e.trim().toLowerCase()))];
@@ -113,6 +140,30 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         mergePolicy(undefined, policy); // throws ZodError (400) with field paths when invalid
         stored.defaultPolicy = policy;
       }
+      // Who must use two-step sign-in: an owner's decision (an admin could otherwise switch off the requirement for admins).
+      if (body.requireMfa !== undefined && body.requireMfa !== cur.requireMfa) {
+        if (staff.role !== 'owner') throw forbidden('Only an owner can change who must use two-step sign-in', 'owner_required');
+        stored.requireMfa = body.requireMfa;
+      }
+      // Single sign-on for everyone but owners: an owner's decision, and only with an enabled identity provider.
+      if (body.requireSso !== undefined && body.requireSso !== cur.requireSso) {
+        if (staff.role !== 'owner') throw forbidden('Only an owner can change whether single sign-on is required', 'owner_required');
+        if (body.requireSso && (await enabledProviderCount(tx, staff.orgId)) === 0) throw conflict('sso_not_configured', 'Enable an identity provider before requiring single sign-on.');
+        stored.requireSso = body.requireSso;
+      }
+      if (body.reviewSla !== undefined) {
+        const provided = Object.fromEntries(Object.entries(body.reviewSla).filter(([, v]) => v !== undefined));
+        stored.reviewSla = { ...cur.reviewSla, ...provided };
+      }
+      // Where new evidence images are stored (data residency): an owner's decision, among the server's locations.
+      if (body.evidenceLocation !== undefined && body.evidenceLocation !== cur.evidenceLocation) {
+        if (staff.role !== 'owner') throw forbidden('Only an owner can change where evidence images are stored', 'owner_required');
+        if (!ctx.storageLocations.has(body.evidenceLocation)) {
+          throw badRequest('This server has no storage location with that name.', [{ path: 'evidenceLocation', message: 'Unknown storage location' }], 'unknown_storage_location');
+        }
+        if (body.evidenceLocation === DEFAULT_EVIDENCE_LOCATION) delete stored.evidenceLocation;
+        else stored.evidenceLocation = body.evidenceLocation;
+      }
       // External second-opinion verifier: the key pair is encrypted here and never returned (verifiers/settings.ts).
       const verifier = body.externalVerifier !== undefined ? applyExternalVerifierUpdate({ keyring: ctx.keyring, config: ctx.config.externalVerifiers, orgId: staff.orgId, now }, cur.externalVerifier, body.externalVerifier) : null;
       if (verifier) stored.externalVerifier = verifier.next;
@@ -121,9 +172,6 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       if (next.eventRetentionDays < next.evidenceRetentionDays) {
         issues.push({ path: 'eventRetentionDays', message: 'Event records must be kept at least as long as the evidence images' });
       }
-      const t = next.identityThresholds;
-      if (!(t.mismatch < t.match)) issues.push({ path: 'identityThresholds.mismatch', message: 'The mismatch threshold must be lower than the match threshold' });
-      if (!(t.idPhotoMismatch < t.idPhotoMatch)) issues.push({ path: 'identityThresholds.idPhotoMismatch', message: 'The ID-photo mismatch threshold must be lower than the ID-photo match threshold' });
       if (issues.length) throw validationFailed('Invalid settings', issues);
 
       const name = body.name !== undefined ? body.name.trim() : org.name;
@@ -146,20 +194,41 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
         targetId: staff.orgId,
         meta: {
           fields: changed,
-          ...(changed.includes('identityThresholds') ? { identityThresholds: { from: cur.identityThresholds, to: next.identityThresholds } } : {}),
           ...(changed.includes('evidenceRetentionDays') ? { evidenceRetentionDays: { from: cur.evidenceRetentionDays, to: next.evidenceRetentionDays } } : {}),
           ...(changed.includes('eventRetentionDays') ? { eventRetentionDays: { from: cur.eventRetentionDays, to: next.eventRetentionDays } } : {}),
           ...(changed.includes('abandonAfterDays') ? { abandonAfterDays: { from: cur.abandonAfterDays, to: next.abandonAfterDays } } : {}),
           ...(changed.includes('alertRecipients') ? { alertRecipients: { count: next.alertRecipients.length } } : {}),
           ...(changed.includes('emailAlerts') ? { emailAlerts: next.emailAlerts } : {}),
+          ...(changed.includes('requireMfa') ? { requireMfa: { from: cur.requireMfa, to: next.requireMfa } } : {}),
+          ...(changed.includes('requireSso') ? { requireSso: { from: cur.requireSso, to: next.requireSso } } : {}),
+          ...(changed.includes('reviewSla') ? { reviewSla: { from: cur.reviewSla, to: next.reviewSla } } : {}),
+          ...(changed.includes('evidenceLocation') ? { evidenceLocation: { from: cur.evidenceLocation, to: next.evidenceLocation } } : {}),
           ...(changed.includes('externalVerifier') && verifier ? { externalVerifier: externalVerifierAuditMeta(cur.externalVerifier, next.externalVerifier, verifier.credentials) } : {}),
         },
         ip: req.ip,
         at: now,
       });
+      // Password sessions of everyone but owners end now (authenticateStaffToken also refuses them from here on).
+      if (changed.includes('requireSso') && next.requireSso) {
+        await tx.execute(
+          sql`DELETE FROM staff_sessions s USING staff_users u WHERE s.staff_user_id = u.id AND u.org_id = ${staff.orgId} AND u.role <> 'owner' AND s.auth_method <> 'sso'`,
+        );
+      }
       return row;
     });
     return toOrgSettingsDTO(updated);
+  });
+
+  /** The server's storage locations, the organisation's choice and its images per location (data residency). */
+  app.get('/evidence-storage', admin, async (req): Promise<EvidenceStorageDTO> => {
+    const staff = getStaff(req);
+    return evidenceStorageSummary(ctx, staff.orgId);
+  });
+
+  /** Usage this month against the limits the server operator set (kind and quotas are not editable here). */
+  app.get('/usage', admin, async (req): Promise<OrgUsageDTO> => {
+    const staff = getStaff(req);
+    return orgUsageDTO(ctx.db, await loadOrgRow(ctx, staff.orgId), ctx.now());
   });
 
   /* ------------------------------------------------------------------ users */
@@ -167,7 +236,16 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
   app.get('/users', admin, async (req) => {
     const staff = getStaff(req);
     const rows = await ctx.db.select().from(staffUsers).where(eq(staffUsers.orgId, staff.orgId)).orderBy(staffUsers.createdAt, staffUsers.id);
-    return { items: rows.map(toStaffUserDTO) };
+    const linked = new Set(
+      (
+        await ctx.db
+          .select({ id: staffSsoIdentities.staffUserId })
+          .from(staffSsoIdentities)
+          .innerJoin(staffUsers, eq(staffUsers.id, staffSsoIdentities.staffUserId))
+          .where(eq(staffUsers.orgId, staff.orgId))
+      ).map((r) => r.id),
+    );
+    return { items: rows.map((u) => toStaffUserDTO(u, { ssoLinked: linked.has(u.id) })) };
   });
 
   app.post('/users', admin, async (req) => {
@@ -235,6 +313,8 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
       if (body.disabled !== undefined && body.disabled !== target.disabled) {
         patch.disabled = body.disabled;
         changed.push('disabled');
+        // Enabled again in the app: SCIM sees the account again (it was hidden after a SCIM delete).
+        if (!body.disabled) patch.scimDeletedAt = null;
       }
       if (passwordHash !== undefined) {
         patch.passwordHash = passwordHash;
@@ -259,47 +339,91 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
     });
     if (revoke) await revokeStaffSessions(ctx, id);
     // An administrator's password reset also lifts the per-account sign-in backoff.
-    if (passwordHash !== undefined) await clearLoginFailures(ctx.db, user.email);
+    if (passwordHash !== undefined) await clearLoginFailures(ctx.db, user.email, ['login', 'password']);
     return toStaffUserDTO(user);
   });
 
   /* ------------------------------------------------------------------ audit log */
 
-  app.get('/audit-log', admin, async (req): Promise<Paged<AuditLogEntryDTO>> => {
-    const staff = getStaff(req);
-    const q = auditQuerySchema.parse(blankToUndefined(req.query));
-    const conds = [
-      eq(auditLog.orgId, staff.orgId),
+  const auditWhere = (orgId: string, q: z.infer<typeof auditFilterSchema>) =>
+    and(
+      eq(auditLog.orgId, orgId),
       q.action ? like(auditLog.action, `${escapeLike(q.action.trim())}%`) : undefined,
       q.targetType ? eq(auditLog.targetType, q.targetType) : undefined,
       q.targetId ? eq(auditLog.targetId, q.targetId) : undefined,
-    ];
-    const where = and(...conds);
-    const [[{ total }], rows] = await Promise.all([
-      ctx.db.select({ total: sql<number>`count(*)::int` }).from(auditLog).where(where),
-      ctx.db
-        .select({ entry: auditLog, actorName: staffUsers.name, apiKeyName: apiKeys.name })
-        .from(auditLog)
-        .leftJoin(staffUsers, and(eq(auditLog.actorType, 'staff'), eq(staffUsers.id, auditLog.actorId)))
-        .leftJoin(apiKeys, and(eq(auditLog.actorType, 'api_key'), eq(apiKeys.id, auditLog.actorId)))
-        .where(where)
-        .orderBy(desc(auditLog.at), desc(auditLog.id))
-        .limit(q.limit)
-        .offset(q.offset),
-    ]);
-    return {
-      total,
-      items: rows.map(({ entry, actorName, apiKeyName }) => ({
-        id: entry.id,
-        at: entry.at.getTime(),
-        actorType: entry.actorType,
-        actorId: entry.actorId ?? null,
-        actorName: entry.actorType === 'system' ? 'System' : entry.actorType === 'api_key' ? (apiKeyName ? `API key “${apiKeyName}”` : 'API key') : (actorName ?? null),
-        action: entry.action,
-        targetType: entry.targetType,
-        targetId: entry.targetId ?? null,
-        meta: entry.meta ?? {},
-      })),
-    };
+      q.from != null ? gte(auditLog.at, new Date(q.from)) : undefined,
+      q.to != null ? lte(auditLog.at, new Date(q.to)) : undefined,
+    );
+  const auditEntries = async (where: SQL | undefined, limit: number, offset: number): Promise<AuditLogEntryDTO[]> => {
+    const rows = await ctx.db
+      .select({ entry: auditLog, actorName: staffUsers.name, apiKeyName: apiKeys.name })
+      .from(auditLog)
+      .leftJoin(staffUsers, and(eq(auditLog.actorType, 'staff'), eq(staffUsers.id, auditLog.actorId)))
+      .leftJoin(apiKeys, and(eq(auditLog.actorType, 'api_key'), eq(apiKeys.id, auditLog.actorId)))
+      .where(where)
+      .orderBy(desc(auditLog.at), desc(auditLog.id))
+      .limit(limit)
+      .offset(offset);
+    return rows.map(({ entry, actorName, apiKeyName }) => ({
+      id: entry.id,
+      at: entry.at.getTime(),
+      actorType: entry.actorType,
+      actorId: entry.actorId ?? null,
+      actorName:
+        entry.actorType === 'system' ? 'System' : entry.actorType === 'scim' ? 'SCIM provisioning' : entry.actorType === 'api_key' ? (apiKeyName ? `API key “${apiKeyName}”` : 'API key') : (actorName ?? null),
+      action: entry.action,
+      targetType: entry.targetType,
+      targetId: entry.targetId ?? null,
+      meta: entry.meta ?? {},
+    }));
+  };
+
+  app.get('/audit-log', admin, async (req): Promise<Paged<AuditLogEntryDTO>> => {
+    const staff = getStaff(req);
+    const q = auditQuerySchema.parse(blankToUndefined(req.query));
+    const where = auditWhere(staff.orgId, q);
+    const [[{ total }], items] = await Promise.all([ctx.db.select({ total: sql<number>`count(*)::int` }).from(auditLog).where(where), auditEntries(where, q.limit, q.offset)]);
+    return { total, items };
+  });
+
+  /**
+   * The audit trail as CSV (same filters as the list; newest first, at most AUDIT_EXPORT_MAX rows — the
+   * X-Audit-Truncated header says when more matched). The export itself is audit-logged.
+   */
+  app.get('/audit-log.csv', admin, async (req, reply) => {
+    const staff = getStaff(req);
+    const q = auditFilterSchema.parse(blankToUndefined(req.query));
+    const where = auditWhere(staff.orgId, q);
+    const [{ total }] = await ctx.db.select({ total: sql<number>`count(*)::int` }).from(auditLog).where(where);
+    const items = await auditEntries(where, AUDIT_EXPORT_MAX, 0);
+    const now = ctx.now();
+    await audit(ctx.db, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'audit_log.exported', targetType: 'organization', targetId: staff.orgId, meta: { rows: items.length, matched: total, filters: q }, ip: req.ip, at: now });
+    const lines = [csvRow([...AUDIT_CSV_COLUMNS]), ...items.map((e) => csvRow([new Date(e.at).toISOString(), e.actorType, e.actorId, e.actorName, e.action, e.targetType, e.targetId, JSON.stringify(e.meta)]))];
+    noStore(reply)
+      .header('Content-Type', 'text/csv; charset=utf-8')
+      .header('Content-Disposition', `attachment; filename="audit-log-${new Date(now).toISOString().slice(0, 10)}.csv"`)
+      .header('X-Audit-Truncated', total > items.length ? 'true' : 'false');
+    return reply.send(CSV_BOM + lines.join('\r\n') + '\r\n');
+  });
+
+  /** Reset another user's two-step sign-in (a lost phone and no recovery codes): they set it up again at next sign-in. */
+  app.post('/users/:id/mfa/reset', admin, async (req) => {
+    const staff = getStaff(req);
+    const id = idParam(req, 'id', 'User', 'user_not_found');
+    if (id === staff.id) throw badRequest('Manage your own two-step sign-in on your account page.', undefined, 'use_account_page');
+    const now = ctx.now();
+    const target = await ctx.db.transaction(async (tx) => {
+      const t = await loadScopedUser(tx, staff.orgId, id, true);
+      if (t.role === 'owner' && staff.role !== 'owner') throw forbidden('Only an owner can reset an owner’s two-step sign-in');
+      if (!t.mfaEnabledAt) throw conflict('mfa_not_enabled', 'This user has not set up two-step sign-in.');
+      await disableMfa(tx, id, now);
+      await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'user.mfa_reset', targetType: 'staff_user', targetId: id, meta: { email: t.email }, ip: req.ip, at: now });
+      return t;
+    });
+    // Signed-in browsers of that user end: the next sign-in is without the old factor.
+    await revokeStaffSessions(ctx, id);
+    await notifySecurityChange(ctx, target, 'mfa_reset_by_admin', { by: staff.name });
+    const [u] = await ctx.db.select().from(staffUsers).where(eq(staffUsers.id, id));
+    return toStaffUserDTO(u);
   });
 };

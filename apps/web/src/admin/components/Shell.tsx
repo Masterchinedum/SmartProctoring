@@ -7,6 +7,7 @@ import { qk } from '../api/queries';
 import { useLive } from '../api/live';
 import { useAuth } from '../auth';
 import { ROLE_LABELS } from '../lib/labels';
+import { sandboxBannerText } from '../lib/quotas';
 
 interface NavItem {
   to: string;
@@ -20,10 +21,12 @@ interface NavItem {
 export const NAV: NavItem[] = [
   { to: '/admin', label: 'Live', end: true },
   { to: '/admin/sessions', label: 'Sessions' },
+  { to: '/admin/review', label: 'Review queue' },
   { to: '/admin/exams', label: 'Exams' },
   { to: '/admin/candidates', label: 'Candidates' },
   { to: '/admin/quality', label: 'Quality' },
   { to: '/admin/audit', label: 'Audit log', adminOnly: true },
+  { to: '/admin/privacy', label: 'Privacy', adminOnly: true },
   { to: '/admin/settings', label: 'Settings', adminOnly: true },
   { to: '/admin/integrations', label: 'Integrations', adminOnly: true },
   { to: '/admin/users', label: 'Users', adminOnly: true },
@@ -43,6 +46,7 @@ export function staffPageTitle(pathname: string): string {
     [/^\/admin\/exams\/[^/]+$/, 'Exam details'],
     [/^\/admin\/candidates\/[^/]+$/, 'Candidate details'],
     [/^\/admin\/tools\/camera-test$/, 'Camera & identity test'],
+    [/^\/admin\/account$/, 'Account & security'],
   ];
   for (const [re, t] of rules) if (re.test(p)) return `${t} — SmartProctoring staff`;
   const nav = NAV.find((n) => n.to !== '/admin' && p === n.to);
@@ -90,6 +94,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <div className="brand-org" title={org.name}>
               {org.name}
             </div>
+            {org.kind === 'sandbox' ? <div className="badge badge-warning brand-sandbox">Sandbox</div> : null}
           </div>
         </div>
         <nav aria-label="Main">
@@ -115,12 +120,16 @@ export function Shell({ children }: { children: ReactNode }) {
             {user.email}
           </div>
           <div className="muted small">{ROLE_LABELS[user.role]}</div>
+          <NavLink to="/admin/account" className="small">
+            Account &amp; security
+          </NavLink>
           <button type="button" className="btn btn-sm" onClick={logout} disabled={loggingOut}>
             {loggingOut ? 'Signing out…' : 'Sign out'}
           </button>
         </div>
       </aside>
       <main className="admin-main" id="admin-main" tabIndex={-1}>
+        <SandboxBanner />
         <LiveBanner />
         {children}
       </main>
@@ -137,6 +146,18 @@ function LiveDot() {
       <span className={`live-dot live-${status}`} title={label} aria-hidden />
       <span className="visually-hidden">({label})</span>
     </>
+  );
+}
+
+/** A sandbox organisation (trial / testing; data deleted automatically): on every page, never dismissed. */
+function SandboxBanner() {
+  const { org } = useAuth();
+  const text = sandboxBannerText(org);
+  if (!text) return null;
+  return (
+    <div className="banner banner-warning sandbox-banner no-print" role="note" aria-label="Sandbox organisation" data-testid="sandbox-banner">
+      {text}
+    </div>
   );
 }
 

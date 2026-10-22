@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { setUnauthorizedHandler } from './api/client';
+import { setMfaEnrollmentHandler, setUnauthorizedHandler } from './api/client';
 import { qk } from './api/queries';
 import { LiveProvider } from './api/live';
 import { AuthProvider, useAuth, useMe } from './auth';
@@ -10,6 +10,7 @@ import { EmptyState, ErrorState, Loading } from './components/Common';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { SessionsPage } from './pages/SessionsPage';
+import { ReviewQueuePage } from './pages/ReviewQueuePage';
 import { SessionDetailPage } from './pages/session/SessionDetailPage';
 import { ComparePage } from './pages/ComparePage';
 import { ReportPage } from './pages/ReportPage';
@@ -20,9 +21,12 @@ import { CandidatesPage } from './pages/candidates/CandidatesPage';
 import { CandidateDetailPage } from './pages/candidates/CandidateDetailPage';
 import { QualityPage } from './pages/QualityPage';
 import { AuditLogPage } from './pages/AuditLogPage';
+import { PrivacyPage } from './pages/PrivacyPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { IntegrationsPage } from './pages/IntegrationsPage';
 import { UsersPage } from './pages/UsersPage';
+import { AccountPage } from './pages/AccountPage';
+import { MfaEnrollmentGate } from './pages/MfaEnrollmentGate';
 // Loads the in-browser face models (MediaPipe): only fetched when the tool is opened.
 const CameraTestPage = lazy(() => import('./pages/tools/CameraTestPage').then((m) => ({ default: m.CameraTestPage })));
 import './admin.css';
@@ -35,6 +39,7 @@ export default function AdminApp() {
       <Route element={<AuthedLayout />}>
         <Route index element={<DashboardPage />} />
         <Route path="sessions" element={<SessionsPage />} />
+        <Route path="review" element={<ReviewQueuePage />} />
         <Route path="sessions/:id" element={<SessionDetailPage />} />
         <Route path="sessions/:id/compare/:eventId" element={<ComparePage />} />
         <Route path="sessions/:id/report" element={<ReportPage />} />
@@ -46,9 +51,11 @@ export default function AdminApp() {
         <Route path="candidates/:id" element={<CandidateDetailPage />} />
         <Route path="quality" element={<QualityPage />} />
         <Route path="audit" element={<AdminOnly><AuditLogPage /></AdminOnly>} />
+        <Route path="privacy" element={<AdminOnly><PrivacyPage /></AdminOnly>} />
         <Route path="settings" element={<AdminOnly><SettingsPage /></AdminOnly>} />
         <Route path="integrations" element={<AdminOnly><IntegrationsPage /></AdminOnly>} />
         <Route path="users" element={<AdminOnly><UsersPage /></AdminOnly>} />
+        <Route path="account" element={<AccountPage />} />
         <Route
           path="tools/camera-test"
           element={
@@ -71,7 +78,12 @@ function AuthedLayout() {
   useEffect(() => {
     // Any 401 from the staff API: drop the cached user so we route to the login page.
     setUnauthorizedHandler(() => qc.setQueryData(qk.me, null));
-    return () => setUnauthorizedHandler(null);
+    // The organisation started requiring two-step sign-in: reload the user, which shows the set-up gate.
+    setMfaEnrollmentHandler(() => void qc.invalidateQueries({ queryKey: qk.me }));
+    return () => {
+      setUnauthorizedHandler(null);
+      setMfaEnrollmentHandler(null);
+    };
   }, [qc]);
 
   if (me.isPending) return <Loading label="Loading…" />;
@@ -85,6 +97,14 @@ function AuthedLayout() {
   if (!me.data) {
     const next = location.pathname + location.search;
     return <Navigate to={`/admin/login${next && next !== '/admin' ? `?next=${encodeURIComponent(next)}` : ''}`} replace />;
+  }
+  // Two-step sign-in required but not set up: nothing else is available until it is.
+  if (me.data.security?.enrollmentRequired) {
+    return (
+      <AuthProvider me={me.data}>
+        <MfaEnrollmentGate />
+      </AuthProvider>
+    );
   }
   return (
     <AuthProvider me={me.data}>

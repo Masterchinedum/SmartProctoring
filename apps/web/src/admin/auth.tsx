@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import type { StaffRole, StaffUserDTO } from '@sp/shared';
+import type { StaffRole, StaffSecurityDTO, StaffUserDTO } from '@sp/shared';
 import { useQuery } from '@tanstack/react-query';
 import { api, ApiError, type MeResponse } from './api/client';
 import { qk } from './api/queries';
@@ -13,10 +13,14 @@ export function roleAtLeast(role: StaffRole | undefined | null, min: StaffRole):
 
 interface AuthValue {
   user: StaffUserDTO;
-  org: { id: string; name: string };
+  org: MeResponse['org'];
   isAdmin: boolean;
   isOwner: boolean;
+  security: StaffSecurityDTO;
 }
+
+/** Older servers (and test fixtures) may not send `security`: treat as "not set up, not required". */
+const NO_SECURITY: StaffSecurityDTO = { mfaEnabled: false, mfaEnabledAt: null, recoveryCodesLeft: null, mfaRequired: false, enrollmentRequired: false };
 
 const AuthContext = createContext<AuthValue | null>(null);
 
@@ -26,6 +30,7 @@ export function AuthProvider({ me, children }: { me: MeResponse; children: React
     org: me.org,
     isAdmin: roleAtLeast(me.user.role, 'admin'),
     isOwner: me.user.role === 'owner',
+    security: me.security ?? NO_SECURITY,
   };
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

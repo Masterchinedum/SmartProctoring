@@ -1,34 +1,76 @@
 import type {
+  AccommodationDTO,
   ApiError as ApiErrorBody,
+  ApiKeyCreateInput,
   ApiKeyDTO,
   AssignmentDTO,
   AuditLogEntryDTO,
+  BulkReviewRequest,
+  BulkReviewResultDTO,
+  CalibrationDTO,
   CandidateDTO,
   CreatedApiKeyDTO,
+  CreatedScimTokenDTO,
   CreatedWebhookDTO,
   DashboardDTO,
+  DecisionConfigDTO,
+  DecisionConfigImpactDTO,
+  DecisionConfigsDTO,
+  DecisionThresholds,
   DetectionQualityDTO,
+  DriftDTO,
+  EventDetailDTO,
   EventDTO,
+  EvidenceStorageDTO,
   ExamDTO,
+  ExamExport,
+  ExamVersionDTO,
+  ExamVersionSummaryDTO,
   ExternalVerifierInfoDTO,
   ExternalVerifierTestResultDTO,
   ExternalVerifierUpdate,
   ExamInput,
   IdentityComparisonDTO,
+  IdentityProviderDTO,
+  IdentityProviderInput,
   IdPhotoUploadResponse,
   IdentityTestResponse,
   IntegrationStatusDTO,
   LiveEventDTO,
   NoteDTO,
+  OpsChecksDTO,
   OrgSettingsDTO,
+  OrgUsageDTO,
+  StaffOrgDTO,
+  MfaChallengeResponse,
   Paged,
-  ReviewStatus,
+  CreatePrivacyRequest,
+  PrivacyRequestDTO,
+  PrivacyRequestsDTO,
+  RecoveryCodesDTO,
+  RetentionPreviewDTO,
+  RegradeRequest,
+  RegradeResultDTO,
+  QueueView,
+  ReviewQueueDTO,
+  ReviewRequest,
+  SessionReviewDTO,
+  SessionReviewOutcome,
   SessionDetailDTO,
   SessionReportDTO,
   SessionSummaryDTO,
+  SessionWindow,
+  ScimStatusDTO,
+  SsoDiscoverResponse,
+  SsoOverviewDTO,
+  SsoTestResultDTO,
   StaffRole,
+  StaffSecurityDTO,
   StaffUserDTO,
+  StaffVerificationMethod,
+  TotpSetupDTO,
   TimelineItemDTO,
+  UpdatePrivacyRequest,
   WebhookDTO,
   WebhookDeliveryDTO,
   WebhookInput,
@@ -50,6 +92,12 @@ export class ApiError extends Error {
 }
 
 let unauthorizedHandler: (() => void) | null = null;
+let mfaEnrollmentHandler: (() => void) | null = null;
+
+/** Called when the staff API answers 403 mfa_enrollment_required (the organisation now requires two-step sign-in). */
+export function setMfaEnrollmentHandler(handler: (() => void) | null): void {
+  mfaEnrollmentHandler = handler;
+}
 /** Called when any staff request (except auth probes) returns 401. */
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
@@ -104,6 +152,7 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
   if (!res.ok) {
     let parsed: Partial<ApiErrorBody> | null = null;
     if (contentType.includes('json')) parsed = (await res.json().catch(() => null)) as Partial<ApiErrorBody> | null;
+    if (res.status === 403 && parsed?.error === 'mfa_enrollment_required') mfaEnrollmentHandler?.();
     throw new ApiError(
       res.status,
       parsed?.error ?? httpCode(res.status),
@@ -127,7 +176,9 @@ function httpCode(status: number): string {
 
 export function errorMessage(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 403) return 'You do not have permission to do this.';
+    // A missing role or a refused origin reads the same to staff; a specific refusal (four eyes, owner only, assign
+    // to yourself only…) says why in its message.
+    if (err.status === 403 && (err.code === 'forbidden' || err.code === 'bad_origin')) return 'You do not have permission to do this.';
     return err.message;
   }
   if (err instanceof Error) return err.message;
@@ -145,7 +196,13 @@ const enc = encodeURIComponent;
 
 export interface MeResponse {
   user: StaffUserDTO;
-  org: { id: string; name: string };
+  /** kind / sandbox may be missing from older servers (treated as production). */
+  org: Pick<StaffOrgDTO, 'id' | 'name'> & Partial<Pick<StaffOrgDTO, 'kind' | 'sandbox'>>;
+  security: StaffSecurityDTO;
+}
+
+export function isMfaChallenge(r: MeResponse | MfaChallengeResponse): r is MfaChallengeResponse {
+  return (r as MfaChallengeResponse).mfaRequired === true;
 }
 
 export interface SessionListParams {
@@ -160,7 +217,14 @@ export interface SessionListParams {
 export const api = {
   // ---- auth
   me: () => request<MeResponse>('GET', '/api/auth/me', { noAuthRedirect: true }),
-  login: (email: string, password: string) => request<MeResponse>('POST', '/api/auth/login', { body: { email, password }, noAuthRedirect: true }),
+  login: (email: string, password: string) => request<MeResponse | MfaChallengeResponse>('POST', '/api/auth/login', { body: { email, password }, noAuthRedirect: true }),
+  loginMfa: (factor: { code: string } | { recoveryCode: string }) => request<MeResponse>('POST', '/api/auth/login/mfa', { body: factor, noAuthRedirect: true }),
+  changePassword: (currentPassword: string, newPassword: string) => request<{ ok: true }>('POST', '/api/auth/password', { body: { currentPassword, newPassword } }),
+  mfaSetup: () => request<TotpSetupDTO>('POST', '/api/auth/mfa/totp/setup'),
+  mfaConfirm: (code: string, currentCode?: string) => request<RecoveryCodesDTO>('POST', '/api/auth/mfa/totp/confirm', { body: { code, currentCode: currentCode || undefined } }),
+  regenerateRecoveryCodes: (code: string) => request<RecoveryCodesDTO>('POST', '/api/auth/mfa/recovery-codes', { body: { code } }),
+  disableMfa: (password: string, code: string) => request<{ ok: true }>('POST', '/api/auth/mfa/disable', { body: { password, code } }),
+  resetUserMfa: (id: string) => request<StaffUserDTO>('POST', `/api/admin/users/${encodeURIComponent(id)}/mfa/reset`),
   logout: () => request<{ ok: true }>('POST', '/api/auth/logout', { noAuthRedirect: true }),
 
   // ---- dashboard / sessions
@@ -175,7 +239,7 @@ export const api = {
   decidePause: (id: string, requestId: string, approve: boolean, note?: string) =>
     request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/pause-requests/${enc(requestId)}/decision`, { body: { approve, note: note || undefined } }),
   hold: (id: string, note?: string) => request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/hold`, { body: { note: note || undefined } }),
-  release: (id: string, body: { note?: string; requireCheck: boolean; reEnroll: boolean }) =>
+  release: (id: string, body: { note?: string; requireCheck: boolean; reEnroll: boolean; verification?: { method: StaffVerificationMethod; note?: string } }) =>
     request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/release`, { body: { ...body, note: body.note || undefined } }),
   terminate: (id: string, reason: string) => request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/terminate`, { body: { reason } }),
   staffSubmit: (id: string, note?: string) => request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/submit`, { body: { note: note || undefined } }),
@@ -183,13 +247,25 @@ export const api = {
   regenerateLink: (id: string) => request<{ accessLink: string }>('POST', `${A}/sessions/${enc(id)}/regenerate-link`),
   extendTime: (id: string, minutes: number, note?: string) =>
     request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/extend`, { body: { minutes, note: note || undefined } }),
+  reschedule: (id: string, window: SessionWindow | null, note?: string) =>
+    request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/reschedule`, { body: { window: window ?? { startsAt: null, endsAt: null }, note: note || undefined } }),
+  reopen: (id: string, reason: string, addMinutes: number) => request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/reopen`, { body: { reason, addMinutes } }),
 
   // ---- events
   events: (p: { category?: string; severity?: string; review?: string; since?: number; limit?: number }) =>
     request<{ items: LiveEventDTO[] }>('GET', `${A}/events`, { query: { ...p } }),
-  event: (id: string) => request<EventDTO>('GET', `${A}/events/${enc(id)}`),
-  reviewEvent: (id: string, status: ReviewStatus, note?: string) =>
-    request<EventDTO>('POST', `${A}/events/${enc(id)}/review`, { body: { status, note: note || undefined } }),
+  event: (id: string) => request<EventDetailDTO>('GET', `${A}/events/${enc(id)}`),
+  /** A decision: a resolution (or `{ status: 'unreviewed' }` to reset); a note is required to change someone else's decision. */
+  reviewEvent: (id: string, decision: ReviewRequest) => request<EventDetailDTO>('POST', `${A}/events/${enc(id)}/review`, { body: { ...decision, note: decision.note || undefined } }),
+  reviewEventsBulk: (body: BulkReviewRequest) => request<BulkReviewResultDTO>('POST', `${A}/events/review-bulk`, { body: { ...body, note: body.note || undefined } }),
+
+  // ---- review queue / session review
+  reviewQueue: (p: { view: QueueView; examId?: string; limit?: number }) => request<ReviewQueueDTO>('GET', `${A}/review-queue`, { query: { ...p } }),
+  assignReview: (sessionId: string, assigneeId: string | null) => request<SessionReviewDTO>('POST', `${A}/sessions/${enc(sessionId)}/review/assign`, { body: { assigneeId } }),
+  escalateReview: (sessionId: string, note: string) => request<SessionReviewDTO>('POST', `${A}/sessions/${enc(sessionId)}/review/escalate`, { body: { note } }),
+  resolveReview: (sessionId: string, outcome: SessionReviewOutcome, note?: string) =>
+    request<SessionReviewDTO>('POST', `${A}/sessions/${enc(sessionId)}/review/resolve`, { body: { outcome, note: note || undefined } }),
+  reopenReview: (sessionId: string, note: string) => request<SessionReviewDTO>('POST', `${A}/sessions/${enc(sessionId)}/review/reopen`, { body: { note } }),
   eventNotes: (id: string) => request<{ items: NoteDTO[] }>('GET', `${A}/events/${enc(id)}/notes`),
   addEventNote: (id: string, text: string) => request<NoteDTO>('POST', `${A}/events/${enc(id)}/notes`, { body: { text } }),
   compare: (eventId: string) => request<IdentityComparisonDTO>('GET', `${A}/identity/compare/${enc(eventId)}`),
@@ -203,11 +279,20 @@ export const api = {
   publishExam: (id: string) => request<ExamDTO>('POST', `${A}/exams/${enc(id)}/publish`),
   archiveExam: (id: string) => request<ExamDTO>('POST', `${A}/exams/${enc(id)}/archive`),
   examSessions: (id: string) => request<{ items: SessionSummaryDTO[] }>('GET', `${A}/exams/${enc(id)}/sessions`),
-  assign: (id: string, candidateIds: string[]) => request<{ items: AssignmentDTO[] }>('POST', `${A}/exams/${enc(id)}/assignments`, { body: { candidateIds } }),
+  examVersions: (id: string) => request<{ items: ExamVersionSummaryDTO[] }>('GET', `${A}/exams/${enc(id)}/versions`),
+  examVersion: (id: string, versionId: string) => request<ExamVersionDTO>('GET', `${A}/exams/${enc(id)}/versions/${enc(versionId)}`),
+  exportExam: (id: string, versionId?: string) => request<ExamExport>('GET', `${A}/exams/${enc(id)}/export`, { query: { versionId } }),
+  importExam: (doc: unknown) => request<ExamDTO>('POST', `${A}/exams/import`, { body: doc }),
+  regradeExam: (id: string, body: RegradeRequest) => request<RegradeResultDTO>('POST', `${A}/exams/${enc(id)}/regrade`, { body }),
+  assign: (id: string, candidateIds: string[], window?: SessionWindow | null) =>
+    request<{ items: AssignmentDTO[] }>('POST', `${A}/exams/${enc(id)}/assignments`, { body: { candidateIds, ...(window ? { window } : {}) } }),
 
   // ---- candidates
   candidates: (q?: string) => request<{ items: CandidateDTO[] }>('GET', `${A}/candidates`, { query: { q } }),
   candidate: (id: string) => request<CandidateDTO>('GET', `${A}/candidates/${enc(id)}`),
+  accommodations: (candidateId: string) => request<{ items: AccommodationDTO[] }>('GET', `${A}/candidates/${enc(candidateId)}/accommodations`),
+  grantAccommodation: (candidateId: string, body: Record<string, unknown>) => request<AccommodationDTO>('POST', `${A}/candidates/${enc(candidateId)}/accommodations`, { body }),
+  revokeAccommodation: (id: string, reason: string) => request<AccommodationDTO>('POST', `${A}/accommodations/${enc(id)}/revoke`, { body: { reason } }),
   createCandidate: (input: { name: string; email: string | null; externalId: string | null }) =>
     request<CandidateDTO>('POST', `${A}/candidates`, { body: input }),
   updateCandidate: (id: string, input: { name: string; email: string | null; externalId: string | null }) =>
@@ -219,22 +304,53 @@ export const api = {
   // ---- org
   settings: () => request<OrgSettingsDTO>('GET', `${A}/settings`),
   updateSettings: (
-    patch: Partial<Omit<OrgSettingsDTO, 'identityThresholds' | 'externalVerifier'>> & {
-      identityThresholds?: Partial<OrgSettingsDTO['identityThresholds']>;
+    // Identity thresholds are changed through decision configurations (proposeDecisionConfig), not here.
+    patch: Partial<Omit<OrgSettingsDTO, 'identityThresholds' | 'decisionConfigVersion' | 'externalVerifier'>> & {
       externalVerifier?: ExternalVerifierUpdate;
     },
   ) => request<OrgSettingsDTO>('PUT', `${A}/settings`, { body: patch }),
+  /** Storage locations, the organisation's choice for new images and its images per location (owner changes it via updateSettings). */
+  evidenceStorage: () => request<EvidenceStorageDTO>('GET', `${A}/evidence-storage`),
+  /** Usage this month against the limits the server operator set (sandbox / quotas). */
+  usage: () => request<OrgUsageDTO>('GET', `${A}/usage`),
   users: () => request<{ items: StaffUserDTO[] }>('GET', `${A}/users`),
   createUser: (input: { email: string; name: string; role: StaffRole; password: string }) => request<StaffUserDTO>('POST', `${A}/users`, { body: input }),
   updateUser: (id: string, patch: { name?: string; role?: StaffRole; disabled?: boolean; password?: string }) =>
     request<StaffUserDTO>('PUT', `${A}/users/${enc(id)}`, { body: patch }),
   auditLog: (p: { limit: number; offset: number; action?: string }) => request<Paged<AuditLogEntryDTO>>('GET', `${A}/audit-log`, { query: { ...p } }),
+  /** The audit trail as CSV (same filters; downloaded by the browser with the staff cookie). */
+  auditLogCsvUrl: (p: { action?: string; from?: number; to?: number }) => {
+    const q = new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => [k, String(v)]));
+    return `${A}/audit-log.csv${q.size ? `?${q}` : ''}`;
+  },
   detectionQuality: (p: { from?: number; to?: number }) => request<DetectionQualityDTO>('GET', `${A}/metrics/detection-quality`, { query: { ...p } }),
+  calibration: (p: { from?: number; to?: number }) => request<CalibrationDTO>('GET', `${A}/metrics/calibration`, { query: { ...p } }),
+  drift: () => request<DriftDTO>('GET', `${A}/metrics/drift`),
+
+  // ---- model governance (versioned identity decision configurations)
+  decisionConfigs: () => request<DecisionConfigsDTO>('GET', `${A}/decision-configs`),
+  proposeDecisionConfig: (input: { thresholds: DecisionThresholds; note: string }) => request<DecisionConfigDTO>('POST', `${A}/decision-configs`, { body: input }),
+  decisionConfigImpact: (id: string) => request<DecisionConfigImpactDTO>('GET', `${A}/decision-configs/${enc(id)}/impact`),
+  decideDecisionConfig: (id: string, decision: 'approve' | 'reject' | 'withdraw', note?: string) =>
+    request<DecisionConfigDTO>('POST', `${A}/decision-configs/${enc(id)}/${decision}`, { body: note ? { note } : {} }),
+  rollbackDecisionConfig: (id: string, note: string) => request<DecisionConfigDTO>('POST', `${A}/decision-configs/${enc(id)}/rollback`, { body: { note } }),
+
+  // ---- privacy operations (admin): request register, export, erasure, retention preview, operational checks
+  privacyRequests: (p: { status?: 'open' | 'closed' | 'all'; candidateId?: string }) => request<PrivacyRequestsDTO>('GET', `${A}/privacy-requests`, { query: { ...p } }),
+  privacyRequest: (id: string) => request<PrivacyRequestDTO>('GET', `${A}/privacy-requests/${enc(id)}`),
+  createPrivacyRequest: (input: CreatePrivacyRequest) => request<PrivacyRequestDTO>('POST', `${A}/privacy-requests`, { body: input }),
+  updatePrivacyRequest: (id: string, patch: UpdatePrivacyRequest) => request<PrivacyRequestDTO>('PUT', `${A}/privacy-requests/${enc(id)}`, { body: patch }),
+  /** The candidate's data as a ZIP (downloaded by the browser with the staff cookie; audited, recorded on the request). */
+  privacyExportUrl: (id: string) => `${A}/privacy-requests/${enc(id)}/export`,
+  erasePrivacyRequest: (id: string) =>
+    request<{ request: PrivacyRequestDTO; sessionsDeleted: number; evidencePurged: number }>('POST', `${A}/privacy-requests/${enc(id)}/erase`, { body: { confirm: true } }),
+  retentionPreview: (days = 30) => request<RetentionPreviewDTO>('GET', `${A}/retention/preview`, { query: { days } }),
+  opsChecks: () => request<OpsChecksDTO>('GET', `${A}/ops/checks`),
 
   // ---- integrations (API keys, webhooks, email alerts)
   integrationStatus: () => request<IntegrationStatusDTO>('GET', `${A}/integrations/status`),
   apiKeys: () => request<{ items: ApiKeyDTO[] }>('GET', `${A}/api-keys`),
-  createApiKey: (name: string) => request<CreatedApiKeyDTO>('POST', `${A}/api-keys`, { body: { name } }),
+  createApiKey: (input: ApiKeyCreateInput) => request<CreatedApiKeyDTO>('POST', `${A}/api-keys`, { body: input }),
   revokeApiKey: (id: string) => request<ApiKeyDTO>('POST', `${A}/api-keys/${enc(id)}/revoke`),
   webhooks: () => request<{ items: WebhookDTO[] }>('GET', `${A}/webhooks`),
   createWebhook: (input: WebhookInput) => request<CreatedWebhookDTO>('POST', `${A}/webhooks`, { body: input }),
@@ -254,6 +370,17 @@ export const api = {
   // ---- external second-opinion face verifier (settings: updateSettings({ externalVerifier }))
   verifierInfo: () => request<ExternalVerifierInfoDTO>('GET', `${A}/verifiers`),
   testVerifier: (jpeg: Blob) => request<ExternalVerifierTestResultDTO>('POST', `${A}/verifiers/test`, { blob: jpeg }),
+  // ---- single sign-on and SCIM (requireSso: updateSettings({ requireSso }))
+  ssoOverview: () => request<SsoOverviewDTO>('GET', `${A}/sso`),
+  createSsoProvider: (input: IdentityProviderInput) => request<IdentityProviderDTO>('POST', `${A}/sso/providers`, { body: input }),
+  updateSsoProvider: (id: string, input: IdentityProviderInput) => request<IdentityProviderDTO>('PUT', `${A}/sso/providers/${enc(id)}`, { body: input }),
+  deleteSsoProvider: (id: string) => request<{ ok: true }>('DELETE', `${A}/sso/providers/${enc(id)}`),
+  testSsoProvider: (id: string) => request<SsoTestResultDTO>('POST', `${A}/sso/providers/${enc(id)}/test`),
+  createScimToken: () => request<CreatedScimTokenDTO>('POST', `${A}/scim/token`),
+  revokeScimToken: () => request<ScimStatusDTO>('DELETE', `${A}/scim/token`),
+  unlinkUserSso: (id: string) => request<StaffUserDTO>('POST', `${A}/users/${enc(id)}/sso/unlink`),
+  /** Sign-in page: which identity provider signs in this address (404 sso_not_configured). */
+  ssoDiscover: (email: string, next?: string) => request<SsoDiscoverResponse>('POST', '/api/auth/sso/discover', { body: { email, next }, noAuthRedirect: true }),
 };
 
 /** Resolve a relative evidence/API URL against the current origin (for new-tab links). */

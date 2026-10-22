@@ -4,7 +4,7 @@
  *   pnpm --filter @sp/server retention:run [-- --dry-run] [--json] [--max <n>]
  *   node apps/server/dist/scripts/retention.js [--dry-run] [--json]
  *
- * Uses the same environment as the server (DATABASE_URL, STORAGE_*, EVIDENCE_KEY...). Holds the same
+ * Uses the same environment as the server (DATABASE_URL, STORAGE_* incl. STORAGE_LOCATIONS, EVIDENCE_KEY...). Holds the same
  * advisory lock as the in-server hourly job, so it never runs concurrently with it.
  *
  * Exit codes: 0 success, 1 error, 2 bad arguments, 3 some sessions failed (see output), 75 another
@@ -16,7 +16,7 @@ import { loadConfig } from '../config.js';
 import type { Ctx } from '../context.js';
 import { createDatabase } from '../db/index.js';
 import { createKeyring } from '../lib/crypto.js';
-import { createStorage } from '../lib/storage.js';
+import { StorageLocations } from '../lib/storage.js';
 import { runRetentionExclusive, type RetentionLockCtx, type RetentionSummary } from '../services/retention.js';
 
 function printSummary(s: RetentionSummary): void {
@@ -63,12 +63,14 @@ async function main(): Promise<number> {
   const config = loadConfig();
   const log = pino({ level: process.env.LOG_LEVEL ?? 'warn', base: { app: 'retention-cli' } });
   const database = createDatabase(config.databaseUrl, { max: 4, applicationName: 'smartproctoring-retention' });
-  const storage = createStorage(config.storage);
+  // Every storage location: each image is deleted where it is stored (data residency).
+  const storageLocations = StorageLocations.fromConfig(config.storageLocations);
   try {
     const ctx: RetentionLockCtx = {
       database,
       db: database.db,
-      storage,
+      storage: storageLocations.default,
+      storageLocations,
       keyring: createKeyring(config.evidenceKey, config.evidenceKeysOld),
       now: () => Date.now(),
       log: log as unknown as Ctx['log'],
@@ -82,7 +84,7 @@ async function main(): Promise<number> {
     else printSummary(summary);
     return summary.failures.length ? 3 : 0;
   } finally {
-    await storage.close?.();
+    await storageLocations.close();
     await database.close();
   }
 }

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_POLICY } from '@sp/shared';
-import { aggregate, parseLabels, parseTraceJsonl, runRecordedTrace, runScenario } from './runner';
+import { aggregate, attentionSummary, parseLabels, parseTraceJsonl, runRecordedTrace, runScenario } from './runner';
 import { finalizeMetrics, matchTrace, type PredEpisode } from './metrics';
-import { SCENARIOS } from './scenarios';
+import { ATTENTION_SCENARIOS, SCENARIOS } from './scenarios';
 import { synthesize } from './synth';
 
 const pred = (type: PredEpisode['type'], s: number, e: number | null, openedAt = s + 1): PredEpisode => ({
@@ -108,5 +108,44 @@ describe('scenario runs', () => {
     expect(c).toMatchObject({ tp: 1, fp: 0, fn: 0 });
     expect(() => parseLabels('[{"type":"nope","start":1,"end":2}]')).toThrow(/unknown event type/);
     expect(() => parseTraceJsonl('{"x":1}')).toThrow(/not a FrameObservation/);
+  });
+});
+
+describe('attention scenarios (exam-taking with activity)', () => {
+  const pick = (name: string) => SCENARIOS.find((s) => s.name === name)!;
+
+  it('the synthetic host reports interaction timing on every observation, and gaze follows the targets', () => {
+    const b = pick('laptop_exam_hunt_typist').build(3);
+    const tr = synthesize({ ...b.spec, durationSec: 240 });
+    expect(tr.observations.every((o) => o.activity !== undefined)).toBe(true);
+    const last = tr.observations[tr.observations.length - 1].activity!;
+    expect(last.pointerAt).toBeGreaterThan(tr.t0);
+    expect(last.clickAt).toBeGreaterThan(tr.t0);
+    // Older hosts: no activity field at all.
+    expect(synthesize({ seed: 1, durationSec: 5 }).observations.every((o) => !('activity' in o))).toBe(true);
+    // Deterministic.
+    expect(synthesize({ ...b.spec, durationSec: 30 }).observations).toEqual(synthesize({ ...b.spec, durationSec: 30 }).observations);
+  });
+
+  it('recorded traces keep the activity field (replayed like the live engine)', () => {
+    const tr = synthesize({ ...pick('offscreen_phone_lap').build(2).spec, durationSec: 40 });
+    const jsonl = tr.observations.map((o) => JSON.stringify({ ...o, activity: { ...o.activity, extra: 'ignored' } })).join('\n');
+    const recs = parseTraceJsonl(jsonl);
+    expect(recs).toHaveLength(tr.observations.length);
+    expect(recs.map((r) => (r as { activity?: unknown }).activity)).toEqual(tr.observations.map((o) => o.activity));
+  });
+
+  it('summarises false alerts on normal exam-taking and recall on off-screen behaviour', () => {
+    const runs = [runScenario(pick('laptop_exam_hunt_typist'), 1), runScenario(pick('offscreen_phone_lap'), 1)];
+    const a = attentionSummary(runs, ATTENTION_SCENARIOS);
+    expect(a.normal.rows).toHaveLength(1);
+    expect(a.normal.rows[0]).toMatchObject({ scenario: 'laptop_exam_hunt_typist', runs: 1, flaggedRuns: 0, perHour: 0 });
+    expect(a.normal.familyPerHour).toBe(0);
+    const off = a.offscreen.rows[0];
+    expect(off.scenario).toBe('offscreen_phone_lap');
+    expect(off.measures).toEqual(['looking_away']);
+    expect(off.required).toBeGreaterThanOrEqual(1);
+    expect(off.detected).toBe(off.required);
+    expect(off.latencyMeanSec!).toBeLessThan(7);
   });
 });

@@ -147,8 +147,18 @@ export interface WebhookNotification {
   severity?: Severity | null;
 }
 
-/** Insert one delivery per (active subscribed webhook, notification). Returns the number of new rows. */
-export async function enqueueWebhookNotifications(db: DbOrTx, orgId: string, notifications: WebhookNotification[], now: number, hooks?: Pick<Webhook, 'id' | 'events' | 'minSeverity'>[]): Promise<number> {
+/**
+ * Insert one delivery per (active subscribed webhook, notification). Returns the number of new rows. `sandbox`: the
+ * organisation is a sandbox — the envelope then carries `sandbox: true` (test data, not real candidates).
+ */
+export async function enqueueWebhookNotifications(
+  db: DbOrTx,
+  orgId: string,
+  notifications: WebhookNotification[],
+  now: number,
+  hooks?: Pick<Webhook, 'id' | 'events' | 'minSeverity'>[],
+  opts: { sandbox?: boolean } = {},
+): Promise<number> {
   if (notifications.length === 0) return 0;
   const targets =
     hooks ??
@@ -162,7 +172,7 @@ export async function enqueueWebhookNotifications(db: DbOrTx, orgId: string, not
       if (!h.events.includes(n.type)) continue;
       if (n.severity && SEVERITY_RANK[n.severity] < SEVERITY_RANK[h.minSeverity]) continue;
       const id = randomUUID();
-      const envelope: WebhookEnvelope = { id, type: n.type, createdAt: now, orgId, data: n.data };
+      const envelope: WebhookEnvelope = { id, type: n.type, createdAt: now, orgId, ...(opts.sandbox ? { sandbox: true as const } : {}), data: n.data };
       rows.push({
         id,
         webhookId: h.id,
@@ -483,11 +493,13 @@ export async function deliverNow(ctx: Ctx, deliveryId: string): Promise<WebhookD
 export async function createPingDelivery(ctx: Ctx, hook: Webhook, sentBy: { id: string; name: string }): Promise<string> {
   const now = ctx.now();
   const id = randomUUID();
+  const [org] = await ctx.db.select({ kind: organizations.kind }).from(organizations).where(eq(organizations.id, hook.orgId));
   const envelope: WebhookEnvelope = {
     id,
     type: 'ping',
     createdAt: now,
     orgId: hook.orgId,
+    ...(org?.kind === 'sandbox' ? { sandbox: true as const } : {}),
     data: { webhookId: hook.id, message: 'Test notification from SmartProctoring. No action is required.', sentBy: sentBy.name },
   };
   await ctx.db.insert(webhookDeliveries).values({

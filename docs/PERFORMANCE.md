@@ -4,7 +4,20 @@ How many candidates one SmartProctoring server instance carries, what limited it
 size a deployment. All numbers come from `e2e/scripts/load-test.ts` against a real server (real Postgres, real
 YuNet/SFace inference on real face photos); the method is in §2 so every number can be reproduced.
 
-## 1. Summary
+**Identity v2 (re-measured 2026-09-25, §7) changed the capacity picture.**
+- *Why:* each candidate now sends 15× more frames for face analysis in the first 3 minutes after an exam starts or
+  resumes (a 3-frame burst every 6 s), and 6× more afterwards (every 15 s). Each frame costs 1.9× the CPU (flip
+  test-time augmentation and a mirrored detection).
+- *Result:* one 4-vCPU instance now carries **≈ 45 candidates who start together (≈ 11 per vCPU)** and ≈ 110 in
+  steady state. §6 is the current sizing.
+- *Unchanged:* the request path is not affected. Heartbeat p95 stays ≤ 28 ms even at N=500 with face analysis
+  saturated.
+- *History:* §1–§5 describe the identity-v1 optimisation work and its measurements.
+- *Dedicated vision workers* (`VISION_DRIVER=remote`, 2026-10-21, §8): face analysis can move to separate worker
+  processes and scale on its own hosts. The HTTP hop costs ≈ 2–3 ms per frame (latency and CPU, ≈ 2 % of a frame's
+  analysis) on one host; the analysis itself is unchanged.
+
+## 1. Summary (identity v1)
 
 One 4-vCPU instance (Postgres and the load generator on the same VM), load test with a 60 s check-in ramp
 and 120 s of exam traffic, no staff dashboard open (quiet runs, §2), whole-run p50 / p95 in ms:
@@ -31,13 +44,15 @@ With a staff dashboard connected N=500 is unchanged (heartbeat 3 / 9, identity s
   limit is face analysis: **≈ 52 identity samples/s per instance** (3 vision workers on 4 vCPU). N=1,000 with
   check-ins spread over 2 min meets every target in steady state; N=800 checking in within 1 min (13 check-ins/s)
   queues check frames (p95 6 s); N=1,200 saturates vision (identity samples wait seconds, some 503s).
-* **Sizing**: plan ≈ 250 concurrent candidates per vCPU at the default 30 s identity interval and ≈ 2 check-ins/s
-  per vCPU of start-up burst; details in §6.
+* **Sizing** (identity v1): ≈ 250 concurrent candidates per vCPU at a 30 s identity interval and ≈ 2 check-ins/s
+  per vCPU of start-up burst. **Superseded for identity v2**: ≈ 11 per vCPU when candidates start together, see
+  §6 and §7.
 
 ## 2. Method
 
-**Load.** `e2e/scripts/load-test.ts` simulates N candidates through the real candidate API: privacy consent,
-initial check-in with 3 real JPEG frames (640×480, server-side face detection + embedding + reference
+**Load.** `e2e/scripts/load-test.ts` simulates N candidates through the real candidate API. The identity-v1
+measurements in §1–§5 used the v1 client behaviour, which is now `CADENCE=v1`; the default is the identity-v2
+cadence (§7.1). The v1 behaviour: privacy consent, initial check-in with 3 real JPEG frames (640×480, server-side face detection + embedding + reference
 building), exam start, then per candidate a heartbeat every 5 s, an identity sample (real JPEG) every 30 s, an
 event batch every 20 s and an answer save every 25 s. Check-ins are spread evenly over `RAMP_SEC`
 (e.g. N=500 in 60 s = 8.3 check-ins/s = 25 face analyses/s on top of the running samples); then
@@ -65,8 +80,9 @@ cd apps/server && DATABASE_URL=postgres://postgres@127.0.0.1:5432/proctor_perf P
   PUBLIC_URL=http://127.0.0.1:8097 STORAGE_DIR=/tmp/perf-storage LOG_LEVEL=warn \
   BOOTSTRAP_ADMIN_EMAIL=perf@example.com BOOTSTRAP_ADMIN_PASSWORD=PerfTest12345 node dist/main.js
 cd e2e && BASE=http://127.0.0.1:8097 STAFF_EMAIL=perf@example.com STAFF_PASSWORD=PerfTest12345 \
-  N=500 RAMP_SEC=60 DURATION_SEC=120 STAFF_WS=1 FACES_DIR=/path/to/face/jpegs npx tsx scripts/load-test.ts
-# max identity-sample throughput: N=150 RAMP_SEC=30 DURATION_SEC=90 SAMPLE_SEC=1
+  CADENCE=v1 N=500 RAMP_SEC=60 DURATION_SEC=120 STAFF_WS=1 FACES_DIR=/path/to/face/jpegs npx tsx scripts/load-test.ts
+# max identity-sample throughput: CADENCE=v1 N=150 RAMP_SEC=30 DURATION_SEC=90 SAMPLE_SEC=1
+# identity v2 (default cadence): N=150 RAMP_SEC=60 DURATION_SEC=360 (§7.1)
 ```
 
 ## 3. Bottlenecks found
@@ -217,44 +233,532 @@ batches (measured with the earlier 30 s keepalive: ≈ 7 summaries per minute pe
 
 ## 6. Sizing guidance
 
-Per concurrent candidate at the default policy (identity sample every 30 s, heartbeat every 5 s), measured:
-≈ 1.7 ms/s of face analysis + ≈ 0.7 ms/s event loop + ≈ 0.3 ms/s Postgres ≈ **2.7 ms CPU per candidate-second**,
-i.e. ≈ 370 candidates per fully busy vCPU. Keep ≥ 30 % headroom for check-in bursts and GC.
+Revised for identity v2 (2026-09-25, §7). The identity-v1 figures (≈ 250 candidates per vCPU, ≈ 800–1,000 per
+4-vCPU instance) no longer apply. Face analysis now sets the size of a deployment. The request path (heartbeats,
+answers, events) and Postgres are far from their limits at these candidate counts.
 
-| deployment | concurrent candidates | check-in burst |
+Per concurrent candidate at the default v2 policy (*Maximum accuracy*, §7) and at the per-exam *Balanced*
+sampling intensity (§7.7):
+
+| | analysed frames/s | server CPU per candidate-second |
 |---|---|---|
-| 2 vCPU instance | ≈ 400 | ≈ 4 check-ins/s |
-| 4 vCPU instance | ≈ 800–1,000 | ≈ 8 check-ins/s |
-| 8 vCPU host | ≈ 1,800–2,000 as **two** 4-vCPU instances | ≈ 16 check-ins/s |
+| start-up window (first 180 s after the exam starts or resumes) | 0.5 (3-frame burst every 6 s) | ≈ 45 ms |
+| steady state (a burst every 15 s) | 0.2 | ≈ 18 ms |
+| Balanced: start-up window | 0.17 (2-frame burst every 12 s) | ≈ 15 ms |
+| Balanced: steady state (every 30 s) | 0.067 | ≈ 6 ms |
+| identity v1, for comparison | 0.033 | ≈ 2.7 ms |
 
-One instance's event loop is a single core: at ≈ 0.7 ms/s per candidate it saturates around 1,400 candidates
-whatever the core count, so scale beyond ≈ 1,000–1,200 candidates per instance by adding instances, not cores.
+A check-in adds ≈ 5.5 frames (≈ 0.5 s CPU; up to 24 frames in poor light).
+- An analysed frame costs ≈ 85 ms of server CPU, of which ≈ 76 ms is the analysis (§7.4).
+- A frame from the v2 client (a face crop of up to 720×720) costs ≈ 1.2× a load-test frame.
+- One 4-vCPU instance (3 vision workers) analyses ≈ 35 load-test frames/s, i.e. **≈ 29 client frames/s**.
 
-* **Check-ins are the burst**: a check-in costs 3 face analyses (≈ 150 ms CPU) plus ≈ 30 queries. If all
-  candidates start at the same minute, size for `candidates ÷ 60` check-ins/s — or stagger start times
-  (e.g. open the exam 5–10 min before the start). A shorter identity interval scales the analysis cost linearly
-  (15 s ⇒ ≈ 3.4 ms/s per candidate).
+Planning at ≤ 75 % of that:
+
+| deployment (default `VISION_THREADS` = CPUs − 1) | everyone starts together (scheduled exam) | steady state (all past their first 3 minutes) | Balanced: everyone starts together | Balanced: steady state |
+|---|---|---|---|---|
+| per vCPU | **≈ 11** | ≈ 27 | **≈ 20** | ≈ 70 |
+| 2 vCPU instance (1 vision worker) | ≈ 15 | ≈ 35 | ≈ 25² | ≈ 90² |
+| 4 vCPU instance (3 vision workers) | **≈ 45** (knee ≈ 58; measured ≈ 70 with test frames) | ≈ 110 (knee ≈ 145; measured ≈ 175) | **≈ 80** (knee ≈ 110; measured ≈ 130) | ≈ 280 (knee ≈ 375; measured ≈ 450) |
+| 8 vCPU instance (7 vision workers), or two 4-vCPU instances | ≈ 80–100¹ | ≈ 200–250¹ | ≈ 150–180¹ | ≈ 500–600¹ |
+
+¹ Extrapolated from the 4-vCPU measurement; 3 → 4 workers gave +23 % in isolation, not +33 %, so scaling with
+cores is sub-linear. Verify on your hardware with `e2e/scripts/load-test.ts` (§7.1; `PROFILE=balanced` for the
+Balanced columns).
+² Scaled from the 4-vCPU Balanced measurement by the default profile's 2-vCPU / 4-vCPU ratio; not measured.
+
+The event loop (≈ 0.7 ms/s per candidate) would saturate around 1,400 candidates. With v2 an instance runs out
+of face analysis long before that, so grow by vision workers (a bigger instance) or by instances.
+
+* **The start-up window is the peak.** Scheduled exams start everyone within a minute or two, so for 3 minutes
+  every candidate sends a 3-frame burst every 6 s: size for the "starts together" column.
+  - *Staggered starts:* with starts spread evenly over S minutes (S ≥ 3), the peak is ≈ (0.2 + 0.9 ÷ S) frames/s
+    per candidate. S = 10 gives 0.29 frames/s and ≈ 75 candidates per 4-vCPU instance; S = 30 gives 0.23 and
+    ≈ 95. With Balanced it is ≈ (0.067 + 0.3 ÷ S): S = 10 gives 0.097 frames/s and ≈ 220 per instance.
+  - *Resumes:* a resume (after a pause or reconnect) opens a new start-up window for that candidate.
+  - *Check-ins:* a check-in is small (≈ 5.5 frames) next to the 90 frames of the start-up window after it. So one
+    4-vCPU instance on its own absorbs only ≈ 14 new candidates per minute (≈ 34 with Balanced), not ≈ 8 check-ins
+    per second as with v1.
+* **Beyond capacity** — by default admission at exam start and load-aware sampling now step in first (§7.8): starts
+  are held back (clock not running, at most 5 minutes) and routine samples are spaced out to the Balanced intensity, so
+  identity samples keep waiting about 2 s instead of 10 s or more. Without them (both switched off, as measured in §7.2):
+  - `server overloaded (face analysis queue long)` appears in the log first;
+  - identity bursts then wait seconds (the client's cadence stretches);
+  - then frames answer 503 `vision_busy` with a `Retry-After` estimated from the queue (retried after it, with a
+    random spread, then kept in the client's outbox);
+  - check-ins slow to minutes, which delays exam starts;
+  - heartbeats, answers and events stay fast throughout.
+* **Cheaper policies** scale demand linearly (`burstSize`, `routineBurstSize`, `startupIntervalSec`,
+  `startupWindowSec`, `periodicCheckIntervalSec`; §7.6). Each costs accuracy or reaction time; decide per exam.
+  - The *Balanced* sampling intensity (Exams → Policy, §7.7) is the measured preset. It gives ≈ 2× the candidates
+    per instance at a synchronised start and ≈ 2.5× in steady state.
+  - Its cost: a swap with no trigger (the face never leaves view or changes abruptly) is confirmed ≈ 8 s later at
+    the median. Other-day false alarms in the simulator rise from 1.4 to 2.5 per 1,000 h
+    (`accuracy/identity-v2.md` §6.4).
+  - Swaps caught by a trigger are confirmed as fast as with the default (`accuracy/end-to-end.md`).
 * **When to add instances**: when the `server overloaded (…)` warning (lib/load-monitor.ts, OPERATIONS §5)
   keeps appearing, when identity samples or check frames answer 503 `vision_busy`, or when you plan for more
-  than the table above. Scale horizontally: N instances behind a load balancer.
+  than the table above. Scale out (N instances behind a load balancer) or up (more vision workers).
 * **Redis** (`REDIS_URL`) is required as soon as there is more than one instance: staff realtime fans out
   through it and rate limits are shared. It also tells each instance whether any staff dashboard is open
   anywhere (`PUBSUB NUMSUB`), so instances without watchers do no realtime work. Load is light (one small
   message per realtime update).
-* **Postgres**: ≈ 1.5 queries per candidate-second (≈ 1,400 queries/s at 1,000 candidates) and ≈ 0.25 vCPU
-  per 1,000 candidates with warm caches; 2 vCPU / 4 GB is plenty for several thousand candidates. Connections =
+* **Postgres**: ≈ 1.5 queries per candidate-second for the request path, plus ≈ 12 per analysed frame. Measured
+  (§7.2): ≈ 0.15 vCPU per 4-vCPU instance at full face-analysis load; 2 vCPU / 4 GB serves many instances. Connections =
   instances × `PG_POOL_MAX` (+ scripts); keep below `max_connections` (default 100). A co-located Postgres over
   its Unix socket (`?host=/var/run/postgresql`) costs the server ≈ 35 % less CPU per query than TCP. With
   PgBouncer in transaction mode enable `max_prepared_statements` (the candidate-auth query is prepared).
 * **`VISION_THREADS`** (default CPU count − 1, max 8): CPU threads for face analysis, one single-threaded
   worker each (best throughput per core). Set it to the CPU count on dedicated vision-heavy instances whose
-  Postgres is elsewhere (+13 % throughput measured on 4 vCPU), lower it when the host also runs other services.
+  Postgres is elsewhere (identity v1: +13 % throughput in the server on 4 vCPU; identity v2: 3 → 4 workers
+  +23 % analysis throughput in isolation, §7.4), lower it when the host also runs other services.
   `VISION_THREADS_PER_WORKER` > 1 lowers single-image latency at the cost of throughput. `VISION_NICE`
   (Linux, default 0) lowers the vision threads' priority so request handling wins under CPU saturation — useful
   on a dedicated host, harmful on a shared one (other processes then win over vision too).
   `VISION_WORKERS=0` runs inference on the event loop (tools only).
 * **`PG_POOL_MAX`** (default 20): 20 was never exhausted once inference left the event loop (0 waiters up to
-  N=1,200). Raise it only if the overload warning names the database pool while Postgres itself has spare CPU;
+  N=1,200, and in every identity-v2 run up to N=500). Raise it only if the overload warning names the database pool while Postgres itself has spare CPU;
   more connections do not make a CPU-bound event loop faster. `PG_STATEMENT_TIMEOUT_MS` (default 60 s) stops a
   runaway statement from holding a connection and row locks.
 * **Memory**: ≈ 400 MB + ≈ 100 MB per vision worker; ≈ 0.7 GB at 1,000 candidates on 4 vCPU.
+* **Dedicated vision workers** (`VISION_DRIVER=remote`, §8, OPERATIONS §2): size the worker fleet from the frames/s
+  above (a 4-vCPU worker host with 4 threads ≈ 46 analyses/s in isolation, ≈ 38 client frames/s; plan at ≤ 75 %), and
+  the API servers for the request path plus ≈ 10–15 ms of CPU per analysed frame (evidence, database, identity logic:
+  the part of the ≈ 85 ms that is not analysis, plus the HTTP client). Memory: a model-free server ≈ 300–350 MB, a
+  worker ≈ 300 MB + ≈ 100 MB per analysis thread.
+
+## 7. Identity v2 (re-measured 2026-09-25)
+
+Identity v2 analyses far more frames per candidate, and each frame costs more. §1–§5 above are the identity-v1
+measurements. They still hold for the request path (heartbeats, answers, events), but not for face analysis,
+which is now the limit well before the request path is. §6 is revised accordingly.
+
+| per candidate | identity v1 | v2 start-up window (first 180 s after a start / resume) | v2 steady state |
+|---|---|---|---|
+| identity sample | 1 frame every 30 s | burst of 3 frames every 6 s (plus one burst at once, trigger `exam_start`) | burst of 3 every 15 s |
+| analysed frames/s | 0.033 | **0.5** (15×) | **0.2** (6×) |
+| check-in | 3 frames | ≥ 5 frontal frames while `progress.frontalNeeded > 0` (mean 5.5 measured, up to 24 in poor light) | — |
+| CPU per face frame (640×480, one worker, §7.4) | 39.8 ms (v1 pipeline) | 75.7 ms (1.9×) | 75.7 ms |
+
+The server may shorten the interval (`nextSampleInMs`: 2.5 s while the evidence is `suspect`, 5 s while
+`monitoring`, ≤ 10 s after an unusable sample). With the test photos the evidence stayed `consistent`, so no
+interval was shortened in these runs. Candidates in a dim room, or during a real swap, add to the figures below.
+
+### 7.1 Method
+
+As §2, with these differences. Server bundle built 2026-09-24 23:13 UTC from commit `f7422f4`; the server
+sources are identical in `1cb71a9` / `5889d2d`, which change only the load-test script. Each run got a fresh
+database and a freshly started server (`node dist/main.js`, default settings: 3 vision workers × 1 thread,
+`PG_POOL_MAX=20`, no Redis) and no staff dashboard (`STAFF_WS=0`). The same 4-vCPU VM, with Postgres 16 and the
+load generator on it. Each run started with a 1-min load average < 1.0, except the first three, which ran back to
+back from 0.2–2.6 with nothing else running. CPU per process and the box's load average were sampled every 5 s
+from `/proc`. CPU not accounted for by server + Postgres + generator averaged ≤ 0.12 cores over every run reported here
+(≤ 0.18 in any phase). One run disturbed by another job (≈ 0.8 cores) was discarded and repeated.
+
+```bash
+# v2 client cadence (default): bursts of 3 sent concurrently, exam_start burst, 6 s for 180 s, then 15 s,
+# nextSampleInMs honoured, heartbeat identitySample requests honoured, adaptive check-in frames
+cd e2e && BASE=http://127.0.0.1:8097 STAFF_EMAIL=perf@example.com STAFF_PASSWORD=PerfTest12345 \
+  N=150 RAMP_SEC=60 DURATION_SEC=360 FACES_DIR=/path/to/face/jpegs npx tsx scripts/load-test.ts
+# identity-v1 client (1 frame every 30 s, fixed check-in frames) on the same server, for comparison
+CADENCE=v1 N=500 RAMP_SEC=60 DURATION_SEC=240 STEADY_FROM_SEC=150 ... npx tsx scripts/load-test.ts
+```
+
+Check-ins are spread over the 60 s ramp. The run reports three phases:
+- **whole run**;
+- **start-up**: every candidate is inside its 180 s start-up window, from the last start to the first start + 180 s;
+- **steady**: every candidate samples every 15 s, from the last start + 195 s.
+
+Frames are the §2 test photos (640×480 JPEG q80, ≈ 30 KB). The v2 client sends face-centred crops of up to 720×720
+at q0.92 (≈ 88 KB), which cost ≈ 1.2× more per frame (§7.4), so real capacity is ≈ 1/1.2 of the measured figures.
+The sizing in §6 includes that factor. About 10 % of check-ins end in `retry` ("We could not verify your identity
+from these images") because of the photo set, not the load; those candidates do not start. That is why
+"checked in" is below N.
+
+### 7.2 Results (v2 cadence)
+
+p50 / p95 in ms. "Refused" = still 503 `vision_busy` after the client's 3 retries.
+
+| N (checked in) | phase | heartbeat | answer | events | identity frame | burst (3 frames) | analysed frames/s | server CPU (cores) | load avg 1 min, mean (max) |
+|---|---|---|---|---|---|---|---|---|---|
+| 60 (54) | start-up | 3 / 9 | 5 / 12 | 6 / 14 | 101 / 132 | 111 / 142 | 26.4 | 2.29 | 2.62 (3.28) |
+| | steady | 3 / 96¹ | 4 / 61¹ | 5 / 81¹ | 104 / 259¹ | 113 / 345¹ | 10.7 | 0.98 | 1.39 (2.12) |
+| 100 (91) | start-up | 4 / 12 | 6 / 15 | 7 / 18 | **1,768 / 2,352** | 1,800 / 2,371 | 35.1 | 2.99 | 3.84 (4.65) |
+| | steady | 3 / 8 | 4 / 11 | 5 / 12 | 100 / 131 | 110 / 141 | 18.0 | 1.59 | 2.68 (3.18) |
+| 150 (136) | start-up | 4 / 16 | 7 / 24 | 8 / 33 | **5,963 / 8,677** | 5,990 / 8,709 | 34.1 | 2.96 | 3.86 (5.12) |
+| | steady | 3 / 10 | 5 / 14 | 6 / 14 | 111 / 181 | 124 / 204 | 27.1 | 2.39 | 3.49 (4.99) |
+| 200 (182) | start-up | 4 / 13 | 7 / 18 | 7 / 21 | **7,685 / 13,807** | 9,540 / 14,351 | 34.0 | 2.99 | 4.87 (5.41) |
+| | steady | 4 / 11 | 6 / 14 | 7 / 17 | **509 / 889** | 540 / 915 | 35.1 | 2.98 | 4.43 (4.95) |
+| 500 (447) | whole run² | 8 / 28 | 12 / 44 | 14 / 53 | **6,901 / 18,774** | 11,814 / 21,229 | 31.5 | 3.05 | 4.37 (5.58) |
+
+| N | check frame (whole run) | refused after retries | 503s retried |
+|---|---|---|---|
+| 60 | 105 / 161 | 0 | 0 |
+| 100 | 127 / 180 | 0 | 0 |
+| 150 | 189 / 1,545 | 0 | 0 |
+| 200 | 1,538 / 4,707 | 196 identity frames (138 of 4,527 bursts incomplete) | 2,875 |
+| 500 | **8,891 / 21,927** | 9,537 of 20,478 identity frames (47 %), 1,194 of 3,888 check frames; 4,791 of 6,826 bursts incomplete | 45,688 |
+
+Postgres used 0.05–0.34 cores and the load generator 0.02–0.17 cores.
+
+¹ One disk stall at t+385–395 s (Postgres checkpoint in progress): answers, events, heartbeats and samples all
+slowed together for ≈ 1 s while the box was ≈ 70 % idle. Outside that 20 s window the 10-s p95s were heartbeat
+≤ 14 ms and identity frame ≤ 250 ms. The v1-cadence run shows a similar single ≈ 0.8 s blip; it is the VM's disk,
+not the load.
+² At N=500 the check-ins alone took minutes, so there is no clean start-up or steady phase.
+
+Reading the tables:
+- **Face analysis is the only limit.** The request path stays fast even at N=500 with analysis saturated:
+  heartbeat p95 ≤ 28 ms, answers ≤ 44 ms, events ≤ 53 ms.
+- **Throughput.** Saturated, one instance analyses ≈ 34–35 frames/s (31.5 at N=500, where it also answers
+  thousands of 503s): 3.0 cores of server CPU, ≈ 85 ms per analysed frame over all threads.
+- **Beyond capacity** it degrades in this order:
+  1. Bursts queue for seconds. The client schedules its next burst after the answer, so the effective interval
+     stretches (a closed loop).
+  2. The vision queue fills (`server overloaded (face analysis queue long)` in the log, `visionQueued` 255–510)
+     and frames get 503.
+  3. Check-ins wait: check frames are served first, but they share the interactive queue with `exam_start`
+     bursts and alternate with overdue identity samples. At N=500 a check-in took minutes (check frame p95 22 s),
+     so candidates started late.
+- **Recovery after the peak.** The backlog drains as the start-up windows end. At N=150 the windows ended between
+  t+182 and t+246 s; identity p95 was ≈ 5–6 s until t+200 s and < 0.3 s from t+250 s.
+
+### 7.3 v1 cadence on the current code (N=500): more work per frame vs more frames
+
+The same server with the identity-v1 client: 1 frame every 30 s, and the check-in sends `frontalFramesRequired`
+frames, now 5 (was 3). Steady phase = t+150…300 s, after the check-in backlog.
+
+| N=500 | identity v1 code (§1, whole run) | current code, v1 cadence |
+|---|---|---|
+| check frame (ramp) | 68 / 98 | **4,138 / 7,843** |
+| identity sample (steady) | 66 / 96 | 95 / 142 |
+| heartbeat / answer / events (steady) | 3 / 8, 5 / 12, 6 / 14 | 3 / 7, 4 / 10, 5 / 12 |
+| analysed frames/s (steady) | — | 15.1 |
+| server CPU (steady) | — | 1.46 cores (ramp: 3.03) |
+| load avg 1 min (steady) | — | 1.48 (max 2.56) |
+| refused | 0 | 0 |
+
+- **More work per frame.** Per-frame cost is 1.9× (§7.4), and an isolated sample takes 95 ms instead of 66 ms.
+  At the v1 frame rate the steady state is still comfortable (≈ 45 % of vision capacity at 452 candidates).
+- **More check-in frames.** 5 frames instead of 3 at 1.9× the cost means a 500-candidate check-in ramp over 60 s
+  (8.3 check-ins/s ≈ 42 frames/s) no longer fits in ≈ 35 frames/s. Check-ins queue even with the v1 cadence.
+- **More frames overall.** The v2 cadence multiplies analysed frames per candidate by 15 in the start-up window
+  and by 6 after it. Together with the per-frame cost, face-analysis CPU per candidate is ≈ 28× v1 during start-up
+  and ≈ 11× afterwards. This, not the per-frame cost, is what moves the knee from ≈ 1,000 to ≈ 70–175 candidates.
+
+### 7.4 Where the time goes per analysed frame
+
+`analyze()` with the identity-sample options (embedding + face crop), one onnxruntime thread (= one vision
+worker), in-process, quiet box, 40 face photos × 3 repetitions. Inference time was split per model by wrapping
+`InferenceSession.run` (scratch script, not committed); the vision code was not changed.
+
+| ms per frame | 640×480 q80 (30 KB) | 1280×720 q92 (112 KB) | 720×720 face crop q92 (88 KB)³ |
+|---|---|---|---|
+| **v2 default** (mirrored detection on, flip TTA on) | **75.7** | **89.8** | **92.9** |
+| mirrored detection off, flip TTA on | 66.4 | 77.9 | 78.7 |
+| mirrored detection on, flip TTA off | 52.3 | 64.8 | 68.5 |
+| both off | 40.6 | 47.8 | 50.0 |
+| v1 pipeline (single view, no mirror, no low-light pass) | 39.8 | 49.0 | 49.2 |
+
+³ What the v2 client sends: a square face crop of 2.4 × the face size at native resolution, ≤ 720 px
+(`frames.ts faceCropRect`).
+
+v2 default at 640×480:
+- YuNet 2 runs × 8.1 ms (the frame and its mirror image);
+- SFace 1.98 runs × 24.2 ms (the frame and its flip; the one poor-bucket photo takes a single denoised view);
+- decode 2.9 ms;
+- the rest (statistics, 2 letterbox packs, the flop, alignment, quality, face-crop JPEG) 8.8 ms.
+
+At 1280×720: YuNet 2 × 8.5 ms, SFace 2 × 25.2 ms, rest 22.6 ms (decode 5.3 ms, then a resize to 640 px for each of
+the 2 detector passes, and the crop).
+
+| v2 feature | extra CPU per frame |
+|---|---|
+| flip TTA (a second SFace run, good / fair frames) | +23–25 ms (+31 % at 640×480) |
+| mirrored YuNet detection (`symmetricPose`, every frame with a face) | +9 ms at 640×480, +12–14 ms at 1280×720 / 720×720 (second resize + flop + pack + YuNet run) |
+| low-light second detection (face-less frames only) | a face-less frame costs 33 ms instead of 13 ms |
+| 3×3 denoise instead of flip (poor frames) | none: one SFace run on the denoised crop instead of two |
+
+Worker-pool throughput (analysis only, 12 concurrent requests, 640×480):
+- 3 workers: v2 **37.2–37.5 analyses/s**, v1 pipeline 68.2/s;
+- 3 workers with 720×720 crops: 31.4/s;
+- 4 workers: 46.1/s.
+
+In the server under load the 3 workers deliver ≈ 34–35 frames/s: the event loop, Postgres and the generator
+share the 4th vCPU.
+
+### 7.5 Knee
+
+The knee is where p95 stays ≤ 1 s with no refusals. Vision capacity is ≈ 35 frames/s per 4-vCPU instance with
+the test frames, ≈ 29 with real client crops.
+
+| | fine | saturated | capacity-bound knee (35 frames/s ÷ demand) |
+|---|---|---|---|
+| start-up window (0.5 frames/s per candidate) | 54 active: identity p95 132 ms, 75 % of capacity | 91 active: p95 2.4 s; 136: 8.7 s; 182: 13.8 s + 503s | **≈ 70 active candidates** |
+| steady state (0.2 frames/s per candidate) | 91 active: p95 131 ms; 136: p95 181 ms (77 %) | 182 active: p95 889 ms, queueing at 100 % | **≈ 175 active candidates** |
+| check-in ramp (check frame p95) | 1 check-in/s: 161 ms; 1.7/s: 180 ms | 2.5/s: 1.5 s; 3.3/s: 4.7 s; 8.3/s (N=500 in 60 s): 22 s | a check-in is only ≈ 5.5 frames; the load is the start-up bursts of those who already started (90 frames each over 180 s) |
+
+With real client crops the knees are ≈ 58 (start-up) and ≈ 145 (steady). Planning at ≤ 75 % of capacity gives
+**≈ 45 candidates per 4-vCPU instance when everyone starts together** (≈ 11 per vCPU) and **≈ 110 in steady
+state** (≈ 27 per vCPU). Identity v1 planned ≈ 250 per vCPU (≈ 800–1,000 per instance).
+
+### 7.6 Optimisation options (measured; not applied)
+
+Accuracy-neutral (identical model inputs):
+
+| idea | measured gain | notes |
+|---|---|---|
+| Mirrored pass: flip the already-packed 640×640 detector tensor instead of resizing, flopping and packing the frame again | −1.3 ms (640×480), −4.4 ms (1280×720), −5.9 ms (720×720 crop) per face frame ≈ **−2 % / −5 % / −6 %** | Bit-identical YuNet input (verified). Simplest form: keep the resized detector image from the first pass. |
+| Batch-2 inference (flip-TTA views in one SFace run; frame + mirror in one YuNet run) | **none**: SFace 35.8 → 35.6 ms, YuNet 15.5 → 16.4 ms for the pair (1 thread) | Needs model copies with a symbolic batch dimension; outputs identical. Not worth it. |
+| `VISION_THREADS=4` (4 workers instead of 3) on an instance whose Postgres runs elsewhere | 37.5 → 46.1 analyses/s in isolation (+23 %); in the server with a co-located Postgres identity v1 gained +11 % | Operational setting, no code change. |
+
+Pending changes from the review (not in the measured build):
+- burst frames keep images only for the representative frame;
+- `checkProgress` stops re-decrypting all of a check's frames on every new frame.
+
+Both cut main-thread and disk work (≈ 9 of the ≈ 85 ms of server CPU per analysed frame, plus quadratic
+decryption in long adaptive check-ins), not the analysis itself. Expect a few percent (≤ 10 %) more capacity and
+faster long check-ins. Re-run §7.1 after they land.
+
+*Update:* both landed in `c4d8894`. A default-profile run at N=150 on the §7.7 build analysed 32.6 frames/s at
+start-up saturation (32.1–34.1 in §7.2) and 26.9 frames/s in steady state. That is no measurable gain at this
+resolution (one run per point; run-to-run spread is a few frames/s).
+
+Trade-offs for the product owner. These are not neutral: each changes accuracy or reaction time. Demand scales
+linearly with these settings:
+
+| setting | effect |
+|---|---|
+| `burstSize` 3 → 2 | −33 % frames |
+| `startupIntervalSec` 6 → 12 | −50 % start-up demand |
+| `startupWindowSec` 180 → 90 | halves how long the peak lasts |
+| `periodicCheckIntervalSec` 15 → 30 | −50 % steady demand |
+| flip TTA off | −31 % per frame (EER in fair light 0.30 → 0.34 %, `accuracy/identity-v2.md` §5) |
+| mirrored detection off | −12 % per frame (the ±1.5× yaw asymmetry returns in liveness and the pose gate) |
+| **Balanced** sampling intensity (per exam, §7.7) | routine samples of 2 frames every 12 s → 30 s: ⅓ of the routine frames; measured ≈ 2× the candidates per instance at a synchronised start, ≈ 2.5× in steady state |
+
+### 7.7 Balanced sampling intensity (measured 2026-09-25)
+
+*Balanced* is a per-exam preset: Exams → Policy → "Sampling intensity", `SAMPLING_PROFILES.balanced` in
+`packages/shared`. Routine samples take 2 frames, every 12 s for the first 180 s, then every 30 s. The
+exam-start sample, trigger samples (track break, face return, camera reconnect, …) and server requests keep 3
+frames. For its accuracy, see `accuracy/identity-v2.md` §6.4 and `accuracy/end-to-end.md` ("Balanced sampling
+intensity").
+
+| per candidate | Maximum accuracy (default) | Balanced |
+|---|---|---|
+| start-up window (first 180 s) | 3 frames every 6 s: 0.5 frames/s | 2 frames every 12 s: 0.17 frames/s |
+| steady state | 3 frames every 15 s: 0.2 frames/s | 2 frames every 30 s: 0.067 frames/s |
+| check-in, then the exam-start sample | ≈ 5.5 frames, then 3 | unchanged |
+
+**Method.** As §7.1, with `PROFILE=balanced` and `N=… RAMP_SEC=60 DURATION_SEC=360`.
+- **Build.** The server bundle was built on 2026-09-25 from commit `f72c1ab`, plus one change (below). It includes
+  the review changes that §7.6 lists as pending.
+- **Steady state alone.** One extra run measured the steady state without a start-up window:
+  `N=500 RAMP_SEC=180 DURATION_SEC=420 STARTUP_WINDOW_SEC=0 STEADY_FROM_SEC=300`. Every candidate samples every
+  30 s from its start. The steady phase is t+300…600 s, after the check-in backlog has drained.
+- **Box.** Each run started from an idle box. CPU not accounted for by server + Postgres + generator was
+  ≤ 0.12 cores.
+
+**Vision priority of start-up samples (fixed in this build).** The review changes had given every sample of the
+start-up window interactive vision priority. At a synchronised start, check-in frames then queued behind every
+started candidate's start-up samples. On the default profile at N=150, the whole-run check-frame p95 was 6.5 s,
+against 1.5–2.2 s in §7.2.
+- **Fix.** Routine samples, including those of the start-up window, are background priority again
+  (`sampleUrgent`, `services/identity-samples.ts`). The exam-start sample, requested samples, follow-ups and
+  samples while evidence builds up stay interactive.
+- **Re-measured on the default profile, N=150:**
+  - whole-run check-frame p95 1.9 s;
+  - start-up 32.6 analysed frames/s (saturated);
+  - steady 26.9 frames/s, identity-frame p95 420 ms.
+  - This agrees with §7.2.
+- **Which runs used which build.** The Balanced runs at N=150, 200 and 300 below were made with the fix. The
+  N=100 run and the steady-only N=500 run were made just before it. Neither queues start-up samples (N=100 never
+  queued; the N=500 run has no start-up window), so the change cannot affect them.
+
+p50 / p95 in ms.
+
+| N (checked in) | phase | heartbeat | answer | events | identity frame | burst | analysed frames/s | server CPU (cores) | load avg 1 min, mean (max) |
+|---|---|---|---|---|---|---|---|---|---|
+| 100 (91) | start-up | 3 / 6 | 5 / 9 | 5 / 10 | 100 / 126 | 105 / 134 | 15.0 | 1.42 | 1.92 (2.20) |
+| | steady | 3 / 5 | 5 / 8 | 5 / 8 | 100 / 126 | 105 / 130 | 6.0 | 0.61 | 0.85 (1.04) |
+| 150 (136) | start-up | 4 / 10 | 6 / 15 | 7 / 19 | **135 / 1,239** | 153 / 1,239 | 22.7 | 2.43 | 2.96 (3.16) |
+| | steady | 3 / 6 | 5 / 9 | 6 / 11 | 116 / 141 | 121 / 146 | 9.1 | 1.03 | 1.71 (2.76) |
+| 200 (182) | start-up | 5 / 13 | 8 / 19 | 9 / 21 | **727 / 4,849** | 747 / 4,878 | 28.7 | 3.02 | 3.88 (4.48) |
+| | steady | 3 / 7 | 5 / 11 | 6 / 12 | 117 / 152 | 124 / 166 | 12.1 | 1.33 | 2.22 (2.69) |
+| 300 (270) | start-up | 5 / 14 | 7 / 18 | 9 / 22 | **8,888 / 13,788** | 8,725 / 13,854 | 28.6 | 3.02 | 4.30 (4.55) |
+| | steady | 3 / 10 | 5 / 13 | 7 / 17 | 124 / 209 | 136 / 224 | 17.4 | 1.89 | 3.01 (3.59) |
+| 500 (452), steady only | steady | 5 / 13 | 7 / 18 | 9 / 23 | **161 / 989** | 178 / 1,008 | 29.8 | 2.87 | 4.51 (5.16) |
+
+| N | check frame (whole run) | identity frame (whole run) | refused after retries | 503s retried |
+|---|---|---|---|---|
+| 100 | 110 / 179 | 101 / 149 | 0 | 0 |
+| 150 | 185 / 918 | 126 / 3,366 | 0 | 0 |
+| 200 | 950 / 4,774 | 565 / 5,435 | 0 | 0 |
+| 300 | **6,470 / 14,259** | 4,439 / 12,771 | 1 identity frame | 95 |
+| 500, steady only (180 s ramp) | 205 / 6,479 | 205 / 10,690 | 1 identity frame | 110 |
+
+Postgres used 0.07–0.21 cores and the load generator 0.05–0.13 cores. With check-ins taking longer, the
+start-up phase (last start … first start + 180 s) shrinks: t+64…182 s at N=150, t+81…182 s at N=200,
+t+125…182 s at N=300.
+
+**Knee** (p95 ≤ 1 s, no refusals):
+
+| | fine | slow / saturated | knee |
+|---|---|---|---|
+| synchronised start (60 s check-in ramp) | 91 active: p95 ≤ 179 ms for everything | 136: start-up identity p95 1.2 s, check frames 0.9 s; 182: 4.8 s both; 270: check frames p95 14 s, 503s | **≈ 130 active** (Maximum ≈ 70) |
+| steady state | 270 active: 17.4 frames/s, p95 209 ms | 452: 29.8 frames/s, p95 989 ms. 10-s windows reach 1.1–1.3 s when the 30-s samples of candidates who started together bunch. | **≈ 450 active** (Maximum ≈ 175) |
+
+Why the gain is ≈ 2× at a synchronised start, not 3×:
+- The check-in (≈ 5.5 frames) and the 3-frame exam-start sample are unchanged.
+- In a synchronised start they coincide with the start-up samples of those who started first. At N=150 the ramp
+  minute alone asks for ≈ 2.5 check-ins/s × 8.5 frames ≈ 21 frames/s, on top of the start-up samples.
+- The start-up samples alone would saturate only at ≈ 210 active (35 ÷ 0.167).
+
+Why the gain is ≈ 2.5× in steady state, not 3×:
+- The request path grows with candidates, not frames: heartbeats, answers and events cost ≈ 0.7 ms of CPU per
+  candidate-second, plus Postgres.
+- At 452 candidates they take ≈ 0.5 cores from the vision workers: server CPU was 2.87 cores for 29.8 frames/s
+  (96 ms per analysed frame, against ≈ 85 ms at the default profile's saturation).
+- The request path itself stays fast: heartbeat p95 ≤ 14 ms in every run.
+
+With real client crops (1.2× per frame) the knees are ≈ 110 (synchronised start) and ≈ 375 (steady). Planning at
+≤ 75 %:
+- **≈ 80 candidates per 4-vCPU instance when everyone starts together** (≈ 20 per vCPU; Maximum ≈ 45);
+- **≈ 280 in steady state** (≈ 70 per vCPU; Maximum ≈ 110).
+
+### 7.8 Admission at exam start and load-aware sampling (measured 2026-10-21)
+
+Both are on by default (OPERATIONS §2 "Built-in protection at the peak"). Same method as §7.1: N=150, a 30-s check-in
+ramp (a synchronised start), 300 s, Maximum profile, a fresh database and server per run, Node 24.22.0, one 4-vCPU /
+16 GB VM with Postgres and the load generator on it. This VM analyses ≈ 25 frames/s at saturation (§7.2's: ≈ 35), so
+compare the two runs with each other, not with the tables above. 136 of 150 checked in (the photo set; §7.1).
+
+| p50 / p95 / max (ms) | both off (`EXAM_START_ADMISSION=false LOAD_AWARE_SAMPLING=false`) | both on (default) |
+|---|---|---|
+| identity frame, whole run | 7,819 / 11,989 / 33,328 | **2,491 / 3,677 / 5,459** |
+| identity frame, start-up phase | 9,915 / 12,578 / 33,328 | — (starts spread over ≈ 3 min: no common start-up phase) |
+| check frame (check-ins) | 4,471 / 8,585 / 8,881 | **2,180 / 3,046 / 3,380** |
+| "Start exam" until admitted | 26 / 54 / 75 | 19,749 / 171,709 / 188,262 (clock not running; cap 300 s) |
+| heartbeat / answer / events p95 | 19 / 28 / 32 | 18 / 24 / 28 |
+| identity frames refused (503) and retried | 70 | 0 |
+| routine sample interval p50 / p95 | 6,000 / 15,000 | 12,000 / 30,000 |
+
+- **Admission** deferred 115 of the 136 starts (734 deferrals of 5–30 s); the longest waited 188 s, within the 300-s
+  cap. The queue settled near the capacity limit (`CAPACITY_MAX_VISION_WAIT_MS`, 2 s), which is what identity
+  samples then waited: lower it for faster samples at the cost of longer start waits.
+- **Load-aware sampling** answered 2,003 bursts with a longer routine interval (`sp_identity_samples_spaced_out_total`),
+  never beyond the Balanced spacing (12 s / 30 s). Every candidate's exam-start sample was taken and matched (136 of
+  136 in both runs).
+- **No side effects found**: no "no samples" or other identity observation in either run (the watchdog waits for the
+  interval it told the client), no server error, the request path as fast as without.
+- **What it does not change**: capacity. The same instance analysed about the same frames per second (25.1 vs 23.5);
+  the work was spread out instead of queued. A start held back for minutes means the instance is under-sized: plan
+  capacity with §6 and treat `sp_exam_starts_deferred_total` as a signal to add instances.
+
+```bash
+# server: EXAM_START_ADMISSION=false LOAD_AWARE_SAMPLING=false for the "off" run
+cd e2e && BASE=http://127.0.0.1:8097 STAFF_EMAIL=perf@example.com STAFF_PASSWORD=PerfTest12345 \
+  N=150 RAMP_SEC=30 DURATION_SEC=300 FACES_DIR=/path/to/face/jpegs npx tsx scripts/load-test.ts
+```
+
+## 8. Dedicated vision worker (measured 2026-10-21)
+
+Face analysis can run in separate vision worker processes (`src/vision-worker`, `VISION_DRIVER=remote`; ARCHITECTURE
+§4). Its purpose is **horizontal scaling**: the ≈ 35 frames/s of one 4-vCPU instance (§7) is no longer the ceiling
+of an API server, and analysis capacity grows by adding worker hosts. One host cannot show that gain; what it can
+show is what the HTTP hop costs per frame. Both are below.
+
+**Conditions — read before using any number here.** One 4-vCPU / 16 GB VM, Node 24.22.1, bundled server
+(`node dist/main.js`) and worker (`node dist/vision-server.js`), Postgres 16 and the load generator on the same VM.
+The VM was **shared with three other agents running test suites and browser end-to-end runs the whole time**: the
+1-min load average was 8–12 during the first series and 14–25 during the second (against 4 vCPUs; §7 used runs
+started below 1.0). Under that contention every analysis cost ≈ 1.9× its quiet CPU time (≈ 160 ms instead of ≈ 85 ms
+per frame in the server) and throughput was 3–13 frames/s instead of ≈ 25–35. **Absolute capacity could not be
+re-measured; only comparisons made side by side mean anything, and §6 is unchanged.** Re-run on a quiet box (and
+with the worker on its own host) before relying on throughput figures.
+
+### 8.1 The cost of the hop (micro-benchmark)
+
+The identity-sample analysis (embedding + face crop, 640×480 q80 test frames, `background` priority) through
+(a) the in-process pool and (b) the remote driver → one worker process on the same VM, both with 3 analysis threads;
+150 sequential analyses (latency on an idle pool) and 12 concurrent for 20 s (throughput). CPU time per frame read
+per thread from `/proc` (scratch script, not committed). Order local, remote, remote, local, then remote, local; load
+average 9.4–12.5.
+
+| per frame | in-process pool | remote driver → worker |
+|---|---|---|
+| sequential latency p50 / p95 (3 runs) | 145 / 205, 136 / 163, 161 / 283 ms | 141 / 179, 136 / 177, 162 / 273 ms |
+| hop overhead (round trip − worker-reported queue wait − analysis), sequential | — | **p50 2.3 ms**, p95 10 ms |
+| hop overhead, 12 concurrent | — | p50 5.3 ms, p95 35 ms |
+| CPU of the analysis threads | 135–143 ms | 132–139 ms |
+| CPU of the main threads (pool messaging / HTTP, JSON, base64) | 0.3–0.4 ms | **1.2–1.5 ms caller + 1.4–1.9 ms worker** |
+| 12 concurrent, analyses/s | 16.7 (7.7 and 6.2 in runs hit by a burst of outside load) | 16.3, 16.4 (7.2 in the burst) |
+
+- The hop adds **≈ 2–3 ms of latency** to an idle-pool analysis (≈ 2 % of a frame) and **≈ 2.5–3 ms of CPU** split
+  between the server and the worker (inflated like everything else on this VM; expect less on a quiet one). The
+  sequential latencies and the throughput of the two drivers are equal within the noise.
+- The concurrent p95 of 35 ms is event-loop queueing on a CPU-starved VM (the worker's main thread competes with its
+  own analysis threads and three other test suites). `sp_vision_remote_overhead_seconds` reports it in production;
+  the alert in `docs/prometheus-alerts.yml` fires above 100 ms.
+- Analysis results are identical bit for bit (embedding, face crop, pose, quality, ID-photo result;
+  `test/vision-remote.test.ts` with the real models).
+
+### 8.2 Load test: in-process vs server + one worker on the same VM
+
+`e2e/scripts/load-test.ts`, identity-v2 cadence (Maximum profile), N candidates checking in over 30 s (a synchronised
+start), 150 s, admission at exam start and load-aware sampling **off** (raw capacity, as §7.2), a fresh database and
+freshly started processes per run. Remote: the worker with `VISION_THREADS=3` (the in-process default on 4 vCPU),
+reached over 127.0.0.1. Runs back to back, in pairs.
+
+| run (load avg mean / max) | checked in | analysed frames/s | identity frame p50 / p95 | check frame p50 / p95 | heartbeat p95 | CPU: server + worker | CPU per analysed frame: server + worker = total | hop overhead (from `/metrics`) |
+|---|---|---|---|---|---|---|---|---|
+| N=60 in-process (9.5 / 12.7) | 54 | 9.7 | 8.3 / 20.8 s | 3.7 / 8.4 s | 116 ms | 1.34 cores | 160 ms | — |
+| N=60 remote (8.5 / 11.5) | 54 | 12.6 | 5.1 / 16.3 s | 1.7 / 3.1 s | 249 ms | 0.22 + 1.56 cores | 20 + 140 = **160 ms** | mean 11 ms, 51 % ≤ 5 ms |
+| N=90 in-process (8.8 / 12.1) | 82 | 9.0 | 23.0 / 37.3 s | 6.7 / 13.6 s | 199 ms | 1.42 cores | 165 ms | — |
+| N=90 remote, before the fix below (9.7 / 10.6) | 82 | 7.8 | 16.6 / 49.8 s | 9.7 / 27.8 s | 221 ms | 0.21 + 1.08 cores | 33 + 168 = 201 ms | mean 19 ms |
+
+The second series (same parameters, reverse order, after the fix) ran at a load average of 14–25: 3–5 frames/s in
+both modes, check-ins expiring in both, and no conclusion either way beyond the fix's effect noted below.
+
+Reading the tables:
+- **Total CPU per analysed frame is the same** (160 ms in both N=60 runs): the work moved from the server to the
+  worker. With a remote worker the API server spent ≈ 20–33 ms of CPU per analysed frame on this VM (evidence storage,
+  database, identity logic, the HTTP client) — ≈ 10–15 ms on a quiet one, which is what an API server must be sized
+  for per analysed frame (§6).
+- **Throughput and latencies are equal within the noise.** The N=60 remote run happened to get more CPU (12.6 vs
+  9.7 frames/s; two processes compete differently with the other agents' processes); do not read it as a gain.
+  The heartbeat p95 was higher with the remote driver in these two pairs (249 vs 116 ms, 221 vs 199 ms), higher
+  again in one pair of the second series (554 vs 320 ms) and equal in the other (421 vs 425 ms) — all far above the
+  ≤ 28 ms of a quiet box (§7.2). The server's event loop does less work per frame with a remote worker (it no longer
+  pools images to threads, but parses each JSON answer), so this is most likely contention noise; re-check on a quiet
+  box.
+- **What the N=90 remote run exposed (fixed).** With identity frames queueing beyond 30 s, the driver's
+  `VISION_WORKER_TIMEOUT_MS` (30 s, below the candidate app's 45-s upload timeout) answered 213 frames with 503 +
+  `Retry-After`, as intended — but the worker still analysed those frames for nobody (worker CPU per *answered* frame
+  168 ms vs 140 ms), and three timeouts in a row opened the circuit of a worker that was only busy. Fixed: a timed-out
+  request now closes its connection and the worker drops the frame if it is still queued (`AbortSignal` into the
+  pool), and timeouts no longer count against a worker (hung workers fail their 2-s load polls instead). In the
+  second series the remote N=90 run retried 191 such answers and refused none after the client's retries (246
+  before).
+- In-process the same overload produces no 503s from the server; frames simply wait (p95 37 s here), and a real
+  candidate's browser gives up after 45 s. With the remote driver the candidate is told "busy, retry in N s" after
+  30 s instead.
+
+### 8.3 What scaling out buys
+
+Not measurable on one host. By construction, analysis capacity is the sum of the workers' (each a §7.4 pool: 3–4
+threads ≈ 37–46 analyses/s on 4 vCPU in isolation, or up to 8 threads on a bigger host), and the API server keeps
+only the ≈ 10–15 ms per frame of non-analysis work plus the request path. An API server that previously saturated
+at ≈ 35 frames/s with its own analysis can therefore drive several workers' worth of frames before its own CPU is the
+limit (≈ 100 frames/s per 2 vCPU at 15 ms per frame; the request path adds ≈ 0.7 ms per candidate-second). The
+driver balances by least expected wait, so workers of different sizes fill in proportion to their speed.
+
+```bash
+# worker (one per vision host; VISION_THREADS defaults to the CPU count, max 8)
+VISION_WORKER_TOKEN=<secret> VISION_WORKER_PORT=8090 node apps/server/dist/vision-server.js
+# server
+VISION_DRIVER=remote VISION_WORKER_URLS=http://vision-1:8090,http://vision-2:8090 VISION_WORKER_TOKEN=<secret> \
+  ... node apps/server/dist/main.js
+# then the load test of §7.1 against the server; per-frame hop: sp_vision_remote_overhead_seconds on /metrics
+```

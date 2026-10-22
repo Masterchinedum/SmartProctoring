@@ -11,7 +11,7 @@ const DEBUG = process.env.E2E_DEBUG === '1';
  * ready; after the configured attempts the exam is held for human review as "could not verify" (never
  * as a different person). Staff see every failed attempt.
  */
-test('active liveness: a still photo cannot pass; attempts recorded; held for review', async ({ staff, staffPage }) => {
+test('active liveness: a still photo cannot pass; attempts recorded; held for review', { tag: '@cross-browser' }, async ({ staff, staffPage }) => {
   skipUnlessFixtures('a');
   test.setTimeout(5 * 60_000);
   const s = await staff.createSession({ policy: { identity: { liveness: 'active', livenessSteps: 2, maxVerificationAttempts: 2 } } });
@@ -75,11 +75,11 @@ test('active liveness: a still photo cannot pass; attempts recorded; held for re
 });
 
 /**
- * Scenario 3b — the passing path: a live (turning) person. Fake camera: candidate A frontal for 10 s,
+ * Scenario 3b — the passing path: a live (turning) person. Fake camera: candidate A frontal for 15 s,
  * then cycles of turning left and right (synthetic parallax between nose and eyes, identity preserved —
  * see scripts/synth-headturn.ts). Both the initial check and a resume check with active liveness pass.
  */
-test('active liveness: a turning head passes at check-in and at resume', async ({ staff }) => {
+test('active liveness: a turning head passes at check-in and at resume', { tag: '@cross-browser' }, async ({ staff }) => {
   skipUnlessFixtures('headturn');
   test.setTimeout(5 * 60_000);
   const s = await staff.createSession({ policy: { identity: { liveness: 'active', livenessSteps: 2 } } });
@@ -150,7 +150,8 @@ test('active liveness: a turning head passes at check-in and at resume', async (
 /**
  * Scenario 3c — a tampered client (script in the page's origin, same camera) submits the still photo for
  * EVERY liveness step and claims the requested head pose. The server measures the pose itself (no
- * nose-vs-eyes parallax in a flat photo) and must reject the attempt: never ready.
+ * nose-vs-eyes parallax in a flat photo) and must reject the attempt: never ready. (Not @cross-browser: a
+ * server-side check, the browser only drives the API.)
  */
 test('active liveness: a tampered client sending the photo for every step is rejected by the server', async ({ staff }) => {
   skipUnlessFixtures('a');

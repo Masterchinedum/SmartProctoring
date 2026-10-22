@@ -13,7 +13,7 @@
 import { DEFAULT_IDENTITY_THRESHOLDS, type FaceQuality, type IdentityDecision } from '@sp/shared';
 import { aggregateFrames, buildReference, cosineSimilarity, maxSimilarity, scoreAgainst, templateFrom } from '../vision/identity';
 import { regateQuality } from '../vision/quality';
-import { qualityBucket, rawLLR, type BucketModel, type QualityBucket } from '../vision/calibration';
+import { qualityBucket, rawLLR, referenceBucket, type BucketModel, type QualityBucket } from '../vision/calibration';
 import type { ImageAnalysis, QualityGate } from '../vision/types';
 import type { FrameRecord, WebcamData } from './webcam-eval';
 import { WEBCAM_CONDITIONS, type WebcamCondition, type WebcamResolution } from './webcam-sim';
@@ -54,6 +54,8 @@ export interface Reference {
   selfSimilarity: number | null;
   /** Session baseline (leave-one-out scores of the gallery frames against the rest): mean, sd, n. */
   baseline: SessionBaselineLike | null;
+  /** `referenceBucket` of the gallery frames (template scoring). */
+  bucket: QualityBucket | null;
 }
 
 export interface SessionBaselineLike {
@@ -95,12 +97,13 @@ export function buildReferences(data: WebcamData, p: PipelineSpec): Reference[] 
         frames.map((f) => asAnalysis(f, p)),
         { ...DEFAULT_IDENTITY_THRESHOLDS, match: p.match, mismatch: p.mismatch },
       );
-      refs.push({ ...base, ok: res.ok, embeddings: res.embeddings, template: res.ok ? templateFrom(res.embeddings) : null, selfSimilarity: null, baseline: null });
+      refs.push({ ...base, ok: res.ok, embeddings: res.embeddings, template: res.ok ? templateFrom(res.embeddings) : null, selfSimilarity: null, baseline: null, bucket: null });
     } else {
-      const usable = frames
+      const usableFrames = frames
         .map((f) => ({ f, q: p.quality(f), e: f.embeddings?.[p.embedding] }))
-        .filter((x) => x.q.usable && x.e && Math.abs(x.q.yawDeg) <= REF_MAX_YAW)
-        .map((x) => x.e!);
+        .filter((x) => x.q.usable && x.e && Math.abs(x.q.yawDeg) <= REF_MAX_YAW);
+      const usable = usableFrames.map((x) => x.e!);
+      const refBucket = usableFrames.length ? referenceBucket(usableFrames.map((x) => x.q)) : null;
       const ok = usable.length >= p.enrolMin;
       let self: number | null = null;
       let baseline: SessionBaselineLike | null = null;
@@ -110,7 +113,7 @@ export function buildReferences(data: WebcamData, p: PipelineSpec): Reference[] 
         const sd = Math.sqrt(loo.reduce((a, b) => a + (b - self!) ** 2, 0) / Math.max(1, loo.length - 1));
         baseline = { mean: self, sd, n: loo.length };
       }
-      refs.push({ ...base, ok, embeddings: ok ? usable : [], template: ok ? templateFrom(usable) : null, selfSimilarity: self, baseline });
+      refs.push({ ...base, ok, embeddings: ok ? usable : [], template: ok ? templateFrom(usable) : null, selfSimilarity: self, baseline, bucket: refBucket });
     }
   }
   return refs;
@@ -188,6 +191,7 @@ export interface BurstTrial {
   /** Leave-one-out self-similarity of the reference gallery (session baseline), template scoring only. */
   refSelf: number | null;
   refBaseline: SessionBaselineLike | null;
+  refBucket: QualityBucket | null;
   /** Check outcome for these frames (legacy: aggregateFrames; template: template score vs labels). */
   decision: IdentityDecision;
   bucket: QualityBucket | null;
@@ -263,6 +267,7 @@ export function scoreTrials(data: WebcamData, p: PipelineSpec, enrolConditions: 
         similarity: s,
         refSelf: ref.selfSimilarity,
         refBaseline: ref.baseline,
+        refBucket: ref.bucket,
         decision,
         bucket: modeBucket(buckets),
       });
@@ -489,6 +494,10 @@ export interface Session {
   refBaseline: SessionBaselineLike | null;
   /** The usable bursts' (similarity, bucket) — samples are bootstrapped from these. */
   bursts: { sim: number; bucket: QualityBucket }[];
+  /** Reference bucket (`referenceBucket`), null for legacy references. */
+  refBucket: QualityBucket | null;
+  /** Usable frames per burst (the probe template's `frames`). */
+  frames: number;
 }
 
 /** Group burst trials into sessions: one reference x one probe photo x condition x resolution (scenes = samples). */
@@ -498,7 +507,7 @@ export function sessionsFrom(bursts: readonly BurstTrial[]): Session[] {
     const key = `${b.refKey}|${b.probeKey}`;
     let s = m.get(key);
     if (!s) {
-      s = { key, kind: b.kind, condition: b.condition, resolution: b.resolution, enrol: b.enrol, bucket: 'good', usableRate: 0, sims: [], refSelf: b.refSelf, refBaseline: b.refBaseline, bursts: [], total: 0, usable: 0 };
+      s = { key, kind: b.kind, condition: b.condition, resolution: b.resolution, enrol: b.enrol, bucket: 'good', usableRate: 0, sims: [], refSelf: b.refSelf, refBaseline: b.refBaseline, bursts: [], refBucket: b.refBucket, frames: 3, total: 0, usable: 0 };
       m.set(key, s);
     }
     s.total++;
@@ -753,4 +762,45 @@ export function checkAttempts(frames: readonly FrameTrial[], bursts: readonly Bu
     a.frames.push(f);
   }
   return [...m.values()];
+}
+
+/**
+ * Sessions of 'room' frames: probes captured in the SAME scene as the host's enrolment (mid-exam continuity, and
+ * an impostor sitting down in the candidate's room), against the host's gallery (template scoring).
+ */
+export function roomSessions(data: WebcamData, p: PipelineSpec, roomConditions: readonly WebcamCondition[]): Session[] {
+  const refs = buildReferences(data, p).filter((r) => r.ok && roomConditions.includes(r.condition));
+  const byHost = new Map(refs.map((r) => [`${r.photoKey}|${r.condition}`, r]));
+  const bucketOf = p.bucket ?? ((q: FaceQuality) => qualityBucket(q));
+  const groups = new Map<string, FrameRecord[]>();
+  for (const r of data.records) {
+    if (r.role !== 'room' || !r.hostPhotoKey) continue;
+    const k = `${r.hostPhotoKey}|${r.condition}|${r.photoKey}|${r.scene}`;
+    groups.set(k, [...(groups.get(k) ?? []), r]);
+  }
+  const sessions = new Map<string, Session & { total: number; usable: number }>();
+  for (const [k, frames] of groups) {
+    const [hostKey, cond] = k.split('|');
+    const ref = byHost.get(`${hostKey}|${cond}`);
+    if (!ref) continue;
+    const f0 = frames[0];
+    const kind = trialKind(ref, { identity: f0.identity, photoKey: f0.photoKey, family: f0.family });
+    const skey = `room|${hostKey}|${cond}|${f0.photoKey}`;
+    let s = sessions.get(skey);
+    if (!s) {
+      s = { key: skey, kind, condition: cond as WebcamCondition, resolution: f0.resolution, enrol: cond as WebcamCondition, bucket: 'good', usableRate: 0, sims: [], refSelf: ref.selfSimilarity, refBaseline: ref.baseline, bursts: [], refBucket: ref.bucket, frames: 3, total: 0, usable: 0 };
+      sessions.set(skey, s);
+    }
+    s.total++;
+    const usable = frames.map((f) => ({ q: p.quality(f), e: f.embeddings?.[p.embedding] ?? null })).filter((x) => x.q.usable && x.e);
+    if (!usable.length) continue;
+    s.usable++;
+    const sim = scoreAgainst(usable.map((x) => x.e!), ref.embeddings);
+    const b = modeBucket(usable.map((x) => bucketOf(x.q)))!;
+    s.sims.push(sim);
+    s.bursts.push({ sim, bucket: b });
+    s.frames = Math.min(s.frames, usable.length);
+    if (b === 'poor' || (b === 'fair' && s.bucket === 'good')) s.bucket = b;
+  }
+  return [...sessions.values()].map(({ total, usable, ...rest }) => ({ ...rest, usableRate: total ? usable / total : 0 }));
 }

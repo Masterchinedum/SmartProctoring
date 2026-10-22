@@ -134,6 +134,7 @@
 .cand-exam-nav { padding: 4px 2px; }
 .cand-prompt { font-size: 15px; }
 .cand-trace { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.cand-exam-footer { max-width: 1200px; width: 100%; margin: 0 auto; padding: 8px 16px 16px; border-top: 1px solid var(--border); }
 
 .cand-fs-overlay { position: fixed; inset: 0; z-index: 900; background: rgba(15, 20, 30, 0.72); display: flex; align-items: center; justify-content: center; padding: 16px; }
 

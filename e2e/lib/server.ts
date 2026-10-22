@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { availableParallelism } from 'node:os';
 import { dirname, join } from 'node:path';
-import { ADMIN_EMAIL, ADMIN_PASSWORD, ARTIFACTS_DIR, EVIDENCE_KEY, REPO_DIR, SESSION_SECRET } from './config';
+import { ADMIN_EMAIL, ADMIN_PASSWORD, ARTIFACTS_DIR, EVIDENCE_KEY, REPO_DIR, SESSION_SECRET, VISION_MODE, VISION_WORKER_PORT, VISION_WORKER_TOKEN } from './config';
 
 /**
  * Server processes for the suite: the main server (global setup) and dedicated instances that specs start
@@ -89,6 +90,8 @@ export function serverEnv(o: ServerOptions): NodeJS.ProcessEnv {
     LOG_LEVEL: process.env.E2E_SERVER_LOG_LEVEL || 'info',
     REDIS_URL: '',
     SMTP_HOST: '',
+    // E2E_VISION=remote: every server of the run analyses faces in the one vision worker global setup started.
+    ...(VISION_MODE === 'remote' ? { VISION_DRIVER: 'remote', VISION_WORKER_URLS: `http://127.0.0.1:${VISION_WORKER_PORT}`, VISION_WORKER_TOKEN } : {}),
     ...o.env,
   };
 }
@@ -160,6 +163,73 @@ export async function startServer(o: ServerOptions & { logFile: string; appendLo
   return { url, env, proc, logFile: o.logFile, stop };
 }
 
+/**
+ * Start the dedicated vision worker from source (tsx src/vision-worker/main.ts, like `pnpm --filter @sp/server
+ * vision-worker`) in its own process group and wait until it is ready (E2E_VISION=remote).
+ */
+export async function startVisionWorker(o: { port: number; logFile: string; threads?: number; healthTimeoutMs?: number }): Promise<{ url: string; stop(): Promise<void> }> {
+  mkdirSync(dirname(o.logFile), { recursive: true });
+  const out = createWriteStream(o.logFile, { flags: 'w' });
+  const proc = spawn(join(REPO_DIR, 'apps/server/node_modules/.bin/tsx'), ['src/vision-worker/main.ts'], {
+    cwd: join(REPO_DIR, 'apps/server'),
+    env: {
+      ...process.env,
+      NODE_ENV: 'production',
+      VISION_WORKER_TOKEN,
+      VISION_WORKER_PORT: String(o.port),
+      VISION_WORKER_HOST: '127.0.0.1',
+      // As many analysis threads as an in-process server uses by default on this machine (CPU count - 1).
+      VISION_THREADS: String(o.threads ?? Math.max(1, Math.min(8, availableParallelism() - 1))),
+      LOG_LEVEL: process.env.E2E_SERVER_LOG_LEVEL || 'info',
+    },
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  proc.stdout!.pipe(out, { end: false });
+  proc.stderr!.pipe(out, { end: false });
+  const url = `http://127.0.0.1:${o.port}`;
+  const stop = async () => {
+    if (proc.exitCode == null && proc.signalCode == null && proc.pid) {
+      try {
+        process.kill(-proc.pid, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+      const deadline = Date.now() + 15_000;
+      while (proc.exitCode == null && proc.signalCode == null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+      if (proc.exitCode == null && proc.signalCode == null) {
+        try {
+          process.kill(-proc.pid, 'SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    out.end();
+  };
+  const deadline = Date.now() + (o.healthTimeoutMs ?? 120_000);
+  let last = '';
+  for (;;) {
+    if (proc.exitCode != null) {
+      await stop();
+      throw new Error(`vision worker exited with code ${proc.exitCode} (see ${o.logFile.replace(`${REPO_DIR}/`, '')})`);
+    }
+    try {
+      const res = await fetch(`${url}/health/ready`);
+      if (res.ok) break;
+      last = `HTTP ${res.status}`;
+    } catch (e) {
+      last = (e as Error).message;
+    }
+    if (Date.now() > deadline) {
+      await stop();
+      throw new Error(`vision worker did not become ready at ${url} (${last})`);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return { url, stop };
+}
+
 export function artifactLog(name: string): string {
   return join(ARTIFACTS_DIR, name);
 }
@@ -174,7 +244,12 @@ export interface CliResult {
  * Run one of the server's operator CLIs exactly as documented (`pnpm --filter @sp/server <script> [args]`,
  * docs/OPERATIONS.md) with the given server environment.
  */
-export function runServerCli(script: 'retention:run' | 'rekey', args: string[], env: NodeJS.ProcessEnv, timeoutMs = 120_000): Promise<CliResult> {
+export function runServerCli(
+  script: 'retention:run' | 'rekey' | 'storage:move' | 'org:create' | 'org:set' | 'org:list' | 'sandbox:purge',
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  timeoutMs = 120_000,
+): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const p = spawn('pnpm', ['--filter', '@sp/server', script, ...args], { cwd: REPO_DIR, env: { ...env, LOG_LEVEL: 'warn' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';

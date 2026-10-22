@@ -1,4 +1,4 @@
-import { SEVERITY_RANK, type EventCategory, type EventDTO, type IdentityCheckDTO, type ReviewStatus, type Severity, type TimelineItemDTO } from '@sp/shared';
+import { isFlagCategory, SEVERITY_RANK, type EventCategory, type EventDTO, type IdentityCheckDTO, type ReviewStatus, type Severity, type TimelineItemDTO } from '@sp/shared';
 import { decisionCategory } from './labels';
 
 /** Client-side filters shared by the Timeline and Events tabs. */
@@ -33,7 +33,7 @@ export function eventMatches(e: EventDTO, f: EventFilterState): boolean {
   if (f.minSeverity && SEVERITY_RANK[e.severity] < SEVERITY_RANK[f.minSeverity]) return false;
   if (f.review && e.review.status !== f.review) return false;
   if (f.hideNeutral && e.category === 'neutral') return false;
-  if (f.onlyUnreviewed && (e.review.status !== 'unreviewed' || e.category === 'neutral')) return false;
+  if (f.onlyUnreviewed && (e.review.status !== 'unreviewed' || !isFlagCategory(e.category))) return false;
   return true;
 }
 

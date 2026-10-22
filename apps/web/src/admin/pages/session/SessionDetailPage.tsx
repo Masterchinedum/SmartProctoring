@@ -7,9 +7,13 @@ import { api, shouldRetry } from '../../api/client';
 import { qk } from '../../api/queries';
 import { DEFAULT_FILTERS, type EventFilterState } from '../../lib/filters';
 import { formatDateTime, formatSimilarity } from '../../lib/format';
+import { formatScore } from '../../lib/examVersions';
+import { kindsSummary } from '../../lib/accommodations';
 import { END_REASON_LABELS, HOLD_REASON_LABELS } from '../../lib/labels';
+import { describeWindow } from '../../lib/scheduling';
 import { ConnectionBadge, DecisionBadge, StatusBadge } from '../../components/Badges';
 import { ErrorState, Loading } from '../../components/Common';
+import { AccommodationsCard } from '../../components/AccommodationsCard';
 import { EventDrawer } from '../../components/EventDetail';
 import { Clock, Countdown, LastHeartbeat, RelativeTime, ReportingInterrupted } from '../../components/Time';
 import { MonitoringLine } from '../DashboardPage';
@@ -18,11 +22,13 @@ import { TimelineTab } from './TimelineTab';
 import { EventsTab } from './EventsTab';
 import { IdentityTab } from './IdentityTab';
 import { DevicesTab, NotesTab, PeriodsTab } from './MiscTabs';
+import { ReviewTab } from './ReviewTab';
 
 const TABS = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'events', label: 'Events' },
   { id: 'identity', label: 'Identity' },
+  { id: 'review', label: 'Review' },
   { id: 'periods', label: 'Periods' },
   { id: 'devices', label: 'Devices' },
   { id: 'notes', label: 'Notes' },
@@ -56,6 +62,18 @@ export function SessionDetailPage() {
   );
   const openEvent = useCallback((eventId: string) => setParam('event', eventId), [setParam]);
   const closeEvent = useCallback(() => setParam('event', null), [setParam]);
+  // From the event drawer: the Review tab with that incident in focus.
+  const openIncident = useCallback(
+    (incidentId: string) =>
+      setParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('event');
+        next.set('tab', 'review');
+        next.set('incident', incidentId);
+        return next;
+      }),
+    [setParams],
+  );
 
   if (detail.isPending) return <Loading label="Loading session…" />;
   if (detail.isError) return <ErrorState error={detail.error} onRetry={() => void detail.refetch()} />;
@@ -69,11 +87,13 @@ export function SessionDetailPage() {
     periods: d.periods.length,
     devices: d.devices.length,
     notes: notesCount,
+    review: d.review.undecided.integrity + d.review.undecided.uncertain + d.review.undecided.technical,
   };
 
   return (
     <div className="stack session-detail">
       <SessionHeader d={d} receivedAt={detail.dataUpdatedAt} />
+      <AccommodationsCard acc={d.accommodations} verifications={d.staffVerifications} started={d.summary.startedAt != null} />
       <PauseDecisionBanner d={d} />
       <SessionActions d={d} />
       {/* WAI-ARIA tabs: ←/→/Home/End move between tabs (automatic activation); Tab moves into the panel. */}
@@ -95,11 +115,12 @@ export function SessionDetailPage() {
         {tab === 'timeline' ? <TimelineTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} /> : null}
         {tab === 'events' ? <EventsTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} /> : null}
         {tab === 'identity' ? <IdentityTab d={d} onOpenEvent={openEvent} /> : null}
+        {tab === 'review' ? <ReviewTab d={d} onOpenEvent={openEvent} focusIncidentId={params.get('incident')} /> : null}
         {tab === 'periods' ? <PeriodsTab d={d} /> : null}
         {tab === 'devices' ? <DevicesTab d={d} /> : null}
         {tab === 'notes' ? <NotesTab d={d} onOpenEvent={openEvent} /> : null}
       </div>
-      {openEventId ? <EventDrawer key={openEventId} eventId={openEventId} sessionId={id} initial={initialEvent} onClose={closeEvent} /> : null}
+      {openEventId ? <EventDrawer key={openEventId} eventId={openEventId} sessionId={id} initial={initialEvent} onClose={closeEvent} onOpenIncident={openIncident} /> : null}
     </div>
   );
 }
@@ -125,6 +146,7 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
           <h1>{s.candidate.name}</h1>
           <div className="muted">
             <Link to={`/admin/exams/${s.exam.id}`}>{s.exam.title}</Link>
+            {s.examVersion ? <span title="Every attempt keeps the exam version it started with"> (version {s.examVersion.number})</span> : null}
             {s.candidate.email ? <> · {s.candidate.email}</> : null}
             {s.candidate.externalId ? <> · ID {s.candidate.externalId}</> : null} ·{' '}
             <Link to={`/admin/candidates/${s.candidate.id}`}>Candidate profile</Link>
@@ -135,11 +157,22 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
           {!terminal ? <ConnectionBadge connection={s.connection} /> : null}
           {s.endReason ? <span className="badge">{END_REASON_LABELS[s.endReason]}</span> : null}
           {legalHold ? <span className="badge badge-info" title="Evidence is not purged while legal hold is on">Legal hold</span> : null}
+          {s.accommodations?.length ? (
+            <span className="badge badge-info" title={kindsSummary(s.accommodations)}>
+              Accommodations
+            </span>
+          ) : null}
         </div>
       </div>
       {s.reportingInterruptedSince ? <ReportingInterrupted since={s.reportingInterruptedSince} /> : null}
       {s.hold ? (
-        s.hold.canReverify ? (
+        s.hold.reason === 'recovery' ? (
+          <div className="banner banner-warning" data-testid="recovery-banner">
+            <strong>Reopened for recovery</strong> {formatDateTime(s.hold.since)}. The exam continues once the candidate passes a fresh camera and identity check with the same link; the
+            exam clock stays stopped until then.
+            {s.hold.message ? <div className="small">Message shown to the candidate: “{s.hold.message}”</div> : null}
+          </div>
+        ) : s.hold.canReverify ? (
           <div className="banner banner-warning">
             <strong>Waiting for the candidate to re-verify.</strong> The exam stays on hold until the candidate passes a fresh camera and identity check (original hold:{' '}
             {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason}, since {formatDateTime(s.hold.since)}).
@@ -156,14 +189,34 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
         <Fact label="Time remaining">
           {terminal ? <span className="muted">—</span> : <Countdown remainingMs={s.remainingMs} timerRunning={s.timerRunning} receivedAt={receivedAt || Date.now()} />}
         </Fact>
+        {s.startedAt == null && !terminal ? (
+          <Fact label="Can be started">
+            <span data-testid="session-window">{describeWindow(s.window ?? null, receivedAt || Date.now())}</span>
+          </Fact>
+        ) : null}
         <Fact label="Started">{s.startedAt ? formatDateTime(s.startedAt) : <span className="muted">Not started</span>}</Fact>
         {s.endedAt ? <Fact label="Ended">{formatDateTime(s.endedAt)}</Fact> : null}
         <Fact label="Pauses">{s.pauseCount}</Fact>
+        {s.reconnectCount ? (
+          <Fact label="Reopened in a new window">
+            {s.reconnectCount}
+            {d.policy.resume.maxReconnects != null ? <span className="muted small"> of {d.policy.resume.maxReconnects} allowed</span> : null}
+          </Fact>
+        ) : null}
         <Fact label="Score">
           {d.score ? (
             <>
-              {d.score.points} / {d.score.maxPoints}
+              {formatScore(d.score)}
               {!d.score.autoGraded ? <span className="muted small"> (includes manually graded questions)</span> : null}
+              {d.score.regrades.length ? (
+                <div className="small muted" data-testid="score-regrades">
+                  {d.score.regrades.map((r) => (
+                    <div key={r.at} title={r.reason}>
+                      Regraded {formatDateTime(r.at)} with the keys of v{r.keysFromVersion} (was {formatScore(r.previous)})
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </>
           ) : (
             <span className="muted">—</span>

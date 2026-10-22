@@ -7,7 +7,7 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { evaluationReports, events, examSessions, identityChecks } from '../../src/db/schema.js';
 import { precision } from '../../src/services/metrics.js';
-import { sample, startedSession } from '../flow.js';
+import { sample, startedSession, sampleDecision } from '../flow.js';
 import { createTestEnv, type TestEnv } from '../helpers.js';
 import { clientEvent, json, MIN, otherOrg, staffApi, type Api } from './fixtures.js';
 
@@ -30,13 +30,15 @@ beforeAll(async () => {
   const tabs = [await clientEvent(c, { type: 'tab_hidden', startedAt: t - 30_000, endedAt: t - 25_000 }), await clientEvent(c, { type: 'tab_hidden', startedAt: t - 20_000, endedAt: t - 15_000 })];
   await clientEvent(c, { type: 'phone_detected', startedAt: t - 10_000, endedAt: t - 8_000, confidence: 0.6 });
   json(await reviewer.post(`/events/${mp[0]}/review`, { status: 'reviewed' }));
-  json(await reviewer.post(`/events/${mp[1]}/review`, { status: 'reviewed' }));
+  json(await reviewer.post(`/events/${mp[1]}/review`, { resolution: 'inconclusive' }));
   json(await reviewer.post(`/events/${mp[2]}/review`, { status: 'dismissed' }));
   for (const id of tabs) json(await reviewer.post(`/events/${id}/review`, { status: 'dismissed' }));
+  // An administrator disagrees with one dismissal (reviewer disagreement).
+  json(await admin.post(`/events/${tabs[0]}/review`, { resolution: 'no_concern', note: 'It happened; the candidate closed a system prompt.' }));
   // identity: two routine matches, then a different person (periodic + follow-up) -> identity_mismatch
   for (let i = 0; i < 2; i++) {
     env.clock.advance(30_000);
-    expect(json(await sample(env, c, { person: 'alice' })).result.decision).toBe('match');
+    expect(await sampleDecision(env, json(await sample(env, c, { person: 'alice' })))).toBe('match');
   }
   env.clock.advance(30_000);
   json(await sample(env, c, { person: 'mallory' }));
@@ -54,8 +56,21 @@ describe('detection quality', () => {
     expect(m.from).toBe(t0);
     expect(m.to).toBe(env.clock.t);
     const by = Object.fromEntries(m.byType.map((b) => [b.type, b]));
-    expect(by.multiple_people).toEqual({ type: 'multiple_people', category: 'integrity', total: 3, reviewed: 2, dismissed: 1, unreviewed: 0, precision: 0.6667 });
-    expect(by.tab_hidden).toMatchObject({ total: 2, reviewed: 0, dismissed: 2, precision: 0 });
+    // "Inconclusive" is excluded from precision: 1 correct (plain "reviewed") vs 1 false detection.
+    expect(by.multiple_people).toEqual({
+      type: 'multiple_people',
+      category: 'integrity',
+      total: 3,
+      reviewed: 2,
+      dismissed: 1,
+      unreviewed: 0,
+      inconclusive: 1,
+      byResolution: { inconclusive: 1 },
+      overridden: 0,
+      precision: 0.5,
+    });
+    expect(by.tab_hidden).toMatchObject({ total: 2, reviewed: 1, dismissed: 1, precision: 0.5, overridden: 1, byResolution: { no_concern: 1 } });
+    expect(m.reviewers).toEqual({ decisions: 7, overrides: 1, overrideRate: 0.1429 });
     expect(by.phone_detected).toMatchObject({ total: 1, unreviewed: 1, precision: null });
     expect(by.identity_mismatch).toMatchObject({ total: 1, dismissed: 1, precision: 0 });
     expect(m.byType.every((b) => b.category !== 'neutral')).toBe(true);
@@ -78,6 +93,7 @@ describe('detection quality', () => {
     expect(Object.keys(m.identity.byTrigger)).toContain('id_photo');
     expect(m.identity.mismatchEventsDismissed).toBe(1);
     expect(m.identity.mismatchEventsConfirmed).toBe(0);
+    expect(m.identity.mismatchEventsInconclusive).toBe(0);
     expect(m.offlineEvaluation).toBeNull();
   });
 

@@ -17,6 +17,8 @@ import { expect, test } from '../lib/test';
  *     table, the event drawer and the image viewer are keyboard operable with proper semantics.
  *  b) phones / small screens and devices without a camera get a friendly notice (not a block); the
  *     welcome screen reflows at 320 px; prefers-reduced-motion stops animations; the staff sign-in page.
+ *
+ * Chromium-only (not @cross-browser): the checker reads Chromium's accessibility tree over CDP.
  */
 
 /** Simulated switch to another tab (see 08-browser-events): produces an integrity flag within seconds. */
@@ -295,7 +297,7 @@ test('keyboard-only exam and staff review: names, focus management, dialogs, liv
     const drawer = eventDrawer(sp);
     await expect(drawer).toBeVisible();
     await expect(drawer.getByRole('button', { name: 'Close' })).toBeFocused();
-    await expect(drawer.locator('.review-panel')).toBeVisible();
+    await expect(drawer.getByRole('heading', { name: 'Review', exact: true })).toBeVisible();
     await expectFocusTrapped(sp, drawer, 6);
     await expectNoA11yIssues(sp, 'event drawer');
     await sp.keyboard.press('Escape');
@@ -380,6 +382,9 @@ test('small screens and missing cameras get a friendly notice; 320 px reflow; re
     // A warning, not a block: consent is still possible.
     await page.getByTestId('consent-checkbox').check();
     await expect(page.getByTestId('consent-continue')).toBeEnabled();
+    // The contrast check reads the button's effective opacity (.btn:disabled sets 0.55): wait until the enabled look
+    // is in place before scanning, so the check measures the button as the candidate sees it.
+    await expect(page.getByTestId('consent-continue')).toHaveCSS('opacity', '1');
     expect(await page.evaluate(() => document.documentElement.scrollWidth), 'no horizontal scrolling at 320 px').toBeLessThanOrEqual(320);
     await expectNoA11yIssues(page, 'welcome screen at 320 px');
 
@@ -412,7 +417,9 @@ test('every staff page: accessible names, landmarks, headings, titles, contrast'
   const pages: [string, RegExp][] = [
     ['/admin', /^Live dashboard/],
     ['/admin/sessions', /^Sessions/],
+    ['/admin/review', /^Review queue/],
     [`/admin/sessions/${s.sessionId}`, /^Session details/],
+    [`/admin/sessions/${s.sessionId}?tab=review`, /^Session details/],
     [`/admin/sessions/${s.sessionId}/report`, /^Session report/],
     ['/admin/exams', /^Exams/],
     [`/admin/exams/${s.examId}`, /^Exam details/],
@@ -425,6 +432,7 @@ test('every staff page: accessible names, landmarks, headings, titles, contrast'
     ['/admin/settings', /^Settings/],
     ['/admin/integrations', /^Integrations/],
     ['/admin/users', /^Users/],
+    ['/admin/account', /^Account & security/],
   ];
   for (const [path, title] of pages) {
     await sp.goto(path);

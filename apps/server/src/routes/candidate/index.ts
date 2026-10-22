@@ -10,6 +10,7 @@ import {
   pauseRequestSchema,
   saveAnswerRequestSchema,
   startCheckRequestSchema,
+  withdrawConsentSchema,
   type CandidateSessionState,
   type PauseResponse,
 } from '@sp/shared';
@@ -32,6 +33,7 @@ import { completeCheck, startCheck, submitCheckFrame } from '../../services/chec
 import { processIdentitySample } from '../../services/identity-samples.js';
 import { ingestEvents, uploadEventEvidence } from '../../services/ingest.js';
 import { trackInstanceRequest } from '../../services/instance-usage.js';
+import { withdrawConsent } from '../../services/privacy-requests.js';
 
 const uuid = z.string().uuid();
 const optNum = z.preprocess((v) => (v === '' || v == null ? undefined : v), z.coerce.number().finite().optional());
@@ -114,6 +116,15 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     return state(req);
   });
 
+  // Withdrawing consent ends the exam and deletes its face images (services/privacy-requests.ts withdrawConsent). Any
+  // holder of the link may do it, in control or not: it is the candidate's right, and it only takes things away.
+  app.post('/consent/withdraw', { config: limit(10) }, async (req) => {
+    const c = getCandidate(req);
+    const body = withdrawConsentSchema.parse(req.body ?? {});
+    await withdrawConsent(ctx, c.session.id, body, { instanceId: c.instanceId ?? null, ip: req.ip });
+    return state(req);
+  });
+
   app.post('/checks', { config: limit(30) }, async (req) => {
     const c = getCandidate(req);
     const instanceId = requireInstanceId(req);
@@ -135,9 +146,16 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     return completeCheck(ctx, c.session.id, instanceId, checkId);
   });
 
-  app.post('/start', { config: limit(30) }, async (req) => {
+  app.post('/start', { config: limit(30) }, async (req, reply) => {
     const c = getCandidate(req);
-    await startSession(ctx, c.session.id, requireInstanceId(req));
+    const { deferred } = await startSession(ctx, c.session.id, requireInstanceId(req));
+    if (deferred) {
+      // Not an error of the candidate's: the server is at capacity (admission at exam start). The app retries.
+      return reply
+        .status(503)
+        .header('Retry-After', String(deferred.retryAfterSec))
+        .send({ error: 'start_deferred', message: 'Many candidates are starting at the same time. Your exam will start in a moment; your exam time has not started yet.', retryAfterSec: deferred.retryAfterSec });
+    }
     return state(req);
   });
 
@@ -157,7 +175,7 @@ export const candidateRoutes: FastifyPluginAsync = async (app) => {
     const c = getCandidate(req);
     const instanceId = requireInstanceId(req);
     const body = eventBatchRequestSchema.parse(req.body);
-    return ingestEvents(ctx, c.session, c.policy, instanceId, body.events, c);
+    return ingestEvents(ctx, c.session, c.policy, instanceId, body.events, c, body.engineVersion);
   });
 
   app.put('/evidence/:evidenceId', { config: limit(240) }, async (req) => {

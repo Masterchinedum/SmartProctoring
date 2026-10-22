@@ -6,13 +6,14 @@
  *   app.get('/x', { preHandler: requireStaff('reviewer') }, async (req) => { const staff = getStaff(req); ... })
  * Role order: reviewer < admin < owner (requireStaff('admin') admits admin and owner).
  */
-import type { StaffRole } from '@sp/shared';
+import { mfaRequiredFor, type StaffRole } from '@sp/shared';
 import { and, eq, gt } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
 import type { Ctx } from '../context.js';
 import { organizations, staffSessions, staffUsers, type StaffUser } from '../db/schema.js';
 import { randomToken, sha256Hex } from '../lib/crypto.js';
 import { forbidden, unauthorized } from '../lib/errors.js';
+import { bindRequestLog } from '../lib/request-log.js';
 
 export const STAFF_COOKIE = 'sp_session';
 
@@ -31,6 +32,15 @@ export interface StaffPrincipal {
   name: string;
   staffSessionId: string;
   ip: string;
+  /**
+   * The organisation requires two-step sign-in for this role and the user has not set it up: only the set-up
+   * endpoints (requireStaff(…, { allowMfaEnrollment: true })) admit them (403 mfa_enrollment_required otherwise).
+   */
+  mfaEnrollmentRequired: boolean;
+  /** How this session was signed in (single sign-on sessions never need SmartProctoring's own two-step sign-in). */
+  authMethod: 'password' | 'sso';
+  /** The identity provider of a single sign-on session. */
+  ssoProviderId: string | null;
 }
 
 declare module 'fastify' {
@@ -47,18 +57,35 @@ export async function authenticateStaffToken(ctx: Ctx, rawCookie: string | undef
   const tokenHash = sha256Hex(un.value);
   const now = ctx.now();
   const rows = await ctx.db
-    .select({ sess: staffSessions, user: staffUsers })
+    .select({ sess: staffSessions, user: staffUsers, orgSettings: organizations.settings })
     .from(staffSessions)
     .innerJoin(staffUsers, eq(staffUsers.id, staffSessions.staffUserId))
+    .innerJoin(organizations, eq(organizations.id, staffUsers.orgId))
     .where(and(eq(staffSessions.tokenHash, tokenHash), gt(staffSessions.expiresAt, new Date(now))));
   const row = rows[0];
   if (!row || row.user.disabled) return null;
+  // The organisation requires single sign-on: a password session of anyone but an owner (break-glass) is no longer
+  // accepted (owner settings change, services/sso; the staff app returns to the sign-in page).
+  if (row.orgSettings?.requireSso === true && row.user.role !== 'owner' && row.sess.authMethod !== 'sso') return null;
   // Sliding expiry, written at most once a minute.
   if (now - row.sess.lastSeenAt.getTime() > 60_000) {
     const expiresAt = Math.min(now + ctx.config.staffSessionIdleMs, row.sess.createdAt.getTime() + ctx.config.staffSessionMaxMs);
     await ctx.db.update(staffSessions).set({ lastSeenAt: new Date(now), expiresAt: new Date(expiresAt) }).where(eq(staffSessions.id, row.sess.id));
   }
-  return { user: row.user, id: row.user.id, orgId: row.user.orgId, role: row.user.role, name: row.user.name, staffSessionId: row.sess.id, ip };
+  // After single sign-on the identity provider is responsible for the second factor (docs/SECURITY.md §2).
+  const mfaEnrollmentRequired = row.sess.authMethod !== 'sso' && row.user.mfaEnabledAt == null && mfaRequiredFor(row.orgSettings?.requireMfa, row.user.role);
+  return {
+    user: row.user,
+    id: row.user.id,
+    orgId: row.user.orgId,
+    role: row.user.role,
+    name: row.user.name,
+    staffSessionId: row.sess.id,
+    ip,
+    mfaEnrollmentRequired,
+    authMethod: row.sess.authMethod,
+    ssoProviderId: row.sess.ssoProviderId ?? null,
+  };
 }
 
 function allowedOrigins(ctx: Ctx, req: FastifyRequest): string[] {
@@ -96,9 +123,12 @@ export async function requireSameOrigin(req: FastifyRequest, _reply: FastifyRepl
   if (!isSameOriginRequest(req.server.ctx, req)) throw forbidden('Cross-origin request refused', 'bad_origin');
 }
 
-/** preHandler factory: require a logged-in staff user with at least `min` role. */
-export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHandler {
-  return async function (this: unknown, req: FastifyRequest, _reply: FastifyReply) {
+/**
+ * preHandler factory: require a logged-in staff user with at least `min` role. A user who must set up two-step
+ * sign-in first is refused (403 mfa_enrollment_required) unless `allowMfaEnrollment` (sign-in state, set-up, sign-out).
+ */
+export function requireStaff(min: StaffRole = 'reviewer', opts: { allowMfaEnrollment?: boolean } = {}): preHandlerAsyncHookHandler {
+  return async function (this: unknown, req: FastifyRequest, reply: FastifyReply) {
     const ctx = req.server.ctx;
     // CSRF / cross-site WebSocket defence in depth (cookie is SameSite=Lax): state-changing requests and
     // WebSocket upgrades must come from our own origin when the browser says where they come from.
@@ -107,7 +137,11 @@ export function requireStaff(min: StaffRole = 'reviewer'): preHandlerAsyncHookHa
     }
     const principal = req.staff ?? (await authenticateStaffToken(ctx, req.cookies?.[STAFF_COOKIE], (v) => req.unsignCookie(v), req.ip));
     if (!principal) throw unauthorized();
+    if (principal.mfaEnrollmentRequired && !opts.allowMfaEnrollment) {
+      throw forbidden('Your organisation requires two-step sign-in. Set it up to continue.', 'mfa_enrollment_required');
+    }
     if (!roleAtLeast(principal.role, min)) throw forbidden(`This action requires the ${min} role`);
+    if (!req.staff) bindRequestLog(req, reply, { staffId: principal.id, orgId: principal.orgId });
     req.staff = principal;
   };
 }
@@ -118,8 +152,8 @@ export function getStaff(req: FastifyRequest): StaffPrincipal {
   return req.staff;
 }
 
-/** Create a staff session and set the cookie. */
-export async function startStaffSession(ctx: Ctx, reply: FastifyReply, user: StaffUser, req: FastifyRequest): Promise<void> {
+/** Create a staff session and set the cookie (a new token every time: no session fixation). */
+export async function startStaffSession(ctx: Ctx, reply: FastifyReply, user: StaffUser, req: FastifyRequest, via: { method: 'password' | 'sso'; ssoProviderId?: string } = { method: 'password' }): Promise<void> {
   const token = randomToken(32);
   const now = ctx.now();
   await ctx.db.insert(staffSessions).values({
@@ -130,6 +164,8 @@ export async function startStaffSession(ctx: Ctx, reply: FastifyReply, user: Sta
     expiresAt: new Date(now + ctx.config.staffSessionIdleMs),
     ip: req.ip,
     userAgent: (req.headers['user-agent'] ?? '').slice(0, 500),
+    authMethod: via.method,
+    ssoProviderId: via.ssoProviderId ?? null,
   });
   reply.setCookie(STAFF_COOKIE, token, {
     signed: true,
@@ -159,4 +195,10 @@ export async function revokeStaffSessions(ctx: Pick<Ctx, 'db'>, userId: string, 
 export async function loadOrgName(ctx: Pick<Ctx, 'db'>, orgId: string): Promise<string> {
   const [o] = await ctx.db.select({ name: organizations.name }).from(organizations).where(eq(organizations.id, orgId));
   return o?.name ?? '';
+}
+
+/** End every single sign-on session made through an identity provider (provider disabled, re-pointed or deleted). */
+export async function revokeProviderSessions(ctx: Pick<Ctx, 'db'>, providerId: string): Promise<number> {
+  const rows = await ctx.db.delete(staffSessions).where(eq(staffSessions.ssoProviderId, providerId)).returning({ id: staffSessions.id });
+  return rows.length;
 }

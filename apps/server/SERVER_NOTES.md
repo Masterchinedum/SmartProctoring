@@ -6,13 +6,14 @@ Fastify 5 + drizzle (Postgres) + FakeVision-testable services. Contract: `packag
 ```
 src/
   config.ts            env -> Config (safe dev defaults; production refuses to start without secrets)
-  context.ts           Ctx: { config, database, db, vision, storage, keyring, bus, now(), log, live }
+  context.ts           Ctx: { config, database, db, vision, storage, storageLocations, keyring, bus, now(), log, live }
   app.ts               buildApp(opts) -> Fastify instance (deps injectable: database, vision, storage, bus, now)
   main.ts              process entry (listen, graceful shutdown)
   db/schema.ts         drizzle schema (all tables)      db/index.ts  createDatabase(), migrate(), Db/Tx types
   drizzle/ (../)       generated SQL migrations — after editing schema.ts: pnpm --filter @sp/server db:generate
   lib/crypto.ts        AES-256-GCM keyring (encrypt/decrypt with AAD), tokens, sha256, scrypt passwords, isJpeg
-  lib/storage.ts       BlobStorage (FsStorage | S3Storage | MemoryStorage)
+  lib/storage.ts       BlobStorage (FsStorage | S3Storage | MemoryStorage); StorageLocations (every configured evidence
+                       storage location, `default` = ctx.storage) and storageAt(ctx, location) — data residency
   lib/audit.ts         audit(db, {...}) -> audit_log row
   lib/errors.ts        HttpError + helpers (badRequest, notFound, conflict, invalidState, forbidden, ...)
   auth/staff.ts        cookie sessions, requireStaff(role), getStaff(req), roleAtLeast
@@ -21,7 +22,10 @@ src/
   realtime/live-route.ts  WS GET /api/admin/live
   services/dto.ts      row->DTO mappers + batched loaders (EventDTO, SessionSummaryDTO, PeriodDTO, IdentityCheckDTO,
                        PauseRequestDTO, HoldDTO, EvidenceRefDTO, IdentityReferenceDTO, NoteDTO, DeviceRecordDTO)
-  services/evidence.ts storeEvidence / readEvidence / readEvidenceForStaff (audited) / purge*
+  services/evidence.ts storeEvidence (to the organisation's storage location) / readEvidence / readEvidenceForStaff
+                       (audited) / purge* — every read and delete via storageFor(row) (evidence.storage_location)
+  services/evidence-storage.ts  start-up check of the locations in use; GET /evidence-storage summary
+  services/storage-move.ts      storage:move — copy, verify, compare-and-set, delete (an organisation's images)
   services/session-state.ts   withSession(ctx, id, m => ...) row-locked mutations, periods, clock, server events,
                               holdNow/pauseNow/finalizeSession/startExam, requiredCheckFor, effectivePolicy
   services/session-actions.ts STAFF ACTIONS: decidePauseRequest, holdSession, releaseHold, terminateSession,
@@ -31,6 +35,8 @@ src/
   services/grading.ts  isAnswerCorrect, gradeSession
   services/privacy.ts  noticeFor(org, policy, candidate)
   routes/auth.ts       /api/auth/login|logout|me|password
+  routes/sso.ts        /api/auth/sso/* single sign-on (OIDC callback, SAML ACS + metadata, completion); services/sso/*
+  routes/scim.ts       /scim/v2/* SCIM 2.0 staff provisioning (SCIM token); services/scim.ts
   routes/public.ts     /api/health, /api/public/privacy-notice
   routes/candidate/*   /api/candidate/*
   routes/admin/*       /api/admin/* staff API (sessions, events, evidence, exams, candidates, org, metrics)
@@ -38,9 +44,10 @@ src/
   services/retention.ts  evidence & event-metadata retention (hourly job + retention-cli)
   jobs/runner.ts       JobRunner (ctx.jobs): periodic jobs, each run guarded by a pg advisory lock
   jobs/sweeper.ts      heartbeat timeouts, clock expiry, stale checks (sweepOnce(ctx) for tests)
-  jobs/integrations.ts registers the webhooks (5 s), email-alerts (10 s) and abandoned-sessions (hourly) jobs
-  auth/api-key.ts      organisation API keys (Bearer sp_live_…; sha256 only) — requireApiKey / getApiKey
-  routes/v1/*          /api/v1/* integration API (docs/INTEGRATION_API.md)
+  jobs/integrations.ts registers the webhooks (5 s), email-alerts (10 s), abandoned-sessions and api-idempotency (hourly) jobs
+  auth/api-key.ts      organisation API keys (Bearer sp_live_…; sha256 only; scopes, expiry) — requireApiKey / requireScope / getApiKey
+  routes/v1/*          /api/v1/* integration API (docs/INTEGRATION_API.md), registered from INTEGRATION_ENDPOINTS (@sp/shared)
+  services/idempotency.ts  Idempotency-Key for /api/v1 POSTs (preHandler guard + onSend store, 24 h, encrypted responses)
   routes/admin/integrations.ts  /api/admin api-keys, webhooks (+ deliveries), email-alerts/test, integrations/status
   services/integration-events.ts  outbox hook called by withSession() (webhook + email rows in the same tx)
   services/webhooks.ts webhook outbox delivery (claim/lease, HMAC signature, backoff, auto-disable, housekeeping)
@@ -105,7 +112,7 @@ app.get('/sessions/:id', { preHandler: requireStaff('reviewer') }, async (req) =
   idPhotoEvidenceId, idPhotoQuality, idPhotoApprovedAt/By. The candidate check decrypts with the same AAD.
 * Access link display: `accessLinkFor(ctx, sessionRow)`.
 * Encrypted AADs in use: `evidence:<evidenceId>`, `access-token:<sessionId>`, `idphoto:<candidateId>`,
-  `reference:<referenceId>`, `frame:<frameId>`, `sample-frame:<frameId>`, `webhook-secret:<webhookId>`, `external-verifier:<orgId>` (base64
+  `reference:<referenceId>`, `frame:<frameId>`, `sample-frame:<frameId>`, `webhook-secret:<webhookId>`, `accommodation-note:<accommodationId>`, `totp:<staffUserId>`, `totp-pending:<staffUserId>`, `privacy-request:<requestId>`, `sso-client-secret:<providerId>`, `external-verifier:<orgId>` (base64
   inside organizations.settings.externalVerifier.credentialsEnc; rekey target `external_verifier_credentials`).
   A NEW encrypted column must be
   added to services/rekey.ts `COLUMN_TARGETS` (test/rekey.test.ts fails for an uncovered bytea column).
@@ -133,6 +140,11 @@ after-commit "kicks" are no-ops).
   candidate state maps it to `endReason: null` (EndReason contract unchanged).
 * Tests: `createTestEnv({ mailer: new MemoryMailer() })` enables email alerts; `env.ctx.config.webhooks` can be
   tweaked per test (allowPrivateNetworks is true outside production, so a local http receiver works).
+* Integration API contract: change `packages/shared/src/integrations.ts` (schemas + INTEGRATION_ENDPOINTS) first, then
+  the handler; bump INTEGRATION_API_VERSION, regenerate `docs/openapi.json` (`pnpm --filter @sp/server openapi -- --out
+  ../../docs/openapi.json`) and update docs/INTEGRATION_API.md (incl. its changelog). test/integrations/contract.test.ts
+  fails on undocumented routes, fields or error codes; a new zod feature the converter (shared/src/openapi.ts) does not
+  know throws.
 
 ## Candidate-side services (for reference)
 checks.ts (start/frames/complete: adaptive progress, liveness, gallery reference, ID photo, resume/reconnect/reverify,

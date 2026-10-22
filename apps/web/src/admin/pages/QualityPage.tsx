@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { CATEGORY_LABELS, EVENT_CATEGORIES, IDENTITY_DECISIONS, type DetectionQualityDTO } from '@sp/shared';
+import { CATEGORY_LABELS, EVENT_CATEGORIES, IDENTITY_DECISIONS, RESOLUTION_INFO, type DetectionQualityDTO, type ReviewResolution } from '@sp/shared';
 import { api, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { formatDate, formatPercent, humanizeKey } from '../lib/format';
@@ -8,6 +8,7 @@ import { DECISION_LABELS, eventTypeTitle, TRIGGER_LABELS } from '../lib/labels';
 import { CategoryBadge, DecisionBadge } from '../components/Badges';
 import { EmptyState, ErrorState, Loading, PageHeader } from '../components/Common';
 import { OfflineEvaluationSection } from './OfflineEvaluation';
+import { CalibrationPanel, DecisionConfigPanel, DriftPanel } from './QualityGovernance';
 
 const RANGES = [
   { id: '7', label: 'Last 7 days', days: 7 },
@@ -47,9 +48,10 @@ export function QualityPage() {
       <div className="guidance">
         <div className="guidance-title">How accuracy is measured</div>
         <p>
-          <strong>In production</strong>, every non-neutral event is reviewed by staff as <em>reviewed</em> (the observation was correct) or <em>dismissed</em> (false
-          positive). For each detector, the precision proxy is <code>reviewed ÷ (reviewed + dismissed)</code>. It only covers events that were raised — it cannot show
-          missed detections — and is only meaningful once enough events have been reviewed.
+          <strong>In production</strong>, reviewers decide every flag with a conclusion: an integrity concern, accurate but no concern, covered by an accommodation, a
+          technical problem, inconclusive, or a false detection. For each detector, the precision proxy is <code>correct ÷ (correct + false detections)</code> —
+          “inconclusive” decisions are left out, since the reviewer could not tell. It only covers events that were raised — it cannot show missed detections — and is
+          only meaningful once enough events have been decided. When one reviewer changes another’s decision, it counts as a disagreement.
         </p>
         <p>
           <strong>Person-swap detection</strong> is tracked separately: how many “possible different person” events reviewers confirmed versus dismissed (false
@@ -61,10 +63,24 @@ export function QualityPage() {
           hairstyles, clothing, backgrounds and pause lengths, and replays labelled scenarios through the behaviour detectors (precision, recall, false alerts per hour).
           See <code>docs/accuracy/</code> and <code>docs/ARCHITECTURE.md</code> §9 for the methodology.
         </p>
+        <p>
+          <strong>Governance</strong>: identity decisions are broken down by capture conditions and by the versions that made them (decision configuration,
+          calibration, recogniser model); drift compares the last week with the four weeks before. The identity thresholds themselves are versioned: changed only
+          through a proposal approved by a second administrator, and restorable at once.
+        </p>
       </div>
       {q.isPending ? <Loading /> : q.isError ? <ErrorState error={q.error} onRetry={() => void q.refetch()} /> : <QualityBody d={q.data} />}
+      <CalibrationPanel from={params.from ?? 0} to={params.to} />
+      <DriftPanel />
+      <DecisionConfigPanel />
     </div>
   );
+}
+
+/** "Integrity concern 3, Accurate, no concern 5" for a tooltip. */
+function resolutionBreakdown(byResolution: DetectionQualityDTO['byType'][number]['byResolution']): string {
+  const parts = Object.entries(byResolution).map(([k, n]) => `${RESOLUTION_INFO[k as ReviewResolution].label}: ${n}`);
+  return parts.length ? parts.join(', ') : 'No structured conclusions yet';
 }
 
 function QualityBody({ d }: { d: DetectionQualityDTO }) {
@@ -88,15 +104,17 @@ function QualityBody({ d }: { d: DetectionQualityDTO }) {
                   <th>Detector / event type</th>
                   <th>Category</th>
                   <th>Total</th>
-                  <th>Confirmed (reviewed)</th>
-                  <th>Dismissed</th>
-                  <th>Unreviewed</th>
+                  <th>Kept (reviewed)</th>
+                  <th>Inconclusive</th>
+                  <th>False detections</th>
+                  <th>Undecided</th>
+                  <th>Disagreements</th>
                   <th>Precision proxy</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => {
-                  const decided = r.reviewed + r.dismissed;
+                  const decided = r.reviewed - r.inconclusive + r.dismissed;
                   return (
                     <tr key={r.type}>
                       <td>{eventTypeTitle(r.type)}</td>
@@ -104,9 +122,11 @@ function QualityBody({ d }: { d: DetectionQualityDTO }) {
                         <CategoryBadge category={r.category} />
                       </td>
                       <td>{r.total}</td>
-                      <td>{r.reviewed}</td>
+                      <td title={resolutionBreakdown(r.byResolution)}>{r.reviewed}</td>
+                      <td>{r.inconclusive}</td>
                       <td>{r.dismissed}</td>
                       <td>{r.unreviewed}</td>
+                      <td>{r.overridden || <span className="muted">0</span>}</td>
                       <td>
                         {r.precision == null ? (
                           <span className="muted small">no decisions yet</span>
@@ -127,7 +147,13 @@ function QualityBody({ d }: { d: DetectionQualityDTO }) {
             </table>
           </div>
         )}
-        <div className="muted small">Neutral session changes (pauses, resumes, camera changes…) are not reviewed and have no precision.</div>
+        <div className="muted small">Session changes and policy exceptions (pauses, resumes, camera changes, accommodations…) are not reviewed and have no precision.</div>
+        <div className="small" data-testid="reviewer-agreement">
+          <strong>Reviewer agreement:</strong> {d.reviewers.decisions} decision{d.reviewers.decisions === 1 ? '' : 's'} in this period,{' '}
+          {d.reviewers.overrides} changed another reviewer’s decision
+          {d.reviewers.overrideRate != null ? ` (${formatPercent(d.reviewers.overrideRate, 1)})` : ''}. Frequent changes for one detector suggest its guidance or thresholds need
+          attention.
+        </div>
       </section>
 
       <div className="grid-2">

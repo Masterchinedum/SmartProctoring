@@ -1,4 +1,4 @@
-import { DEFAULT_POLICY, proctoringPolicySchema, type ProctoringPolicy } from '@sp/shared';
+import { DEFAULT_POLICY, proctoringPolicySchema, SAMPLING_FIELDS, SAMPLING_PROFILES, samplingProfileOf, type ProctoringPolicy } from '@sp/shared';
 
 /**
  * Form metadata for every field of proctoringPolicySchema. The editor renders from this table; a unit
@@ -60,6 +60,17 @@ export const POLICY_GROUPS: PolicyGroup[] = [
         help: 'Only applies when the candidate has an approved ID photo.',
       },
       {
+        path: 'identity.samplingProfile',
+        label: 'Sampling intensity',
+        kind: 'enum',
+        options: [
+          { value: 'maximum', label: 'Maximum accuracy (default)' },
+          { value: 'balanced', label: 'Balanced' },
+          { value: 'custom', label: 'Custom' },
+        ],
+        help: 'Fills the sampling fields below. Balanced serves about twice as many candidates per server when everyone starts together, and about 2.5× once the exam is under way: routine samples are taken half as often, with 2 frames instead of 3. A swap that happens without the face leaving view or changing abruptly is confirmed about 8 s later. A swap caught when the face returns, the track is interrupted or the camera reconnects is confirmed as fast, because those samples keep 3 frames.',
+      },
+      {
         path: 'identity.periodicCheckIntervalSec',
         label: 'Routine identity sample every',
         kind: 'integer',
@@ -88,11 +99,19 @@ export const POLICY_GROUPS: PolicyGroup[] = [
       },
       {
         path: 'identity.burstSize',
-        label: 'Frames per identity sample',
+        label: 'Frames per triggered identity sample',
         kind: 'integer',
         min: 1,
         max: 5,
-        help: 'Distinct camera frames captured within about half a second and decided together (more frames = steadier decisions).',
+        help: 'Samples taken at once when the exam starts or resumes, the face changes or returns, the camera reconnects, or the server asks for a faster look: distinct camera frames captured within about half a second and decided together (more frames = steadier decisions).',
+      },
+      {
+        path: 'identity.routineBurstSize',
+        label: 'Frames per routine identity sample',
+        kind: 'integer',
+        min: 1,
+        max: 5,
+        help: 'Frames of the routine samples (every start-up / routine interval above). Fewer frames = less server load; triggered samples are unaffected.',
       },
       {
         path: 'identity.onMismatch',
@@ -110,6 +129,37 @@ export const POLICY_GROUPS: PolicyGroup[] = [
         min: 1,
         max: 20,
         help: 'After this many unusable images during a check, the session is routed to human review (never labelled a different person).',
+      },
+    ],
+  },
+  {
+    id: 'alternatives',
+    title: 'Alternative arrangements',
+    description:
+      'Usually set for one candidate as an accommodation (Candidates → Accommodations) rather than for the whole exam. Identity verified by staff replaces the automated face check; without a camera nothing camera-based runs.',
+    advanced: true,
+    fields: [
+      {
+        path: 'identity.verification',
+        label: 'Identity verification',
+        kind: 'enum',
+        options: [
+          { value: 'automatic', label: 'Automatic face check (recommended)' },
+          { value: 'staff', label: 'By a staff member before the exam starts' },
+        ],
+        help: 'By staff: no face reference is built and no automated identity comparisons are made; a staff member records how they verified each candidate. The live-person and ID-photo checks are switched off.',
+      },
+      {
+        path: 'identity.staffReverifyOnContinue',
+        label: 'Staff re-verify after pauses and reconnections',
+        kind: 'boolean',
+        help: 'Only with identity verified by staff: the exam waits for a staff member after every pause or reconnection.',
+      },
+      {
+        path: 'camera.enabled',
+        label: 'Use the camera',
+        kind: 'boolean',
+        help: 'Off: no camera check, no camera observations and no images; identity is verified by staff. Browser rules still apply.',
       },
     ],
   },
@@ -168,6 +218,43 @@ export const POLICY_GROUPS: PolicyGroup[] = [
     ],
   },
   {
+    id: 'resume',
+    title: 'Interruptions and recovery',
+    description:
+      'Limits on interruptions that are not a pause: the exam reopened in a new browser window (after a reload, a crash or on another device) or the connection lost. When a limit is reached, staff decide whether the candidate continues. Pauses follow the pausing rules above.',
+    fields: [
+      {
+        path: 'resume.maxReconnects',
+        label: 'Times the exam may be reopened in a new browser window',
+        kind: 'nullableInteger',
+        min: 0,
+        max: 100,
+        nullLabel: 'Unlimited',
+        help: 'Each time, the candidate repeats the camera and identity check. Reloading the page before the exam starts does not count. 0 = not allowed at all.',
+      },
+      {
+        path: 'resume.maxOfflineMinutes',
+        label: 'Longest time the exam may be disconnected',
+        kind: 'nullableInteger',
+        min: 1,
+        max: 1440,
+        unit: 'min',
+        nullLabel: 'Unlimited',
+        help: 'Counted from the last sign of the candidate’s browser during the exam. Paused exams and exams on hold are not counted.',
+      },
+      {
+        path: 'resume.onLimit',
+        label: 'When a limit is reached',
+        kind: 'enum',
+        options: [
+          { value: 'hold', label: 'Put the exam on hold for staff to decide (recommended)' },
+          { value: 'end', label: 'End the exam and submit the saved answers' },
+        ],
+        help: 'Either way staff can let the candidate continue: release the hold, or reopen the ended exam for recovery.',
+      },
+    ],
+  },
+  {
     id: 'browser',
     title: 'Browser rules',
     description: 'Signals available from the exam page. The system cannot observe other monitors, devices or applications.',
@@ -202,13 +289,53 @@ export const POLICY_GROUPS: PolicyGroup[] = [
     fields: [
       { path: 'detection.absenceSec', label: 'No face visible for', kind: 'number', min: 2, step: 1, unit: 's', help: 'Before “Candidate not visible” is recorded.' },
       { path: 'detection.multiplePeopleSec', label: 'Additional person visible for', kind: 'number', min: 0.3, step: 0.1, unit: 's', help: 'Brief, but longer than a single frame.' },
+      {
+        path: 'detection.attentionReference',
+        label: 'Measure looking away from',
+        kind: 'enum',
+        options: [
+          { value: 'learned', label: 'The candidate’s working position, learned during the exam (recommended)' },
+          { value: 'calibration', label: 'The calibration at check-in only' },
+        ],
+        help: 'Candidates look at the screen, not the camera. The learned working position is where this candidate looks while using the mouse and keyboard (from interaction timing only — never what is typed); it starts from the calibration and adapts within the first minute. “Calibration only” was the behaviour before September 2026 and flags more ordinary work (reading the bottom of the screen, a monitor beside the camera).',
+      },
       { path: 'detection.lookAwaySec', label: 'Sustained look-away after', kind: 'number', min: 1, step: 0.5, unit: 's' },
-      { path: 'detection.lookAwayYawDeg', label: 'Head turn counted as “away”', kind: 'number', min: 10, max: 80, step: 1, unit: '°', help: 'Sideways offset from the candidate’s baseline.' },
-      { path: 'detection.lookDownPitchDeg', label: 'Head tilt counted as “looking down”', kind: 'number', min: 8, max: 60, step: 1, unit: '°' },
+      {
+        path: 'detection.lookAwayYawDeg',
+        label: 'Head turn counted as “away”',
+        kind: 'number',
+        min: 10,
+        max: 80,
+        step: 1,
+        unit: '°',
+        help: 'Sideways, from the middle of the candidate’s screen (their learned working position, or the calibration). A wide screen that the candidate scans with their head widens it automatically.',
+      },
+      { path: 'detection.lookDownPitchDeg', label: 'Looking down counted as “away”', kind: 'number', min: 8, max: 60, step: 1, unit: '°', help: 'Below the middle of the candidate’s screen. Looking at the keyboard while typing is not counted (see below).' },
+      {
+        path: 'detection.lookUpPitchDeg',
+        label: 'Looking up counted as “away”',
+        kind: 'number',
+        min: 10,
+        max: 80,
+        step: 1,
+        unit: '°',
+        help: 'Above the middle of the candidate’s screen. Looking up to think is normal: looks up need a larger angle, last longer (below) and join glance patterns only when clearly beyond the screen.',
+      },
+      { path: 'detection.lookUpSec', label: 'Sustained look up after', kind: 'number', min: 1, step: 1, unit: 's', help: 'Thinking look-ups usually last 2–8 s; a stretch followed by one, about 14 s.' },
+      {
+        path: 'detection.typingExcuseSec',
+        label: 'Looking at the keyboard is ignored while typing within',
+        kind: 'number',
+        min: 0,
+        max: 10,
+        step: 0.5,
+        unit: 's',
+        help: 'Looking down at the keyboard is not “away” while the candidate pressed a key this recently. Looking down without typing (a phone, notes) still counts; a look that continues after the typing stops counts from the last keystroke. 0 = off.',
+      },
       { path: 'detection.glanceMinSec', label: 'Ignore glances shorter than', kind: 'number', min: 0.3, step: 0.1, unit: 's' },
       { path: 'detection.repeatedLookAwayCount', label: 'Repeated look-away: glances', kind: 'integer', min: 2, help: 'Number of qualifying glances within the window.' },
       { path: 'detection.repeatedLookAwayWindowSec', label: 'Repeated look-away: window', kind: 'number', min: 10, step: 5, unit: 's' },
-      { path: 'detection.sameDirectionCount', label: 'Same-direction attention: glances', kind: 'integer', min: 2, help: 'Glances toward the same off-screen direction within the window.' },
+      { path: 'detection.sameDirectionCount', label: 'Same-direction attention: glances', kind: 'integer', min: 2, help: 'Glances toward the same off-screen spot (for example notes on the desk, a second screen) within the window.' },
       { path: 'detection.obstructionSec', label: 'Face obstructed for', kind: 'number', min: 1, step: 0.5, unit: 's' },
       { path: 'detection.phoneMinConfidence', label: 'Phone: minimum detector confidence', kind: 'number', min: 0.1, max: 1, step: 0.05, help: '0–1. Higher means fewer but more certain detections.' },
       { path: 'detection.objectMinConfidence', label: 'Other objects: minimum detector confidence', kind: 'number', min: 0.1, max: 1, step: 0.05 },
@@ -291,6 +418,22 @@ export function validatePolicy(p: unknown): PolicyValidation {
   const errors: Record<string, string> = {};
   for (const issue of r.error.issues) errors[issue.path.join('.')] = issue.message;
   return { ok: false, errors };
+}
+
+const SAMPLING_PATHS = new Set(SAMPLING_FIELDS.map((f) => `identity.${f}`));
+
+/**
+ * Set a field the way the editor does: choosing a sampling intensity preset fills the sampling fields; editing one of
+ * those fields by hand makes the intensity follow the numbers ('custom' unless they match a preset again).
+ */
+export function applyPolicyChange(p: ProctoringPolicy, path: string, value: unknown): ProctoringPolicy {
+  if (path === 'identity.samplingProfile') {
+    const preset = value === 'maximum' || value === 'balanced' ? SAMPLING_PROFILES[value] : null;
+    return { ...p, identity: { ...p.identity, ...(preset ?? {}), samplingProfile: value as ProctoringPolicy['identity']['samplingProfile'] } };
+  }
+  const next = setPath(p, path, value);
+  if (!SAMPLING_PATHS.has(path) || typeof value !== 'number') return next;
+  return { ...next, identity: { ...next.identity, samplingProfile: samplingProfileOf(next.identity) } };
 }
 
 /** Paths whose value differs from DEFAULT_POLICY. */

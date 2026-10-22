@@ -17,17 +17,22 @@
  *   POST /sessions/:id/legal-hold {enabled}           -> SessionSummaryDTO                          [admin]
  *   POST /sessions/:id/regenerate-link                -> { accessLink }                             [admin]
  *   POST /sessions/:id/extend {minutes,note?}         -> SessionSummaryDTO                          [admin]
+ *   POST /sessions/:id/reschedule {window,note?}      -> SessionSummaryDTO  (before the exam starts) [admin]
+ *   POST /sessions/:id/reopen {reason,addMinutes}     -> SessionSummaryDTO  (ended exam, recovery)  [admin]
  *
  * All lifecycle changes go through services/session-actions.ts (row lock, events, periods, audit,
  * candidate commands, realtime).
  */
 import {
   extendTimeSchema,
+  FLAG_CATEGORIES,
   holdRequestSchema,
   legalHoldSchema,
   noteRequestSchema,
   pauseDecisionSchema,
   releaseRequestSchema,
+  reopenRequestSchema,
+  rescheduleRequestSchema,
   SESSION_STATUSES,
   staffSubmitSchema,
   terminateRequestSchema,
@@ -46,6 +51,7 @@ import { getStaff, requireStaff, roleAtLeast } from '../../auth/staff.js';
 import { candidates, events, examSessions, exams, notes, pauseRequests } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { notFound, validationFailed } from '../../lib/errors.js';
+import { mergePolicy } from '../../services/org.js';
 import {
   loadDeviceRecordDTOs,
   loadIdentityCheckDTOs,
@@ -58,7 +64,10 @@ import {
   toHoldDTO,
   toNoteDTO,
   toPauseRequestDTO,
+  loadStaffVerifications,
+  toScoreDTO,
 } from '../../services/dto.js';
+import { toSessionAccommodationsDTO } from '../../services/accommodations.js';
 import { buildSessionReport } from '../../services/reports.js';
 import { eventsToCsv } from '../../services/reports-csv.js';
 import { resolveTimeZone } from '../../services/reports-format.js';
@@ -74,6 +83,9 @@ import {
   terminateSession,
 } from '../../services/session-actions.js';
 import { effectivePolicy } from '../../services/session-state.js';
+import { loadReopenEligibility, reopenSession } from '../../services/recovery.js';
+import { rescheduleSession } from '../../services/scheduling.js';
+import { loadSessionReviewRows, toSessionReviewDTO } from '../../services/review.js';
 import { actorOf, assertSessionInOrg, blankToUndefined, escapeLike, idParam, isUuid, listParam, loadOrgRow, loadScopedSession, noStore, pagingSchema } from './common.js';
 import { eventFilterConds, loadLiveEvents } from './events.js';
 
@@ -135,7 +147,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         orderBy: [desc(examSessions.updatedAt), desc(examSessions.id)],
         limit: DASHBOARD_SESSION_LIMIT,
       }),
-      loadLiveEvents(ctx.db, staff.orgId, [ne(events.category, 'neutral')], DASHBOARD_EVENT_LIMIT),
+      loadLiveEvents(ctx.db, staff.orgId, [inArray(events.category, [...FLAG_CATEGORIES])], DASHBOARD_EVENT_LIMIT),
       ctx.db
         .select({ request: pauseRequests, sessionId: examSessions.id, candidateName: candidates.name, examTitle: exams.title })
         .from(pauseRequests)
@@ -190,7 +202,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     const id = idParam(req, 'id', 'Session', 'session_not_found');
     const { session, exam } = await loadScopedSession(ctx.db, staff.orgId, id);
     const org = await loadOrgRow(ctx, staff.orgId);
-    const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices] = await Promise.all([
+    const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices, staffVerifications, reviewRows] = await Promise.all([
       // The access link (a bearer credential) only for admins, only on this explicit detail response.
       loadSessionSummaries(ctx, ctx.db, { orgId: staff.orgId, sessionIds: [id], includeAccessLink: roleAtLeast(staff.role, 'admin') }),
       loadPeriodDTOs(ctx.db, id),
@@ -199,11 +211,18 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       loadPauseRequestDTOs(ctx.db, id),
       loadNoteDTOs(ctx.db, { sessionId: id }),
       loadDeviceRecordDTOs(ctx.db, id),
+      loadStaffVerifications(ctx.db, id),
+      loadSessionReviewRows(ctx.db, [id]),
     ]);
     if (!summary) throw notFound('Session not found', 'session_not_found');
+    const policy = effectivePolicy(session, exam, org);
+    const [review, reopen] = await Promise.all([toSessionReviewDTO(ctx.db, summary.review!, reviewRows.get(id)), loadReopenEligibility(ctx.db, session, policy, ctx.now())]);
     return {
       summary,
-      policy: effectivePolicy(session, exam, org),
+      policy,
+      // Exceptions are frozen at start; before that, against the exam's current rules.
+      accommodations: toSessionAccommodationsDTO(session, session.policy ? null : mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, exam.policy as Record<string, unknown>)),
+      staffVerifications,
       periods,
       identityChecks,
       references,
@@ -211,7 +230,9 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       notes: noteList,
       devices,
       consent: { acceptedAt: ms(session.consentAcceptedAt), noticeVersion: session.consentNoticeVersion ?? null },
-      score: session.score ? { points: session.score.points, maxPoints: session.score.maxPoints, autoGraded: session.score.autoGraded } : null,
+      score: toScoreDTO(session.score),
+      review,
+      reopen,
     };
   });
 
@@ -293,7 +314,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   app.post('/sessions/:id/release', reviewer, async (req) => {
     const id = idParam(req, 'id', 'Session', 'session_not_found');
     const body = releaseRequestSchema.parse(req.body ?? {});
-    return releaseHold(ctx, id, actorOf(req), { note: body.note ?? null, requireCheck: body.requireCheck, reEnroll: body.reEnroll });
+    return releaseHold(ctx, id, actorOf(req), { note: body.note ?? null, requireCheck: body.requireCheck, reEnroll: body.reEnroll, verification: body.verification ?? null });
   });
 
   app.post('/sessions/:id/terminate', admin, async (req) => {
@@ -323,5 +344,20 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     const id = idParam(req, 'id', 'Session', 'session_not_found');
     const body = extendTimeSchema.parse(req.body ?? {});
     return extendSessionTime(ctx, id, body.minutes, actorOf(req), body.note ?? null);
+  });
+
+  /* ------------------------------------------------------------------ scheduling & recovery (services/scheduling.ts, services/recovery.ts) */
+
+  app.post('/sessions/:id/reschedule', admin, async (req) => {
+    const id = idParam(req, 'id', 'Session', 'session_not_found');
+    const body = rescheduleRequestSchema.parse(req.body ?? {});
+    const actor = actorOf(req);
+    return rescheduleSession(ctx, id, { type: 'staff', id: actor.id, orgId: actor.orgId, ip: actor.ip }, body.window, body.note ?? null);
+  });
+
+  app.post('/sessions/:id/reopen', admin, async (req) => {
+    const id = idParam(req, 'id', 'Session', 'session_not_found');
+    const body = reopenRequestSchema.parse(req.body ?? {});
+    return reopenSession(ctx, id, actorOf(req), body);
   });
 };

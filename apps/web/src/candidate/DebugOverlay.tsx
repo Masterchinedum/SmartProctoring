@@ -5,8 +5,9 @@ import type { DebugSnapshot } from './debug';
 /**
  * Candidate debug overlay — only with `?debug=1` on the take URL (never shown otherwise). A small panel for
  * validating a real webcam: camera resolution, analysis rate, faces, the server's answer to the latest check
- * frame (quality, guidance, adaptive progress), the latest identity burst (decision, similarity, accumulated
- * evidence), the next routine sample and the identity triggers that fired.
+ * frame (quality, guidance, adaptive progress), the latest identity burst (receipt: image usable, guidance — the
+ * server never tells the candidate page its identity verdict), the next routine sample and the identity triggers
+ * that fired. Staff see the decisions and the evidence in the session view and the camera self-test page.
  */
 export function DebugOverlay() {
   const ctrl = useController();
@@ -72,6 +73,15 @@ export function DebugOverlay() {
                   </td>
                 </tr>
               )}
+              {rt && (
+                <tr>
+                  <th>looking away from</th>
+                  <td data-testid="debug-attention">
+                    {rt.attention.reference} (learned {Math.round(rt.attention.warmth * 100)}%): screen {fmt(rt.attention.offsetFromBaseline.yaw, 0)}° / {fmt(rt.attention.offsetFromBaseline.pitch, 0)}° from calibration · limits ←{fmt(rt.attention.limits.left, 0)} →
+                    {fmt(rt.attention.limits.right, 0)} ↑{fmt(rt.attention.limits.up, 0)} ↓{fmt(rt.attention.limits.down, 0)} · keyboard samples {rt.attention.samples.keyboard}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
 
@@ -109,7 +119,7 @@ export function DebugOverlay() {
                     <tr>
                       <th>progress</th>
                       <td data-testid="debug-check-progress">
-                        frontal {cf.progress.frontalAccepted} (+{cf.progress.frontalNeeded} wanted) · identity {cf.progress.identity ?? '—'} · steps{' '}
+                        frontal {cf.progress.frontalAccepted} (+{cf.progress.frontalNeeded} wanted) · steps{' '}
                         {cf.progress.steps.map((s) => `${s.index}:${s.satisfied ? '✓' : '·'}`).join(' ') || '—'} · {cf.progress.canComplete ? <span className="good">can complete</span> : 'collecting'}
                       </td>
                     </tr>
@@ -142,7 +152,8 @@ export function DebugOverlay() {
                       {res ? (
                         <>
                           {' '}
-                          · <span className={res.result.decision === 'match' ? 'good' : res.result.decision === 'mismatch' ? 'bad' : 'warn'}>{res.result.decision}</span> · sim {fmt(res.result.similarity)}
+                          · <span className={res.result.usable ? 'good' : 'warn'}>{res.result.usable ? 'image usable' : 'image not usable'}</span>
+                          {res.followUpInMs != null ? ' · faster sample requested' : ''}
                         </>
                       ) : (
                         ' · queued (offline)'
@@ -153,15 +164,6 @@ export function DebugOverlay() {
                   )}
                 </td>
               </tr>
-              {res?.evidence && (
-                <tr>
-                  <th>evidence</th>
-                  <td>
-                    <span className={res.evidence.state === 'consistent' ? 'good' : res.evidence.state === 'monitoring' ? 'warn' : 'bad'}>{res.evidence.state}</span> · swap p{' '}
-                    {fmt(res.evidence.swapProbability, 3)} · {res.evidence.samples} samples
-                  </td>
-                </tr>
-              )}
               {res?.result.guidance?.length ? (
                 <tr>
                   <th>guidance</th>

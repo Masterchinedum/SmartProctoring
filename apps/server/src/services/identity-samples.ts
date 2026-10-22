@@ -2,7 +2,8 @@
  * Mid-exam identity samples (POST /api/candidate/identity/sample), ARCHITECTURE §4.5 (identity v2).
  *
  *  - Idempotent on sampleId (a replay returns the stored result).
- *  - Bursts: the client takes `policy.identity.burstSize` frames within ~0.6 s and sends them as separate requests
+ *  - Bursts: the client takes `policy.identity.burstSize` frames (routine samples: `routineBurstSize`, shared
+ *    burstSizeFor) within ~0.6 s and sends them as separate requests
  *    sharing burstId (burstIndex 0..size-1, any order). Each frame is analysed on arrival and answered per frame;
  *    when all frames arrived (or BURST_TIMEOUT_MS after the first one — the next sample or the sweeper decides it
  *    on the frames received) the burst is decided as ONE sample: identity_checks row, mean embedding of its usable
@@ -21,12 +22,12 @@
  *    (exam_start after a (re)start until a sample arrives; server_request while suspect and the client is late).
  */
 import { randomUUID } from 'node:crypto';
-import type { IdentityCheckTrigger, IdentityDecision, IdentityEvidenceDTO, IdentityResultDTO, IdentitySampleResponse, ProctoringPolicy } from '@sp/shared';
+import { DEFAULT_POLICY, type HoldDTO, type IdentityCheckTrigger, type IdentityDecision, type IdentityEvidenceDTO, type IdentityResultDTO, type IdentitySampleResponse, type ProctoringPolicy, type SessionStatus } from '@sp/shared';
 import { and, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { events, evidence, examSessions, identityChecks, identitySampleFrames, type ExamSession, type IdentityCheck, type IdentityCheckContext, type IdentityEngineState, type IdentitySampleFrame, type PendingBurst } from '../db/schema.js';
-import { invalidState } from '../lib/errors.js';
-import { CALIBRATION, decideIdentity, deserializeEmbeddings, hammingHex, posteriorSwap, serializeEmbeddings, type ImageAnalysis } from '../vision/index.js';
+import { conflict, invalidState } from '../lib/errors.js';
+import { advisoryGuidance, CALIBRATION, decideIdentity, deserializeEmbeddings, hammingHex, INCONCLUSIVE_GUIDANCE, posteriorSwap, serializeEmbeddings, type ImageAnalysis } from '../vision/index.js';
 import { assertInControl } from './candidate-state.js';
 import { toHoldDTO } from './dto.js';
 import { purgeEvidenceRows, readEvidence, storeEvidence } from './evidence.js';
@@ -35,22 +36,39 @@ import {
   accumulate,
   CLEAR_MATCH_LLR,
   frameEvidence,
+  loadAwareDelayMs,
   nextSampleDelayMs,
   sampleLabel,
+  POOR_LIGHT_GUIDANCE,
+  poorLightSuspect,
+  sampleWatchdog,
   toEvidenceDTO,
-  URGENT_TRIGGERS,
+  usableBaseline,
   windowSum,
   type ComparisonContext,
+  type SessionBaseline,
   type EvidenceEntry,
   type FrameEvidence,
 } from './identity-evidence.js';
+import { currentCapacity, samplingPressure } from './capacity.js';
 import { aggregateBurst, scoreReference } from './identity-gallery.js';
-import { sessionHasEvidenceCapacity } from './session-limits.js';
+import { IDENTITY_SAMPLE_SHARE, sessionHasEvidenceCapacity } from './session-limits.js';
 import { holdNow, identityState, withSession, type SessionMutation, type SessionPreload } from './session-state.js';
 import { secondOpinion, secondOpinionApplies, secondOpinionDetails, type SecondOpinionRecord } from './identity-external.js';
-import { loadOrg, orgThresholds } from './org.js';
+import { loadOrg, mergePolicy, orgThresholds, type DecisionStamp } from './org.js';
 import { fusionPolicyFor } from '../verifiers/index.js';
-import { internalStrength } from '../verifiers/fusion.js';
+import { internalStrength, type InternalOpinion } from '../verifiers/fusion.js';
+
+/** A sample captured this long before it arrived is recorded only (it is not live evidence of who is there now). */
+export const LATE_SAMPLE_MS = 2 * 60_000;
+/** Client clocks are server-corrected; captures up to this long before the period began still belong to it. */
+const PERIOD_CLOCK_TOLERANCE_MS = 5_000;
+
+/** Record-only: captured before the current active period began, or far older than its receipt (LATE_SAMPLE_MS). */
+export function lateSample(capturedAt: number, receivedAt: number, periodStart: number | null): boolean {
+  if (periodStart != null && capturedAt < periodStart - PERIOD_CLOCK_TOLERANCE_MS) return true;
+  return receivedAt - capturedAt > LATE_SAMPLE_MS;
+}
 
 /** An incomplete burst is decided on the frames received this long after its first frame. */
 export const BURST_TIMEOUT_MS = 3_000;
@@ -70,6 +88,41 @@ export interface SampleInput {
   burstSize?: number;
 }
 
+/**
+ * The engine's answer to a sample (and what is stored for idempotent replays): the decision and the session's
+ * evidence. Staff-side only — the candidate gets `candidateSampleResponse(answer)`.
+ */
+interface SampleAnswer {
+  result: IdentityResultDTO;
+  followUpInMs: number | null;
+  status: SessionStatus;
+  hold: HoldDTO | null;
+  burst?: IdentitySampleResponse['burst'];
+  nextSampleInMs?: number | null;
+  evidence?: IdentityEvidenceDTO;
+}
+
+/**
+ * What the candidate is told about a sample: a receipt (was the image usable, guidance about the image) and the
+ * cadence — never the decision, the similarity or the evidence state (a live verdict would let a candidate probe the
+ * comparison or react to it).
+ */
+export function candidateSampleResponse(a: SampleAnswer): IdentitySampleResponse {
+  const r = a.result;
+  const usable = r.decision !== 'unable_to_verify';
+  // Unusable image: its quality guidance. Usable: only the lighting guidance a poor-light suspicion adds (never the
+  // "could not confirm" wording of an inconclusive comparison).
+  const guidance = !usable ? r.guidance : r.guidance.includes(POOR_LIGHT_GUIDANCE) ? r.guidance.filter((g) => g !== INCONCLUSIVE_GUIDANCE) : [];
+  return {
+    result: { id: r.id, trigger: r.trigger, at: r.at, usable, guidance },
+    followUpInMs: a.followUpInMs,
+    status: a.status,
+    hold: a.hold,
+    ...(a.burst ? { burst: a.burst } : {}),
+    nextSampleInMs: a.nextSampleInMs ?? null,
+  };
+}
+
 interface StoredResponse {
   followUpInMs: number | null;
   nextSampleInMs?: number | null;
@@ -87,14 +140,16 @@ function safeHamming(a: string | null, b: string | null): number {
   }
 }
 
-/** Mid-exam samples after a camera reconnect may look quite different (another camera): relaxed normalisation. */
-function comparisonContext(trigger: IdentityCheckTrigger): ComparisonContext {
-  return trigger === 'camera_reconnect' ? 'relaxed' : 'continuous';
+/** Per-session normalisation context of a mid-exam sample (identity-evidence.ts). */
+function comparisonContext(trigger: IdentityCheckTrigger, st: Pick<IdentityEngineState, 'normalisation'>): ComparisonContext {
+  // After a resume / reconnect / reverify the room, light or camera may differ from enrolment: never the tighter
+  // same-session normalisation there (docs/accuracy/identity-v2.md §9).
+  return trigger === 'camera_reconnect' || st.normalisation === 'relaxed' ? 'relaxed' : 'continuous';
 }
 
 /* =================================================================== entry point */
 
-async function replayCheck(ctx: Ctx, sessionId: string, row: IdentityCheck): Promise<IdentitySampleResponse> {
+async function replayCheck(ctx: Ctx, sessionId: string, row: IdentityCheck): Promise<SampleAnswer> {
   const [s] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, sessionId));
   const stored = (row.response ?? {}) as unknown as StoredResponse;
   return {
@@ -108,7 +163,7 @@ async function replayCheck(ctx: Ctx, sessionId: string, row: IdentityCheck): Pro
   };
 }
 
-async function replayFrame(ctx: Ctx, sessionId: string, frame: IdentitySampleFrame): Promise<IdentitySampleResponse> {
+async function replayFrame(ctx: Ctx, sessionId: string, frame: IdentitySampleFrame): Promise<SampleAnswer> {
   const [s] = await ctx.db.select().from(examSessions).where(eq(examSessions.id, sessionId));
   const stored = (frame.response ?? {}) as unknown as StoredResponse;
   return {
@@ -140,25 +195,31 @@ async function findExisting(db: Ctx['db'] | SessionMutation['tx'], sessionId: st
 }
 
 export async function processIdentitySample(ctx: Ctx, session: ExamSession, instanceId: string, q: SampleInput, jpeg: Buffer, preload?: SessionPreload): Promise<IdentitySampleResponse> {
+  return candidateSampleResponse(await processSample(ctx, session, instanceId, q, jpeg, preload));
+}
+
+async function processSample(ctx: Ctx, session: ExamSession, instanceId: string, q: SampleInput, jpeg: Buffer, preload?: SessionPreload): Promise<SampleAnswer> {
   const existing = await findExisting(ctx.db, session.id, q.sampleId);
   if (existing.check) return replayCheck(ctx, session.id, existing.check);
   if (existing.frame) return replayFrame(ctx, session.id, existing.frame);
 
   assertInControl(session, instanceId);
   if (!['active', 'paused', 'on_hold'].includes(session.status)) throw invalidState('Identity samples are only accepted during the exam');
+  if (sessionPolicy(session).verification === 'staff') throw conflict('identity_samples_off', 'Identity is verified by a staff member for this exam; no identity pictures are taken.');
 
   const active = await loadActiveReference(ctx, ctx.db, session.id);
   if (!active) throw invalidState('No identity reference exists for this exam');
-  // Samples taken at a discontinuity (someone may just have swapped in) are analysed with interactive priority;
-  // routine samples may wait a few seconds while check-in frames keep a candidate waiting.
-  const analysis: ImageAnalysis = await ctx.vision.analyze(jpeg, { embed: true, faceCrop: true, priority: URGENT_TRIGGERS.has(q.trigger) ? 'interactive' : 'background' });
+  // Samples the server is waiting for are analysed with interactive priority; routine samples may wait a few seconds
+  // while check-in frames keep a candidate waiting. Decided from the server's own state, not the client's trigger
+  // label (a client could otherwise label every sample urgent).
+  const analysis: ImageAnalysis = await ctx.vision.analyze(jpeg, { embed: true, faceCrop: true, priority: sampleUrgent(identityState(session), sessionPolicy(session), ctx.now()) ? 'interactive' : 'background' });
   const isBurst = q.burstId != null && (q.burstSize ?? 1) > 1;
   const secondOpinionRequests: string[] = [];
 
   const out = await withSession(
     ctx,
     session.id,
-    async (m): Promise<IdentitySampleResponse | { replay: IdentityCheck | IdentitySampleFrame; kind: 'check' | 'frame' }> => {
+    async (m): Promise<SampleAnswer | { replay: IdentityCheck | IdentitySampleFrame; kind: 'check' | 'frame' }> => {
       const dup = await findExisting(m.tx, session.id, q.sampleId);
       if (dup.check) return { replay: dup.check, kind: 'check' };
       if (dup.frame) return { replay: dup.frame, kind: 'frame' };
@@ -173,7 +234,13 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
       if (s.status !== 'active') {
         if (open && !open.observed && at < open.startedAt.getTime()) recordOnly = true;
         else throw invalidState('The exam is not active');
+      } else if (lateSample(at, now, identityState(s).activeSince ?? (open?.kind === 'active' ? open.startedAt.getTime() : null))) {
+        // Captured before the current active period began (it belongs to the period before a pause / hold / resume),
+        // or long before it arrived (an outbox delivering a backlog): recorded, but it is not live evidence.
+        recordOnly = true;
       }
+      // The client is sending (even a late sample): the watchdog measures silence from here.
+      if (s.status === 'active') m.setIdentityState({ ...identityState(m.session), lastSampleReceivedAt: now });
       const env = await sampleEnv(m, active, jpeg.length, secondOpinionRequests);
 
       // Bursts whose remaining frames never came are decided on what arrived (which may put the exam on hold).
@@ -182,7 +249,7 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
       if (!recordOnly && m.session.status !== 'active') recordOnly = true;
 
       const sim = analysis.embedding ? scoreReference(analysis.embedding, active.embeddings) : null;
-      const fe = frameEvidence(analysis.quality, sim, env.baseline, comparisonContext(q.trigger));
+      const fe = frameEvidence(analysis.quality, sim, env.baseline, comparisonContext(q.trigger, identityState(m.session)));
 
       if (!isBurst) {
         return decideSample(m, env, {
@@ -202,8 +269,8 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
       const st = identityState(m.session);
       let pending = st.pendingBursts.find((b) => b.id === burstId) ?? null;
       const late = !pending && (recordOnly || (await burstSeen(m, burstId)));
-      const label = sampleLabel(sim, analysis.quality, env.thresholds);
-      const cmp = decideIdentity(sim, analysis.quality, env.thresholds, 'reference');
+      const label = sampleLabel(sim, analysis.quality, env.thresholds, fe.usable ? fe.llr : null);
+      const cmp = decideIdentity(sim, analysis.quality, env.thresholds, 'reference', fe.usable ? { llr: fe.llr } : undefined);
       const keepImages = !late && wantImages(env, label, fe, st);
       const images = keepImages ? await storeSampleImages(m, env, { at, instanceId, jpeg, crop: analysis.faceCropJpeg, identityCheckId: null }) : { probeId: null, frameId: null };
       const frameId = randomUUID();
@@ -263,7 +330,7 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
     try {
       await resolveSwapSecondOpinion(ctx, session.id, checkId);
     } catch (err) {
-      // The pending request is retried by the next confirming sample after SECOND_OPINION_PENDING_MS.
+      // The pending request is retried by the next confirming sample after secondOpinionPendingMs().
       ctx.log.error({ err, sessionId: session.id, checkId }, 'applying the external second opinion failed');
     }
   }
@@ -279,6 +346,28 @@ export async function processIdentitySample(ctx: Ctx, session: ExamSession, inst
   };
 }
 
+/**
+ * Whether the server is waiting for this sample (vision priority 'interactive'): it asked for one (exam start, a
+ * faster look, or its watchdog because samples are overdue), a follow-up after a non-match is due, or the evidence
+ * is building up (monitoring / suspect / a flagged mismatch). Routine samples, including those of the start-up
+ * window, are 'background': at a synchronised exam start they would otherwise queue check-in frames (candidates
+ * waiting to start) behind every started candidate's start-up samples (PERFORMANCE §7.7).
+ */
+export function sampleUrgent(
+  st: Pick<IdentityEngineState, 'sampleRequest' | 'followUpRequestedAt' | 'evidence' | 'activeSince' | 'openMismatchEventId'>,
+  policy: Pick<ProctoringPolicy['identity'], 'startupWindowSec' | 'startupIntervalSec' | 'periodicCheckIntervalSec'>,
+  now: number,
+): boolean {
+  if (st.sampleRequest || st.followUpRequestedAt != null || st.openMismatchEventId) return true;
+  if (st.evidence?.state && st.evidence.state !== 'consistent') return true;
+  return sampleWatchdog(policy, st, now) !== 'ok';
+}
+
+/** The session's policy snapshot (taken at exam start; samples are only accepted after it). */
+function sessionPolicy(s: Pick<ExamSession, 'policy'>): ProctoringPolicy['identity'] {
+  return (s.policy ? mergePolicy(undefined, s.policy as Record<string, unknown>) : DEFAULT_POLICY).identity;
+}
+
 /* =================================================================== deciding samples */
 
 interface SampleEnv {
@@ -287,6 +376,8 @@ interface SampleEnv {
   baseline: ActiveReference['ref']['baseline'];
   policy: ProctoringPolicy;
   thresholds: Awaited<ReturnType<SessionMutation['thresholds']>>;
+  /** The versions behind `thresholds` and the comparison, recorded on the decision. */
+  stamp: DecisionStamp;
   jpegBytes: number;
   /**
    * Identity checks whose suspected swap waits for the external second opinion: the caller resolves them after the
@@ -296,7 +387,26 @@ interface SampleEnv {
 }
 
 async function sampleEnv(m: SessionMutation, active: ActiveReference, jpegBytes: number, secondOpinionRequests: string[] = []): Promise<SampleEnv> {
-  return { ctx: m.ctx, active, baseline: active.ref.baseline ?? null, policy: await m.policy(), thresholds: await m.thresholds(), jpegBytes, secondOpinionRequests };
+  return {
+    ctx: m.ctx,
+    active,
+    baseline: sampleBaseline(active, identityState(m.session)),
+    policy: await m.policy(),
+    thresholds: await m.thresholds(),
+    stamp: await m.decisionStamp(),
+    jpegBytes,
+    secondOpinionRequests,
+  };
+}
+
+/**
+ * The baseline mid-exam samples are normalised against: the current period's own (measured at the resume / reconnect
+ * / reverify check that began it, identity-evidence.ts periodBaseline) while the normalisation is 'continuous', else
+ * the enrolment baseline.
+ */
+export function sampleBaseline(active: ActiveReference, st: Pick<IdentityEngineState, 'normalisation' | 'periodBaseline'>): SessionBaseline | null {
+  const pb = st.periodBaseline;
+  return st.normalisation === 'continuous' && pb && usableBaseline(pb) ? pb : (active.ref.baseline ?? null);
 }
 
 function wantImages(env: SampleEnv, label: IdentityDecision, fe: FrameEvidence, st: IdentityEngineState): boolean {
@@ -311,9 +421,10 @@ async function storeSampleImages(
   o: { at: number; instanceId: string | null; jpeg: Buffer | null; crop: Buffer | null; identityCheckId: string | null },
 ): Promise<{ probeId: string | null; frameId: string | null; skipped?: boolean }> {
   const s = m.session;
-  // Over the per-session storage budget the sample is still compared and decided; only its images are not kept.
+  // Over the samples' share of the per-session storage budget the sample is still compared and decided; only its
+  // images are not kept. The rest of the budget stays free for check frames (session-limits.ts).
   const bytes = (o.jpeg?.length ?? 0) + (o.crop?.length ?? 0);
-  if (!(await sessionHasEvidenceCapacity(env.ctx, m.tx, s.id, { items: 2, bytes }))) return { probeId: null, frameId: null, skipped: true };
+  if (!(await sessionHasEvidenceCapacity(env.ctx, m.tx, s.id, { items: 2, bytes }, IDENTITY_SAMPLE_SHARE))) return { probeId: null, frameId: null, skipped: true };
   const base = { orgId: s.orgId, sessionId: s.id, candidateId: s.candidateId, kind: 'identity_probe' as const, capturedAt: o.at, identityCheckId: o.identityCheckId, clientInstanceId: o.instanceId };
   const probeId = o.crop ? (await storeEvidence(env.ctx, m.tx, { ...base, reason: 'face_crop', data: o.crop })).row.id : null;
   const frameId = o.jpeg ? (await storeEvidence(env.ctx, m.tx, { ...base, reason: 'frame', data: o.jpeg })).row.id : null;
@@ -347,7 +458,7 @@ interface DecideInput {
   burst: { id: string; size: number; received: number } | null;
 }
 
-async function decideBurst(m: SessionMutation, env: SampleEnv, pending: PendingBurst, o: { completingSampleId: string | null; recordOnly: boolean }): Promise<IdentitySampleResponse> {
+async function decideBurst(m: SessionMutation, env: SampleEnv, pending: PendingBurst, o: { completingSampleId: string | null; recordOnly: boolean }): Promise<SampleAnswer> {
   const rows = await m.tx
     .select()
     .from(identitySampleFrames)
@@ -364,7 +475,7 @@ async function decideBurst(m: SessionMutation, env: SampleEnv, pending: PendingB
     }
     const analysis = analysisFromSummary(r.analysis, embedding);
     const sim = embedding ? scoreReference(embedding, env.active.embeddings) : null;
-    return { analysis, embedding, evidence: frameEvidence(r.analysis.quality, sim, env.baseline, comparisonContext(r.trigger)), frameRow: r };
+    return { analysis, embedding, evidence: frameEvidence(r.analysis.quality, sim, env.baseline, comparisonContext(r.trigger, identityState(m.session))), frameRow: r };
   });
   const st = identityState(m.session);
   st.pendingBursts = st.pendingBursts.filter((b) => b.id !== pending.id);
@@ -412,12 +523,12 @@ async function eraseOrphanFrameEmbeddings(m: SessionMutation): Promise<void> {
     );
 }
 
-async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput): Promise<IdentitySampleResponse> {
+async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput): Promise<SampleAnswer> {
   const { ctx } = env;
   const s = m.session;
   const now = m.now;
   const st0 = identityState(s);
-  const context = comparisonContext(d.trigger);
+  const context = comparisonContext(d.trigger, st0);
 
   // ---- the sample's evidence (one burst = one sample)
   let fe: FrameEvidence;
@@ -437,12 +548,19 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
     );
     fe = agg.evidence;
     rep = agg.representative;
-    burstInfo = { consistent: agg.consistent, usableFrames: agg.usable, frameSimilarities: agg.perFrame.map((p) => p.similarity), frameLlrs: agg.perFrame.map((p) => (p.usable ? p.llr : null)) };
+    burstInfo = {
+      consistent: agg.consistent,
+      scoring: agg.scoring,
+      spread: agg.spread,
+      usableFrames: agg.usable,
+      frameSimilarities: agg.perFrame.map((p) => p.similarity),
+      frameLlrs: agg.perFrame.map((p) => (p.usable ? p.llr : null)),
+    };
   }
   const repFrame = d.frames[rep];
   const quality = fe.usable ? repFrame.analysis.quality : (repFrame?.analysis.quality ?? null);
-  const label = sampleLabel(fe.similarity, quality, env.thresholds);
-  const cmp = decideIdentity(fe.similarity, quality, env.thresholds, 'reference');
+  const label = sampleLabel(fe.similarity, quality, env.thresholds, fe.usable ? fe.llr : null);
+  const cmp = decideIdentity(fe.similarity, quality, env.thresholds, 'reference', fe.usable ? { llr: fe.llr } : undefined);
 
   const pre = await precedingContext(m.tx, s.id, d.at, d.trigger);
   const ctxInfo: IdentityCheckContext = {
@@ -472,6 +590,10 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
     probeId = r?.probeEvidenceId ?? null;
     frameImageId = r?.frameEvidenceId ?? null;
   }
+  // A decided burst keeps the images of its representative frame only; the other frames' images (stored on arrival,
+  // before the burst could be judged) are purged after commit, so bursts do not use up the session's storage budget.
+  const burstKeptImages = new Set([probeId, frameImageId].filter((x): x is string => !!x));
+  const burstExtraImages = d.burst ? d.frames.flatMap((f) => [f.frameRow!.probeEvidenceId, f.frameRow!.frameEvidenceId]).filter((x): x is string => !!x && !burstKeptImages.has(x)) : [];
 
   const [row] = await m.tx
     .insert(identityChecks)
@@ -493,14 +615,30 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
       dhash: repFrame?.analysis.dhash ?? null,
       clientInstanceId: m.session.activeInstanceId,
       context: ctxInfo,
+      ...env.stamp,
     })
     .returning();
-  m.publishIdentityCheck(row.id);
+  m.publishIdentityCheck(row);
   if (d.burst) {
     const ids = d.frames.map((f) => f.frameRow!.id);
     await m.tx.update(identitySampleFrames).set({ identityCheckId: row.id, embeddingEnc: null }).where(inArray(identitySampleFrames.id, ids));
-    const imageIds = d.frames.flatMap((f) => [f.frameRow!.probeEvidenceId, f.frameRow!.frameEvidenceId]).filter((x): x is string => !!x);
-    if (imageIds.length) await m.tx.update(evidence).set({ identityCheckId: row.id }).where(inArray(evidence.id, imageIds));
+    if (burstKeptImages.size) await m.tx.update(evidence).set({ identityCheckId: row.id }).where(inArray(evidence.id, [...burstKeptImages]));
+    if (burstExtraImages.length) {
+      const extra = new Set(burstExtraImages);
+      for (const f of d.frames) {
+        const r = f.frameRow!;
+        if ((r.probeEvidenceId && extra.has(r.probeEvidenceId)) || (r.frameEvidenceId && extra.has(r.frameEvidenceId))) {
+          await m.tx
+            .update(identitySampleFrames)
+            .set({ probeEvidenceId: r.probeEvidenceId && extra.has(r.probeEvidenceId) ? null : r.probeEvidenceId, frameEvidenceId: r.frameEvidenceId && extra.has(r.frameEvidenceId) ? null : r.frameEvidenceId })
+            .where(eq(identitySampleFrames.id, r.id));
+        }
+      }
+      m.onCommit(async () => {
+        const rows = await ctx.db.select().from(evidence).where(inArray(evidence.id, burstExtraImages));
+        await purgeEvidenceRows(ctx, ctx.db, rows, 'identity_burst_frame');
+      });
+    }
   }
 
   let followUpInMs: number | null = null;
@@ -512,6 +650,12 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
     followUpInMs = r.followUpInMs;
     nextSampleInMs = r.nextSampleInMs;
     evidenceDTO = r.evidence;
+    if (r.poorLight) {
+      // Suspicion from poor light only: ask the candidate for more light (the next, faster sample may then decide).
+      const guidance = [...new Set([...(quality ? advisoryGuidance(quality) : []), POOR_LIGHT_GUIDANCE, ...row.guidance])];
+      await m.tx.update(identityChecks).set({ guidance }).where(eq(identityChecks.id, row.id));
+      row.guidance = guidance;
+    }
   }
   const evidenceCtx: IdentityCheckContext = { ...ctxInfo, evidence: { llr: fe.usable ? fe.llr : null, bucket: fe.bucket, ...evidenceDTO, calibrationVersion: CALIBRATION.version } };
   // A burst that cleanly matched while nothing was building up: its speculatively stored frame images are not kept.
@@ -519,7 +663,7 @@ async function decideSample(m: SessionMutation, env: SampleEnv, d: DecideInput):
   const cleanMatch = label === 'match' && fe.usable && fe.llr <= CLEAR_MATCH_LLR && st1.evidence.state === 'consistent' && !st1.openMismatchEventId && !env.policy.evidence.keepMatchingIdentitySamples;
   let finalRow = row;
   if (d.burst && cleanMatch) {
-    const imageIds = d.frames.flatMap((f) => [f.frameRow!.probeEvidenceId, f.frameRow!.frameEvidenceId]).filter((x): x is string => !!x);
+    const imageIds = [...burstKeptImages];
     if (imageIds.length) {
       await m.tx.update(identityChecks).set({ probeEvidenceId: null, frameEvidenceId: null }).where(eq(identityChecks.id, row.id));
       finalRow = { ...finalRow, probeEvidenceId: null, frameEvidenceId: null };
@@ -555,18 +699,25 @@ async function applyEvidence(
   row: IdentityCheck,
   fe: FrameEvidence,
   dhash: string | null,
-): Promise<{ followUpInMs: number | null; nextSampleInMs: number | null; evidence: IdentityEvidenceDTO }> {
+): Promise<{ followUpInMs: number | null; nextSampleInMs: number | null; evidence: IdentityEvidenceDTO; poorLight?: boolean }> {
   const st = identityState(m.session);
   const at = row.at.getTime();
 
   // A sample received after the server asked for one satisfies the request (whatever its trigger).
   if (st.sampleRequest && row.receivedAt.getTime() >= st.sampleRequest.since) st.sampleRequest = null;
+  // Samples arrive again: the watchdog's 'no_samples' observation ends where this sample was taken.
+  if (st.openNoSamplesEventId) {
+    await m.closeEvent(st.openNoSamplesEventId, at, { closedBy: 'sample_received', identityCheckId: row.id });
+    st.openNoSamplesEventId = null;
+  }
 
   // ---- server-side feed integrity: identical frames across samples taken seconds apart
   const identical = safeHamming(st.lastSampleDhash, dhash) === 0;
   st.identicalDhashStreak = identical ? Math.max(2, st.identicalDhashStreak + 1) : 1;
   st.lastSampleDhash = dhash;
-  if (st.identicalDhashStreak >= IDENTICAL_SAMPLES_SUSPECT && !st.openFeedSuspectEventId) {
+  // Part of the exam's camera-integrity checks: off when the exam switched them off (like the browser's own checks).
+  const feedChecksOn = env.policy.detection.enabled.cameraIntegrity !== false;
+  if (feedChecksOn && st.identicalDhashStreak >= IDENTICAL_SAMPLES_SUSPECT && !st.openFeedSuspectEventId) {
     const ev = await m.addEvent({
       type: 'camera_feed_suspect',
       source: 'server_identity',
@@ -579,7 +730,7 @@ async function applyEvidence(
     });
     st.openFeedSuspectEventId = ev.id;
     if (row.frameEvidenceId) await m.tx.update(evidence).set({ eventId: ev.id }).where(eq(evidence.id, row.frameEvidenceId));
-  } else if (st.openFeedSuspectEventId && st.identicalDhashStreak >= IDENTICAL_SAMPLES_SUSPECT) {
+  } else if (feedChecksOn && st.openFeedSuspectEventId && st.identicalDhashStreak >= IDENTICAL_SAMPLES_SUSPECT) {
     const [cur] = await m.tx.select({ details: events.details }).from(events).where(eq(events.id, st.openFeedSuspectEventId));
     await m.updateEvent(st.openFeedSuspectEventId, { details: { ...(cur?.details ?? {}), samples: st.identicalDhashStreak } });
   } else if (st.openFeedSuspectEventId && !identical) {
@@ -661,12 +812,52 @@ async function applyEvidence(
   // On hold (hold_for_review): sampling stops; the evidence that led here is in the event.
   if (held) return { followUpInMs: null, nextSampleInMs: null, evidence: toEvidenceDTO(res.acc) };
 
-  const nextSampleInMs = nextSampleDelayMs(env.policy.identity, { activeSince: st.activeSince, acc: st.evidence }, m.now);
+  // ---- 'suspect' from poor light only (capped evidence): an uncertain observation for staff, lighting guidance
+  const poorLight = poorLightSuspect(st.evidence) && !st.openMismatchEventId;
+  if (poorLight) await notePoorLightSuspect(m, st, row);
+
+  // A busy face-analysis queue spaces routine samples out (never the faster cadence while evidence builds up).
+  const pressure = m.ctx.config.loadAwareSampling ? samplingPressure(m.ctx.config.capacity, currentCapacity(m.ctx).visionWaitMs) : 0;
+  const nextSampleInMs = loadAwareDelayMs(env.policy.identity, { activeSince: st.activeSince, acc: st.evidence }, m.now, pressure);
+  if (nextSampleInMs > nextSampleDelayMs(env.policy.identity, { activeSince: st.activeSince, acc: st.evidence }, m.now)) m.ctx.metrics.identitySamplesSpacedOut.inc();
+  st.cadenceMs = nextSampleInMs;
   const faster = st.evidence.state !== 'consistent' || st.evidence.unusableStreak > 0 || st.openMismatchEventId != null;
   const followUpInMs = faster ? nextSampleInMs : null;
   st.followUpRequestedAt = followUpInMs != null ? m.now : null;
   m.setIdentityState(st);
-  return { followUpInMs, nextSampleInMs, evidence: toEvidenceDTO(st.evidence) };
+  return { followUpInMs, nextSampleInMs, evidence: toEvidenceDTO(st.evidence), poorLight };
+}
+
+
+/**
+ * The evidence window is 'suspect' only because of poor-quality (dim / backlit / small) frames: record it as an
+ * uncertain observation (identity_unverifiable, details.reason 'poor_light_suspect') — never "possible different
+ * person"; confirmation waits for a fair or good frame. Closed like any identity_unverifiable by the next clear result.
+ */
+async function notePoorLightSuspect(m: SessionMutation, st: IdentityEngineState, row: IdentityCheck): Promise<void> {
+  const at = row.at.getTime();
+  const sum = windowSum(st.evidence.window);
+  const details = { poorLightSuspect: true, evidence: sum, lastSampleAt: at, guidance: [POOR_LIGHT_GUIDANCE] };
+  if (st.openUnverifiableEventId) {
+    const [cur] = await m.tx.select().from(events).where(eq(events.id, st.openUnverifiableEventId));
+    if (cur) {
+      if (!(cur.details as { poorLightSuspect?: boolean }).poorLightSuspect || (cur.details as { evidence?: number }).evidence !== sum) await m.updateEvent(cur.id, { details: { ...cur.details, ...details } });
+      return;
+    }
+  }
+  const ev = await m.addEvent({
+    type: 'identity_unverifiable',
+    source: 'server_identity',
+    open: true,
+    startedAt: at,
+    confidence: null,
+    observation:
+      'In poor light the face could not be matched dependably with the identity reference. This is not a finding that a different person is present; more light or a clearer view will settle it.',
+    details: { reason: 'poor_light_suspect', trigger: row.trigger, similarity: row.similarity, issues: row.quality?.issues ?? [], identityCheckIds: [row.id], ...details },
+    context: { precededBy: row.context?.precededBy ?? [], periodKind: row.context?.periodKind ?? null },
+  });
+  st.openUnverifiableEventId = ev.id;
+  await m.tx.update(identityChecks).set({ eventId: ev.id }).where(eq(identityChecks.id, row.id));
 }
 
 const OBSERVATIONS: [string, string][] = [
@@ -787,7 +978,7 @@ export async function decideStaleBurstsForAll(ctx: Ctx, limit = 200): Promise<nu
         if (m.session.status !== 'active' || !st.pendingBursts.some((b) => now - b.firstReceivedAt >= BURST_TIMEOUT_MS)) return 0;
         const active = await loadActiveReference(ctx, m.tx, id);
         if (!active) {
-          m.setIdentityState({ ...st, pendingBursts: [] });
+          m.dropPendingBursts();
           return 0;
         }
         const before = st.pendingBursts.length;
@@ -802,12 +993,41 @@ export async function decideStaleBurstsForAll(ctx: Ctx, limit = 200): Promise<nu
   return n;
 }
 
+/**
+ * Erase the embeddings of burst frames that will never be decided, for ANY session (paused, on hold, ended, or active
+ * without further samples): frames older than ORPHAN_FRAME_MS without an identity check, except frames of a burst an
+ * active session is still collecting. Called by the sweeper; returns the number of frames erased.
+ */
+export async function eraseOrphanFrameEmbeddingsForAll(ctx: Ctx): Promise<number> {
+  const cutoff = new Date(ctx.now() - ORPHAN_FRAME_MS);
+  const rows = await ctx.db
+    .update(identitySampleFrames)
+    .set({ embeddingEnc: null })
+    .where(
+      and(
+        isNull(identitySampleFrames.identityCheckId),
+        isNotNull(identitySampleFrames.embeddingEnc),
+        lt(identitySampleFrames.receivedAt, cutoff),
+        sql`not exists (select 1 from exam_sessions s where s.id = identity_sample_frames.session_id and s.status = 'active' and coalesce(s.identity_state->'pendingBursts', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('id', identity_sample_frames.burst_id)))`,
+      ),
+    )
+    .returning({ id: identitySampleFrames.id });
+  return rows.length;
+}
+
 export { windowSum };
 
 /* =================================================================== external second opinion (suspected swap) */
 
-/** A pending second opinion older than this is considered lost (e.g. the server restarted) and asked again. */
+/** A pending second opinion is considered lost (e.g. the server restarted) and asked again after at least this long ... */
 export const SECOND_OPINION_PENDING_MS = 15_000;
+/** ... and never before the provider call itself may have timed out (EXTERNAL_VERIFIER_TIMEOUT_MS, up to 30 s) plus a margin for loading the images and applying the answer. */
+const SECOND_OPINION_PENDING_MARGIN_MS = 10_000;
+
+/** How long a requested second opinion is waited for before it is asked again (derived from the configured timeout). */
+export function secondOpinionPendingMs(config: Pick<Ctx['config'], 'externalVerifiers'>): number {
+  return Math.max(SECOND_OPINION_PENDING_MS, (config.externalVerifiers?.timeoutMs ?? 0) + SECOND_OPINION_PENDING_MARGIN_MS);
+}
 /** After the provider said "same person" about borderline evidence, borderline confirmations are held off this long. */
 export const SECOND_OPINION_VETO_MS = 5 * 60_000;
 
@@ -822,11 +1042,22 @@ async function swapGate(m: SessionMutation, env: SampleEnv, st: IdentityEngineSt
   const now = m.now;
   if (st.secondOpinionVeto && now < st.secondOpinionVeto.until) {
     // A clear internal mismatch is never held off by an external opinion (fusion principle 3); a borderline one is.
-    const strength = internalStrength({ decision: 'mismatch', similarity: row.similarity ?? null }, fusionPolicyFor(env.thresholds));
+    // The strength is that of the accumulated evidence (a confirmed SPRT is clear), not the raw similarity.
+    const strength = internalStrength(swapOpinion(row, windowSum(st.evidence.window)), fusionPolicyFor(env.thresholds));
     return strength === 'borderline' ? 'vetoed' : 'proceed_after_veto';
   }
-  if (st.secondOpinionPending && now - st.secondOpinionPending.since < SECOND_OPINION_PENDING_MS) return 'pending';
+  if (st.secondOpinionPending && now - st.secondOpinionPending.since < secondOpinionPendingMs(env.ctx.config)) return 'pending';
   return 'request';
+}
+
+/**
+ * The internal opinion on a suspected swap for the external fusion: the accumulated evidence decides its strength —
+ * a window sum at or above `sprt.confirm` (a confirmed_mismatch) is decisive, so an external "same person" can flag
+ * it for review but never overrule it (verifiers/fusion.ts). A look-alike at similarity 0.35–0.45 is not
+ * "borderline" when the evidence over several samples is decisive.
+ */
+export function swapOpinion(row: Pick<IdentityCheck, 'similarity'>, llrSum: number): InternalOpinion {
+  return { decision: 'mismatch', similarity: row.similarity ?? null, evidence: { llr: Math.round(llrSum * 10000) / 10000, decisive: llrSum >= CALIBRATION.sprt.confirm } };
 }
 
 /**
@@ -890,7 +1121,7 @@ export async function resolveSwapSecondOpinion(ctx: Ctx, sessionId: string, chec
   const record = await secondOpinion(ctx, {
     org,
     kind: 'suspected_swap',
-    internal: { decision: 'mismatch', similarity: row.similarity ?? null },
+    internal: swapOpinion(row, windowSum(identityState(s).evidence.window)),
     thresholds: orgThresholds(org),
     consentAcceptedAt: s.consentAcceptedAt,
     sessionId,

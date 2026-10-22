@@ -22,7 +22,7 @@ function ev(id: string, version: number, extra: Partial<EventUpsert> = {}): Even
 }
 
 const sampleResponse: IdentitySampleResponse = {
-  result: { id: 'r', trigger: 'periodic', decision: 'match', similarity: 0.7, confidence: 0.9, quality: null, guidance: [], at: 1 },
+  result: { id: 'r', trigger: 'periodic', usable: true, guidance: [], at: 1 },
   followUpInMs: null,
   status: 'active',
   hold: null,
@@ -352,7 +352,7 @@ describe.each([
 
   it('keeps an identity sample the server answers with 503 (busy) without counting it as a delivery failure', async () => {
     box.close();
-    box = await Outbox.open({ namespace: nextNs(), memory, sampleBusyMinMs: 40 });
+    box = await Outbox.open({ namespace: nextNs(), memory, sampleBusyMinMs: 40, random: () => 0 });
     await box.putSample({ id: 's1', trigger: 'face_return', capturedAt: 3, jpeg: jpeg() });
     let busy: 503 | 429 | null = 503;
     const { sender, calls } = makeSender({
@@ -663,7 +663,7 @@ describe('Outbox worker', () => {
   });
 
   it('retries a busy (503) identity sample with its own back-off and keeps delivering everything else promptly', async () => {
-    const box = await Outbox.open({ namespace: nextNs(), memory: true });
+    const box = await Outbox.open({ namespace: nextNs(), memory: true, random: () => 0 });
     const sampleAt: number[] = [];
     const { sender, calls } = makeSender({
       identitySample: () => {
@@ -682,6 +682,27 @@ describe('Outbox worker', () => {
     expect(gaps.slice(0, 3)).toEqual([2, 4, 8]);
     expect(box.stats()).toMatchObject({ size: 1, busySamples: 1, oldestAt: null, failingSince: null });
     box.close();
+  });
+
+  it('waits at least the server’s Retry-After for a busy sample, spread by up to +50 % so refused candidates do not return together', async () => {
+    const at = async (random: number, retryAfterSec: number | null) => {
+      const box = await Outbox.open({ namespace: nextNs(), memory: true, random: () => random });
+      const sampleAt: number[] = [];
+      const { sender } = makeSender({
+        identitySample: () => {
+          sampleAt.push(Date.now());
+          throw new CandidateApiError(503, 'vision_busy', 'busy', undefined, retryAfterSec == null ? null : retryAfterSec * 1000);
+        },
+      });
+      box.start(sender);
+      await box.putSample({ id: 's1', trigger: 'periodic', capturedAt: 1, jpeg: jpeg() });
+      await vi.advanceTimersByTimeAsync(40_000);
+      box.close();
+      return Math.round((sampleAt[1] - sampleAt[0]) / 100) / 10;
+    };
+    expect(await at(0, 7)).toBe(7); // the server's estimate, not the 2 s default
+    expect(await at(0.999, 7)).toBe(10.5);
+    expect(await at(0.5, null)).toBe(2.5); // no Retry-After: the default 2 s, spread
   });
 
   it('re-sends a parked answer when resumeAnswers is called, without polling while parked', async () => {

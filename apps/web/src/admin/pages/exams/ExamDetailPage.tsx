@@ -11,8 +11,12 @@ import { ALL_POLICY_FIELDS, changedFromDefault, formatPolicyValue, getPath, POLI
 import { CategoryCounts, ConnectionBadge, StatusBadge } from '../../components/Badges';
 import { CopyButton, EmptyState, ErrorState, Loading, PageHeader } from '../../components/Common';
 import { ConfirmDialog } from '../../components/Modal';
+import { downloadJson, exportFileName } from '../../lib/examVersions';
 import { TimeOfDay } from '../../components/Time';
+import { WindowFields } from '../../components/WindowFields';
+import { describeWindow, parseWindowForm, type WindowFormValues } from '../../lib/scheduling';
 import { EXAM_STATUS_CLASS, EXAM_STATUS_LABEL } from './ExamsPage';
+import { ExamVersionsPanel } from './ExamVersions';
 
 export function ExamDetailPage() {
   const { id = '' } = useParams();
@@ -25,8 +29,16 @@ export function ExamDetailPage() {
     void qc.invalidateQueries({ queryKey: qk.exams });
     setConfirm(null);
   };
-  const publish = useMutation({ mutationFn: () => api.publishExam(id), onSuccess: setExam });
+  const publish = useMutation({
+    mutationFn: () => api.publishExam(id),
+    onSuccess: (e) => {
+      setExam(e);
+      void qc.invalidateQueries({ queryKey: qk.examVersions(id) });
+    },
+  });
   const archive = useMutation({ mutationFn: () => api.archiveExam(id), onSuccess: setExam });
+  // The editable copy (for a published exam: its current version), as a portable file with answer keys.
+  const exportExam = useMutation({ mutationFn: () => api.exportExam(id), onSuccess: (doc) => downloadJson(doc, exportFileName(doc.exam.title)) });
 
   if (exam.isPending) return <Loading />;
   if (exam.isError) return <ErrorState error={exam.error} onRetry={() => void exam.refetch()} />;
@@ -42,13 +54,18 @@ export function ExamDetailPage() {
             {e.title} <span className={EXAM_STATUS_CLASS[e.status]}>{EXAM_STATUS_LABEL[e.status]}</span>
           </>
         }
-        subtitle={`${formatDuration(e.durationSec * 1000)} · ${e.questions.length} question${e.questions.length === 1 ? '' : 's'} · ${points} point${points === 1 ? '' : 's'}`}
+        subtitle={`${formatDuration(e.durationSec * 1000)} · ${e.questions.length} question${e.questions.length === 1 ? '' : 's'} · ${points} point${points === 1 ? '' : 's'}${e.currentVersion ? ` · version ${e.currentVersion.number}` : ''}`}
         actions={
           isAdmin ? (
             <>
-              <Link className="btn" to={`/admin/exams/${id}/edit`}>
-                Edit
-              </Link>
+              {e.status !== 'archived' ? (
+                <Link className="btn" to={`/admin/exams/${id}/edit`}>
+                  Edit
+                </Link>
+              ) : null}
+              <button type="button" className="btn" disabled={exportExam.isPending} onClick={() => exportExam.mutate()} title="Download the questions, answer keys and rules as a file that can be imported as a new exam">
+                Export
+              </button>
               {e.status === 'draft' ? (
                 <button type="button" className="btn btn-primary" onClick={() => setConfirm('publish')}>
                   Publish…
@@ -63,6 +80,11 @@ export function ExamDetailPage() {
           ) : null
         }
       />
+      {exportExam.isError ? (
+        <div className="banner banner-danger" role="alert">
+          {errorMessage(exportExam.error)}
+        </div>
+      ) : null}
       <div className="stats-row">
         <div className="stat">
           <div className="stat-value">{e.stats.assigned}</div>
@@ -107,11 +129,12 @@ export function ExamDetailPage() {
 
       {isAdmin ? <AssignPanel exam={e} /> : null}
       <ExamSessions examId={id} />
+      <ExamVersionsPanel exam={e} isAdmin={isAdmin} />
 
       {confirm === 'publish' ? (
         <ConfirmDialog
           title="Publish this exam?"
-          message="Candidates can then be assigned and start the exam with their access link. Check the questions and proctoring rules first."
+          message="This creates version 1 of the exam (or the next version, if it was published before). Candidates can then be assigned and start it with their access link. Check the questions and proctoring rules first."
           confirmLabel="Publish"
           busy={publish.isPending}
           error={publish.isError ? errorMessage(publish.error) : null}
@@ -211,6 +234,8 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [results, setResults] = useState<AssignmentDTO[] | null>(null);
+  const [windowForm, setWindowForm] = useState<WindowFormValues>({ opens: '', closes: '' });
+  const parsedWindow = parseWindowForm(windowForm, Date.now());
   const candidates = useQuery({ queryKey: qk.candidates(''), queryFn: () => api.candidates(), retry: shouldRetry });
   const sessions = useQuery({ queryKey: qk.examSessions(exam.id), queryFn: () => api.examSessions(exam.id), retry: shouldRetry });
   const assigned = useMemo(() => new Set((sessions.data?.items ?? []).map((s) => s.candidate.id)), [sessions.data]);
@@ -221,7 +246,7 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
     );
   }, [candidates.data, search]);
   const m = useMutation({
-    mutationFn: () => api.assign(exam.id, [...selected]),
+    mutationFn: () => api.assign(exam.id, [...selected], parsedWindow.ok ? parsedWindow.window : null),
     onSuccess: (r) => {
       setResults(r.items);
       setSelected(new Set());
@@ -279,7 +304,10 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
                       </span>
                     ) : null}
                   </td>
-                  <td className="mono small break">{r.accessLink}</td>
+                  <td className="mono small break">
+                    {r.accessLink}
+                    {r.window ? <div className="muted">Window: {describeWindow(r.window, Date.now())}</div> : null}
+                  </td>
                   <td>
                     <CopyButton text={r.accessLink} />
                   </td>
@@ -289,6 +317,14 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
           </table>
         </div>
       ) : null}
+      <WindowFields
+        idPrefix="assign-window"
+        legend="Scheduling window (optional)"
+        value={windowForm}
+        onChange={setWindowForm}
+        error={parsedWindow.ok ? null : { field: parsedWindow.field, message: parsedWindow.error }}
+        disabled={exam.status !== 'published'}
+      />
       <div className="row">
         <input type="text" placeholder="Filter candidates…" value={search} onChange={(e) => setSearch(e.target.value)} className="grow" aria-label="Filter candidates" />
         <label className="inline">
@@ -300,7 +336,7 @@ function AssignPanel({ exam }: { exam: ExamDTO }) {
           />
           Select all shown
         </label>
-        <button type="button" className="btn btn-primary" disabled={selected.size === 0 || m.isPending || exam.status === 'archived'} onClick={() => m.mutate()}>
+        <button type="button" className="btn btn-primary" disabled={selected.size === 0 || m.isPending || exam.status === 'archived' || !parsedWindow.ok} onClick={() => m.mutate()}>
           {m.isPending ? 'Assigning…' : `Assign ${selected.size || ''} selected`}
         </button>
       </div>
@@ -355,6 +391,7 @@ function ExamSessions({ examId }: { examId: string }) {
                 <th>Candidate</th>
                 <th>Status</th>
                 <th>Started</th>
+                <th>Version</th>
                 <th>Flags</th>
                 <th>Unreviewed</th>
                 <th>Access link</th>
@@ -378,6 +415,7 @@ function ExamSessions({ examId }: { examId: string }) {
                   <td>
                     <TimeOfDay at={s.startedAt} />
                   </td>
+                  <td className="small">{s.examVersion ? `v${s.examVersion.number}` : <span className="muted">—</span>}</td>
                   <td>
                     <CategoryCounts counts={s.counts} compact />
                   </td>

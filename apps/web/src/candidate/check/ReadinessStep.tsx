@@ -8,7 +8,11 @@ import { useFrameAnalysis } from './useFrameAnalysis';
 /**
  * Camera setup: camera picker, live (mirrored) preview and a checklist that updates live.
  */
-export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?: string }) {
+/**
+ * `cameraOnly`: identity is verified by staff, so only a working camera is required (a face need not be detected —
+ * for example with a face covering); the checklist stays as advice.
+ */
+export function ReadinessStep({ onReady, intro, cameraOnly = false }: { onReady: () => void; intro?: string; cameraOnly?: boolean }) {
   const ctrl = useController();
   const { camera } = useSnapshot();
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
@@ -49,7 +53,7 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
       ? evaluateReadiness({ cameraState: camera.state, framesFlowing: false, faces: [], frame: null, faceRegion: null, virtualCamera: virtual })
       : items;
   const analysisUnavailable = !vs.loading && !vs.vision?.face;
-  const ready = camera.state === 'live' && (analysisUnavailable ? true : allRequiredPass(shown));
+  const ready = camera.state === 'live' && (analysisUnavailable || cameraOnly ? true : allRequiredPass(shown));
   const firstFailing = shown.find((i) => i.required && !i.ok);
   // Borderline picture: the candidate may continue (the server judges usability and guides live), with advice.
   const warn = ready && !analysisUnavailable ? warnings(shown).filter((w) => w.id !== 'real_camera') : [];
@@ -60,7 +64,10 @@ export function ReadinessStep({ onReady, intro }: { onReady: () => void; intro?:
       {intro && <p>{intro}</p>}
       <p className="muted">
         Sit where you will take the exam, in a well-lit place, with your face in the middle of the picture. The preview is mirrored like a mirror; nothing is recorded
-        at this step. Only a working camera and your face (alone in view) are required to continue — the other items are advice.
+        at this step.{' '}
+        {cameraOnly
+          ? 'Only a working camera is required to continue — the checklist is advice for the camera observations during the exam.'
+          : 'Only a working camera and your face (alone in view) are required to continue — the other items are advice.'}
       </p>
       <div className="cand-setup">
         <div className="stack">

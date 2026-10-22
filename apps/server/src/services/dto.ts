@@ -15,12 +15,19 @@ import {
   type NoteDTO,
   type PauseRequestDTO,
   type PeriodDTO,
+  type CheckPurpose,
+  type SessionScoreDTO,
   type SessionSummaryDTO,
+  type SessionWindow,
   type StaffUserDTO,
+  type StaffVerificationDTO,
+  type StaffVerificationMethod,
   type DeviceRecordDTO,
   type IdentityReferenceDTO,
+  type Severity,
 } from '@sp/shared';
 import { and, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
 import {
@@ -28,12 +35,15 @@ import {
   deviceRecords,
   events,
   evidence,
+  examVersions,
   exams,
   identityChecks,
   identityReferences,
   notes,
+  organizations,
   pauseRequests,
   sessionPeriods,
+  sessionReviews,
   staffUsers,
   examSessions,
   type Candidate,
@@ -48,6 +58,10 @@ import {
   type SessionPeriod,
   type StaffUser,
 } from '../db/schema.js';
+import { orgSettings } from './org.js';
+import { toReviewSummary } from './review.js';
+
+const reviewAssignee = alias(staffUsers, 'review_assignee');
 
 export const ms = (d: Date | null | undefined): number | null => (d ? d.getTime() : null);
 export const msReq = (d: Date): number => d.getTime();
@@ -103,6 +117,12 @@ export function toPauseRequestDTO(row: PauseRequest): PauseRequestDTO {
   };
 }
 
+/** The session's scheduling window (services/scheduling.ts), or null when it has none. */
+export function sessionWindow(s: Pick<ExamSession, 'windowStartsAt' | 'windowEndsAt'>): SessionWindow | null {
+  if (!s.windowStartsAt && !s.windowEndsAt) return null;
+  return { startsAt: ms(s.windowStartsAt), endsAt: ms(s.windowEndsAt) };
+}
+
 export function toHoldDTO(s: Pick<ExamSession, 'status' | 'holdReason' | 'holdSince' | 'holdMessage' | 'holdCanReverify'>): HoldDTO | null {
   if (s.status !== 'on_hold' || !s.holdReason) return null;
   return {
@@ -113,8 +133,18 @@ export function toHoldDTO(s: Pick<ExamSession, 'status' | 'holdReason' | 'holdSi
   };
 }
 
-export function toStaffUserDTO(u: StaffUser): StaffUserDTO {
-  return { id: u.id, email: u.email, name: u.name, role: u.role, disabled: u.disabled, createdAt: msReq(u.createdAt) };
+export function toStaffUserDTO(u: StaffUser, extra: { ssoLinked?: boolean } = {}): StaffUserDTO {
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role,
+    disabled: u.disabled,
+    createdAt: msReq(u.createdAt),
+    mfaEnabledAt: ms(u.mfaEnabledAt),
+    provisionedVia: u.provisionedVia ?? null,
+    ...(extra.ssoLinked !== undefined ? { ssoLinked: extra.ssoLinked } : {}),
+  };
 }
 
 export function toNoteDTO(n: Note, authorName: string): NoteDTO {
@@ -157,6 +187,7 @@ export function toEventDTO(
     evidence: (extra.evidence ?? []).slice().sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime()).map(toEvidenceRefDTO),
     review: {
       status: row.reviewStatus,
+      resolution: row.resolution ?? null,
       by: row.reviewedBy ?? null,
       byName: extra.reviewerName ?? null,
       at: ms(row.reviewedAt),
@@ -187,6 +218,9 @@ export function toIdentityCheckDTO(row: IdentityCheck, probe: EvidenceRow | null
     livenessPassed: livenessFromContext(c as unknown as Record<string, unknown>),
     // Only present when an external second opinion was asked (off by default): the DTO is otherwise unchanged.
     ...withSecondOpinion(secondOpinionFromContext(c as unknown as Record<string, unknown>)),
+    ...(row.decisionConfigVersion != null || row.calibrationVersion || row.modelVersion
+      ? { versions: { decisionConfig: row.decisionConfigVersion ?? null, calibration: row.calibrationVersion ?? null, model: row.modelVersion ?? null } }
+      : {}),
   };
 }
 
@@ -359,9 +393,27 @@ export interface SessionCounts {
   unreviewed: number;
   open: number;
   highSeverity: number;
+  /** Arrival of the oldest undecided flag (review service-level target). */
+  oldestUndecidedAt: number | null;
+  undecided: { integrity: number; uncertain: number; technical: number };
+  topUndecidedSeverity: Severity | null;
 }
 
-const ZERO_COUNTS: SessionCounts = { integrity: 0, uncertain: 0, technical: 0, unreviewed: 0, open: 0, highSeverity: 0 };
+const ZERO_COUNTS: SessionCounts = {
+  integrity: 0,
+  uncertain: 0,
+  technical: 0,
+  unreviewed: 0,
+  open: 0,
+  highSeverity: 0,
+  oldestUndecidedAt: null,
+  undecided: { integrity: 0, uncertain: 0, technical: 0 },
+  topUndecidedSeverity: null,
+};
+const publicCounts = (c: SessionCounts): SessionSummaryDTO['counts'] => ({ integrity: c.integrity, uncertain: c.uncertain, technical: c.technical, unreviewed: c.unreviewed, open: c.open, highSeverity: c.highSeverity });
+/** Flags: the categories reviewers decide (not session changes or policy exceptions). */
+const FLAG_SQL = sql`${events.category} in ('integrity', 'uncertain', 'technical')`;
+const SEVERITY_BY_RANK: Record<number, Severity> = { 0: 'info', 1: 'low', 2: 'medium', 3: 'high' };
 
 /** Per-session event counts (dismissed events excluded from category counts). */
 export async function loadSessionCounts(db: DbOrTx, sessionIds: string[]): Promise<Map<string, SessionCounts>> {
@@ -373,15 +425,42 @@ export async function loadSessionCounts(db: DbOrTx, sessionIds: string[]): Promi
       integrity: sql<number>`count(*) filter (where ${events.category} = 'integrity' and ${events.reviewStatus} <> 'dismissed')::int`,
       uncertain: sql<number>`count(*) filter (where ${events.category} = 'uncertain' and ${events.reviewStatus} <> 'dismissed')::int`,
       technical: sql<number>`count(*) filter (where ${events.category} = 'technical' and ${events.reviewStatus} <> 'dismissed')::int`,
-      unreviewed: sql<number>`count(*) filter (where ${events.category} <> 'neutral' and ${events.reviewStatus} = 'unreviewed')::int`,
-      open: sql<number>`count(*) filter (where ${events.category} <> 'neutral' and ${events.status} = 'open')::int`,
+      unreviewed: sql<number>`count(*) filter (where ${FLAG_SQL} and ${events.reviewStatus} = 'unreviewed')::int`,
+      open: sql<number>`count(*) filter (where ${FLAG_SQL} and ${events.status} = 'open')::int`,
       highSeverity: sql<number>`count(*) filter (where ${events.severity} = 'high' and ${events.reviewStatus} <> 'dismissed')::int`,
+      oldestUndecidedAt: sql<Date | null>`min(${events.firstReceivedAt}) filter (where ${FLAG_SQL} and ${events.reviewStatus} = 'unreviewed')`,
+      undecidedIntegrity: sql<number>`count(*) filter (where ${events.category} = 'integrity' and ${events.reviewStatus} = 'unreviewed')::int`,
+      undecidedUncertain: sql<number>`count(*) filter (where ${events.category} = 'uncertain' and ${events.reviewStatus} = 'unreviewed')::int`,
+      undecidedTechnical: sql<number>`count(*) filter (where ${events.category} = 'technical' and ${events.reviewStatus} = 'unreviewed')::int`,
+      topUndecidedSeverity: sql<number | null>`max(case ${events.severity} when 'high' then 3 when 'medium' then 2 when 'low' then 1 else 0 end) filter (where ${FLAG_SQL} and ${events.reviewStatus} = 'unreviewed')`,
     })
     .from(events)
     .where(inArray(events.sessionId, sessionIds))
     .groupBy(events.sessionId);
-  for (const r of rows) out.set(r.sessionId, { integrity: r.integrity, uncertain: r.uncertain, technical: r.technical, unreviewed: r.unreviewed, open: r.open, highSeverity: r.highSeverity });
+  for (const r of rows) {
+    out.set(r.sessionId, {
+      integrity: r.integrity,
+      uncertain: r.uncertain,
+      technical: r.technical,
+      unreviewed: r.unreviewed,
+      open: r.open,
+      highSeverity: r.highSeverity,
+      oldestUndecidedAt: r.oldestUndecidedAt ? new Date(r.oldestUndecidedAt).getTime() : null,
+      undecided: { integrity: r.undecidedIntegrity, uncertain: r.undecidedUncertain, technical: r.undecidedTechnical },
+      topUndecidedSeverity: r.topUndecidedSeverity == null ? null : SEVERITY_BY_RANK[r.topUndecidedSeverity] ?? null,
+    });
+  }
   return out;
+}
+
+export function toScoreDTO(score: ExamSession['score']): SessionScoreDTO | null {
+  if (!score) return null;
+  return {
+    points: score.points,
+    maxPoints: score.maxPoints,
+    autoGraded: score.autoGraded,
+    regrades: (score.regrades ?? []).map((r) => ({ at: r.at, byStaffId: r.by, reason: r.reason, keysFromVersion: r.keysFromVersion, previous: r.previous })),
+  };
 }
 
 export function toSessionSummaryDTO(
@@ -389,6 +468,8 @@ export function toSessionSummaryDTO(
   input: {
     session: ExamSession;
     exam: { id: string; title: string };
+    /** The exam version the attempt is pinned to (null before it starts). */
+    examVersion?: { id: string; number: number } | null;
     candidate: Pick<Candidate, 'id' | 'name' | 'email' | 'externalId'>;
     counts?: SessionCounts;
     pendingPauseRequest?: PauseRequest | null;
@@ -402,6 +483,8 @@ export function toSessionSummaryDTO(
   return {
     id: s.id,
     exam: { id: input.exam.id, title: input.exam.title },
+    examVersion: input.examVersion ?? null,
+    accommodations: (s.accommodations?.items ?? []).map((i) => i.kind),
     candidate: { id: input.candidate.id, name: input.candidate.name, email: input.candidate.email ?? null, externalId: input.candidate.externalId ?? null },
     status: s.status,
     endReason: s.endReason ?? null,
@@ -415,11 +498,13 @@ export function toSessionSummaryDTO(
     startedAt: ms(s.startedAt),
     endedAt: ms(s.endedAt),
     pauseCount: s.pauseCount,
-    counts: input.counts ?? { ...ZERO_COUNTS },
+    counts: publicCounts(input.counts ?? ZERO_COUNTS),
     pendingPauseRequest: input.pendingPauseRequest ? toPauseRequestDTO(input.pendingPauseRequest) : null,
     hold: toHoldDTO(s),
     accessLink: input.includeAccessLink ? accessLinkFor(ctx, s) : null,
     legalHold: s.legalHold,
+    window: sessionWindow(s),
+    reconnectCount: s.reconnectCount,
   };
 }
 
@@ -451,6 +536,9 @@ export function staffVisibleKey(s: ExamSession): string {
     s.holdMessage ?? null,
     s.holdCanReverify,
     s.legalHold,
+    ms(s.windowStartsAt),
+    ms(s.windowEndsAt),
+    s.reconnectCount,
   ]);
 }
 
@@ -480,10 +568,23 @@ export async function loadSessionSummaries(ctx: Pick<Ctx, 'config' | 'keyring' |
   }
   if (q.where) conds.push(q.where);
   let query = db
-    .select({ session: examSessions, exam: { id: exams.id, title: exams.title }, candidate: { id: candidates.id, name: candidates.name, email: candidates.email, externalId: candidates.externalId } })
+    .select({
+      session: examSessions,
+      exam: { id: exams.id, title: exams.title },
+      examVersion: { id: examVersions.id, number: examVersions.number },
+      candidate: { id: candidates.id, name: candidates.name, email: candidates.email, externalId: candidates.externalId },
+      // Review state and the organisation's targets in the same query (one query set for any number of sessions).
+      review: sessionReviews,
+      assigneeName: reviewAssignee.name,
+      orgSettings: organizations.settings,
+    })
     .from(examSessions)
     .innerJoin(exams, eq(exams.id, examSessions.examId))
     .innerJoin(candidates, eq(candidates.id, examSessions.candidateId))
+    .innerJoin(organizations, eq(organizations.id, examSessions.orgId))
+    .leftJoin(examVersions, eq(examVersions.id, examSessions.examVersionId))
+    .leftJoin(sessionReviews, eq(sessionReviews.sessionId, examSessions.id))
+    .leftJoin(reviewAssignee, eq(reviewAssignee.id, sessionReviews.assigneeId))
     .where(and(...conds))
     .orderBy(...(q.orderBy ?? [desc(examSessions.updatedAt)]))
     .$dynamic();
@@ -496,14 +597,33 @@ export async function loadSessionSummaries(ctx: Pick<Ctx, 'config' | 'keyring' |
     ids.length ? db.select().from(pauseRequests).where(and(inArray(pauseRequests.sessionId, ids), eq(pauseRequests.status, 'pending'))) : Promise.resolve([] as PauseRequest[]),
   ]);
   const pendingBySession = new Map(pending.map((p) => [p.sessionId, p]));
+  const sla = orgSettings(rows[0] ? { settings: rows[0].orgSettings } : null).reviewSla;
   const now = ctx.now();
-  return rows.map((r) =>
-    toSessionSummaryDTO(
+  return rows.map((r) => {
+    const dto = toSessionSummaryDTO(
       ctx,
-      { session: r.session, exam: r.exam, candidate: r.candidate, counts: counts.get(r.session.id), pendingPauseRequest: pendingBySession.get(r.session.id) ?? null, includeAccessLink: q.includeAccessLink === true },
+      { session: r.session, exam: r.exam, examVersion: r.examVersion, candidate: r.candidate, counts: counts.get(r.session.id), pendingPauseRequest: pendingBySession.get(r.session.id) ?? null, includeAccessLink: q.includeAccessLink === true },
       now,
-    ),
-  );
+    );
+    dto.review = toReviewSummary(r.session, counts.get(r.session.id), r.review ? { ...r.review, assigneeName: r.assigneeName } : null, sla, now);
+    return dto;
+  });
+}
+
+/** Identity verifications by staff (identity_verified_by_staff events), oldest first. */
+export async function loadStaffVerifications(db: DbOrTx, sessionId: string): Promise<StaffVerificationDTO[]> {
+  const rows = await db
+    .select({ at: events.startedAt, details: events.details })
+    .from(events)
+    .where(and(eq(events.sessionId, sessionId), eq(events.type, 'identity_verified_by_staff')))
+    .orderBy(events.startedAt);
+  const byIds = [...new Set(rows.map((r) => (r.details as { by?: string }).by).filter((x): x is string => !!x))];
+  const staff = byIds.length ? await db.select({ id: staffUsers.id, name: staffUsers.name }).from(staffUsers).where(inArray(staffUsers.id, byIds)) : [];
+  const names = new Map(staff.map((s) => [s.id, s.name]));
+  return rows.map((r) => {
+    const d = r.details as { by?: string; method?: StaffVerificationMethod; purpose?: CheckPurpose | null; note?: string | null };
+    return { at: r.at.getTime(), by: d.by ? { id: d.by, name: names.get(d.by) ?? 'Former staff member' } : null, method: d.method ?? 'other', purpose: d.purpose ?? null, note: d.note ?? null };
+  });
 }
 
 /** Summary of a single session regardless of org (caller must authorise). */

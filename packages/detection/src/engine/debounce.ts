@@ -117,6 +117,15 @@ export class Debouncer {
     return { kind: 'clear', endedAt };
   }
 
+  /**
+   * Move the start of a building run earlier (the condition is known to have begun at `t0`, e.g. a look down
+   * that was excused as typing until the typing stopped). No effect on an active episode.
+   */
+  backdate(t0: number): void {
+    if (this.active || this.pendingReset || this.runStart === null || !(t0 < this.runStart)) return;
+    this.runStart = t0;
+  }
+
   /** Time the pending/ongoing run has lasted (0 when idle without a run). */
   runDuration(t: number): number {
     return this.runStart === null || this.pendingReset ? 0 : t - this.runStart;

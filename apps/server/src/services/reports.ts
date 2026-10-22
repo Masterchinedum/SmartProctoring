@@ -19,7 +19,12 @@ import {
   clockUsedMs,
   EVENT_CATALOG,
   EVENT_CATEGORIES,
+  explainEvent,
+  groupIncidents,
+  isFlagCategory,
+  revertExceptions,
   SEVERITY_RANK,
+  STAFF_VERIFICATION_METHOD_LABEL,
   type SessionEndReason,
   type EventCategory,
   type EventDTO,
@@ -30,17 +35,22 @@ import {
   type PeriodKind,
   type ProctoringPolicy,
   type SessionReportDTO,
+  type StaffVerificationDTO,
   type TimelineItemDTO,
 } from '@sp/shared';
 import { and, asc, eq } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import { candidates, examSessions, exams, identityReferences, organizations, type IdentityReference } from '../db/schema.js';
 import { notFound } from '../lib/errors.js';
-import { loadNoteDTOs, loadSessionSummaries, sessionClock } from './dto.js';
+import { accommodationLimitations, toSessionAccommodationsDTO } from './accommodations.js';
+import { loadNoteDTOs, loadSessionSummaries, loadStaffVerifications, sessionClock, toScoreDTO } from './dto.js';
+import { loadVersion } from './exam-versions.js';
 import { capFirst, formatDuration, lcFirst, listJoin, makeClock, pct, plural, type Clock } from './reports-format.js';
 import { loadSessionTimeline } from './reports-timeline.js';
 import { capturesWithin, GAP_NOT_REPORTING, GAP_NOT_RETURNED, loadLateCaptures, unobservedOutages, withUnobservedOutages, type Span } from './reporting-gaps.js';
+import { mergePolicy } from './org.js';
 import { effectivePolicy } from './session-state.js';
+import { loadSessionReviewRows, toSessionReviewDTO } from './review.js';
 
 export const NOTABLE_EVENTS_LIMIT = 200;
 const MAX_BEHAVIOUR_LINES = 8;
@@ -54,7 +64,9 @@ const END_REASON_TEXT: Record<SessionEndReason, string> = {
   time_expired: 'submitted automatically when the exam time ran out',
   staff_submitted: 'submitted by an administrator',
   staff_terminated: 'ended by an administrator',
+  candidate_withdrew: 'ended when the candidate withdrew their consent (no score is recorded; the face images and templates were deleted)',
   abandoned: 'closed automatically after a long period without activity (no score is recorded)',
+  resume_limit: 'ended under the exam’s resume rules after too many or too long interruptions (the saved answers were submitted)',
 };
 
 const HOLD_REASON_TEXT: Record<HoldReason, string> = {
@@ -64,6 +76,9 @@ const HOLD_REASON_TEXT: Record<HoldReason, string> = {
   pause_limit: 'the pause was longer than the exam rules allow',
   staff: 'a staff member placed it on hold',
   id_photo_unverifiable: 'the live image could not be compared dependably with the approved ID photo (not evidence of a different person)',
+  staff_verification: 'the candidate waited for a staff member to verify their identity',
+  resume_limit: 'the exam was interrupted more often or for longer than the exam rules allow',
+  recovery: 'an administrator reopened the ended exam and the candidate had to pass a fresh identity check',
 };
 
 const DETECTOR_LABELS: Record<keyof ProctoringPolicy['detection']['enabled'], string> = {
@@ -169,15 +184,20 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
   const { session, exam, candidate, org } = row;
   const now = ctx.now();
 
-  const [[summary], timeline, refs, notes, lateCaptures] = await Promise.all([
+  const [[summary], timeline, refs, notes, lateCaptures, pinned] = await Promise.all([
     loadSessionSummaries(ctx, db, { orgId, sessionIds: [sessionId] }),
     loadSessionTimeline(db, sessionId),
     db.select().from(identityReferences).where(eq(identityReferences.sessionId, sessionId)).orderBy(asc(identityReferences.version)),
     loadNoteDTOs(db, { sessionId }),
     loadLateCaptures(db, sessionId),
+    session.examVersionId ? loadVersion(db, session.examVersionId) : Promise.resolve(null),
   ]);
   if (!summary) throw notFound('Session not found', 'session_not_found');
   const policy = effectivePolicy(session, exam, org);
+  // Accommodations: what they changed (frozen at start), and the exam's own rules (limitations attribute each change).
+  const accommodations = toSessionAccommodationsDTO(session, session.policy ? null : mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, exam.policy as Record<string, unknown>));
+  const examRules = revertExceptions(policy, accommodations?.exceptions ?? []);
+  const staffVerifications = policy.identity.verification === 'staff' ? await loadStaffVerifications(db, sessionId) : null;
   const { events: evs, checks } = timeline;
 
   const endAt = session.endedAt ? session.endedAt.getTime() : now;
@@ -211,7 +231,8 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     inconclusive: checks.filter((c) => c.decision === 'inconclusive').length,
     unableToVerify: checks.filter((c) => c.decision === 'unable_to_verify').length,
     idPhoto,
-    summary: identitySummary({ clock, session, refs, checks, events: evs, idPhoto, items: timeline.items, endAt }),
+    summary: identitySummary({ clock, session, refs, checks, events: evs, idPhoto, items: timeline.items, endAt, staffVerifications }),
+    ...decisionVersions(checks),
   };
 
   /* -------------------------------------------------------------- event counts */
@@ -230,7 +251,7 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     if (e.review.status === 'dismissed') cur.dismissed++;
     byTypeMap.set(e.type, cur);
   }
-  const catOrder: Record<EventCategory, number> = { integrity: 0, uncertain: 1, technical: 2, neutral: 3 };
+  const catOrder: Record<EventCategory, number> = { integrity: 0, uncertain: 1, technical: 2, neutral: 3, exception: 4 };
   const byType = [...byTypeMap.values()].sort((a, b) => catOrder[a.category] - catOrder[b.category] || b.count - a.count || (a.type < b.type ? -1 : 1));
 
   const notableAll = evs
@@ -238,14 +259,30 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.startedAt - b.startedAt || (a.id < b.id ? -1 : 1));
   const notableEvents = notableAll.slice(0, NOTABLE_EVENTS_LIMIT);
 
+  /* -------------------------------------------------------------- review: incidents, explanations, outcome */
+  const incidents = groupIncidents(evs, { now: endAt });
+  const explainCtx = {
+    policy: examRules,
+    events: evs,
+    accommodations: (session.accommodations?.items ?? []).map((i) => ({ kind: i.kind, params: i.params ?? {} })),
+    now: endAt,
+  };
+  const explanations = Object.fromEntries(notableEvents.map((e) => [e.id, explainEvent(e, explainCtx)]));
+  const reviewRows = await loadSessionReviewRows(db, [sessionId]);
+  const review = await toSessionReviewDTO(db, summary.review!, reviewRows.get(sessionId));
+
   /* -------------------------------------------------------------- narrative */
   const observations = buildObservations({ clock, session, exam, periods, events: evs, checks, identity, totals, uncoveredMs: totalsRaw.uncoveredMs, endAt, notableTruncated: notableAll.length - notableEvents.length });
-  const limitations = buildLimitations({ clock, periods, events: evs, policy, endAt, evidencePurgedAt: session.evidencePurgedAt?.getTime() ?? null, lateCaptures });
+  const limitations = [
+    ...buildLimitations({ clock, periods, events: evs, policy: examRules, endAt, evidencePurgedAt: session.evidencePurgedAt?.getTime() ?? null, lateCaptures }),
+    ...accommodationLimitations(session.accommodations),
+  ];
 
   return {
     generatedAt: now,
     session: summary,
-    exam: { id: exam.id, title: exam.title, durationSec: exam.durationSec },
+    // The attempt's own version: its title is what the candidate saw, even if the exam was renamed since.
+    exam: { id: exam.id, title: pinned?.title ?? exam.title, durationSec: exam.durationSec, version: pinned?.number ?? null },
     candidate: { id: candidate.id, name: candidate.name, email: candidate.email ?? null, externalId: candidate.externalId ?? null },
     totals,
     periods,
@@ -255,8 +292,12 @@ export async function buildSessionReport(ctx: ReportCtx, sessionId: string, orgI
     notableEvents,
     observations,
     reviewerNotes: notes,
-    score: session.score ? { points: session.score.points, maxPoints: session.score.maxPoints, autoGraded: session.score.autoGraded } : null,
+    score: toScoreDTO(session.score),
+    accommodations,
     limitations,
+    review,
+    incidents,
+    explanations,
   };
 }
 
@@ -271,6 +312,8 @@ interface IdentitySummaryInput {
   idPhoto: { decision: string; similarity: number | null } | null;
   items: TimelineItemDTO[];
   endAt: number;
+  /** Set when identity is verified by staff (policy.identity.verification 'staff'): the verifications on record. */
+  staffVerifications?: StaffVerificationDTO[] | null;
 }
 
 /** How far before an identity observation the report looks for what preceded it. */
@@ -381,6 +424,13 @@ export function identitySummary(input: IdentitySummaryInput): string {
   const dismissedMismatch = mismatchEvents.length - openMismatch.length;
   const unverifiable = events.filter((e) => e.type === 'identity_unverifiable' && e.review.status !== 'dismissed');
 
+  if (input.staffVerifications) {
+    const v = input.staffVerifications;
+    if (!v.length) return 'Identity is verified by staff for this candidate instead of the automated face check; no verification has been recorded yet.';
+    const list = v.map((x) => `${clock.time(x.at)} (${STAFF_VERIFICATION_METHOD_LABEL[x.method].toLowerCase()}${x.by ? `, ${x.by.name}` : ''}${x.purpose && x.purpose !== 'initial' ? `, after a ${x.purpose === 'resume' ? 'pause' : x.purpose === 'reconnect' ? 'reconnection' : 'hold'}` : ''})`);
+    return `Identity was verified by staff instead of the automated face check: ${listJoin(list)}. No automated identity comparisons were made.`;
+  }
+
   if (refs.length === 0 && checks.length === 0) {
     return input.session.status === 'invited'
       ? 'No identity reference has been established yet because the readiness check has not been completed.'
@@ -489,6 +539,15 @@ export function buildObservations(input: ObservationInput): string[] {
     const minutes = typeof e.details.minutes === 'number' ? e.details.minutes : null;
     const note = str(e.details.note);
     out.push(`An administrator extended the exam time${minutes != null ? ` by ${plural(minutes, 'minute')}` : ''} at ${clock.time(e.startedAt)}${note ? ` (“${note}”)` : ''}.`);
+  }
+  // Scheduling and recovery (services/scheduling.ts, services/recovery.ts). The staff reason stays on the timeline.
+  for (const e of evs.filter((x) => x.type === 'session_rescheduled')) out.push(`The window for starting the exam was changed at ${clock.time(e.startedAt)}.`);
+  for (const e of evs.filter((x) => x.type === 'session_reopened')) {
+    const prev = str(e.details.previousEndReason) as SessionEndReason | null;
+    const minutes = typeof e.details.addMinutes === 'number' && e.details.addMinutes > 0 ? e.details.addMinutes : null;
+    out.push(
+      `An administrator reopened the exam for recovery at ${clock.time(e.startedAt)}${prev && END_REASON_TEXT[prev] ? ` (it had been ${END_REASON_TEXT[prev]})` : ''}${minutes ? ` and added ${plural(minutes, 'minute')}` : ''}.`,
+    );
   }
 
   const active = periods.filter((p) => p.kind === 'active');
@@ -612,8 +671,11 @@ function holdResolution(p: PeriodDTO, evs: EventDTO[], checks: IdentityCheckDTO[
   const end = p.endedAt ?? endAt;
   const within = (e: EventDTO) => e.startedAt >= p.startedAt && e.startedAt <= end + 1000;
   const released = evs.find((e) => e.type === 'hold_released' && within(e));
-  const terminated = evs.find((e) => e.type === 'session_terminated' && within(e));
-  const submitted = evs.find((e) => (e.type === 'session_submitted' || e.type === 'session_expired') && within(e));
+  // A recovery hold (services/recovery.ts) starts where the exam had ended: only an end after the reopening counts.
+  const reopened = evs.find((e) => e.type === 'session_reopened' && within(e));
+  const after = (e: EventDTO) => within(e) && (!reopened || e.startedAt > reopened.startedAt);
+  const terminated = evs.find((e) => e.type === 'session_terminated' && after(e));
+  const submitted = evs.find((e) => (e.type === 'session_submitted' || e.type === 'session_expired') && after(e));
   const parts: string[] = [];
   if (released) {
     const reEnroll = released.details.reEnroll === true;
@@ -624,6 +686,11 @@ function holdResolution(p: PeriodDTO, evs: EventDTO[], checks: IdentityCheckDTO[
     const reverify = checks.find((c) => (c.trigger === 'reverify' || c.trigger === 'check_in') && c.at >= released.startedAt && c.at <= end + 60_000);
     if (reverify) parts.push(reverify.decision === 'match' ? `the candidate passed the identity check at ${clock.time(reverify.at)}` : `the identity check at ${clock.time(reverify.at)} returned “${reverify.decision.replace(/_/g, ' ')}”`);
   }
+  if (reopened) {
+    parts.push(`an administrator had reopened the exam for recovery at ${clock.time(reopened.startedAt)}`);
+    const check = checks.find((c) => c.trigger === 'reverify' && c.at >= reopened.startedAt && c.at <= end + 60_000);
+    if (check) parts.push(check.decision === 'match' ? `the candidate passed the identity check at ${clock.time(check.at)}` : `the identity check at ${clock.time(check.at)} returned “${check.decision.replace(/_/g, ' ')}”`);
+  }
   if (terminated) parts.push(`the exam was ended by an administrator at ${clock.time(terminated.startedAt)}`);
   else if (submitted) parts.push(`the exam was submitted at ${clock.time(submitted.startedAt)}`);
   if (parts.length === 0) return open ? 'it is still on hold' : 'the hold ended';
@@ -632,11 +699,11 @@ function holdResolution(p: PeriodDTO, evs: EventDTO[], checks: IdentityCheckDTO[
 
 function behaviourLines(evs: EventDTO[], clock: Clock, endAt: number): string[] {
   const relevant = evs.filter(
-    (e) => e.review.status !== 'dismissed' && e.category !== 'neutral' && !['identity_mismatch', 'identity_unverifiable', 'reporting_interrupted'].includes(e.type),
+    (e) => e.review.status !== 'dismissed' && isFlagCategory(e.category) && !['identity_mismatch', 'identity_unverifiable', 'reporting_interrupted'].includes(e.type),
   );
   const groups = new Map<EventType, EventDTO[]>();
   for (const e of relevant) groups.set(e.type, [...(groups.get(e.type) ?? []), e]);
-  const catRank: Record<EventCategory, number> = { integrity: 0, uncertain: 1, technical: 2, neutral: 3 };
+  const catRank: Record<EventCategory, number> = { integrity: 0, uncertain: 1, technical: 2, neutral: 3, exception: 4 };
   const ranked = [...groups.entries()]
     .map(([type, list]) => ({ type, list, severity: Math.max(...list.map((e) => SEVERITY_RANK[e.severity])), total: list.reduce((s, e) => s + eventDuration(e, endAt), 0), category: list[0].category }))
     .sort((a, b) => catRank[a.category] - catRank[b.category] || b.severity - a.severity || b.total - a.total || b.list.length - a.list.length);
@@ -739,4 +806,18 @@ export function buildLimitations(input: LimitationInput): string[] {
   if (!policy.evidence.screenshots) out.push('Screenshots were turned off by the exam rules, so events have no images.');
   if (input.evidencePurgedAt != null) out.push(`Screenshots and identity images were deleted on ${clock.dateTime(input.evidencePurgedAt)} under the retention policy; the event records remain.`);
   return out;
+}
+
+/** The distinct versions behind a session's identity decisions (in order of first use), when any were recorded. */
+function decisionVersions(checks: IdentityCheckDTO[]): Pick<SessionReportDTO['identity'], 'versions'> {
+  const ordered = [...checks].sort((a, b) => a.at - b.at).flatMap((c) => (c.versions ? [c.versions] : []));
+  if (!ordered.length) return {};
+  const distinct = <T>(xs: (T | null)[]) => [...new Set(xs.filter((x): x is T => x != null))];
+  return {
+    versions: {
+      decisionConfigs: distinct(ordered.map((v) => v.decisionConfig)),
+      calibrations: distinct(ordered.map((v) => v.calibration)),
+      models: distinct(ordered.map((v) => v.model)),
+    },
+  };
 }

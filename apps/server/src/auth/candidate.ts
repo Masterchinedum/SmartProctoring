@@ -9,6 +9,7 @@ import type { Ctx } from '../context.js';
 import { candidates, examSessions, exams, organizations, type Candidate, type Exam, type ExamSession, type Organization } from '../db/schema.js';
 import { sha256Hex } from '../lib/crypto.js';
 import { badRequest, HttpError } from '../lib/errors.js';
+import { bindRequestLog } from '../lib/request-log.js';
 import { effectivePolicy } from '../services/session-state.js';
 
 export interface CandidatePrincipal {
@@ -88,8 +89,9 @@ export async function resolveCandidateSession(ctx: Ctx, req: FastifyRequest, tok
 }
 
 /** preHandler for /api/candidate/* routes. */
-export async function candidateAuth(req: FastifyRequest, _reply: FastifyReply): Promise<void> {
+export async function candidateAuth(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   req.candidateAuth = await resolveCandidateSession(req.server.ctx, req);
+  bindRequestLog(req, reply, { sessionId: req.candidateAuth.session.id, orgId: req.candidateAuth.session.orgId });
 }
 
 export function getCandidate(req: FastifyRequest): CandidatePrincipal {

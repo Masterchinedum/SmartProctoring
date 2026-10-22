@@ -24,21 +24,37 @@ export const HOLD_REASONS = [
   'pause_limit', // pause exceeded configured maximum duration
   'staff', // held manually by staff
   'id_photo_unverifiable', // comparison with the approved ID photo was inconclusive / not possible (policy: required) — NOT a mismatch
+  'staff_verification', // identity is verified by staff (policy.identity.verification 'staff'): waiting for a staff member
+  'resume_limit', // the exam was interrupted more often / longer than the exam's resume policy allows (policy.resume, onLimit 'hold')
+  'recovery', // staff reopened an ended exam for recovery: waiting for the candidate's fresh identity check (./scheduling.ts)
 ] as const;
 export type HoldReason = (typeof HOLD_REASONS)[number];
 
-export const END_REASONS = ['candidate_submitted', 'time_expired', 'staff_submitted', 'staff_terminated'] as const;
+/**
+ * 'candidate_withdrew': the candidate withdrew their consent in the exam app (POST /api/candidate/consent/withdraw):
+ * the exam ended as terminated (no score), its face images and templates were deleted, and a consent-withdrawal
+ * entry was added to the privacy register (./privacy-ops.ts) so staff arrange an alternative assessment.
+ */
+export const END_REASONS = ['candidate_submitted', 'time_expired', 'staff_submitted', 'staff_terminated', 'candidate_withdrew'] as const;
 export type EndReason = (typeof END_REASONS)[number];
 
 /**
- * End reasons set by server housekeeping rather than by a person or the exam clock (additive to END_REASONS):
+ * End reasons set by the server rather than by a person or the exam clock (additive to END_REASONS):
  *  - 'abandoned': an invited / ready / paused session with no activity for the organisation's `abandonAfterDays`
  *    was closed automatically (status 'terminated', no score implied). Answers are kept; retention then applies.
- * Staff-facing DTOs use SessionEndReason; the candidate contract (CandidateSessionState) keeps EndReason.
+ *  - 'resume_limit': the exam was interrupted (reopened in a new browser window, or disconnected) more often or for
+ *    longer than the exam's resume policy allows and the policy says to end it (policy.resume.onLimit 'end'): status
+ *    'submitted' — the saved answers are graded, as when the time runs out. Staff can reopen it for recovery.
+ * Staff-facing DTOs use SessionEndReason. The candidate contract (CandidateSessionState) uses CandidateEndReason:
+ * 'resume_limit' is explained to the candidate, housekeeping ('abandoned') is not.
  */
-export const SYSTEM_END_REASONS = ['abandoned'] as const;
+export const SYSTEM_END_REASONS = ['abandoned', 'resume_limit'] as const;
 export const SESSION_END_REASONS = [...END_REASONS, ...SYSTEM_END_REASONS] as const;
 export type SessionEndReason = (typeof SESSION_END_REASONS)[number];
+
+/** End reasons the candidate app is told (CandidateSessionState.session.endReason, the 'submitted' command). */
+export const CANDIDATE_END_REASONS = [...END_REASONS, 'resume_limit'] as const;
+export type CandidateEndReason = (typeof CANDIDATE_END_REASONS)[number];
 
 /**
  * Periods partition the session timeline. Observed periods had monitoring running; unobserved periods

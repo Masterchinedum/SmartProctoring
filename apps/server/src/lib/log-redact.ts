@@ -13,7 +13,8 @@ export const REDACTED = '[redacted]';
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** `/take/<token>` (ACCESS_LINK_PATH), up to the next `/`, `?` or `#`. */
 const TAKE_PATH_RE = new RegExp(`(${escapeRe(ACCESS_LINK_PATH)})[^/?#]+`, 'gi');
-const TOKEN_PARAM_RE = /([?&](?:token|access_token)=)[^&#]*/gi;
+// Also the OIDC authorization code and state on the single sign-on callback (single-use credentials).
+const TOKEN_PARAM_RE = /([?&](?:token|access_token|code|state)=)[^&#]*/gi;
 
 /** Remove access tokens from a request URL (path segment after /take/ and token query parameters). */
 export function redactUrl(url: string): string {

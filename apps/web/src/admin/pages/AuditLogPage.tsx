@@ -12,10 +12,20 @@ const LIMIT = 50;
 
 /** Common audit actions offered as suggestions (the filter accepts any text). */
 const COMMON_ACTIONS = [
+  'accommodation.granted',
+  'accommodation.revoked',
   'auth.login',
   'auth.login_failed',
+  'auth.mfa_disabled',
+  'auth.mfa_enabled',
+  'auth.mfa_recovery_codes_regenerated',
+  'auth.mfa_replaced',
   'auth.password_changed',
+  'auth.recovery_code_used',
+  'auth.sso_failed',
+  'audit_log.exported',
   'candidate.consent',
+  'candidate.consent_withdrawn',
   'candidate.created',
   'candidate.deleted',
   'candidate.id_photo_approved',
@@ -23,28 +33,56 @@ const COMMON_ACTIONS = [
   'candidate.id_photo_removed',
   'candidate.updated',
   'event.review',
+  'evidence.purged',
+  'evidence.storage_moved',
   'evidence.view',
   'exam.archived',
   'exam.assigned',
   'exam.created',
+  'exam.exported',
+  'exam.imported',
   'exam.published',
+  'exam.regraded',
   'exam.updated',
   'metrics.offline_evaluation_uploaded',
   'note.created',
+  'privacy_request.completed',
+  'privacy_request.created',
+  'privacy_request.erased',
+  'privacy_request.exported',
+  'privacy_request.rejected',
+  'privacy_request.reopened',
+  'privacy_request.updated',
   'reference.re_enrolled',
   'retention.purge',
+  'scim.token_created',
+  'scim.token_revoked',
+  'scim.token_rotated',
+  'review.assigned',
+  'review.escalated',
+  'review.reopened',
+  'review.resolved',
   'session.events_exported',
   'session.hold',
+  'session.identity_verified_by_staff',
   'session.legal_hold_off',
   'session.legal_hold_on',
   'session.link_regenerated',
+  'session.regraded',
   'session.release',
   'session.release_reenroll_authorized',
   'session.staff_submit',
   'session.terminate',
   'session.time_extended',
   'settings.updated',
+  'sso.provider_created',
+  'sso.provider_deleted',
+  'sso.provider_tested',
+  'sso.provider_updated',
   'user.created',
+  'user.mfa_reset',
+  'user.sso_linked',
+  'user.sso_unlinked',
   'user.updated',
 ];
 
@@ -78,7 +116,11 @@ export function AuditLogPage() {
             Clear
           </button>
         ) : null}
+        <a className="btn btn-sm" href={api.auditLogCsvUrl({ action: debounced || undefined })} download data-testid="audit-export">
+          Download CSV{debounced ? ' (filtered)' : ''}
+        </a>
       </div>
+      <p className="small muted">The CSV holds who did what, when and why (with the full details of each entry), newest first, up to 50,000 entries; the export itself is recorded here.</p>
       {q.isPending ? (
         <Loading />
       ) : q.isError ? (
@@ -103,7 +145,7 @@ export function AuditLogPage() {
                   <tr key={e.id}>
                     <td className="nowrap small">{formatDateTime(e.at)}</td>
                     <td>
-                      {e.actorName ?? (e.actorType === 'system' ? 'System' : e.actorType === 'candidate' ? 'Candidate' : e.actorType === 'api_key' ? 'API key' : '—')}
+                      {e.actorName ?? (e.actorType === 'system' ? 'System' : e.actorType === 'candidate' ? 'Candidate' : e.actorType === 'api_key' ? 'API key' : e.actorType === 'scim' ? 'SCIM provisioning' : '—')}
                       <div className="muted small">{e.actorType}</div>
                     </td>
                     <td>

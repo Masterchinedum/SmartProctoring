@@ -12,24 +12,34 @@
  *     removes most of that between-person spread. A probe similarity s is mapped into the global genuine frame by a
  *     z-score transfer from the personal genuine model:
  *         s' = g.mean + (s - p.mean) * (g.sd / p.sd)
- *     where p.mean = baseline.mean - drift(bucket) and p.sd = sqrt(baseline.sd^2 + driftSd(bucket)^2), both
- *     bounded (band around the global mean, limited sharpening, shrinkage towards the global model with few
- *     enrolment frames), and then scored with the calibrated `sampleLLR(s', bucket)`. So a drop from 0.78 to 0.40 is
- *     strong evidence of a different person even though 0.40 is above the global mismatch threshold, while a
- *     person whose own frames are only ~0.6 similar gets a more lenient model. Poor-quality frames are barely
- *     normalised (their drift is large and uncertain).
+ *     where p.mean = baseline.mean - drift(bucket) and p.sd = sqrt(baseline.sd^2 + driftSd(bucket)^2) with the drift
+ *     measured by the vision module (`GENUINE_DRIFT`: 'continuous' = same session, 'relaxed' = another day / room /
+ *     camera), both bounded (band around the global mean, limited sharpening, shrinkage towards the global model with
+ *     few enrolment frames), and then scored with the calibrated `sampleLLR(s', bucket)`. So a drop from the person's
+ *     own level is evidence of a different person even above the global mismatch threshold, while a person whose own
+ *     frames are only ~0.6 similar gets a more lenient model. Poor frames are barely normalised. The 'relaxed' drift
+ *     applies at resume / reconnect / reverify checks and to every mid-exam sample after such a check (the room,
+ *     light and camera may differ from enrolment): 'continuous' normalisation across days caused 9–27 false alarms
+ *     per 1,000 h in the vision module's simulation (docs/accuracy/identity-v2.md §9).
+ *     Calibration v2.1: the models are conditional on the reference's quality (`baseline.bucket`); a candidate
+ *     enrolled in poor light and still in poor light is judged mid-exam by the same-session model on the raw score
+ *     (vision `continuousApplies` / `continuousLLR`), and a fair / good probe against a poor-light reference is
+ *     normalised 'relaxed' (the light changed) — see `comparisonLLR`.
  *  2. Accumulation (SPRT / windowed CUSUM): clamped LLRs of samples (a burst counts as ONE sample: its frames are
  *     taken within ~0.6 s and are not independent) are summed over a window of the last `sprt.maxSamples` samples
- *     no older than 10 minutes. sum >= sprt.suspect => 'suspect' (ask for a faster sample), sum >= sprt.confirm =>
+ *     no older than 10 minutes, with positive evidence from 'poor' samples capped at `sprt.maxPoorEvidence`
+ *     (`windowEvidence`, below `sprt.confirm`): poor light alone can make a session 'suspect' — faster sampling,
+ *     lighting guidance, an uncertain observation for staff — but confirmation waits for a fair or good frame. sum >= sprt.suspect => 'suspect' (ask for a faster sample), sum >= sprt.confirm =>
  *     'confirmed_mismatch', sum <= sprt.clear => evidence cleared ('consistent', window emptied) so lighting dips
  *     do not accumulate forever. Unusable frames contribute nothing (never "different person"). A discontinuity
  *     (track break, face return, camera reconnect, exam start...) drops earlier genuine evidence from the window —
  *     it vouched for whoever was in view BEFORE the break — and weights positive evidence of that sample by 1.25
- *     (a swap can only happen at a break). With the LLR clamp (6) and weight, a single sample can never reach
- *     `sprt.confirm` (9): at least two samples are always needed.
+ *     (a swap can only happen at a break). With the LLR clamp (5) and weight, a single sample can never reach
+ *     `sprt.confirm` (7): at least two fair / good samples are always needed.
  */
-import type { FaceQuality, IdentityCheckTrigger, IdentityDecision, IdentityEvidenceDTO, IdentityPolicy, IdentitySampleRequestDTO, IdentityThresholds, SessionStatus } from '@sp/shared';
-import { BUCKET_MODELS, CALIBRATION, posteriorSwap, qualityBucket, sampleLLR, type QualityBucket } from '../vision/index.js';
+import { burstSizeFor, SAMPLING_PROFILES, type FaceQuality, type IdentityCheckTrigger, type IdentityDecision, type IdentityEvidenceDTO, type IdentityPolicy, type IdentitySampleRequestDTO, type IdentityThresholds, type SessionStatus } from '@sp/shared';
+import { GENUINE_DRIFT, windowEvidence } from '../vision/calibration.js';
+import { bucketModel, CALIBRATION, continuousApplies, decideIdentity, posteriorSwap, qualityBucket, referenceClass, sampleLLR, type EvidenceContext, type QualityBucket } from '../vision/index.js';
 
 /* =================================================================== per-session normalisation */
 
@@ -41,6 +51,11 @@ export interface SessionBaseline {
   n: number;
   /** CALIBRATION.version when measured. */
   calibrationVersion?: string;
+  /**
+   * Quality bucket of the enrolment gallery (median over its frames): the calibrated per-comparison model may be
+   * conditioned on the reference's quality (a dim-enrolled reference makes impostors score higher).
+   */
+  bucket?: QualityBucket;
 }
 
 export type ComparisonContext =
@@ -50,14 +65,8 @@ export type ComparisonContext =
   | 'relaxed';
 
 export const SESSION_NORMALISATION = Object.freeze({
-  /** Expected drop of a genuine probe below the enrolment baseline, per bucket (mean, sd). */
-  drift: Object.freeze({
-    good: Object.freeze({ mean: 0.06, sd: 0.05 }),
-    fair: Object.freeze({ mean: 0.12, sd: 0.07 }),
-    poor: Object.freeze({ mean: 0.2, sd: 0.1 }),
-  }) as Readonly<Record<QualityBucket, { mean: number; sd: number }>>,
-  /** Extra drift allowed in the 'relaxed' context. */
-  relaxedExtra: Object.freeze({ mean: 0.05, sd: 0.03 }),
+  /** Measured drop of a genuine probe below the enrolment baseline, per context and bucket (vision/calibration.ts). */
+  drift: GENUINE_DRIFT,
   /** The personal genuine mean stays within [global - below, global + above]. */
   meanBand: Object.freeze({ below: 0.08, above: 0.04 }),
   /** The personal sd is at least global sd / maxSharpen (per bucket; poor frames and the 'relaxed' context are not sharpened). */
@@ -75,17 +84,39 @@ export function usableBaseline(b: SessionBaseline | null | undefined): b is Sess
   return !!b && Number.isFinite(b.mean) && Number.isFinite(b.sd) && b.n >= SESSION_NORMALISATION.minBaselineFrames;
 }
 
+/**
+ * Baseline of an active period that began with a passed resume / reconnect / reverify check: how that check's usable
+ * frames score against the reference (the candidate's level under the period's own light, room and camera — possibly
+ * another day), with the reference's bucket as in the enrolment baseline. Mid-exam samples of the period are then
+ * normalised 'continuous' against it (same period, minutes apart) instead of 'relaxed' against the enrolment.
+ * null (=> 'relaxed') with fewer than `minBaselineFrames` usable frames, or when the level is below the band the
+ * continuous normalisation is calibrated for (personal mean below the cross-session genuine mean of the frames' bucket
+ * minus `meanBand.below`): there the band would pull the personal model above what the check measured, and genuine
+ * samples of the period would look like a drop (webcam harness: that is where the false alarms came from).
+ */
+export function periodBaseline(frames: readonly { usable: boolean; similarity: number | null; bucket?: QualityBucket | null }[], referenceBucket: QualityBucket | null | undefined): SessionBaseline | null {
+  const usable = frames.filter((f) => f.usable && f.similarity != null && Number.isFinite(f.similarity));
+  if (usable.length < SESSION_NORMALISATION.minBaselineFrames) return null;
+  const sims = usable.map((f) => f.similarity!);
+  const mean = sims.reduce((a, v) => a + v, 0) / sims.length;
+  const sd = Math.sqrt(sims.reduce((a, v) => a + (v - mean) * (v - mean), 0) / Math.max(1, sims.length - 1));
+  const order: Record<QualityBucket, number> = { good: 0, fair: 1, poor: 2 };
+  const buckets = usable.map((f) => f.bucket ?? 'good').sort((a, b) => order[a] - order[b]);
+  const b = buckets[buckets.length >> 1];
+  const N = SESSION_NORMALISATION;
+  if (mean - N.drift.continuous[b].mean < bucketModel(b, referenceBucket).genuine.mean - N.meanBand.below) return null;
+  return { mean: round4(mean), sd: round4(sd), n: sims.length, calibrationVersion: CALIBRATION.version, ...(referenceBucket ? { bucket: referenceBucket } : {}) };
+}
+
 /** The personal genuine model (similarity of this person's probes to their reference) for a bucket. */
 export function personalGenuine(bucket: QualityBucket, baseline: SessionBaseline, context: ComparisonContext = 'continuous'): { mean: number; sd: number } {
-  const g = BUCKET_MODELS[bucket].genuine;
+  const g = bucketModel(bucket, baseline.bucket).genuine;
   const N = SESSION_NORMALISATION;
-  const d = N.drift[bucket];
-  const extraMean = context === 'relaxed' ? N.relaxedExtra.mean : 0;
-  const extraSd = context === 'relaxed' ? N.relaxedExtra.sd : 0;
-  const rawMean = clamp(baseline.mean - d.mean - extraMean, g.mean - N.meanBand.below - extraMean, g.mean + N.meanBand.above);
+  const d = N.drift[context][bucket];
+  const rawMean = clamp(baseline.mean - d.mean, g.mean - N.meanBand.below, g.mean + N.meanBand.above);
   // Across rooms / cameras / days ('relaxed') the personal model may shift its mean but is never sharper than the global one.
   const sharpen = context === 'relaxed' ? 1 : N.maxSharpen[bucket];
-  const rawSd = Math.max(Math.sqrt(baseline.sd * baseline.sd + d.sd * d.sd + extraSd * extraSd), g.sd / sharpen);
+  const rawSd = Math.max(Math.sqrt(baseline.sd * baseline.sd + d.sd * d.sd), g.sd / sharpen);
   const w = baseline.n / (baseline.n + N.shrinkFrames);
   return { mean: w * rawMean + (1 - w) * g.mean, sd: w * rawSd + (1 - w) * g.sd };
 }
@@ -93,19 +124,36 @@ export function personalGenuine(bucket: QualityBucket, baseline: SessionBaseline
 /** Similarity mapped into the global genuine frame of the bucket (identity when there is no usable baseline). */
 export function normaliseSimilarity(similarity: number, bucket: QualityBucket, baseline: SessionBaseline | null | undefined, context: ComparisonContext = 'continuous'): number {
   if (!usableBaseline(baseline)) return similarity;
-  const g = BUCKET_MODELS[bucket].genuine;
+  const g = bucketModel(bucket, baseline.bucket).genuine;
   const p = personalGenuine(bucket, baseline, context);
   return g.mean + (similarity - p.mean) * (g.sd / p.sd);
 }
 
 /**
  * Evidence of one comparison: clamped, monotone LLR (> 0 = evidence of a different person; vision/calibration.ts
- * `sampleLLR`) of the similarity after per-session normalisation.
+ * `sampleLLR`), conditional on the quality of the reference (`baseline.bucket`, calibration v2.1):
+ *  - same session ('continuous'), poor-light reference, poor probe (`continuousApplies`): the same-session model on
+ *    the RAW similarity — the candidate's own level decides (a look-alike in the candidate's dim room scores far
+ *    below it although above the global match threshold);
+ *  - otherwise the reference-conditional cross-session model on the per-session normalised similarity. When the
+ *    light improved since a poor-light enrolment (fair / good probe), the enrolment baseline no longer describes the
+ *    capture: 'relaxed' normalisation even mid-exam (continuous normalisation there caused false confirmations).
+ * `frames`: usable frames averaged into the probe (a burst template: pass its frame count; default 1).
  */
-export function comparisonLLR(similarity: number, bucket: QualityBucket, baseline: SessionBaseline | null | undefined, context: ComparisonContext = 'continuous'): { llr: number; normalised: number } {
+export function comparisonLLR(
+  similarity: number,
+  bucket: QualityBucket,
+  baseline: SessionBaseline | null | undefined,
+  context: ComparisonContext = 'continuous',
+  frames = 1,
+): { llr: number; normalised: number } {
   if (!Number.isFinite(similarity)) return { llr: 0, normalised: similarity };
-  const normalised = normaliseSimilarity(similarity, bucket, baseline, context);
-  return { llr: round4(sampleLLR(normalised, bucket)), normalised: round4(normalised) };
+  const reference = baseline?.bucket ?? null;
+  const ev: EvidenceContext = { reference, baseline: usableBaseline(baseline) ? baseline : null, context, frames };
+  if (continuousApplies(bucket, ev)) return { llr: round4(sampleLLR(similarity, bucket, ev)), normalised: round4(similarity) };
+  const normContext: ComparisonContext = context === 'continuous' && referenceClass(reference) === 'poor' && bucket !== 'poor' ? 'relaxed' : context;
+  const normalised = normaliseSimilarity(similarity, bucket, baseline, normContext);
+  return { llr: round4(sampleLLR(normalised, bucket, { reference })), normalised: round4(normalised) };
 }
 
 export interface FrameEvidence {
@@ -192,8 +240,23 @@ export const DISCONTINUITY_TRIGGERS: ReadonlySet<IdentityCheckTrigger> = new Set
 /** Triggers processed with interactive priority (someone may have just swapped in). */
 export const URGENT_TRIGGERS: ReadonlySet<IdentityCheckTrigger> = new Set<IdentityCheckTrigger>([...DISCONTINUITY_TRIGGERS, 'server_request', 'follow_up']);
 
+/** Accumulated evidence of a window: the LLR sum with poor-only positive evidence capped (`windowEvidence`). */
 export function windowSum(window: readonly EvidenceEntry[]): number {
-  return round4(window.reduce((a, e) => a + e.llr, 0));
+  return round4(windowEvidence(window));
+}
+
+/** Candidate guidance while suspicion rests on poor-light frames only. */
+export const POOR_LIGHT_GUIDANCE = 'Add light in front of you (a lamp or a window facing you) so the camera can see your face clearly.';
+
+/**
+ * The window is 'suspect' only because of poor-quality samples: without their (capped) positive evidence it would not
+ * be. Confirmation then waits for a fair / good frame; staff see an uncertain observation, the candidate lighting
+ * guidance.
+ */
+export function poorLightSuspect(acc: Pick<EvidenceAccumulator, 'state' | 'window'>): boolean {
+  if (acc.state !== 'suspect') return false;
+  const poorPositive = acc.window.some((e) => e.bucket === 'poor' && e.llr > 0);
+  return poorPositive && windowSum(acc.window.filter((e) => !(e.bucket === 'poor' && e.llr > 0))) < CALIBRATION.sprt.suspect;
 }
 
 export function toEvidenceDTO(acc: Readonly<EvidenceAccumulator>, prior: number = CALIBRATION.prior): IdentityEvidenceDTO {
@@ -220,12 +283,21 @@ export interface AccumulateResult {
   posterior: number;
 }
 
-/** Add one sample (a burst aggregate or a single frame) to the session's evidence. Pure. */
+/**
+ * Add one sample (a burst aggregate or a single frame) to the session's evidence. Pure. A sample may arrive out of
+ * order (a queued upload delivered late — identity-samples.ts makes samples far older than their receipt, or from
+ * before the current period, record-only): it takes its place in time, and a discontinuity trigger drops earlier
+ * genuine evidence only when the sample is newer than everything in the window (a late track_break must not erase the
+ * evidence of the samples taken after it).
+ */
 export function accumulate(prev: Readonly<EvidenceAccumulator>, obs: SampleObservation): AccumulateResult {
   const sprt = CALIBRATION.sprt;
   const acc: EvidenceAccumulator = { ...EMPTY_ACCUMULATOR, ...prev, window: [...(prev.window ?? [])] };
-  acc.lastSampleAt = obs.at;
-  acc.window = acc.window.filter((e) => obs.at - e.at <= EVIDENCE.maxAgeMs);
+  const newest = acc.window.reduce((mx, e) => Math.max(mx, e.at), -Infinity);
+  const inOrder = obs.at > newest;
+  const latest = Math.max(obs.at, prev.lastSampleAt ?? -Infinity, newest);
+  acc.lastSampleAt = latest;
+  acc.window = acc.window.filter((e) => latest - e.at <= EVIDENCE.maxAgeMs);
   const prevState = acc.state;
   const done = (transition: EvidenceTransition, contribution: number): AccumulateResult => {
     const sum = windowSum(acc.window);
@@ -237,12 +309,13 @@ export function accumulate(prev: Readonly<EvidenceAccumulator>, obs: SampleObser
     return done('none', 0);
   }
   acc.unusableStreak = 0;
-  acc.lastUsableAt = obs.at;
+  acc.lastUsableAt = Math.max(obs.at, prev.lastUsableAt ?? -Infinity);
 
-  const discontinuity = DISCONTINUITY_TRIGGERS.has(obs.trigger);
+  const discontinuity = DISCONTINUITY_TRIGGERS.has(obs.trigger) && inOrder;
   if (discontinuity) acc.window = acc.window.filter((e) => e.llr > 0);
   const contribution = round4(obs.evidence.llr > 0 && discontinuity ? obs.evidence.llr * EVIDENCE.discontinuityWeight : obs.evidence.llr);
   acc.window.push({ id: obs.id, at: obs.at, llr: contribution, similarity: obs.evidence.similarity, bucket: obs.evidence.bucket, trigger: obs.trigger });
+  if (!inOrder) acc.window.sort((a, b) => a.at - b.at);
   while (acc.window.length > sprt.maxSamples) acc.window.shift();
   const sum = windowSum(acc.window);
 
@@ -286,11 +359,11 @@ export function accumulate(prev: Readonly<EvidenceAccumulator>, obs: SampleObser
  * The per-sample decision label shown in identity-check lists (org thresholds, as before): the calibrated evidence
  * decides escalation, the label only describes the single comparison. Unusable images are never a mismatch.
  */
-export function sampleLabel(similarity: number | null, quality: FaceQuality | null, thresholds: Pick<IdentityThresholds, 'match' | 'mismatch'>): IdentityDecision {
-  if (!quality || !quality.usable || similarity == null || !Number.isFinite(similarity)) return 'unable_to_verify';
-  if (similarity >= thresholds.match) return 'match';
-  if (similarity < Math.min(thresholds.mismatch, thresholds.match)) return 'mismatch';
-  return 'inconclusive';
+export function sampleLabel(similarity: number | null, quality: FaceQuality | null, thresholds: IdentityThresholds, llr?: number | null): IdentityDecision {
+  // vision's quality-aware rule: a poor frame is never labelled "mismatch", a fair / good one only with strong
+  // calibrated evidence (MISMATCH_MIN_LLR). With the sample's evidence (`llr`, from frameEvidence / aggregateBurst),
+  // "match" also needs that evidence to favour the candidate (a look-alike in a dim room: "inconclusive").
+  return decideIdentity(similarity, quality, thresholds, 'reference', llr == null || !Number.isFinite(llr) ? undefined : { llr }).decision;
 }
 
 /* =================================================================== check assessment (resume / reconnect / reverify) */
@@ -322,12 +395,18 @@ export interface CheckAssessment {
   clearMatch: number;
   clearMismatch: number;
   posterior: number;
+  /** 'uncertain' because the evidence of a different person came only from poor-quality frames (add light). */
+  poorLight: boolean;
 }
 
 /** Running identity assessment of a check's frames against the protected reference. */
 export function assessCheck(frames: readonly FrameEvidence[], opts: { atLimit?: boolean } = {}): CheckAssessment {
   const usable = frames.filter((f) => f.usable);
-  const llr = round4(usable.reduce((a, f) => a + f.llr, 0) * CHECK_EVIDENCE.frameWeight);
+  // Positive evidence from poor frames is capped as in the SPRT window: a dim-room check ends 'uncertain' (lighting
+  // guidance), never 'likely_mismatch', unless fair / good frames add their own evidence.
+  const weighted = usable.map((f) => ({ llr: f.llr * CHECK_EVIDENCE.frameWeight, bucket: f.bucket }));
+  const llr = round4(windowEvidence(weighted));
+  const poorLimited = weighted.some((f) => f.bucket === 'poor' && f.llr > 0) && windowEvidence(weighted.filter((f) => !(f.bucket === 'poor' && f.llr > 0))) < CHECK_EVIDENCE.mismatchLLR;
   const clearMatch = usable.filter((f) => f.llr <= -CHECK_EVIDENCE.clearFrameLLR).length;
   const clearMismatch = usable.filter((f) => f.llr >= CHECK_EVIDENCE.clearFrameLLR).length;
   const min = opts.atLimit ? CHECK_EVIDENCE.minFramesAtLimit : CHECK_EVIDENCE.minFrames;
@@ -337,7 +416,7 @@ export function assessCheck(frames: readonly FrameEvidence[], opts: { atLimit?: 
   else if (llr <= CHECK_EVIDENCE.matchLLR) status = 'likely_match';
   else if (llr >= CHECK_EVIDENCE.mismatchLLR) status = 'likely_mismatch';
   else status = 'uncertain';
-  return { status, llr, usable: usable.length, clearMatch, clearMismatch, posterior: round4(posteriorSwap(llr)) };
+  return { status, llr, usable: usable.length, clearMatch, clearMismatch, posterior: round4(posteriorSwap(llr)), poorLight: status === 'uncertain' && poorLimited };
 }
 
 /* =================================================================== cadence */
@@ -359,10 +438,15 @@ export interface CadenceInput {
   acc: Pick<EvidenceAccumulator, 'state' | 'unusableStreak'>;
 }
 
+type CadencePolicy = Pick<IdentityPolicy, 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>;
+
+function inStartupWindow(policy: CadencePolicy, activeSince: number | null, now: number): boolean {
+  return activeSince != null && now - activeSince < policy.startupWindowSec * 1000;
+}
+
 /** Server-driven delay until the next routine sample (ms). */
-export function nextSampleDelayMs(policy: Pick<IdentityPolicy, 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>, st: CadenceInput, now: number): number {
-  const inStartup = st.activeSince != null && now - st.activeSince < policy.startupWindowSec * 1000;
-  let ms = (inStartup ? policy.startupIntervalSec : policy.periodicCheckIntervalSec) * 1000;
+export function nextSampleDelayMs(policy: CadencePolicy, st: CadenceInput, now: number): number {
+  let ms = (inStartupWindow(policy, st.activeSince, now) ? policy.startupIntervalSec : policy.periodicCheckIntervalSec) * 1000;
   if (st.acc.state === 'suspect') ms = Math.min(ms, CADENCE.suspectMs);
   else if (st.acc.state === 'monitoring' || st.acc.state === 'confirmed_mismatch') ms = Math.min(ms, CADENCE.monitoringMs);
   if (st.acc.unusableStreak > 0) ms = Math.min(ms, CADENCE.unusableMs);
@@ -370,20 +454,72 @@ export function nextSampleDelayMs(policy: Pick<IdentityPolicy, 'periodicCheckInt
 }
 
 /**
+ * The routine delay while this server's face-analysis queue is under `pressure` (0..1, services/capacity.ts
+ * samplingPressure): spaced out in proportion, at most to the measured Balanced sampling intensity (12 s in the
+ * start-up window, 30 s after; PERFORMANCE.md §7.7, accuracy/identity-v2.md §6.4), so the queue drains instead of
+ * refusing frames. Only the routine interval of a 'consistent' session stretches. The faster cadence while evidence
+ * builds up (suspect / monitoring / unusable samples) is kept, and the samples the client takes on its own (exam start
+ * and resume, track break, appearance change, face return, ...) are not scheduled here at all. Exams already sampling
+ * at or below the Balanced intensity are not stretched.
+ */
+export function loadAwareDelayMs(policy: CadencePolicy, st: CadenceInput, now: number, pressure: number): number {
+  const base = nextSampleDelayMs(policy, st, now);
+  if (!(pressure > 0) || st.acc.state !== 'consistent' || st.acc.unusableStreak > 0) return base;
+  const balanced = SAMPLING_PROFILES.balanced;
+  const ceilingMs = (inStartupWindow(policy, st.activeSince, now) ? balanced.startupIntervalSec : balanced.periodicCheckIntervalSec) * 1000;
+  if (ceilingMs <= base) return base;
+  return Math.round(base + (ceilingMs - base) * Math.min(1, pressure));
+}
+
+/**
+ * Server-side watchdog for an active, connected session whose identity samples stopped arriving (a client that
+ * stopped sampling, e.g. because no frame qualified while the face was hidden):
+ *  - no sample for `requestAfterIntervals` expected intervals => the heartbeat asks for one (server_request, which the
+ *    client honours even without a qualifying frame);
+ *  - still none after `observeAfterIntervals` intervals (at least `minObserveMs`) => an uncertain observation for staff
+ *    (identity_unverifiable, details.reason 'no_samples'), closed by the next sample.
+ */
+export const SAMPLE_WATCHDOG = Object.freeze({ requestAfterIntervals: 3, observeAfterIntervals: 6, minObserveMs: 60_000 });
+
+export type WatchdogState = { activeSince?: number | null; evidence?: Partial<EvidenceAccumulator> | null; lastSampleReceivedAt?: number | null; cadenceMs?: number | null };
+
+/** 'request' / 'unanswered' when samples are overdue (see SAMPLE_WATCHDOG); 'ok' otherwise. Pure. */
+export function sampleWatchdog(
+  policy: Pick<IdentityPolicy, 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'>,
+  state: WatchdogState,
+  now: number,
+): 'ok' | 'request' | 'unanswered' {
+  // Silence since the latest sample (server receipt time, else its capture time) or the start of the period.
+  const last = Math.max(state.lastSampleReceivedAt ?? -Infinity, state.evidence?.lastSampleAt ?? -Infinity, state.activeSince ?? -Infinity);
+  if (!Number.isFinite(last)) return 'ok';
+  // At least the interval the client was last told: a cadence spaced out under load is not "overdue" (loadAwareDelayMs).
+  const interval = Math.max(nextSampleDelayMs(policy, { activeSince: state.activeSince ?? null, acc: { state: state.evidence?.state ?? 'consistent', unusableStreak: state.evidence?.unusableStreak ?? 0 } }, now), state.cadenceMs ?? 0);
+  const quiet = now - last;
+  if (quiet > Math.max(SAMPLE_WATCHDOG.observeAfterIntervals * interval, SAMPLE_WATCHDOG.minObserveMs)) return 'unanswered';
+  if (quiet > SAMPLE_WATCHDOG.requestAfterIntervals * interval) return 'request';
+  return 'ok';
+}
+
+/**
  * The identity sample the server wants right now (HeartbeatResponse / CandidateSessionState.identitySample):
  * {trigger:'exam_start', inMs:0} after a (re)start until a sample arrives; {trigger:'server_request', inMs:0} while
- * the evidence is 'suspect' and the requested faster sample is late. Pure (computed from the session row), so the
- * single-statement heartbeat can answer it too.
+ * the evidence is 'suspect' and the requested faster sample is late, or when the watchdog finds samples overdue
+ * (`sampleWatchdog`, measured against the policy's own intervals). Every request is a triggered sample: its burst size
+ * is `burstSizeFor(trigger)` = policy.burstSize (routine samples use routineBurstSize; the server never requests one).
+ * Pure (computed from the session row), so the single-statement heartbeat can answer it too.
  */
 export function identitySampleRequest(
   status: SessionStatus,
-  state: { sampleRequest?: { trigger: IdentityCheckTrigger; since: number } | null; evidence?: Partial<EvidenceAccumulator> | null } | null | undefined,
-  burstSize: number,
+  state: ({ sampleRequest?: { trigger: IdentityCheckTrigger; since: number } | null } & WatchdogState) | null | undefined,
+  policy: Pick<IdentityPolicy, 'burstSize' | 'routineBurstSize' | 'periodicCheckIntervalSec' | 'startupIntervalSec' | 'startupWindowSec'> & Partial<Pick<IdentityPolicy, 'verification'>>,
   now: number,
 ): IdentitySampleRequestDTO | null {
-  if (status !== 'active' || !state) return null;
-  if (state.sampleRequest) return { trigger: state.sampleRequest.trigger, inMs: 0, burstSize };
+  // Identity verified by staff: no face reference, so no samples are ever requested.
+  if (status !== 'active' || !state || policy.verification === 'staff') return null;
+  const request = (trigger: IdentityCheckTrigger): IdentitySampleRequestDTO => ({ trigger, inMs: 0, burstSize: burstSizeFor(trigger, policy) });
+  if (state.sampleRequest) return request(state.sampleRequest.trigger);
   const acc = state.evidence;
-  if (acc?.state === 'suspect' && acc.lastSampleAt != null && now - acc.lastSampleAt >= CADENCE.lateAfterMs) return { trigger: 'server_request', inMs: 0, burstSize };
+  if (acc?.state === 'suspect' && acc.lastSampleAt != null && now - acc.lastSampleAt >= CADENCE.lateAfterMs) return request('server_request');
+  if (sampleWatchdog(policy, state, now) !== 'ok') return request('server_request');
   return null;
 }

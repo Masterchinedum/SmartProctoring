@@ -21,7 +21,7 @@ async function switchAway(page: Page, hidden: boolean): Promise<void> {
   }, hidden);
 }
 
-test('tab hidden and fullscreen exit: one event per episode', async ({ staff }) => {
+test('tab hidden and fullscreen exit: one event per episode', { tag: '@cross-browser' }, async ({ staff }) => {
   skipUnlessFixtures('a');
   const s = await staff.createSession({ policy: { browser: { requireFullscreen: true, flagTabHidden: true, flagWindowBlur: true, windowBlurMinSec: 2 } } });
   const browser = await launchCamera('a');

@@ -19,7 +19,7 @@ const res = (accepted: boolean, progress?: Partial<CheckProgressDTO>, extra: Par
   accepted,
   quality,
   guidance: accepted ? [] : ['Your face is too dark.'],
-  ...(progress ? { progress: { frontalAccepted: 0, frontalNeeded: 0, identity: null, steps: [], canComplete: false, ...progress } } : {}),
+  ...(progress ? { progress: { frontalAccepted: 0, frontalNeeded: 0, steps: [], canComplete: false, ...progress } } : {}),
   ...extra,
 });
 
@@ -28,12 +28,12 @@ describe('AdaptiveCheck — v2 (server progress)', () => {
     const a = new AdaptiveCheck({ frontalFramesRequired: 3, maxFrontalFrames: 10, liveness });
     expect(a.phase(false, 0)).toBe('frontal');
     a.frontalSentOne();
-    a.frontalResult(res(true, { frontalAccepted: 1, frontalNeeded: 2, identity: 'pending' }), { yaw: 4, pitch: -20 });
+    a.frontalResult(res(true, { frontalAccepted: 1, frontalNeeded: 2 }), { yaw: 4, pitch: -20 });
     a.frontalSentOne();
-    a.frontalResult(res(true, { frontalAccepted: 2, frontalNeeded: 1, identity: 'pending' }), { yaw: 6, pitch: -22 });
+    a.frontalResult(res(true, { frontalAccepted: 2, frontalNeeded: 1 }), { yaw: 6, pitch: -22 });
     expect(a.phase(false, 0)).toBe('frontal');
     a.frontalSentOne();
-    a.frontalResult(res(true, { frontalAccepted: 3, frontalNeeded: 2, identity: 'uncertain' }), { yaw: 5, pitch: -21 });
+    a.frontalResult(res(true, { frontalAccepted: 3, frontalNeeded: 2 }), { yaw: 5, pitch: -21 });
     // The initial frames are sent: the steps come next, the extra frontal frames after them.
     expect(a.phase(false, 0)).toBe('liveness');
     expect(a.frontalCentre()).toEqual({ yaw: 5, pitch: -21 });
@@ -42,10 +42,10 @@ describe('AdaptiveCheck — v2 (server progress)', () => {
     expect(a.isStepSatisfied(1)).toBe(true);
     expect(a.phase(true, 0)).toBe('frontal');
     a.frontalSentOne();
-    a.frontalResult(res(true, { frontalAccepted: 4, frontalNeeded: 1, identity: 'uncertain' }));
+    a.frontalResult(res(true, { frontalAccepted: 4, frontalNeeded: 1 }));
     expect(a.phase(true, 0)).toBe('frontal');
     a.frontalSentOne();
-    a.frontalResult(res(true, { frontalAccepted: 5, frontalNeeded: 0, identity: 'likely_match', canComplete: true }));
+    a.frontalResult(res(true, { frontalAccepted: 5, frontalNeeded: 0, canComplete: true }));
     expect(a.phase(true, 1)).not.toBe('complete'); // a frame still in flight
     expect(a.phase(true, 0)).toBe('complete');
   });
@@ -54,7 +54,7 @@ describe('AdaptiveCheck — v2 (server progress)', () => {
     const a = new AdaptiveCheck({ frontalFramesRequired: 3, maxFrontalFrames: 10, liveness });
     for (let i = 0; i < 3; i++) {
       a.frontalSentOne();
-      a.frontalResult(res(true, { frontalAccepted: i + 1, frontalNeeded: 0, identity: 'likely_mismatch', canComplete: i === 2 }));
+      a.frontalResult(res(true, { frontalAccepted: i + 1, frontalNeeded: 0, canComplete: i === 2 }));
     }
     expect(a.phase(false, 0)).toBe('complete');
   });

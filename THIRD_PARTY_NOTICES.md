@@ -62,12 +62,15 @@ Full text: https://www.apache.org/licenses/LICENSE-2.0 — the models and librar
 | nodemailer | MIT-0 | optional (email alerts over SMTP) |
 | zod | MIT | |
 | pino | MIT | |
+| @prometheus-io/client (formerly prom-client) | Apache-2.0 | `/metrics` exposition (served only when `METRICS_TOKEN` is set) |
+| openid-client, oauth4webapi, jose (Filip Skokan) | MIT | staff single sign-on with OpenID Connect |
+| @node-saml/node-saml | MIT | staff single sign-on with SAML 2.0; with its dependencies xml-crypto (MIT, XML signature verification), @xmldom/xmldom (MIT), @xmldom/is-dom-node (MIT), xpath (MIT), xml2js (MIT) with sax (ISC), xmlbuilder (MIT), xml-encryption (MIT) with escape-html (MIT), debug (MIT) |
 | react, react-dom, react-router-dom | MIT | |
 | @tanstack/react-query | MIT | |
 | idb | ISC | |
 
 Build/test-only tools (not shipped): TypeScript (Apache-2.0), Vite (MIT), Vitest (MIT), tsup (MIT),
-tsx (MIT), drizzle-kit (MIT), Playwright (Apache-2.0).
+tsx (MIT), drizzle-kit (MIT), Playwright (Apache-2.0); in the single sign-on tests jose (MIT, signing the fake identity provider's ID tokens) and xml-crypto (MIT, signing test SAML assertions).
 
 ## Datasets
 No face datasets are included in this repository. Accuracy baselines in `docs/accuracy/` were

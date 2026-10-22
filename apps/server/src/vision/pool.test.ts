@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { VisionInputError } from './image';
-import { BACKGROUND_MAX_WAIT_MS, resolveWorkerScript, VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
+import { BACKGROUND_MAX_WAIT_MS, MAX_RETRY_AFTER_SEC, resolveWorkerScript, retryAfterSecFor, VisionBusyError, VisionCancelledError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
 
 const FAKE_WORKER = `
 import { parentPort, workerData } from 'node:worker_threads';
@@ -49,6 +49,36 @@ describe('VisionWorkerPool', () => {
     expect(a.embedding).toBeInstanceOf(Float32Array);
   });
 
+  it('reports each analysis\' queue wait and worker time (analyzeTimed; the dedicated vision worker forwards them)', async () => {
+    const pool = await start(1);
+    const [first, second] = await Promise.all([pool.analyzeTimed(img('sleep:80'), {}), pool.analyzeTimed(img('sleep:10'), {})]);
+    expect(first.analysis.dhash).toBe('sleep:80');
+    expect(first.runMs).toBeGreaterThanOrEqual(70);
+    expect(first.waitMs).toBeLessThan(40);
+    expect(second.waitMs).toBeGreaterThanOrEqual(60); // queued behind the first on the only worker
+    expect(Buffer.isBuffer(second.analysis.faceCropJpeg)).toBe(true);
+  });
+
+  it('drops a queued analysis whose caller gave up (AbortSignal); one already on a worker finishes', async () => {
+    const pool = await start(1);
+    const running = new AbortController();
+    const queued = new AbortController();
+    const first = pool.analyzeTimed(img('sleep:80'), {}, running.signal);
+    const dropped = pool.analyzeTimed(img('never'), {}, queued.signal);
+    const third = pool.analyzeTimed(img('third'), {});
+    await new Promise((r) => setTimeout(r, 20));
+    expect(pool.queued).toBe(2);
+    queued.abort();
+    running.abort(); // too late: already on the worker
+    await expect(dropped).rejects.toBeInstanceOf(VisionCancelledError);
+    expect(pool.queued).toBe(1);
+    expect((await first).analysis.dhash).toBe('sleep:80');
+    expect((await third).analysis.dhash).toBe('third');
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(pool.analyzeTimed(img('x'), {}, aborted.signal)).rejects.toBeInstanceOf(VisionCancelledError);
+  });
+
   it('maps worker errors back to their classes (VisionInputError -> HTTP 400)', async () => {
     const pool = await start(1);
     await expect(pool.analyze(img('bad'), {})).rejects.toBeInstanceOf(VisionInputError);
@@ -84,6 +114,62 @@ describe('VisionWorkerPool', () => {
     // The background queue has its own budget.
     const bg = await Promise.allSettled([pool.analyze(img('sleep:30'), {}), ...Array.from({ length: 3 }, () => pool.analyze(img('x'), { priority: 'background' }))]);
     expect(bg.filter((s) => s.status === 'rejected')).toHaveLength(1);
+  });
+
+  it('reports its load and asks refused clients to come back when the work ahead should be done (Retry-After)', async () => {
+    const pool = await start(2, 4);
+    expect(pool.load).toMatchObject({ workers: 2, inFlight: 0, queued: { interactive: 0, background: 0 }, estimatedWaitMs: { interactive: 0, background: 0 }, maxQueue: 4 });
+    await pool.analyze(img('sleep:600'), {}); // the first measured analysis replaces the initial guess
+    expect(pool.load.serviceMs).toBeGreaterThanOrEqual(590);
+    expect(pool.load.serviceMs).toBeLessThan(700);
+
+    const work = [...Array.from({ length: 6 }, () => pool.analyze(img('sleep:600'), {})), ...Array.from({ length: 4 }, () => pool.analyze(img('x'), { priority: 'background' }))];
+    await new Promise((r) => setTimeout(r, 50));
+    const load = pool.load;
+    expect(load.inFlight).toBe(2);
+    expect(load.queued).toEqual({ interactive: 4, background: 4 });
+    expect(load.oldestWaitMs.interactive).toBeGreaterThanOrEqual(40);
+    // 4 interactive analyses ahead (+ about one for the work in flight) of ≈ 600 ms on 2 workers ≈ 1.5 s;
+    // background work also waits behind the interactive queue: 9 × 600 / 2 ≈ 2.7 s.
+    expect(load.estimatedWaitMs.interactive).toBeGreaterThan(1400);
+    expect(load.estimatedWaitMs.interactive).toBeLessThan(1800);
+    expect(load.estimatedWaitMs.background).toBeGreaterThan(2600);
+    expect(load.estimatedWaitMs.background).toBeLessThan(3200);
+
+    const refused = await Promise.allSettled([pool.analyze(img('x'), {}), pool.analyze(img('x'), { priority: 'background' })]);
+    const reasons = refused.map((r) => (r.status === 'rejected' ? r.reason : null));
+    expect(reasons[0]).toBeInstanceOf(VisionBusyError);
+    expect(reasons[0].retryAfterSec).toBe(2);
+    expect(reasons[1].retryAfterSec).toBe(3);
+    await Promise.all(work);
+    expect(pool.load.estimatedWaitMs).toEqual({ interactive: 0, background: 0 });
+  });
+
+  it('tells its observer about every analysis (queue wait, worker time, outcome) and every refusal', async () => {
+    const ended: { priority: string; waitMs: number; runMs: number; ok: boolean }[] = [];
+    const refused: string[] = [];
+    const pool = await VisionWorkerPool.start({
+      size: 1,
+      maxQueue: 1,
+      script,
+      workerData: { engine: { modelsDir: 'ok', threads: 1 }, nice: 0 },
+      observer: { analysisEnded: (i) => ended.push(i), analysisRefused: (p) => refused.push(p) },
+    });
+    pools.push(pool);
+    const settled = await Promise.allSettled([pool.analyze(img('sleep:80'), {}), pool.analyze(img('sleep:10'), {}), pool.analyze(img('x'), {}), pool.analyze(img('bad'), { priority: 'background' })]);
+    expect(settled.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled', 'rejected', 'rejected']);
+    expect(refused).toEqual(['interactive']);
+    expect(ended).toHaveLength(3);
+    expect(ended[0]).toMatchObject({ priority: 'interactive', ok: true });
+    expect(ended[0].runMs).toBeGreaterThanOrEqual(70);
+    expect(ended[1].waitMs).toBeGreaterThanOrEqual(70); // queued behind the first
+    expect(ended[2]).toMatchObject({ priority: 'background', ok: false });
+  });
+
+  it('keeps Retry-After within 1 s and MAX_RETRY_AFTER_SEC', () => {
+    expect(retryAfterSecFor(0)).toBe(1);
+    expect(retryAfterSecFor(1001)).toBe(2);
+    expect(retryAfterSecFor(10 * 60_000)).toBe(MAX_RETRY_AFTER_SEC);
   });
 
   it('fails only the analysis of a crashed worker and replaces the worker', async () => {

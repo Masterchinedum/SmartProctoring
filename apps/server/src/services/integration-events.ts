@@ -6,12 +6,14 @@
  *
  *   event row touched by the mutation            -> webhook notification / email alert
  *   ------------------------------------------------------------------------------------------------
- *   non-neutral event, first seen               -> event.created   (webhook minSeverity filter)
- *   non-neutral span event, closed               -> event.closed    (dedupe per end time)
+ *   flag (integrity / uncertain / technical), first seen -> event.created (webhook minSeverity filter)
+ *   flag span event, closed                      -> event.closed    (dedupe per end time)
  *   identity_mismatch, first seen                -> identity.mismatch
  *   session_held / hold_released, first seen     -> session.held / session.released
  *   pause_requested, first seen                  -> session.pause_requested
  *   session_submitted / session_terminated       -> session.submitted / session.terminated
+ *   review_completed                             -> session.reviewed (outcome only)
+ *   session_rescheduled / session_reopened       -> session.rescheduled (window) / session.reopened (previous end reason)
  *   session_held | pause_requested | high-severity non-neutral event -> email alert (org toggles)
  *
  * The inserts run in a SAVEPOINT: if anything here fails, the integration rows are rolled back and logged, but
@@ -22,7 +24,7 @@
  * EVENT_CATALOG title/observation, never the client-supplied `observation`; other user-controlled text (the
  * candidate's pause reason) has links removed (lib/text-safety.ts). Event `details` are never forwarded.
  */
-import { EVENT_CATALOG, type EventSource, type EventType, type HoldReason, type SessionStatus } from '@sp/shared';
+import { EVENT_CATALOG, isFlagCategory, type EventSource, type EventType, type HoldReason, type SessionStatus, type WebhookSessionData } from '@sp/shared';
 import { and, eq, inArray } from 'drizzle-orm';
 import { events, webhooks, type EventRow } from '../db/schema.js';
 import { stripUrls } from '../lib/text-safety.js';
@@ -37,6 +39,10 @@ const SESSION_NOTIFICATIONS: Partial<Record<EventRow['type'], WebhookNotificatio
   pause_requested: 'session.pause_requested',
   session_submitted: 'session.submitted',
   session_terminated: 'session.terminated',
+  score_regraded: 'session.regraded',
+  review_completed: 'session.reviewed',
+  session_rescheduled: 'session.rescheduled',
+  session_reopened: 'session.reopened',
 };
 
 function str(v: unknown): string | null {
@@ -44,6 +50,9 @@ function str(v: unknown): string | null {
 }
 
 const CLIENT_SOURCES: readonly EventSource[] = ['client_browser', 'client_vision'];
+
+/** Structured reasons a session.terminated webhook carries (staff free text never leaves the staff app). */
+const AUTOMATIC_TERMINATION_REASONS = new Set(['abandoned_after_inactivity', 'consent_withdrawn']);
 
 /**
  * Title and observation of an event as they may appear in a webhook or an alert email: the catalog wording for
@@ -76,7 +85,8 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
         .select({ id: webhooks.id, events: webhooks.events, minSeverity: webhooks.minSeverity })
         .from(webhooks)
         .where(and(eq(webhooks.orgId, orgId), eq(webhooks.active, true)));
-      const settings = orgSettings(await m.org());
+      const org = await m.org();
+      const settings = orgSettings(org);
       const emailOn = !!ctx.mailer && settings.alertRecipients.length > 0 && (settings.emailAlerts.holds || settings.emailAlerts.pauseRequests || settings.emailAlerts.highSeverity);
       if (hooks.length === 0 && !emailOn) return { webhooks: 0, emails: 0 };
 
@@ -117,7 +127,7 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           staffUrl: `${staffUrl}?event=${ev.id}`,
         };
 
-        if (ev.category !== 'neutral') {
+        if (isFlagCategory(ev.category)) {
           if (created) notifications.push({ type: 'event.created', dedupeKey: `event.created:${ev.id}`, sessionId: s.id, data: eventData, severity: ev.severity });
           if (ev.status === 'closed' && EVENT_CATALOG[ev.type]?.span) {
             notifications.push({ type: 'event.closed', dedupeKey: `event.closed:${ev.id}:${endedAt ?? startedAt}`, sessionId: s.id, data: eventData, severity: ev.severity });
@@ -147,9 +157,23 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
             data.requireCheck = d.requireCheck !== false;
           }
           if (ev.type === 'pause_requested') data.pauseRequest = { id: str(d.requestId), reason: outboundReason(d.reason, 1000) };
-          if (ev.type === 'session_submitted') data.score = s.score ? { points: s.score.points, maxPoints: s.score.maxPoints, autoGraded: s.score.autoGraded } : null;
+          if (ev.type === 'session_submitted' || ev.type === 'score_regraded') data.score = s.score ? { points: s.score.points, maxPoints: s.score.maxPoints, autoGraded: s.score.autoGraded } : null;
+          if (ev.type === 'score_regraded') data.reason = outboundReason(d.reason, 1000);
+          // The structured outcome only; the reviewer's note stays in the staff app.
+          if (ev.type === 'review_completed') data.outcome = str(d.outcome);
           // Free-text staff notes are never forwarded; only the structured automatic reason.
-          if (ev.type === 'session_terminated') data.reason = str(d.reason) === 'abandoned_after_inactivity' ? 'abandoned_after_inactivity' : null;
+          if (ev.type === 'session_terminated') data.reason = AUTOMATIC_TERMINATION_REASONS.has(str(d.reason) ?? '') ? str(d.reason) : null;
+          // The resume policy ended the exam (services/recovery.ts): which limit, as a structured reason.
+          if (ev.type === 'session_submitted' && d.endReason === 'resume_limit') data.reason = d.limit === 'reconnects' ? 'too_many_reconnects' : d.limit === 'offline' ? 'offline_too_long' : null;
+          if (ev.type === 'session_rescheduled') {
+            data.window = (d.window as WebhookSessionData['window']) ?? null;
+            data.previousWindow = (d.previousWindow as WebhookSessionData['previousWindow']) ?? null;
+          }
+          // The staff reason stays in the staff app; how the exam had ended is structured.
+          if (ev.type === 'session_reopened') {
+            data.reason = str(d.previousEndReason);
+            data.addedMinutes = typeof d.addMinutes === 'number' ? d.addMinutes : 0;
+          }
           notifications.push({ type: sessionType, dedupeKey: `${sessionType}:${ev.id}`, sessionId: s.id, data });
         }
 
@@ -171,7 +195,7 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           });
         }
       }
-      const w = hooks.length ? await enqueueWebhookNotifications(sp, orgId, notifications, m.now, hooks) : 0;
+      const w = hooks.length ? await enqueueWebhookNotifications(sp, orgId, notifications, m.now, hooks, { sandbox: org?.kind === 'sandbox' }) : 0;
       const e = emailOn ? await enqueueEmailAlerts(sp, orgId, emails, m.now) : 0;
       return { webhooks: w, emails: e };
     });

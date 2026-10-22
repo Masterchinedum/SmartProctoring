@@ -83,6 +83,9 @@ export const HOLD_REASON_LABELS: Record<HoldReason, string> = {
   pause_limit: 'Pause exceeded the maximum allowed duration',
   staff: 'Placed on hold by staff',
   id_photo_unverifiable: 'Could not be verified against the approved ID photo (image unclear — not a mismatch)',
+  staff_verification: 'Waiting for staff to verify identity (accommodation)',
+  resume_limit: 'Interrupted more often or longer than the exam rules allow',
+  recovery: 'Reopened for recovery — waiting for the candidate’s identity check',
 };
 
 export const END_REASON_LABELS: Record<SessionEndReason, string> = {
@@ -90,7 +93,9 @@ export const END_REASON_LABELS: Record<SessionEndReason, string> = {
   time_expired: 'Time expired (auto-submitted)',
   staff_submitted: 'Submitted by staff',
   staff_terminated: 'Terminated by staff',
+  candidate_withdrew: 'Candidate withdrew consent (no score)',
   abandoned: 'Closed after inactivity (no score)',
+  resume_limit: 'Ended by the interruption rules (auto-submitted)',
 };
 
 export const CATEGORY_SHORT: Record<EventCategory, string> = {
@@ -98,6 +103,7 @@ export const CATEGORY_SHORT: Record<EventCategory, string> = {
   uncertain: 'Uncertain',
   neutral: 'Session change',
   technical: 'Technical',
+  exception: 'Policy exception',
 };
 
 export const SEVERITY_LABELS: Record<Severity, string> = { info: 'Info', low: 'Low', medium: 'Medium', high: 'High' };
@@ -224,4 +230,18 @@ export function describeDetailValue(key: string, value: unknown): string | null 
     return mapped.join(mapped.every((s) => /[.!?]$/.test(s)) ? ' ' : ', ');
   }
   return null;
+}
+
+/**
+ * Reviewer guidance for an event: the catalog note, except where the event's details say the generic note would
+ * mislead. A check that ran out of attempts with CLEAR images that never matched convincingly (a look-alike, or a
+ * large change in appearance) is not an image-quality problem, so "this is NOT evidence of a different person" is
+ * replaced by a prompt to compare the images.
+ */
+export function reviewerGuidance(event: { type: string; details?: Record<string, unknown> | null }): string | null {
+  const d = event.details ?? {};
+  if (event.type === 'identity_unverifiable' && d.lastReason === 'inconclusive' && d.qualityOnly === false) {
+    return 'The images were clear enough to compare but never matched the reference convincingly. Compare the reference and the check images side by side: consider a different person who resembles the candidate, and a large change in appearance (glasses, hair, weight, age of the reference). Release, re-verify or escalate as appropriate.';
+  }
+  return (EVENT_CATALOG as Record<string, { reviewerNote?: string }>)[event.type]?.reviewerNote ?? null;
 }

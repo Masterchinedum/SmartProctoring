@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { DEFAULT_POLICY, type ProctoringPolicy } from '@sp/shared';
-import { formatPolicyValue, getPath, parsePolicyNumber, POLICY_GROUPS, setPath, type PolicyField } from '../lib/policyForm';
+import { applyPolicyChange, formatPolicyValue, getPath, parsePolicyNumber, POLICY_GROUPS, type PolicyField } from '../lib/policyForm';
 
 /**
  * Editor for every field of the proctoring policy, grouped. Numeric inputs keep their own text so
@@ -29,7 +29,7 @@ export function PolicyEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invalid]);
 
-  const set = (path: string, v: unknown) => onChange(setPath(value, path, v));
+  const set = (path: string, v: unknown) => onChange(applyPolicyChange(value, path, v));
   const markInvalid = (path: string, bad: boolean) => setInvalid((m) => (m[path] === bad ? m : { ...m, [path]: bad }));
 
   return (

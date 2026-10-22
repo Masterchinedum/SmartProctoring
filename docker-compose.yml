@@ -1,6 +1,8 @@
 # Production-like stack: app + Postgres + Redis.
 #   cp .env.example .env   # fill EVIDENCE_KEY, SESSION_SECRET, BOOTSTRAP_ADMIN_PASSWORD, POSTGRES_PASSWORD
 #   docker compose up -d --build
+# Face analysis runs inside the app container. To run it in dedicated, separately scaled vision workers instead:
+#   docker compose -f docker-compose.yml -f docker-compose.vision.yml up -d --build --scale vision=3
 services:
   postgres:
     image: postgres:16-alpine

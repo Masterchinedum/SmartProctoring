@@ -29,11 +29,17 @@ export const qk = {
   exams: ['exams'] as const,
   exam: (id: string) => ['exam', id] as const,
   examSessions: (id: string) => ['exam', id, 'sessions'] as const,
+  examVersions: (id: string) => ['exam', id, 'versions'] as const,
+  examVersion: (id: string, versionId: string) => ['exam', id, 'versions', versionId] as const,
   candidates: (q: string) => ['candidates', q] as const,
   candidatesAll: ['candidates'] as const,
   candidate: (id: string) => ['candidate', id] as const,
+  accommodations: (candidateId: string) => ['candidate', candidateId, 'accommodations'] as const,
   settings: ['settings'] as const,
+  evidenceStorage: ['settings', 'evidence-storage'] as const,
+  usage: ['settings', 'usage'] as const,
   users: ['users'] as const,
+  sso: ['sso'] as const,
   audit: (p: object) => ['audit', p] as const,
   quality: (p: object) => ['quality', p] as const,
   integrationStatus: ['integrations', 'status'] as const,
@@ -41,6 +47,16 @@ export const qk = {
   webhooks: ['integrations', 'webhooks'] as const,
   webhookDeliveries: (id: string) => ['integrations', 'webhooks', id, 'deliveries'] as const,
   verifierInfo: ['integrations', 'verifiers'] as const,
+  reviewQueueAll: ['review-queue'] as const,
+  reviewQueue: (p: object) => ['review-queue', p] as const,
+  decisionConfigs: ['decision-configs'] as const,
+  decisionConfigImpact: (id: string) => ['decision-configs', id, 'impact'] as const,
+  calibration: (p: object) => ['calibration', p] as const,
+  drift: ['drift'] as const,
+  privacyAll: ['privacy'] as const,
+  privacyRequests: (p: object) => ['privacy', 'requests', p] as const,
+  retentionPreview: ['privacy', 'retention'] as const,
+  opsChecks: ['privacy', 'ops-checks'] as const,
 };
 
 /* ------------------------------------------------------------------ cache patching (realtime + mutations) */
@@ -58,6 +74,7 @@ const PERIOD_EVENT_TYPES = new Set<string>([
   'unobserved_period',
   'reporting_interrupted',
   'checkin_completed',
+  'session_reopened',
 ]);
 
 function refreshSessionStructure(qc: QueryClient, sessionId: string): void {
@@ -102,10 +119,13 @@ export function applyEvent(qc: QueryClient, ev: EventDTO, names?: { candidateNam
         : old,
     );
   }
-  qc.setQueryData<EventDTO>(qk.event(ev.id), (old) => (old ? ev : old));
+  // Keep the detail fields (explanation, history, incident) and refresh them if the drawer is open.
+  qc.setQueryData<EventDTO>(qk.event(ev.id), (old) => (old ? { ...old, ...ev } : old));
+  if (names) void qc.invalidateQueries({ queryKey: qk.event(ev.id), exact: true });
   qc.setQueryData<{ items: TimelineItemDTO[] }>(qk.timeline(ev.sessionId), (old) => (old ? { items: upsertTimelineEvent(old.items, ev) } : old));
   qc.setQueryData<{ items: EventDTO[] }>(qk.sessionEvents(ev.sessionId), (old) => (old ? { items: upsertEvent(old.items, ev) } : old));
-  if (names && PERIOD_EVENT_TYPES.has(ev.type)) refreshSessionStructure(qc, ev.sessionId);
+  // A regrade changes the score shown on the detail page and in the report.
+  if (names && (PERIOD_EVENT_TYPES.has(ev.type) || ev.type === 'score_regraded')) refreshSessionStructure(qc, ev.sessionId);
   return { isNew };
 }
 

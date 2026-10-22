@@ -2,7 +2,8 @@ import { EVENT_CATALOG, type Baseline, type DetectionPolicy, type EngineOutput, 
 import { createBaselineCalibrator, type BaselineCalibrator } from '../baseline/calibrator';
 import { defaultIdFactory } from '../util/id';
 import { isFiniteNumber } from '../util/math';
-import { attentionAngles, awayThresholds, countPersons, DEFAULT_BASELINE, directionOf, isAway, K, plausibleFaces, type DetectorHost, type TickContext } from './context';
+import { AttentionModel, type AttentionInfo, type AttentionParams, type AttentionState } from './attention';
+import { attentionAngles, countPersons, DEFAULT_BASELINE, directionOf, K, plausibleFaces, type DetectorHost, type TickContext } from './context';
 import { EpisodeBook } from './episodes';
 import { IdentityScheduler, type IdentitySchedule } from './identity';
 import { ContinuityDetector, type ContinuityState } from './detectors/continuity';
@@ -35,6 +36,13 @@ export interface EngineOptions {
    * frames and adopts that baseline unless the host calls setBaseline first.
    */
   recalibrateOnCameraChange?: boolean;
+  /**
+   * The candidate's learned working region from the previous period of this session (attentionState() of the
+   * previous engine). Kept while the camera is unchanged (the first setCameraInfo with another device resets it).
+   */
+  attentionState?: AttentionState | null;
+  /** Attention-model tuning (evaluation / tests); defaults: ATTENTION_PARAMS. */
+  attentionParams?: Partial<AttentionParams>;
 }
 
 export interface MonitoringEngine {
@@ -57,6 +65,10 @@ export interface MonitoringEngine {
   identitySchedule(): IdentitySchedule;
   /** Swap-trigger diagnostics: latest appearance distance / threshold and the triggers fired. */
   continuityState(): ContinuityState;
+  /** Learned working region (for the next period of this session; stays in the browser). */
+  attentionState(): AttentionState;
+  /** Where attention is measured from right now (diagnostics / debug overlay). */
+  attentionInfo(): AttentionInfo;
 }
 
 /** Window for the internal throughput estimate when the host does not report obs.fps. */
@@ -69,7 +81,7 @@ const FPS_WINDOW_MS = 5000;
  */
 export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
   const policy = opts.policy;
-  const th = awayThresholds(policy);
+  const attention = new AttentionModel(policy, opts.attentionParams, opts.attentionState);
   const evidence = opts.evidence ?? { maxScreenshotsPerEvent: 4, periodicScreenshotSec: 30 };
   const book = new EpisodeBook({
     idFactory: opts.idFactory ?? defaultIdFactory,
@@ -81,6 +93,7 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
   });
   const host: DetectorHost = {
     policy,
+    attention,
     book,
     prompts: new PromptManager(),
     identity: new IdentityScheduler({
@@ -106,6 +119,7 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
   const continuity = new ContinuityDetector(host);
 
   let baseline: Baseline | null = opts.baseline ?? null;
+  attention.setBaseline(baseline);
   let recalibrator: BaselineCalibrator | null = null;
   const recalibrate = opts.recalibrateOnCameraChange !== false;
 
@@ -172,10 +186,14 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
     let pitchOff = 0;
     let away: boolean | null = null;
     let direction = null as TickContext['direction'];
+    let att: TickContext['att'] = null;
     if (primary) {
-      ({ h, v, yawOff, pitchOff } = attentionAngles(primary, b));
-      away = isAway(h, v, th);
-      if (away) direction = directionOf(h, v, th);
+      ({ yawOff, pitchOff } = attentionAngles(primary, b));
+      // Learn only from a clear view of exactly one usable face.
+      const learnable = !!frame && !covered && faces.length === 1 && primaryAssessable;
+      att = attention.assess(t, primary, obs.activity, learnable);
+      ({ h, v, away } = att);
+      if (away) direction = directionOf(h, v, { yaw: h >= 0 ? att.limits.left : att.limits.right, down: att.limits.down, up: att.limits.up });
     }
     return {
       t,
@@ -207,6 +225,7 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
       pitchOff,
       away,
       direction,
+      att,
       baseline: b,
       fps: estimateFps(t, obs.fps),
     };
@@ -240,7 +259,10 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
       recalibrator.add(obs);
       if (recalibrator.ready()) {
         const r = recalibrator.result();
-        if (r) baseline = r;
+        if (r) {
+          baseline = r;
+          attention.setBaseline(r);
+        }
         recalibrator = null;
       }
     }
@@ -269,6 +291,9 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
     begin();
     const prev = feed.camera;
     const changed = feed.setCamera({ label: String(info?.label ?? ''), deviceIdHash: String(info?.deviceIdHash ?? '') }, t);
+    // A different camera sees the candidate from elsewhere: the learned working region no longer applies.
+    attention.setCamera(String(info?.deviceIdHash ?? ''));
+    if (changed) attention.reset();
     if (changed) {
       host.episodes.push(
         book.marker('camera_changed', t, {
@@ -356,6 +381,7 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
     setBaseline(b: Baseline) {
       if (!b || ![b.yaw, b.pitch, b.cx, b.cy, b.faceWidth].every(isFiniteNumber)) return;
       baseline = { ...b };
+      attention.setBaseline(baseline);
       recalibrator = null;
     },
     getBaseline: () => (baseline ? { ...baseline } : null),
@@ -370,6 +396,8 @@ export function createMonitoringEngine(opts: EngineOptions): MonitoringEngine {
     },
     identitySchedule: () => host.identity.schedule(),
     continuityState: () => continuity.state(),
+    attentionState: () => attention.exportState(),
+    attentionInfo: () => attention.info(),
   };
 }
 

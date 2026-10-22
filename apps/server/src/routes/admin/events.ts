@@ -2,13 +2,14 @@
  * Staff API — events: org-wide feed, single event, review decisions and event notes.
  *
  *   GET  /events?category=&severity=&review=&type=&since=&limit=  -> { items: LiveEventDTO[] }   [reviewer]
- *   GET  /events/:id                                               -> EventDTO                    [reviewer]
- *   POST /events/:id/review {status,note?}                         -> EventDTO                    [reviewer]
+ *   GET  /events/:id                                               -> EventDetailDTO              [reviewer]
+ *   POST /events/:id/review {resolution|status,note?}              -> EventDetailDTO              [reviewer]
+ *   POST /events/review-bulk {eventIds,resolution,note?,incidentId?} -> BulkReviewResultDTO       [reviewer]
  *   GET  /events/:id/notes                                         -> { items: NoteDTO[] }        [reviewer]
  *   POST /events/:id/notes {text}                                  -> NoteDTO                     [reviewer]
  */
-import { EVENT_TYPES, eventFilterSchema, noteRequestSchema, reviewRequestSchema, type EventType, type LiveEventDTO } from '@sp/shared';
-import { and, desc, eq, gte, inArray, ne, type SQL } from 'drizzle-orm';
+import { bulkReviewSchema, EVENT_TYPES, eventFilterSchema, FLAG_CATEGORIES, noteRequestSchema, reviewRequestSchema, type BulkReviewResultDTO, type EventType, type LiveEventDTO } from '@sp/shared';
+import { and, desc, eq, gte, inArray, type SQL } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { getStaff, requireStaff } from '../../auth/staff.js';
@@ -17,14 +18,20 @@ import type { DbOrTx } from '../../db/index.js';
 import { candidates, events, examSessions, exams, notes, type EventRow } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { notFound, validationFailed } from '../../lib/errors.js';
-import { eventRowsToDTOs, loadEventDTO, loadNoteDTOs, toNoteDTO } from '../../services/dto.js';
+import { eventRowsToDTOs, loadNoteDTOs, toNoteDTO } from '../../services/dto.js';
+import { loadEventDetail } from '../../services/event-detail.js';
+import { decideEvent, decideEventsBulk } from '../../services/review.js';
 import { blankToUndefined, idParam, listParam } from './common.js';
 
 const feedQuerySchema = eventFilterSchema.extend({ limit: z.coerce.number().int().min(1).max(500).default(100) });
 
 /** Parse the shared event filters into SQL conditions (null = a filter that can match nothing). */
 export function eventFilterConds(query: unknown): SQL[] | null {
-  const f = eventFilterSchema.parse(blankToUndefined(query));
+  return eventFilterCondsFrom(eventFilterSchema.parse(blankToUndefined(query)));
+}
+
+/** The same, from already parsed filters (the integration API parses with its own documented schema). */
+export function eventFilterCondsFrom(f: z.infer<typeof eventFilterSchema>): SQL[] | null {
   const conds: SQL[] = [];
   if (f.category) conds.push(eq(events.category, f.category));
   if (f.severity) conds.push(eq(events.severity, f.severity));
@@ -70,7 +77,7 @@ export async function loadScopedEvent(db: DbOrTx, orgId: string, eventId: string
 }
 
 async function eventDTO(ctx: Ctx, eventId: string) {
-  const dto = await loadEventDTO(ctx.db, eventId);
+  const dto = await loadEventDetail(ctx, eventId);
   if (!dto) throw notFound('Event not found', 'event_not_found');
   return dto;
 }
@@ -84,8 +91,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
     const q = feedQuerySchema.parse(blankToUndefined(req.query));
     const conds = eventFilterConds(req.query);
     if (conds === null) return { items: [] };
-    // The feed shows flags: neutral session changes only when explicitly requested.
-    if (!q.category) conds.push(ne(events.category, 'neutral'));
+    // The feed shows flags: session changes and policy exceptions only when explicitly requested.
+    if (!q.category) conds.push(inArray(events.category, [...FLAG_CATEGORIES]));
     return { items: await loadLiveEvents(ctx.db, staff.orgId, conds, q.limit) };
   });
 
@@ -100,40 +107,30 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
     const staff = getStaff(req);
     const id = idParam(req, 'id', 'Event', 'event_not_found');
     const body = reviewRequestSchema.parse(req.body ?? {});
-    const note = body.note?.trim() ? body.note.trim() : null;
     const now = ctx.now();
-    const ev = await ctx.db.transaction(async (tx) => {
+    const out = await ctx.db.transaction(async (tx) => {
       const [cur] = await tx
         .select()
         .from(events)
         .where(and(eq(events.id, id), eq(events.orgId, staff.orgId)))
         .for('update');
       if (!cur) throw notFound('Event not found', 'event_not_found');
-      const unreview = body.status === 'unreviewed';
-      await tx
-        .update(events)
-        .set({
-          reviewStatus: body.status,
-          reviewedBy: unreview ? null : staff.id,
-          reviewedAt: unreview ? null : new Date(now),
-          reviewNote: unreview ? null : note,
-        })
-        .where(eq(events.id, id));
-      await audit(tx, {
-        orgId: staff.orgId,
-        actorType: 'staff',
-        actorId: staff.id,
-        action: 'event.review',
-        targetType: 'event',
-        targetId: id,
-        meta: { sessionId: cur.sessionId, type: cur.type, from: cur.reviewStatus, to: body.status, note },
-        ip: req.ip,
-        at: now,
-      });
-      return cur;
+      const r = await decideEvent(tx, { id: staff.id, orgId: staff.orgId, ip: req.ip }, cur, body, { bulk: false, at: now });
+      return { cur, changed: r.ok && r.changed };
     });
-    ctx.live.eventChanged(id, ev.sessionId);
+    // Also refreshes the session summary (counts, review state).
+    if (out.changed) ctx.live.eventChanged(id, out.cur.sessionId, staff.orgId);
     return eventDTO(ctx, id);
+  });
+
+  /** One decision for several events: technical / low-severity ones, or the events of one incident. */
+  app.post('/events/review-bulk', reviewer, async (req): Promise<BulkReviewResultDTO> => {
+    const staff = getStaff(req);
+    const body = bulkReviewSchema.parse(req.body ?? {});
+    const now = ctx.now();
+    const { result } = await ctx.db.transaction((tx) => decideEventsBulk(tx, { id: staff.id, orgId: staff.orgId, ip: req.ip }, body, now));
+    for (const id of result.updated) ctx.live.eventChanged(id, undefined, staff.orgId);
+    return result;
   });
 
   app.get('/events/:id/notes', reviewer, async (req) => {

@@ -7,6 +7,7 @@ import {
   guidanceForIssues,
   ID_PHOTO_QUALITY_GATE,
   isCutOff,
+  lowContrast,
   poseWithinGate,
   QUALITY_GATE,
   QUALITY_GATE_V1,
@@ -61,7 +62,7 @@ describe('assessQuality', () => {
     expect(assessQuality(input({ pose: { yawDeg: 0, pitchDeg: 30, rollDeg: 0 } })).issues).toContain('face_turned');
     expect(assessQuality(input({ stats: { ...GOOD_STATS, brightness: 20 } })).issues).toContain('too_dark');
     expect(assessQuality(input({ stats: { ...GOOD_STATS, brightness: 240 } })).issues).toContain('too_bright');
-    expect(assessQuality(input({ stats: { ...GOOD_STATS, contrast: 5 } })).issues).toContain('low_contrast');
+    expect(assessQuality(input({ stats: { ...GOOD_STATS, contrast: 4.5 } })).issues).toContain('low_contrast');
     expect(assessQuality(input({ stats: { ...GOOD_STATS, sharpness: 20 } })).issues).toEqual(['blurry']);
     expect(assessQuality(input({ faces: [face(320, 240, 200, 0.62)] })).issues).toEqual(['low_detection_confidence']);
   });
@@ -78,8 +79,26 @@ describe('assessQuality', () => {
   });
 
   it('does not add "blurry" on top of "too dark" (guidance stays actionable)', () => {
-    const q = assessQuality(input({ stats: { brightness: 20, contrast: 5, sharpness: 5, rawLaplacianVar: 1 } }));
+    const q = assessQuality(input({ stats: { brightness: 20, contrast: 4.5, sharpness: 5, rawLaplacianVar: 1 } }));
     expect(q.issues).toEqual(['too_dark', 'low_contrast']);
+  });
+
+  it('low contrast: a confidently detected face down to minContrastConfident stays usable (backlit webcam faces)', () => {
+    // Backlit fixture: face luma ~61, flare lift ~25 => face contrast 6.6-7.1, right at minContrast (7).
+    const confident = assessQuality(input({ stats: { brightness: 61, contrast: 6.6, sharpness: 900, rawLaplacianVar: 300 } }));
+    expect(confident.issues).not.toContain('low_contrast');
+    expect(confident.usable).toBe(true);
+    // The same contrast with an unconfident detection (the detector is guessing) is refused.
+    const unsure = assessQuality(input({ faces: [face(320, 240, 200, 0.8)], stats: { brightness: 61, contrast: 6.6, sharpness: 900, rawLaplacianVar: 300 } }));
+    expect(unsure.issues).toContain('low_contrast');
+    // Below minContrastConfident nothing is recognisable enough, however confident the detector.
+    expect(assessQuality(input({ stats: { brightness: 61, contrast: 4.9, sharpness: 900, rawLaplacianVar: 300 } })).issues).toContain('low_contrast');
+    // Without the confident-detection fields (custom / v1 gates) minContrast alone applies.
+    const { minContrastConfident: _a, confidentDetectionScore: _b, ...plain } = QUALITY_GATE;
+    expect(assessQuality(input({ stats: { brightness: 61, contrast: 6.6, sharpness: 900, rawLaplacianVar: 300 } }), plain).issues).toContain('low_contrast');
+    expect(lowContrast(6.6, 0.93, QUALITY_GATE)).toBe(false);
+    expect(lowContrast(6.6, 0.87, QUALITY_GATE)).toBe(true);
+    expect(lowContrast(7.2, 0.5, QUALITY_GATE)).toBe(false);
   });
 
   it('advisory guidance for usable but poor frames (dim, flat, small) and none for good frames', () => {

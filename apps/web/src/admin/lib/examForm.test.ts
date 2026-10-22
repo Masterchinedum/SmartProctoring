@@ -18,6 +18,7 @@ const exam: ExamDTO = {
   createdAt: 1,
   updatedAt: 2,
   stats: { assigned: 0, active: 0, completed: 0, flagged: 0 },
+  currentVersion: null,
 };
 
 describe('exam draft mapping', () => {

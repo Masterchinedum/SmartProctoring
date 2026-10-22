@@ -26,6 +26,22 @@ export function UsersPage() {
   const [creating, setCreating] = useState(false);
   const [resetting, setResetting] = useState<StaffUserDTO | null>(null);
   const [toggling, setToggling] = useState<StaffUserDTO | null>(null);
+  const [resettingMfa, setResettingMfa] = useState<StaffUserDTO | null>(null);
+  const [unlinking, setUnlinking] = useState<StaffUserDTO | null>(null);
+  const unlink = useMutation({
+    mutationFn: (id: string) => api.unlinkUserSso(id),
+    onSuccess: (u) => {
+      qc.setQueryData<{ items: StaffUserDTO[] }>(qk.users, (old) => (old ? { items: old.items.map((x) => (x.id === u.id ? u : x)) } : old));
+      setUnlinking(null);
+    },
+  });
+  const resetMfa = useMutation({
+    mutationFn: (id: string) => api.resetUserMfa(id),
+    onSuccess: (u) => {
+      qc.setQueryData<{ items: StaffUserDTO[] }>(qk.users, (old) => (old ? { items: old.items.map((x) => (x.id === u.id ? u : x)) } : old));
+      setResettingMfa(null);
+    },
+  });
   const qc = useQueryClient();
   const update = useMutation({
     mutationFn: ({ id, patch }: { id: string; patch: Parameters<typeof api.updateUser>[1] }) => api.updateUser(id, patch),
@@ -69,6 +85,8 @@ export function UsersPage() {
                 <th>Email</th>
                 <th>Role</th>
                 <th>Status</th>
+                <th>Two-step sign-in</th>
+                <th>Single sign-on</th>
                 <th>Created</th>
                 <th />
               </tr>
@@ -100,6 +118,19 @@ export function UsersPage() {
                     )}
                   </td>
                   <td>{u.disabled ? <span className="badge badge-danger">Disabled</span> : <span className="badge badge-success">Active</span>}</td>
+                  <td className="small">
+                    {u.mfaEnabledAt ? (
+                      <span title={`On since ${formatDate(u.mfaEnabledAt)}`} className="badge badge-success">
+                        On
+                      </span>
+                    ) : (
+                      <span className="badge">Off</span>
+                    )}
+                  </td>
+                  <td className="small">
+                    {u.ssoLinked ? <span className="badge badge-success">Linked</span> : <span className="muted">—</span>}
+                    {u.provisionedVia === 'scim' ? <span className="badge badge-info">SCIM</span> : u.provisionedVia === 'sso' ? <span className="badge badge-info">Created at sign-in</span> : null}
+                  </td>
                   <td className="small">{formatDate(u.createdAt)}</td>
                   <td>
                     {canManage(u) ? (
@@ -110,6 +141,16 @@ export function UsersPage() {
                         <button type="button" className="btn btn-sm" onClick={() => setToggling(u)}>
                           {u.disabled ? 'Enable' : 'Disable'}
                         </button>
+                        {u.mfaEnabledAt ? (
+                          <button type="button" className="btn btn-sm" onClick={() => setResettingMfa(u)}>
+                            Reset two-step sign-in
+                          </button>
+                        ) : null}
+                        {u.ssoLinked ? (
+                          <button type="button" className="btn btn-sm" onClick={() => setUnlinking(u)}>
+                            Unlink single sign-on
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
                   </td>
@@ -121,6 +162,30 @@ export function UsersPage() {
       )}
       {creating ? <CreateUserModal roles={roles} onClose={() => setCreating(false)} /> : null}
       {resetting ? <ResetPasswordModal user={resetting} onClose={() => setResetting(null)} /> : null}
+      {resettingMfa ? (
+        <ConfirmDialog
+          title={`Reset two-step sign-in for ${resettingMfa.name}?`}
+          message="Use this when they lost their phone and their recovery codes. Their authenticator and recovery codes stop working and they are signed out; if your organisation requires two-step sign-in they set it up again at their next sign-in. They are told by email (when email is configured) and the reset is recorded in the audit log. Make sure you are talking to the real person first."
+          confirmLabel="Reset two-step sign-in"
+          danger
+          busy={resetMfa.isPending}
+          error={resetMfa.isError ? errorMessage(resetMfa.error) : null}
+          onConfirm={() => resetMfa.mutate(resettingMfa.id)}
+          onCancel={() => setResettingMfa(null)}
+        />
+      ) : null}
+      {unlinking ? (
+        <ConfirmDialog
+          title={`Unlink single sign-on for ${unlinking.name}?`}
+          message="Use this when their address now belongs to a different identity at your identity provider (for example a re-used mailbox). They are signed out; at their next single sign-on the account is linked to whoever then signs in with this address. Recorded in the audit log."
+          confirmLabel="Unlink"
+          danger
+          busy={unlink.isPending}
+          error={unlink.isError ? errorMessage(unlink.error) : null}
+          onConfirm={() => unlink.mutate(unlinking.id)}
+          onCancel={() => setUnlinking(null)}
+        />
+      ) : null}
       {toggling ? (
         <ConfirmDialog
           title={toggling.disabled ? `Enable ${toggling.name}?` : `Disable ${toggling.name}?`}

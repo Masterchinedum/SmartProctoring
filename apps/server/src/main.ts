@@ -1,7 +1,15 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 
+/** Node 24 is the only supported runtime (package.json engines; pnpm install enforces it, this covers `node dist/main.js`). */
+const MIN_NODE_MAJOR = 24;
+
 async function main() {
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  if (nodeMajor < MIN_NODE_MAJOR) {
+    console.error(`[runtime] Node ${MIN_NODE_MAJOR} or later is required; this is Node ${process.versions.node}.`);
+    process.exit(1);
+  }
   let config;
   try {
     config = loadConfig();
@@ -13,6 +21,11 @@ async function main() {
   try {
     app = await buildApp({ config });
   } catch (err) {
+    if ((err as Error).name === 'StorageLocationsConfigError') {
+      // A storage location in use is not configured (data residency, docs/OPERATIONS.md §2).
+      console.error(`[storage] ${(err as Error).message}`);
+      process.exit(1);
+    }
     if ((err as Error).name === 'VisionModelsNotFoundError') {
       console.error(`[vision] ${(err as Error).message}\nSet MODELS_DIR to the folder containing face_detection_yunet_2023mar.onnx and face_recognition_sface_2021dec.onnx.`);
       process.exit(1);

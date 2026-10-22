@@ -191,17 +191,23 @@ describe('looking_away', () => {
     expect(eps[0].details.direction).toBe('down');
   });
 
-  it('eye gaze adds to head pose; head pose alone below threshold does not flag', () => {
+  it('eye gaze confirms a head turn; eyes alone (reading across the screen, looking down at it) do not flag', () => {
     const a = new Driver();
-    a.run(0, 20, () => ({ faces: [face({ yaw: 15 })] }));
+    a.run(0, 20, () => ({ faces: [face({ yaw: 20 })] }));
     expect(a.of('looking_away')).toHaveLength(0);
+    // Head clearly turned and the eyes further the same way: away.
     const b = new Driver();
-    b.run(0, 20, () => ({ faces: [face({ yaw: 15, gazeX: 0.8 })] }));
+    b.run(0, 20, () => ({ faces: [face({ yaw: 20, gazeX: 0.6 })] }));
     expect(b.final('looking_away')).toHaveLength(1);
     // Eyes counter-rotating toward the screen cancel a head turn.
     const c = new Driver();
     c.run(0, 20, () => ({ faces: [face({ yaw: 32, gazeX: -0.6 })] }));
     expect(c.of('looking_away')).toHaveLength(0);
+    // Reading the far side / the bottom of the screen with the eyes only.
+    const d = new Driver();
+    d.run(0, 20, () => ({ faces: [face({ yaw: 6, gazeX: 0.8 })] }));
+    d.run(20, 40, () => ({ faces: [face({ pitch: -12, gazeY: -0.8 })] }));
+    expect(d.of('looking_away')).toHaveLength(0);
   });
 
   it('is relative to the candidate’s baseline (camera to the side)', () => {

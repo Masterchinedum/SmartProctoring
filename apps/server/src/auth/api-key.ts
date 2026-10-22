@@ -4,27 +4,33 @@
  *   Authorization: Bearer sp_live_<43 chars base64url>
  *
  * Keys are random (256 bit), shown once at creation, and stored only as sha256 (plus an 16-character display
- * prefix). A key belongs to one organisation and has the fixed scope 'integration'. Revoked keys stop
- * working immediately. `lastUsedAt` is written at most once a minute per key.
+ * prefix). A key belongs to one organisation, works only on the integration API (`scope` 'integration'), and carries
+ * `scopes` (API_KEY_SCOPES): every /api/v1 endpoint requires one (INTEGRATION_ENDPOINTS), else 403 insufficient_scope.
+ * Revoked keys stop working immediately (401 invalid_api_key); keys past their `expiresAt` are refused with
+ * 401 api_key_expired. `lastUsedAt` is written at most once a minute per key.
  *
- * Usage in a route plugin:
- *   app.get('/x', { preHandler: requireApiKey }, async (req) => { const key = getApiKey(req); ... key.orgId ... })
+ * Usage in a route plugin (routes/v1 registers every route through the endpoint catalogue instead):
+ *   app.get('/x', { preHandler: [requireApiKey, requireScope('exams:read')] }, async (req) => { const key = getApiKey(req); ... key.orgId ... })
  */
-import { API_KEY_PATTERN, API_KEY_PREFIX, type ApiKeyDTO } from '@sp/shared';
+import { API_KEY_PATTERN, API_KEY_PREFIX, normaliseApiKeyScopes, type ApiKeyDTO, type ApiKeyScope } from '@sp/shared';
 import { and, eq, isNull } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Ctx } from '../context.js';
 import { apiKeys, type ApiKey } from '../db/schema.js';
 import { randomToken, sha256Hex } from '../lib/crypto.js';
 import { HttpError } from '../lib/errors.js';
+import { bindRequestLog } from '../lib/request-log.js';
 
 export const API_KEY_DISPLAY_PREFIX_LENGTH = API_KEY_PREFIX.length + 8;
 const LAST_USED_WRITE_INTERVAL_MS = 60_000;
+const REALM = 'SmartProctoring integration API';
 
 export interface ApiKeyPrincipal {
   id: string;
   orgId: string;
   name: string;
+  scopes: ApiKeyScope[];
+  expiresAt: number | null;
   ip: string;
 }
 
@@ -45,9 +51,11 @@ export function toApiKeyDTO(row: ApiKey, creatorName: string | null): ApiKeyDTO 
     name: row.name,
     prefix: row.prefix,
     scope: row.scope,
+    scopes: normaliseApiKeyScopes(row.scopes),
     createdAt: row.createdAt.getTime(),
     createdBy: row.createdBy ? { id: row.createdBy, name: creatorName ?? 'Unknown' } : null,
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.getTime() : null,
+    expiresAt: row.expiresAt ? row.expiresAt.getTime() : null,
     revokedAt: row.revokedAt ? row.revokedAt.getTime() : null,
   };
 }
@@ -61,32 +69,54 @@ export function bearerApiKey(req: FastifyRequest): string | null {
   return m[1];
 }
 
-/** Resolve an API key (null if unknown or revoked). */
-export async function authenticateApiKey(ctx: Pick<Ctx, 'db' | 'now'>, key: string, ip: string): Promise<ApiKeyPrincipal | null> {
+export type ApiKeyAuthResult = { ok: true; principal: ApiKeyPrincipal } | { ok: false; reason: 'invalid' } | { ok: false; reason: 'expired'; expiresAt: number };
+
+/** Resolve an API key: unknown or revoked → invalid; past its expiry → expired (lastUsedAt is not touched then). */
+export async function authenticateApiKey(ctx: Pick<Ctx, 'db' | 'now'>, key: string, ip: string): Promise<ApiKeyAuthResult> {
   const [row] = await ctx.db
     .select()
     .from(apiKeys)
     .where(and(eq(apiKeys.keyHash, sha256Hex(key)), isNull(apiKeys.revokedAt)));
-  if (!row) return null;
+  if (!row) return { ok: false, reason: 'invalid' };
   const now = ctx.now();
+  if (row.expiresAt && row.expiresAt.getTime() <= now) return { ok: false, reason: 'expired', expiresAt: row.expiresAt.getTime() };
   if (!row.lastUsedAt || now - row.lastUsedAt.getTime() > LAST_USED_WRITE_INTERVAL_MS) {
     await ctx.db.update(apiKeys).set({ lastUsedAt: new Date(now) }).where(eq(apiKeys.id, row.id));
   }
-  return { id: row.id, orgId: row.orgId, name: row.name, ip };
+  return { ok: true, principal: { id: row.id, orgId: row.orgId, name: row.name, scopes: normaliseApiKeyScopes(row.scopes), expiresAt: row.expiresAt?.getTime() ?? null, ip } };
 }
 
 function invalidKey(reply: FastifyReply): HttpError {
-  reply.header('WWW-Authenticate', 'Bearer realm="SmartProctoring integration API"');
+  reply.header('WWW-Authenticate', `Bearer realm="${REALM}"`);
   return new HttpError(401, 'invalid_api_key', 'Missing, invalid or revoked API key. Send "Authorization: Bearer sp_live_...".');
 }
 
-/** preHandler: require a valid organisation API key. */
+function expiredKey(reply: FastifyReply, expiresAt: number): HttpError {
+  reply.header('WWW-Authenticate', `Bearer realm="${REALM}", error="invalid_token", error_description="The API key has expired"`);
+  return new HttpError(401, 'api_key_expired', `This API key expired on ${new Date(expiresAt).toISOString()}. Ask an administrator for a new key (Integrations → API keys).`);
+}
+
+/** preHandler: require a valid, unexpired organisation API key. */
 export async function requireApiKey(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const key = bearerApiKey(req);
   if (!key) throw invalidKey(reply);
-  const principal = await authenticateApiKey(req.server.ctx, key, req.ip);
-  if (!principal) throw invalidKey(reply);
-  req.apiKey = principal;
+  const r = await authenticateApiKey(req.server.ctx, key, req.ip);
+  if (!r.ok) throw r.reason === 'expired' ? expiredKey(reply, r.expiresAt) : invalidKey(reply);
+  req.apiKey = r.principal;
+  bindRequestLog(req, reply, { apiKeyId: r.principal.id, orgId: r.principal.orgId });
+}
+
+/** preHandler (after requireApiKey): the key must carry `scope` (403 insufficient_scope otherwise). */
+export function requireScope(scope: ApiKeyScope) {
+  return async function requireApiKeyScope(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const key = getApiKey(req);
+    if (key.scopes.includes(scope)) return;
+    reply.header('WWW-Authenticate', `Bearer realm="${REALM}", error="insufficient_scope", scope="${scope}"`);
+    throw new HttpError(403, 'insufficient_scope', `This API key does not have the "${scope}" scope. An administrator can create a key with it (Integrations → API keys).`, {
+      requiredScope: scope,
+      scopes: key.scopes,
+    });
+  };
 }
 
 /** The API key principal inside a handler guarded by requireApiKey. */

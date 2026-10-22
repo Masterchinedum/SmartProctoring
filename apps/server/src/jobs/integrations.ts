@@ -5,10 +5,14 @@
  *   webhooks            every 5 s (+ kicked after commits)  services/webhooks.ts      deliverDueWebhooks
  *   email-alerts        every 10 s (+ kicked after commits) services/email-alerts.ts  runEmailAlertJob
  *   abandoned-sessions  hourly                              services/abandonment.ts   closeAbandonedSessions
+ *   api-idempotency     hourly                              services/idempotency.ts   purgeIdempotencyKeys (records > 24 h)
+ *   sandbox-purge       hourly                              services/sandbox-purge.ts runSandboxPurgeExclusive (sandbox organisations only)
  */
 import type { Ctx } from '../context.js';
 import { ABANDON_JOB, ABANDON_JOB_INTERVAL_MS, closeAbandonedSessions } from '../services/abandonment.js';
 import { EMAIL_ALERT_JOB, EMAIL_JOB_INTERVAL_MS, runEmailAlertJob } from '../services/email-alerts.js';
+import { IDEMPOTENCY_JOB, IDEMPOTENCY_JOB_INTERVAL_MS, purgeIdempotencyKeys } from '../services/idempotency.js';
+import { runSandboxPurgeExclusive, SANDBOX_PURGE_INTERVAL_MS, SANDBOX_PURGE_JOB } from '../services/sandbox-purge.js';
 import { deliverDueWebhooks, WEBHOOK_JOB } from '../services/webhooks.js';
 
 export function registerIntegrationJobs(ctx: Ctx): void {
@@ -37,6 +41,26 @@ export function registerIntegrationJobs(ctx: Ctx): void {
     async run(c) {
       const r = await closeAbandonedSessions(c);
       if (r.closed) c.log.info({ closed: r.closed }, 'closed abandoned sessions');
+    },
+  });
+  ctx.jobs.register({
+    name: IDEMPOTENCY_JOB,
+    intervalMs: IDEMPOTENCY_JOB_INTERVAL_MS,
+    runAtStart: true,
+    async run(c) {
+      const n = await purgeIdempotencyKeys(c);
+      if (n) c.log.info({ deleted: n }, 'deleted expired Idempotency-Key records');
+    },
+  });
+  ctx.jobs.register({
+    name: SANDBOX_PURGE_JOB,
+    intervalMs: SANDBOX_PURGE_INTERVAL_MS,
+    runAtStart: true,
+    async run(c) {
+      // Its own lock too, shared with `sandbox:purge` (the CLI), so the two never run at once.
+      const r = await runSandboxPurgeExclusive(c);
+      const t = r?.totals;
+      if (t && (t.sessionsDeleted || t.candidatesDeleted || t.evidenceItemsPurged || t.failures)) c.log.info({ sandboxPurge: t }, 'sandbox clean-up completed');
     },
   });
 }

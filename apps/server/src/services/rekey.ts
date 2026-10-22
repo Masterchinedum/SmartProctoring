@@ -9,7 +9,14 @@
  *     check_frames.embedding_enc            frame:<frameId>
  *     exam_sessions.access_token_enc        access-token:<sessionId>
  *     webhooks.secret_enc                   webhook-secret:<webhookId>
- *   evidence blobs (storage; evidence.key_id)  evidence:<evidenceId>   (purged rows have no blob)
+ *     accommodations.note_enc               accommodation-note:<accommodationId>
+ *     staff_users.totp_secret_enc           totp:<staffUserId>
+ *     staff_users.totp_pending_enc          totp-pending:<staffUserId>
+ *     privacy_requests.details_enc          privacy-request:<requestId>
+ *     api_idempotency_keys.response_enc     api-idempotency:<recordId>   (24 h: stored integration API responses)
+ *     identity_providers.oidc_client_secret_enc  sso-client-secret:<providerId>
+ *   evidence blobs (storage; evidence.key_id)  evidence:<evidenceId>   (purged rows have no blob; each in its own
+ *                                               storage location, evidence.storage_location)
  *   organizations.settings.externalVerifier.credentialsEnc (base64 in JSON)  external-verifier:<orgId>
  *
  * Batches in primary-key order, each row on its own: a row is only rewritten if it still holds the ciphertext that
@@ -24,9 +31,16 @@ import { and, asc, eq, gt, isNotNull, isNull, ne, sql, type SQL } from 'drizzle-
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import type { Ctx } from '../context.js';
 import type { Database, Db } from '../db/index.js';
-import { candidates, checkFrames, evidence, examSessions, identityReferences, identitySampleFrames, organizations, webhooks } from '../db/schema.js';
+import { accommodations, apiIdempotencyKeys, candidates, checkFrames, evidence, examSessions, identityProviders, identityReferences, identitySampleFrames, organizations, privacyRequests, staffUsers, webhooks } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
+import { storageAt } from '../lib/storage.js';
 import { verifierCredentialsAad } from '../verifiers/settings.js';
+import { accommodationNoteAad } from './accommodations.js';
+import { evidenceAtLocation } from './evidence.js';
+import { totpAad, totpPendingAad } from './mfa.js';
+import { idempotencyResponseAad } from './idempotency.js';
+import { privacyRequestDetailsAad } from './privacy-requests.js';
+import { ssoClientSecretAad } from './sso/providers.js';
 import { frameAad, idPhotoAad, referenceAad, sampleFrameAad } from './identity-common.js';
 
 /**
@@ -38,7 +52,7 @@ import { frameAad, idPhotoAad, referenceAad, sampleFrameAad } from './identity-c
 export const REKEY_LOCK_KEY = 727_274_011;
 export const REKEY_DEFAULT_BATCH = 200;
 
-export type RekeyCtx = Pick<Ctx, 'db' | 'storage' | 'keyring' | 'now' | 'log'> & { database: Database };
+export type RekeyCtx = Pick<Ctx, 'db' | 'storage' | 'keyring' | 'now' | 'log'> & Partial<Pick<Ctx, 'storageLocations'>> & { database: Database };
 
 interface ColumnTarget {
   name: string;
@@ -56,6 +70,12 @@ export const COLUMN_TARGETS: ColumnTarget[] = [
   { name: 'sample_frame_embeddings', table: identitySampleFrames, id: identitySampleFrames.id, col: identitySampleFrames.embeddingEnc, aad: sampleFrameAad },
   { name: 'access_tokens', table: examSessions, id: examSessions.id, col: examSessions.accessTokenEnc, aad: (id) => `access-token:${id}` },
   { name: 'webhook_secrets', table: webhooks, id: webhooks.id, col: webhooks.secretEnc, aad: (id) => `webhook-secret:${id}` },
+  { name: 'accommodation_notes', table: accommodations, id: accommodations.id, col: accommodations.noteEnc, aad: accommodationNoteAad },
+  { name: 'totp_secrets', table: staffUsers, id: staffUsers.id, col: staffUsers.totpSecretEnc, aad: totpAad },
+  { name: 'totp_pending_secrets', table: staffUsers, id: staffUsers.id, col: staffUsers.totpPendingEnc, aad: totpPendingAad },
+  { name: 'privacy_request_details', table: privacyRequests, id: privacyRequests.id, col: privacyRequests.detailsEnc, aad: privacyRequestDetailsAad },
+  { name: 'api_idempotency_responses', table: apiIdempotencyKeys, id: apiIdempotencyKeys.id, col: apiIdempotencyKeys.responseEnc, aad: idempotencyResponseAad },
+  { name: 'sso_client_secrets', table: identityProviders, id: identityProviders.id, col: identityProviders.oidcClientSecretEnc, aad: ssoClientSecretAad },
 ];
 export const EVIDENCE_TARGET = 'evidence_blobs';
 /** External verifier key pairs: base64 ciphertext inside organizations.settings (verifiers/settings.ts). */
@@ -205,7 +225,7 @@ async function rekeyEvidence(ctx: RekeyCtx, sum: RekeyTargetSummary, failures: R
   let done = 0;
   for (;;) {
     const rows = await ctx.db
-      .select({ id: evidence.id, storageKey: evidence.storageKey, keyId: evidence.keyId })
+      .select({ id: evidence.id, storageKey: evidence.storageKey, storageLocation: evidence.storageLocation, keyId: evidence.keyId })
       .from(evidence)
       .where(and(isNull(evidence.purgedAt), ne(evidence.keyId, current), lastId ? gt(evidence.id, lastId) : undefined))
       .orderBy(asc(evidence.id))
@@ -215,7 +235,9 @@ async function rekeyEvidence(ctx: RekeyCtx, sum: RekeyTargetSummary, failures: R
       lastId = r.id;
       const aad = `evidence:${r.id}`;
       try {
-        const blob = await ctx.storage.get(r.storageKey);
+        // The row's own storage location (data residency): the blob is re-encrypted where it is.
+        const store = storageAt(ctx, r.storageLocation);
+        const blob = await store.get(r.storageKey);
         if (!blob) {
           sum.missing++;
           continue;
@@ -223,19 +245,20 @@ async function rekeyEvidence(ctx: RekeyCtx, sum: RekeyTargetSummary, failures: R
         // The blob header is authoritative (a previous run may have stopped after writing the blob).
         if (ctx.keyring.keyIdOf(blob) !== current) {
           const next = ctx.keyring.encrypt(ctx.keyring.decrypt(blob, aad), aad);
-          await ctx.storage.put(r.storageKey, next);
+          await store.put(r.storageKey, next);
         }
         const updated = await ctx.db
           .update(evidence)
           .set({ keyId: current })
-          .where(and(eq(evidence.id, r.id), eq(evidence.storageKey, r.storageKey), isNull(evidence.purgedAt)))
+          .where(and(eq(evidence.id, r.id), eq(evidence.storageKey, r.storageKey), evidenceAtLocation(r.storageLocation), isNull(evidence.purgedAt)))
           .returning({ id: evidence.id });
         if (updated.length) {
           sum.rekeyed++;
         } else {
-          // Purged (or moved) while we were writing: make sure the blob we wrote does not outlive the purge.
-          const [now] = await ctx.db.select({ purgedAt: evidence.purgedAt, storageKey: evidence.storageKey }).from(evidence).where(eq(evidence.id, r.id));
-          if (!now || now.purgedAt || now.storageKey !== r.storageKey) await ctx.storage.delete(r.storageKey);
+          // Purged (or moved by storage:move) while we were writing: make sure the blob we wrote does not outlive
+          // the purge or stay behind in the old location.
+          const [now] = await ctx.db.select({ purgedAt: evidence.purgedAt, storageKey: evidence.storageKey, storageLocation: evidence.storageLocation }).from(evidence).where(eq(evidence.id, r.id));
+          if (!now || now.purgedAt || now.storageKey !== r.storageKey || now.storageLocation !== r.storageLocation) await store.delete(r.storageKey);
           sum.skipped++;
         }
       } catch (err) {

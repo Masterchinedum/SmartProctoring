@@ -1,55 +1,78 @@
 /**
- * Integration API (LMS / HR systems), prefix /api/v1. Customer documentation: docs/INTEGRATION_API.md.
+ * Integration API (LMS / HR systems), prefix /api/v1. Customer documentation: docs/INTEGRATION_API.md; machine-readable
+ * contract: GET /api/v1/openapi.json (docs/openapi.json), generated from packages/shared/src/integrations.ts.
  *
- * Auth: `Authorization: Bearer sp_live_...` (organisation API key, auth/api-key.ts). Every query is scoped to
- * the key's organisation (other organisations' ids are 404). Rate limit: API_RATE_LIMIT_PER_MINUTE per key
- * (default 600/min; 429 rate_limited). Writes and reads of reports / event lists are audit-logged with
- * actorType 'api_key'. Evidence images are never exposed here (staff-only); events carry an evidence count
- * and a staff link instead.
+ * Every route is registered from the endpoint catalogue (INTEGRATION_ENDPOINTS: method, path, required scope,
+ * idempotency), so the code cannot drift from the documented contract; test/integrations/contract.test.ts checks that
+ * no other route exists below /api/v1 and validates every response against its schema.
  *
- *   GET  /exams?status=                                   -> { items: IntegrationExamDTO[] }
- *   POST /candidates {name, email?, externalId?}          -> { candidate, created }  201 created | 200 updated (upsert by externalId)
- *   GET  /candidates?externalId=&email=&limit=&offset=    -> { items: IntegrationCandidateDTO[], total }
- *   POST /exams/:examId/assignments {candidateIds?, externalIds?} -> { items: IntegrationAssignmentDTO[] }
- *   GET  /sessions?examId=&externalId=&candidateId=&status=&limit=&offset= -> { items: IntegrationSessionDTO[], total }
- *   GET  /sessions/:id                                    -> IntegrationSessionDTO
- *   GET  /sessions/:id/report?tz=                         -> IntegrationSessionReportDTO
- *   GET  /sessions/:id/events?category=&type=&severity=&since= -> { items: IntegrationEventDTO[] }
+ * Auth: `Authorization: Bearer sp_live_...` (organisation API key, auth/api-key.ts): 401 invalid_api_key / api_key_expired,
+ * then the endpoint's scope (403 insufficient_scope). Every query is scoped to the key's organisation (other
+ * organisations' ids are 404). Rate limit: API_RATE_LIMIT_PER_MINUTE per key (default 600/min; 429 rate_limited).
+ * POSTs and PUTs accept an Idempotency-Key header (services/idempotency.ts). Writes and reads of reports / event lists
+ * are audit-logged with actorType 'api_key'. Evidence images are never exposed here (staff-only); events carry an
+ * evidence count and a staff link instead.
+ *
+ *   GET  /openapi.json                                    -> the OpenAPI 3.1 document (no API key; 60/min per IP)
+ *   GET  /exams?status=                                   -> { items: IntegrationExamDTO[] }                                    exams:read
+ *   POST /candidates {name, email?, externalId?}          -> { candidate, created }  201 created | 200 updated (upsert by externalId)  candidates:write
+ *   GET  /candidates?externalId=&email=&limit=&offset=    -> { items: IntegrationCandidateDTO[], total }                        candidates:read
+ *   POST /exams/:examId/assignments {candidateIds?, externalIds?, window?} -> { items: IntegrationAssignmentDTO[] }         assignments:write
+ *   GET  /sessions?examId=&externalId=&candidateId=&status=&limit=&offset= -> { items: IntegrationSessionDTO[], total }    sessions:read
+ *   GET  /sessions/:id                                    -> IntegrationSessionDTO (accessLink only with assignments:write)  sessions:read
+ *   PUT  /sessions/:id/window {window, note?}             -> IntegrationSessionDTO (before the exam starts; services/scheduling.ts)  assignments:write
+ *   GET  /sessions/:id/report?tz=                         -> IntegrationSessionReportDTO                                    reports:read
+ *   GET  /sessions/:id/events?category=&type=&severity=&review=&since= -> { items: IntegrationEventDTO[] }                  events:read
  */
 import {
   EVENT_CATALOG,
   integrationAssignSchema,
   integrationCandidateSchema,
+  integrationCandidatesQuerySchema,
+  integrationEndpoint,
+  integrationEventsQuerySchema,
+  integrationExamsQuerySchema,
+  integrationOpenApiJson,
+  integrationReportQuerySchema,
+  integrationSessionsQuerySchema,
+  rescheduleRequestSchema,
   SESSION_STATUSES,
   TERMINAL_STATUSES,
   type EventDTO,
   type IntegrationAssignmentDTO,
   type IntegrationCandidateDTO,
+  type IntegrationCandidateUpsertDTO,
   type IntegrationEventDTO,
   type IntegrationExamDTO,
+  type IntegrationOperationId,
   type IntegrationSessionDTO,
   type IntegrationSessionReportDTO,
   type SessionStatus,
   type SessionSummaryDTO,
 } from '@sp/shared';
 import { and, asc, desc, eq, inArray, notInArray, sql, type SQL } from 'drizzle-orm';
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
-import { z } from 'zod';
-import { bearerApiKey, getApiKey, requireApiKey, type ApiKeyPrincipal } from '../../auth/api-key.js';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
+import { bearerApiKey, getApiKey, requireApiKey, requireScope, type ApiKeyPrincipal } from '../../auth/api-key.js';
 import type { Ctx } from '../../context.js';
 import type { DbOrTx } from '../../db/index.js';
-import { candidates, examSessions, exams, type Candidate } from '../../db/schema.js';
+import { candidates, examSessions, examVersions, exams, type Candidate } from '../../db/schema.js';
 import { audit } from '../../lib/audit.js';
 import { sha256Hex } from '../../lib/crypto.js';
 import { conflict, notFound, validationFailed } from '../../lib/errors.js';
-import { accessLinkFor, loadSessionSummaries } from '../../services/dto.js';
+import { accessLinkFor, loadSessionSummaries, sessionWindow } from '../../services/dto.js';
+import { acceptWindow, rescheduleSession } from '../../services/scheduling.js';
 import { sessionStaffUrl } from '../../services/email-alerts.js';
+import { idempotencyGuard, storeIdempotentResponse } from '../../services/idempotency.js';
 import { buildSessionReport } from '../../services/reports.js';
 import { resolveTimeZone } from '../../services/reports-format.js';
 import { loadOrderedSessionEvents } from '../../services/reports-timeline.js';
+import { assertCandidateQuota, assertSessionQuota, recordSessionsCreated } from '../../services/quotas.js';
 import { createExamSession } from '../../services/session-actions.js';
-import { eventFilterConds } from '../admin/events.js';
+import { eventFilterCondsFrom } from '../admin/events.js';
 import { blankToUndefined, idParam, isUuid, listParam } from '../admin/common.js';
+
+/** The OpenAPI document is public (no organisation data): limited per client IP. */
+export const OPENAPI_RATE_LIMIT_PER_MINUTE = 60;
 
 /* ------------------------------------------------------------------ mapping */
 
@@ -60,13 +83,20 @@ export function toIntegrationCandidateDTO(c: Candidate): IntegrationCandidateDTO
 const FACE_SCORE_KEY = /similarity/i;
 const FACE_SCORE_TEXT = / \((?:lowest |highest )?similarity -?\d+(?:\.\d+)?\)/gi;
 
+/** `T` with every property named like "similarity" (at any depth) typed as null — what withoutFaceScores returns. */
+export type WithoutFaceScores<T> = T extends readonly (infer U)[]
+  ? WithoutFaceScores<U>[]
+  : T extends object
+    ? { [K in keyof T]: K extends `${string}${'similarity' | 'Similarity'}${string}` ? null : WithoutFaceScores<T[K]> }
+    : T;
+
 /**
  * The integration API never carries face-similarity scores (docs/INTEGRATION_API.md): they are biometric
  * measurements that stay behind staff sign-in. Every field named like `similarity` (session identity summary,
  * ID-photo result, event details such as min/maxSimilarity) becomes null, and the "(similarity 0.31)" asides
  * in report sentences are removed.
  */
-export function withoutFaceScores<T>(value: T): T {
+export function withoutFaceScores<T>(value: T): WithoutFaceScores<T> {
   const walk = (v: unknown): unknown => {
     if (typeof v === 'string') return v.replace(FACE_SCORE_TEXT, '');
     if (Array.isArray(v)) return v.map(walk);
@@ -77,7 +107,7 @@ export function withoutFaceScores<T>(value: T): T {
     }
     return v;
   };
-  return walk(value) as T;
+  return walk(value) as WithoutFaceScores<T>;
 }
 
 export function toIntegrationEventDTO(e: EventDTO, publicUrl: string): IntegrationEventDTO {
@@ -111,6 +141,8 @@ async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSu
       status: s.status,
       endReason: s.endReason,
       exam: s.exam,
+      examVersion: s.examVersion?.number ?? null,
+      accommodations: s.accommodations ?? [],
       candidate: s.candidate,
       createdAt: x?.createdAt.getTime() ?? 0,
       startedAt: s.startedAt,
@@ -118,10 +150,12 @@ async function integrationSessions(ctx: Ctx, orgId: string, summaries: SessionSu
       remainingMs: s.remainingMs,
       timerRunning: s.timerRunning,
       pauseCount: s.pauseCount,
-      score: x?.score ? { points: x.score.points, maxPoints: x.score.maxPoints, autoGraded: x.score.autoGraded } : null,
+      score: x?.score ? { points: x.score.points, maxPoints: x.score.maxPoints, autoGraded: x.score.autoGraded, regraded: x.score.regrades?.length ?? 0 } : null,
       counts: s.counts,
       hold: s.hold,
       accessLink: s.accessLink,
+      window: s.window ?? null,
+      review: { state: s.review?.state ?? 'none', outcome: s.review?.outcome ?? null },
       staffUrl: sessionStaffUrl(ctx.config.publicUrl, s.id),
     };
   });
@@ -139,25 +173,11 @@ async function apiAudit(db: DbOrTx, key: ApiKeyPrincipal, now: number, action: s
   await audit(db, { orgId: key.orgId, actorType: 'api_key', actorId: key.id, action, targetType, targetId, meta: { apiKey: key.name, ...meta }, ip: key.ip, at: now });
 }
 
-const pagingSchema = z.object({
-  limit: z.coerce.number().int().min(1).max(500).default(100),
-  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
-});
-
-const examsQuerySchema = z.object({ status: z.enum(['draft', 'published', 'archived']).optional() });
-const candidatesQuerySchema = pagingSchema.extend({ externalId: z.string().max(200).optional(), email: z.string().max(254).optional() });
-const sessionsQuerySchema = pagingSchema.extend({
-  examId: z.string().optional(),
-  candidateId: z.string().optional(),
-  externalId: z.string().max(200).optional(),
-  status: z.string().optional(),
-});
-
 /* ------------------------------------------------------------------ routes */
 
 export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
   const ctx = app.ctx;
-  const rateLimit = {
+  const keyRateLimit = {
     max: ctx.config.integrationApi.rateLimitPerMinute,
     timeWindow: '1 minute',
     // Per API key (hashed; no database access), falling back to the client IP for requests without a key.
@@ -166,16 +186,39 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
       return key ? `api:${sha256Hex(key).slice(0, 32)}` : `api-ip:${req.ip}`;
     },
   };
-  const auth = { preHandler: requireApiKey, config: { rateLimit } };
+
+  /** Register an endpoint of the catalogue: its method, path, scope check and idempotency come from the contract. */
+  function endpoint<T>(operationId: IntegrationOperationId, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<T>): void {
+    const e = integrationEndpoint(operationId);
+    const preHandler: preHandlerAsyncHookHandler[] = e.scope ? [requireApiKey, requireScope(e.scope)] : [];
+    if (e.idempotent) preHandler.push(idempotencyGuard);
+    app.route({
+      method: e.method,
+      url: e.path,
+      preHandler,
+      ...(e.idempotent ? { onSend: storeIdempotentResponse } : {}),
+      config: { rateLimit: e.scope ? keyRateLimit : { max: OPENAPI_RATE_LIMIT_PER_MINUTE, timeWindow: '1 minute' } },
+      handler,
+    });
+  }
+
+  /* ---------------------------------------------------------------- the contract */
+
+  const openApiDocument = integrationOpenApiJson({ serverUrl: `${ctx.config.publicUrl}/api/v1` });
+  endpoint('getOpenApiDocument', async (_req, reply) => {
+    reply.header('Cache-Control', 'public, max-age=300').type('application/json; charset=utf-8');
+    return openApiDocument;
+  });
 
   /* ---------------------------------------------------------------- exams */
 
-  app.get('/exams', auth, async (req): Promise<{ items: IntegrationExamDTO[] }> => {
+  endpoint('listExams', async (req): Promise<{ items: IntegrationExamDTO[] }> => {
     const key = getApiKey(req);
-    const q = examsQuerySchema.parse(blankToUndefined(req.query));
+    const q = integrationExamsQuerySchema.parse(blankToUndefined(req.query));
     const rows = await ctx.db
-      .select({ id: exams.id, title: exams.title, status: exams.status, durationSec: exams.durationSec })
+      .select({ id: exams.id, title: exams.title, status: exams.status, durationSec: exams.durationSec, version: examVersions.number })
       .from(exams)
+      .leftJoin(examVersions, eq(examVersions.id, exams.currentVersionId))
       .where(and(eq(exams.orgId, key.orgId), q.status ? eq(exams.status, q.status) : undefined))
       .orderBy(desc(exams.createdAt), desc(exams.id));
     return { items: rows };
@@ -183,7 +226,7 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
 
   /* ---------------------------------------------------------------- candidates */
 
-  app.post('/candidates', auth, async (req, reply) => {
+  endpoint('upsertCandidate', async (req, reply): Promise<IntegrationCandidateUpsertDTO> => {
     const key = getApiKey(req);
     const input = normaliseCandidate(req.body);
     const now = ctx.now();
@@ -211,6 +254,7 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
           return { row: updated, created: false };
         }
       }
+      await assertCandidateQuota(tx, key.orgId, 1, now); // 409 quota_exceeded (services/quotas.ts)
       const [inserted] = await tx
         .insert(candidates)
         .values({ orgId: key.orgId, name: input.name, email: input.email ?? null, externalId: input.externalId ?? null, createdAt: new Date(now), updatedAt: new Date(now) })
@@ -222,9 +266,9 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     return { candidate: toIntegrationCandidateDTO(row), created };
   });
 
-  app.get('/candidates', auth, async (req) => {
+  endpoint('listCandidates', async (req): Promise<{ items: IntegrationCandidateDTO[]; total: number }> => {
     const key = getApiKey(req);
-    const q = candidatesQuerySchema.parse(blankToUndefined(req.query));
+    const q = integrationCandidatesQuerySchema.parse(blankToUndefined(req.query));
     const where = and(
       eq(candidates.orgId, key.orgId),
       q.externalId ? eq(candidates.externalId, q.externalId.trim()) : undefined,
@@ -239,11 +283,12 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
 
   /* ---------------------------------------------------------------- assignments */
 
-  app.post('/exams/:examId/assignments', auth, async (req) => {
+  endpoint('assignCandidates', async (req): Promise<{ items: IntegrationAssignmentDTO[] }> => {
     const key = getApiKey(req);
     const examId = idParam(req, 'examId', 'Exam', 'exam_not_found');
     const body = integrationAssignSchema.parse(req.body ?? {});
     const now = ctx.now();
+    const window = acceptWindow(body.window, now);
     const items = await ctx.db.transaction(async (tx) => {
       const [exam] = await tx
         .select()
@@ -305,19 +350,21 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
       const existing = new Map<string, (typeof current)[number]>();
       for (const s of current) if (!existing.has(s.candidateId)) existing.set(s.candidateId, s);
 
+      await assertSessionQuota(tx, key.orgId, ordered.filter((c) => !existing.has(c.id)).length, now); // 409 quota_exceeded
       const out: IntegrationAssignmentDTO[] = [];
       let created = 0;
       for (const c of ordered) {
         const prev = existing.get(c.id);
         if (prev) {
-          out.push({ sessionId: prev.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: accessLinkFor(ctx, prev) ?? '', existing: true });
+          out.push({ sessionId: prev.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: accessLinkFor(ctx, prev) ?? '', existing: true, window: sessionWindow(prev) });
           continue;
         }
-        const s = await createExamSession(ctx, tx, { orgId: key.orgId, examId, candidateId: c.id });
-        out.push({ sessionId: s.session.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: s.accessLink, existing: false });
+        const s = await createExamSession(ctx, tx, { orgId: key.orgId, examId, candidateId: c.id, window });
+        out.push({ sessionId: s.session.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: s.accessLink, existing: false, window });
         created++;
       }
-      await apiAudit(tx, key, now, 'api.exam.assigned', 'exam', examId, { requested: ordered.length, created, existing: ordered.length - created });
+      await recordSessionsCreated(tx, key.orgId, created, now);
+      await apiAudit(tx, key, now, 'api.exam.assigned', 'exam', examId, { requested: ordered.length, created, existing: ordered.length - created, ...(window ? { window } : {}) });
       return out;
     });
     for (const a of items) if (!a.existing) ctx.live.sessionChanged(a.sessionId, { orgId: key.orgId });
@@ -326,9 +373,9 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
 
   /* ---------------------------------------------------------------- sessions */
 
-  app.get('/sessions', auth, async (req) => {
+  endpoint('listSessions', async (req): Promise<{ items: IntegrationSessionDTO[]; total: number }> => {
     const key = getApiKey(req);
-    const q = sessionsQuerySchema.parse(blankToUndefined(req.query));
+    const q = integrationSessionsQuerySchema.parse(blankToUndefined(req.query));
     const conds: SQL[] = [];
     if (q.examId) {
       if (!isUuid(q.examId)) throw validationFailed('Invalid exam id', [{ path: 'examId', message: 'Must be an exam id' }]);
@@ -357,33 +404,56 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
     return { items: await integrationSessions(ctx, key.orgId, summaries), total };
   });
 
-  app.get('/sessions/:id', auth, async (req): Promise<IntegrationSessionDTO> => {
+  endpoint('getSession', async (req): Promise<IntegrationSessionDTO> => {
     const key = getApiKey(req);
     const id = idParam(req, 'id', 'Session', 'session_not_found');
-    // The candidate's link is returned for a single session (like the staff detail view), never in lists.
-    const summaries = await loadSessionSummaries(ctx, ctx.db, { orgId: key.orgId, sessionIds: [id], includeAccessLink: true });
+    // The candidate's link is returned for a single session (like the staff detail view), never in lists, and only to
+    // keys that may assign candidates (it lets its holder take the exam as the candidate).
+    const summaries = await loadSessionSummaries(ctx, ctx.db, { orgId: key.orgId, sessionIds: [id], includeAccessLink: key.scopes.includes('assignments:write') });
     if (summaries.length === 0) throw notFound('Session not found', 'session_not_found');
     return (await integrationSessions(ctx, key.orgId, summaries))[0];
   });
 
-  app.get('/sessions/:id/report', auth, async (req): Promise<IntegrationSessionReportDTO> => {
+  /** Set, change or clear the scheduling window of a session that has not started (409 already_started / invalid_state). */
+  endpoint('rescheduleSession', async (req): Promise<IntegrationSessionDTO> => {
     const key = getApiKey(req);
     const id = idParam(req, 'id', 'Session', 'session_not_found');
-    const tz = resolveTimeZone((req.query as Record<string, unknown> | undefined)?.tz);
-    const report = await buildSessionReport(ctx, id, key.orgId, { timeZone: tz });
-    await apiAudit(ctx.db, key, ctx.now(), 'api.session.report_read', 'session', id);
-    return withoutFaceScores({ ...report, notableEvents: report.notableEvents.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)), staffUrl: sessionStaffUrl(ctx.config.publicUrl, id) });
+    const body = rescheduleRequestSchema.parse(req.body ?? {});
+    await rescheduleSession(ctx, id, { type: 'api_key', id: key.id, orgId: key.orgId, ip: key.ip, name: key.name }, body.window, body.note ?? null);
+    const summaries = await loadSessionSummaries(ctx, ctx.db, { orgId: key.orgId, sessionIds: [id] });
+    if (summaries.length === 0) throw notFound('Session not found', 'session_not_found');
+    return (await integrationSessions(ctx, key.orgId, summaries))[0];
   });
 
-  app.get('/sessions/:id/events', auth, async (req) => {
+  endpoint('getSessionReport', async (req): Promise<IntegrationSessionReportDTO> => {
     const key = getApiKey(req);
     const id = idParam(req, 'id', 'Session', 'session_not_found');
+    const tz = resolveTimeZone(integrationReportQuerySchema.parse(blankToUndefined(req.query)).tz);
+    const report = await buildSessionReport(ctx, id, key.orgId, { timeZone: tz });
+    await apiAudit(ctx.db, key, ctx.now(), 'api.session.report_read', 'session', id);
+    // Explanations are reviewer-facing (they quote detector and identity measurements): not for integrations; nor
+    // are the internal decision versions (Quality page). Reports never carry the candidate's link.
+    const { explanations: _explanations, ...rest } = report;
+    const { versions: _versions, ...identity } = rest.identity;
+    return withoutFaceScores({
+      ...rest,
+      session: { ...rest.session, accessLink: null },
+      identity,
+      notableEvents: report.notableEvents.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)),
+      staffUrl: sessionStaffUrl(ctx.config.publicUrl, id),
+    });
+  });
+
+  endpoint('listSessionEvents', async (req): Promise<{ items: IntegrationEventDTO[] }> => {
+    const key = getApiKey(req);
+    const id = idParam(req, 'id', 'Session', 'session_not_found');
+    const filters = integrationEventsQuerySchema.parse(blankToUndefined(req.query));
     const [s] = await ctx.db
       .select({ id: examSessions.id })
       .from(examSessions)
       .where(and(eq(examSessions.id, id), eq(examSessions.orgId, key.orgId)));
     if (!s) throw notFound('Session not found', 'session_not_found');
-    const conds = eventFilterConds(req.query);
+    const conds = eventFilterCondsFrom(filters);
     const list = conds === null ? [] : await loadOrderedSessionEvents(ctx.db, id, ...conds);
     await apiAudit(ctx.db, key, ctx.now(), 'api.session.events_read', 'session', id, { rows: list.length });
     return { items: list.map((e) => toIntegrationEventDTO(e, ctx.config.publicUrl)) };

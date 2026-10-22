@@ -1,18 +1,203 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { DEFAULT_IDENTITY_THRESHOLDS, DEFAULT_POLICY, type OrgSettingsDTO } from '@sp/shared';
+import { DEFAULT_POLICY, MFA_REQUIREMENT_LABEL, MFA_REQUIREMENTS, mfaRequiredFor, type MfaRequirement, type OrgSettingsDTO } from '@sp/shared';
+import { useAuth } from '../auth';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { qk } from '../api/queries';
 import { normalizePolicy, validatePolicy } from '../lib/policyForm';
 import { ErrorState, Loading, PageHeader } from '../components/Common';
 import { PolicyEditor } from '../components/PolicyEditor';
+import { EvidenceStorageSection } from './EvidenceStorageSection';
+import { SingleSignOnSection } from './SsoSection';
+import { QUOTA_LEVEL_CLASS, QUOTA_LEVEL_TEXT, usageFootnote, usageRow, usageWarnings } from '../lib/quotas';
 
 export function SettingsPage() {
   const q = useQuery({ queryKey: qk.settings, queryFn: api.settings, retry: shouldRetry });
   if (q.isPending) return <Loading />;
   if (q.isError) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
-  return <SettingsForm key={JSON.stringify(q.data)} initial={q.data} />;
+  return (
+    <div className="stack">
+      <PageHeader
+        title="Settings"
+        subtitle="Organisation-wide defaults. Individual exams can override the proctoring policy and evidence retention."
+        actions={
+          <Link className="btn" to="/admin/integrations">
+            Integrations: API keys, webhooks, email alerts, face verifier ›
+          </Link>
+        }
+      />
+      <UsageSection />
+      <SettingsForm key={JSON.stringify(q.data)} initial={q.data} />
+      <ReviewTargetsSection key={`sla-${JSON.stringify(q.data.reviewSla)}`} settings={q.data} />
+      <SecuritySection settings={q.data} />
+      <EvidenceStorageSection />
+      <SingleSignOnSection />
+    </div>
+  );
+}
+
+/**
+ * Usage this month against the limits the server operator set (exams, candidates, exam sessions per month), with a
+ * warning from 80 %. Read-only: the organisation's kind and limits are not staff settings.
+ */
+function UsageSection() {
+  const q = useQuery({ queryKey: qk.usage, queryFn: api.usage, retry: shouldRetry });
+  return (
+    <section className="card stack" aria-labelledby="usage-title" data-testid="settings-usage">
+      <h2 id="usage-title">Usage and limits</h2>
+      {q.isPending ? (
+        <Loading />
+      ) : q.isError ? (
+        <ErrorState error={q.error} onRetry={() => void q.refetch()} />
+      ) : (
+        <>
+          {q.data.kind === 'sandbox' ? (
+            <p className="small" data-testid="usage-sandbox">
+              This is a <strong>sandbox</strong> organisation for trying SmartProctoring out and testing integrations: exam sessions, images and candidates are deleted{' '}
+              {q.data.sandbox ? `${q.data.sandbox.purgeAfterDays} days` : 'a few days'} after their last use. Do not use it for real candidates.
+            </p>
+          ) : null}
+          {usageWarnings(q.data).map((w) => (
+            <div key={w} className={`banner ${w.startsWith('Limit reached') ? 'banner-danger' : 'banner-warning'} small`} data-testid="usage-warning">
+              {w}
+            </div>
+          ))}
+          <table className="table usage-table">
+            <thead>
+              <tr>
+                <th scope="col">What</th>
+                <th scope="col">Used</th>
+                <th scope="col">
+                  <span className="visually-hidden">Share of the limit</span>
+                </th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {q.data.quotas.map(usageRow).map((r) => (
+                <tr key={r.quota} data-testid={`usage-${r.quota}`}>
+                  <th scope="row">{r.label}</th>
+                  <td>{r.text}</td>
+                  <td className="usage-bar-cell">
+                    {r.percent != null ? (
+                      <div className={`usage-bar level-${r.level}`} aria-hidden="true">
+                        <span style={{ width: `${r.percent}%` }} />
+                      </div>
+                    ) : null}
+                  </td>
+                  <td>{r.percent != null ? <span className={QUOTA_LEVEL_CLASS[r.level]}>{QUOTA_LEVEL_TEXT[r.level]}</span> : <span className="muted small">No limit</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="small muted">{usageFootnote(q.data)}</p>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** Service-level targets for review work: shown in the review queue, on the dashboard and as monitoring metrics. */
+function ReviewTargetsSection({ settings }: { settings: OrgSettingsDTO }) {
+  const qc = useQueryClient();
+  const [hold, setHold] = useState(String(settings.reviewSla.holdMinutes));
+  const [flags, setFlags] = useState(String(settings.reviewSla.flagHours));
+  const h = Number(hold);
+  const f = Number(flags);
+  const valid = Number.isInteger(h) && h >= 1 && h <= 1440 && Number.isInteger(f) && f >= 1 && f <= 720;
+  const changed = h !== settings.reviewSla.holdMinutes || f !== settings.reviewSla.flagHours;
+  const m = useMutation({
+    mutationFn: () => api.updateSettings({ reviewSla: { holdMinutes: h, flagHours: f } }),
+    onSuccess: (s) => {
+      qc.setQueryData(qk.settings, s);
+      void qc.invalidateQueries({ queryKey: qk.reviewQueueAll });
+    },
+  });
+  return (
+    <section className="card stack" aria-labelledby="sla-title" data-testid="settings-review-targets">
+      <h2 id="sla-title">Review targets</h2>
+      <p className="small muted">
+        How quickly staff should decide. A held exam keeps the candidate waiting, so its target is in minutes. Reviews past a target are marked overdue in the review queue and
+        on the dashboard, and counted in the monitoring metrics.
+      </p>
+      <form
+        className="grid-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (valid && changed) m.mutate();
+        }}
+      >
+        <label>
+          Decide a held exam within (minutes)
+          <input type="number" min={1} max={1440} value={hold} onChange={(e) => setHold(e.target.value)} required />
+        </label>
+        <label>
+          Decide flags within (hours)
+          <input type="number" min={1} max={720} value={flags} onChange={(e) => setFlags(e.target.value)} required />
+        </label>
+        <div className="row">
+          <button type="submit" className="btn btn-primary" disabled={!valid || !changed || m.isPending}>
+            {m.isPending ? 'Saving…' : 'Save targets'}
+          </button>
+        </div>
+      </form>
+      {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+    </section>
+  );
+}
+
+/** Who must use two-step sign-in. Only an owner can change it (an admin could otherwise exempt administrators). */
+function SecuritySection({ settings }: { settings: OrgSettingsDTO }) {
+  const { isOwner } = useAuth();
+  const qc = useQueryClient();
+  const [value, setValue] = useState<MfaRequirement>(settings.requireMfa);
+  const users = useQuery({ queryKey: qk.users, queryFn: api.users, retry: shouldRetry });
+  const m = useMutation({
+    mutationFn: () => api.updateSettings({ requireMfa: value }),
+    onSuccess: (s) => {
+      qc.setQueryData(qk.settings, s);
+      void qc.invalidateQueries({ queryKey: qk.me });
+    },
+  });
+  const active = (users.data?.items ?? []).filter((u) => !u.disabled);
+  const without = active.filter((u) => !u.mfaEnabledAt && mfaRequiredFor(value, u.role));
+  return (
+    <section className="card stack" aria-labelledby="security-title" data-testid="settings-security">
+      <h2 id="security-title">Two-step sign-in</h2>
+      <p className="small muted">
+        Staff who must use it and have not set it up can only set it up at their next request — nothing else is available to them until they have. Everyone can turn it on for
+        themselves under Account &amp; security. It applies to password sign-in: after single sign-on your identity provider handles the second step.
+      </p>
+      <label>
+        Requirement
+        <select value={value} disabled={!isOwner || m.isPending} onChange={(e) => setValue(e.target.value as MfaRequirement)} aria-describedby="mfa-req-hint">
+          {MFA_REQUIREMENTS.map((r) => (
+            <option key={r} value={r}>
+              {MFA_REQUIREMENT_LABEL[r]}
+            </option>
+          ))}
+        </select>
+        <span id="mfa-req-hint" className="small muted">
+          {isOwner ? 'Changes are recorded in the audit log.' : 'Only an owner can change this.'}
+        </span>
+      </label>
+      {users.data ? (
+        <div className="small">
+          {active.filter((u) => u.mfaEnabledAt).length} of {active.length} active staff use two-step sign-in.
+          {value !== 'off' && without.length ? ` ${without.length} required staff have not set it up yet: ${without.map((u) => u.name).join(', ')}.` : ''}
+        </div>
+      ) : null}
+      {m.isError ? <div className="banner banner-danger" role="alert">{errorMessage(m.error)}</div> : null}
+      {isOwner ? (
+        <div className="row">
+          <button type="button" className="btn btn-primary" disabled={value === settings.requireMfa || m.isPending} onClick={() => m.mutate()}>
+            {m.isPending ? 'Saving…' : 'Save requirement'}
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 interface Draft {
@@ -21,11 +206,6 @@ interface Draft {
   eventRetentionDays: string;
   abandonAfterDays: string;
   privacyContact: string;
-  match: string;
-  mismatch: string;
-  idPhotoMatch: string;
-  idPhotoMismatch: string;
-  mismatchConfirmations: string;
 }
 
 function toDraft(s: OrgSettingsDTO): Draft {
@@ -35,11 +215,6 @@ function toDraft(s: OrgSettingsDTO): Draft {
     eventRetentionDays: String(s.eventRetentionDays),
     abandonAfterDays: String(s.abandonAfterDays),
     privacyContact: s.privacyContact,
-    match: String(s.identityThresholds.match),
-    mismatch: String(s.identityThresholds.mismatch),
-    idPhotoMatch: String(s.identityThresholds.idPhotoMatch),
-    idPhotoMismatch: String(s.identityThresholds.idPhotoMismatch),
-    mismatchConfirmations: String(s.identityThresholds.mismatchConfirmations),
   };
 }
 
@@ -47,15 +222,10 @@ function toDraft(s: OrgSettingsDTO): Draft {
 export function validateSettingsDraft(d: Draft): Record<string, string> {
   const e: Record<string, string> = {};
   const int = (v: string) => Number.isInteger(Number(v)) && v.trim() !== '';
-  const unit = (v: string) => v.trim() !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
   if (!d.name.trim()) e.name = 'Required';
   if (!int(d.evidenceRetentionDays) || +d.evidenceRetentionDays < 1 || +d.evidenceRetentionDays > 3650) e.evidenceRetentionDays = 'Whole number of days, 1–3650';
   if (!int(d.eventRetentionDays) || +d.eventRetentionDays < 30 || +d.eventRetentionDays > 3650) e.eventRetentionDays = 'Whole number of days, 30–3650';
   if (!int(d.abandonAfterDays) || +d.abandonAfterDays < 1 || +d.abandonAfterDays > 3650) e.abandonAfterDays = 'Whole number of days, 1–3650';
-  for (const k of ['match', 'mismatch', 'idPhotoMatch', 'idPhotoMismatch'] as const) if (!unit(d[k])) e[k] = 'A number between 0 and 1';
-  if (!e.match && !e.mismatch && +d.mismatch >= +d.match) e.mismatch = 'Must be lower than the match threshold';
-  if (!e.idPhotoMatch && !e.idPhotoMismatch && +d.idPhotoMismatch >= +d.idPhotoMatch) e.idPhotoMismatch = 'Must be lower than the ID-photo match threshold';
-  if (!int(d.mismatchConfirmations) || +d.mismatchConfirmations < 1 || +d.mismatchConfirmations > 10) e.mismatchConfirmations = 'Whole number, 1–10';
   return e;
 }
 
@@ -68,12 +238,6 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
   const errors = validateSettingsDraft(d);
   const policyCheck = validatePolicy(policy);
   const hasErrors = Object.keys(errors).length > 0 || !policyCheck.ok || invalidPolicy.length > 0;
-  const thresholdsChanged =
-    +d.match !== initial.identityThresholds.match ||
-    +d.mismatch !== initial.identityThresholds.mismatch ||
-    +d.idPhotoMatch !== initial.identityThresholds.idPhotoMatch ||
-    +d.idPhotoMismatch !== initial.identityThresholds.idPhotoMismatch ||
-    +d.mismatchConfirmations !== initial.identityThresholds.mismatchConfirmations;
 
   const set = (patch: Partial<Draft>) => {
     setD((x) => ({ ...x, ...patch }));
@@ -88,13 +252,6 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
         abandonAfterDays: Number(d.abandonAfterDays),
         privacyContact: d.privacyContact.trim(),
         defaultPolicy: policy,
-        identityThresholds: {
-          match: Number(d.match),
-          mismatch: Number(d.mismatch),
-          idPhotoMatch: Number(d.idPhotoMatch),
-          idPhotoMismatch: Number(d.idPhotoMismatch),
-          mismatchConfirmations: Number(d.mismatchConfirmations),
-        },
       }),
     onSuccess: (s) => {
       qc.setQueryData(qk.settings, s);
@@ -120,15 +277,6 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
         if (!hasErrors) m.mutate();
       }}
     >
-      <PageHeader
-        title="Settings"
-        subtitle="Organisation-wide defaults. Individual exams can override the proctoring policy and evidence retention."
-        actions={
-          <Link className="btn" to="/admin/integrations">
-            Integrations: API keys, webhooks, email alerts, face verifier ›
-          </Link>
-        }
-      />
       <section className="card stack">
         <h2>Organisation</h2>
         <div className="grid-2">
@@ -154,26 +302,22 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
           )}
         </div>
       </section>
-      <section className="card stack">
+      <section className="card stack" data-testid="settings-thresholds">
         <h2>Identity decision thresholds</h2>
-        <div className="banner banner-warning small">
-          <strong>Change these only on the basis of an offline evaluation on your own consented data</strong> (see the Quality page and <code>docs/accuracy/</code>).
-          Raising the match threshold or lowering the mismatch threshold increases “inconclusive” results; moving the mismatch threshold up increases false “possible
-          different person” events, which put genuine candidates on hold. Changes apply to new identity checks only and are audit-logged.
+        <p className="small">
+          Version {initial.decisionConfigVersion}: same person at or above <strong>{initial.identityThresholds.match}</strong>, possible different person below{' '}
+          <strong>{initial.identityThresholds.mismatch}</strong> (ID photo: {initial.identityThresholds.idPhotoMatch} / {initial.identityThresholds.idPhotoMismatch};{' '}
+          {initial.identityThresholds.mismatchConfirmations} confirmations).
+        </p>
+        <p className="small muted">
+          The thresholds are versioned. A change is proposed with a reason, previewed on recent identity samples and approved by a second administrator; an earlier
+          version can be restored at once. Every identity decision records the version that made it.
+        </p>
+        <div>
+          <Link className="btn btn-sm" to="/admin/quality">
+            Decision configuration on the Detection quality page ›
+          </Link>
         </div>
-        <div className="grid-2">
-          {field('match', 'Match threshold (same person at or above)', { type: 'number', min: 0, max: 1, step: 0.01 }, `Default ${DEFAULT_IDENTITY_THRESHOLDS.match}`)}
-          {field('mismatch', 'Mismatch threshold (possible different person below)', { type: 'number', min: 0, max: 1, step: 0.01 }, `Default ${DEFAULT_IDENTITY_THRESHOLDS.mismatch}`)}
-          {field('idPhotoMatch', 'ID photo: match threshold', { type: 'number', min: 0, max: 1, step: 0.01 }, `Default ${DEFAULT_IDENTITY_THRESHOLDS.idPhotoMatch}`)}
-          {field('idPhotoMismatch', 'ID photo: mismatch threshold', { type: 'number', min: 0, max: 1, step: 0.01 }, `Default ${DEFAULT_IDENTITY_THRESHOLDS.idPhotoMismatch}`)}
-          {field(
-            'mismatchConfirmations',
-            'Consecutive mismatches before raising an event',
-            { type: 'number', min: 1, max: 10, step: 1 },
-            `Default ${DEFAULT_IDENTITY_THRESHOLDS.mismatchConfirmations}. Single samples never raise an event on their own.`,
-          )}
-        </div>
-        {thresholdsChanged ? <div className="banner banner-danger small">You are changing identity thresholds.</div> : null}
       </section>
       <section className="stack">
         <div className="row">

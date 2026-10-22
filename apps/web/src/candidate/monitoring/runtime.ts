@@ -5,6 +5,8 @@ import {
   createFrameMetricsTracker,
   facesFromMediapipe,
   objectsFromMediapipe,
+  type AttentionInfo,
+  type AttentionState,
   type ContinuityFire,
 } from '@sp/detection';
 import type {
@@ -23,12 +25,14 @@ import type {
   MonitoringStatus,
   ProctoringPolicy,
 } from '@sp/shared';
-import { classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api';
+import { CandidateApiError, classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api';
+import { isFullscreen, onFullscreenChange } from '../fullscreen';
 import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
+import { ActivityTracker } from './activity';
 import { AnalysisFrame, captureFaceCrop, captureJpeg, GraySampler, HeldFrame, sameFrame } from './frames';
-import { BurstSampler, burstEligible, SUSPECT_INTERVAL_MS, type BurstResult } from './sampler';
+import { BurstSampler, burstEligible, type BurstResult } from './sampler';
 import type { TraceRecorder } from './trace';
 import { loadVision, type Vision } from './vision';
 
@@ -40,6 +44,7 @@ export { SAMPLE_PRIORITY, SampleTriggerQueue } from './sampler';
  *   camera ─► 5 Hz loop ─► FrameObservation ─► engine.ingest ─► episodes ─► outbox (events + evidence)
  *                                                       └──► signals ─► identity samples / candidate prompts
  *   DOM (visibility, focus, fullscreen, clipboard, displays) ─► browser signal tracker ─► outbox
+ *   DOM (key / pointer / scroll / answer timing only) ─► FrameObservation.activity (engine only; never uploaded)
  *
  * Nothing here blocks the exam: model or camera failures degrade monitoring and are reported as
  * technical events.
@@ -62,6 +67,11 @@ export interface RuntimeDeps {
   baseline: Baseline | null;
   /** Previous period's baseline to compare the environment with (after resume / reconnect). */
   previousBaseline?: Baseline | null;
+  /**
+   * The candidate's working region learned in a previous period of this session (MonitoringRuntime.attentionState()
+   * of the previous run). The engine keeps it while the camera is unchanged. In memory only.
+   */
+  attentionState?: AttentionState | null;
   trace?: TraceRecorder | null;
   onSignal?: (s: Extract<EngineSignal, { kind: 'candidate_prompt' | 'candidate_prompt_clear' }>) => void;
   onStatus?: (s: MonitoringStatus) => void;
@@ -95,6 +105,8 @@ export interface RuntimeDebug {
   swapTriggers: ContinuityFire[];
   lastBurst: BurstResult | null;
   budgetLeft: number;
+  /** Where looking away is measured from (learned working region / calibration). */
+  attention: AttentionInfo;
 }
 
 export function episodeToUpsert(ep: EpisodeUpdate, instanceId: string): EventUpsert {
@@ -135,6 +147,8 @@ export class MonitoringRuntime {
   private readonly held = new HeldFrame();
   private readonly metrics = createFrameMetricsTracker();
   private readonly bursts: BurstSampler;
+  /** Exam-page interaction timing for the engine (timing only; stays in the browser). */
+  private readonly activity = new ActivityTracker(() => this.now());
   private lastFaces = 0;
   private running = false;
   private stopped = false;
@@ -163,10 +177,12 @@ export class MonitoringRuntime {
       evidence: p.evidence,
       baseline: deps.baseline ?? undefined,
       idFactory: uuid,
+      attentionState: deps.attentionState ?? null,
     });
     this.tracker = createBrowserSignalTracker(p.browser);
     this.bursts = new BurstSampler({
       burstSize: p.identity.burstSize ?? 3,
+      routineBurstSize: p.identity.routineBurstSize ?? p.identity.burstSize ?? 3,
       uuid,
       now: () => this.now(),
       mono: () => performance.now(),
@@ -213,7 +229,13 @@ export class MonitoringRuntime {
       swapTriggers: cont.fired,
       lastBurst: this.bursts.last,
       budgetLeft: this.bursts.budget.available(performance.now()),
+      attention: this.engine.attentionInfo(),
     };
+  }
+
+  /** The learned working region, for the next period of this session (kept in memory by the controller). */
+  attentionState(): AttentionState {
+    return this.engine.attentionState();
   }
 
   get isRunning(): boolean {
@@ -239,6 +261,16 @@ export class MonitoringRuntime {
       fps: Math.round(this.fps() * 10) / 10,
       cameraState: this.deps.camera.state.state,
     };
+  }
+
+  /** policy.camera.enabled: false = an exam without a camera (an accommodation) — browser rules only. */
+  private get cameraOn(): boolean {
+    return this.deps.policy.camera?.enabled !== false;
+  }
+
+  /** Identity samples only exist with automatic verification (none when identity is verified by staff). */
+  private get identitySampling(): boolean {
+    return this.cameraOn && this.deps.policy.identity.verification !== 'staff';
   }
 
   async start(): Promise<void> {
@@ -276,9 +308,16 @@ export class MonitoringRuntime {
     }
 
     this.attachBrowserSignals();
+    if (!this.cameraOn) {
+      // No camera (approved arrangement): only the browser rules are observed; nothing camera-based starts.
+      this.lastStatus = { state: 'ok', faces: 0, label: 'No camera (approved arrangement)', open: [] };
+      this.deps.onStatus?.(this.lastStatus);
+      this.scheduleLoop(0);
+      return;
+    }
     // Identity continuity matters most right after the exam starts / resumes / reconnects: sample at once.
     // (The server may ask for the same via CandidateSessionState.session.identitySample — deduplicated.)
-    this.bursts.request('exam_start', 'host');
+    if (this.identitySampling) this.bursts.request('exam_start', 'host');
     this.unsubCamera = this.deps.camera.subscribe((s) => this.onCamera(s));
     if (!this.deps.camera.state.wanted) void this.deps.camera.start();
     this.onCamera(this.deps.camera.state);
@@ -348,6 +387,7 @@ export class MonitoringRuntime {
 
     // Browser signal tracker runs regardless of the camera.
     this.pushEpisodes(this.tracker.tick(t));
+    if (!this.cameraOn) return;
     this.bursts.tick();
 
     const stale = nowMs - this.lastIngestAt >= MIN_INGEST_INTERVAL_MS;
@@ -393,6 +433,7 @@ export class MonitoringRuntime {
       this.sampleWithoutVision(video, nowMs);
     }
     if (!obs) return;
+    obs.activity = this.activity.snapshot();
     this.lastIngestAt = nowMs;
     this.deps.trace?.observation(stripDescriptors(obs));
     let out: EngineOutput;
@@ -422,8 +463,10 @@ export class MonitoringRuntime {
 
   private offerBurstFrame(source: HTMLVideoElement | HTMLCanvasElement, faces: FaceObservation[], t: number): void {
     const one = burstEligible(faces);
-    if (!this.bursts.wantsFrame(!!one && this.deps.camera.isVideoReady())) return;
-    const crop = captureFaceCrop(source, one!.box).then((c) => c?.blob ?? null);
+    const ready = this.deps.camera.isVideoReady();
+    // A server request that found no qualifying frame for a while is taken from whatever the camera shows.
+    if (!this.bursts.wantsFrame(!!one && ready, ready)) return;
+    const crop = captureFaceCrop(source, one?.box ?? null).then((c) => c?.blob ?? null);
     void this.bursts.addFrame(crop, t);
   }
 
@@ -466,6 +509,7 @@ export class MonitoringRuntime {
 
   /** Queue an identity sample; the burst is captured on the next analysed frames with one usable face. */
   private requestSample(trigger: IdentityCheckTrigger, source: 'engine' | 'host' | 'server' = 'engine'): void {
+    if (!this.identitySampling) return; // identity verified by staff: no face samples at all
     this.bursts.request(trigger, source);
   }
 
@@ -489,7 +533,7 @@ export class MonitoringRuntime {
     // Offline or server trouble: keep it for later delivery. A busy server (vision queue full) is told apart:
     // the sample waits, and that is not a reporting outage.
     try {
-      await this.deps.outbox.putSample({ id: f.sampleId, trigger: q.trigger, capturedAt: f.capturedAt, jpeg: f.jpeg, busy: isServerBusy(e), burstId: q.burstId, burstIndex: q.burstIndex, burstSize: q.burstSize });
+      await this.deps.outbox.putSample({ id: f.sampleId, trigger: q.trigger, capturedAt: f.capturedAt, jpeg: f.jpeg, busy: isServerBusy(e), retryAfterMs: e instanceof CandidateApiError ? e.retryAfterMs : null, burstId: q.burstId, burstIndex: q.burstIndex, burstSize: q.burstSize });
     } catch (err) {
       console.warn('[monitoring] failed to queue identity sample', err);
     }
@@ -506,16 +550,17 @@ export class MonitoringRuntime {
       return;
     }
     if (!final) return;
+    // The server tells the candidate only whether the image could be used (and guidance about it), never a verdict.
     const r = res.result;
-    if (r?.decision === 'unable_to_verify' && r.guidance?.length) {
-      // Non-blocking guidance: the image was not usable for a dependable comparison.
+    if (r && r.guidance?.length) {
+      // Non-blocking guidance: the image was not usable, or the light is too poor for a dependable comparison.
       this.deps.onSignal?.({
         kind: 'candidate_prompt',
         key: 'identity_guidance',
         severity: 'info',
-        message: `We couldn’t confirm your identity from the camera image. ${r.guidance.join(' ')}`,
+        message: r.usable ? r.guidance.join(' ') : `We couldn’t confirm your identity from the camera image. ${r.guidance.join(' ')}`,
       });
-    } else if (r?.decision === 'match') {
+    } else if (r?.usable) {
       this.deps.onSignal?.({ kind: 'candidate_prompt_clear', key: 'identity_guidance' });
     }
     if (!this.running) return;
@@ -592,7 +637,7 @@ export class MonitoringRuntime {
     on(document, 'visibilitychange', () => this.pushEpisodes(tr.visibility(document.visibilityState === 'hidden', this.now())));
     on(window, 'blur', () => this.pushEpisodes(tr.focus(false, this.now())));
     on(window, 'focus', () => this.pushEpisodes(tr.focus(true, this.now())));
-    on(document, 'fullscreenchange', () => this.pushEpisodes(tr.fullscreen(!!document.fullscreenElement, this.now())));
+    this.removers.push(onFullscreenChange(() => this.pushEpisodes(tr.fullscreen(isFullscreen(), this.now()))));
     for (const action of ['copy', 'cut', 'paste'] as const) {
       on(
         document,
@@ -605,6 +650,8 @@ export class MonitoringRuntime {
       );
     }
     if (block) on(document, 'contextmenu', (e) => e.preventDefault(), { capture: true });
+    // Interaction timing for the engine's working-region model (key / pointer / scroll / answer — timing only).
+    this.removers.push(this.activity.attach(document));
     const scr = window.screen as Screen & { isExtended?: boolean };
     const reportDisplays = () => {
       if (typeof scr.isExtended === 'boolean') this.pushEpisodes(tr.displays(scr.isExtended, this.now()));
@@ -615,7 +662,7 @@ export class MonitoringRuntime {
     const t = this.now();
     this.pushEpisodes(tr.visibility(document.visibilityState === 'hidden', t));
     this.pushEpisodes(tr.focus(document.hasFocus(), t));
-    this.pushEpisodes(tr.fullscreen(!!document.fullscreenElement, t));
+    this.pushEpisodes(tr.fullscreen(isFullscreen(), t));
     reportDisplays();
   }
 
@@ -679,18 +726,16 @@ export function stripDescriptors(obs: FrameObservation): FrameObservation {
 
 /**
  * Cadence after the final answer of a burst (identity engine v2): the next routine burst after
- * `nextSampleInMs`, labelled 'server_request' while the server wants a faster look (a follow-up was asked for,
- * or the evidence is 'monitoring' / 'suspect'), else 'periodic'. Without nextSampleInMs: 3 s while suspect, else
- * the policy interval. An older server (no nextSampleInMs field at all) gets its follow-up sample as before.
+ * `nextSampleInMs`, labelled 'server_request' while the server wants a faster look (it sent followUpInMs — the
+ * only hint it gives; the candidate is never told why), else 'periodic'. Without nextSampleInMs: the follow-up
+ * delay, else the policy interval. An older server (no nextSampleInMs field at all) gets its follow-up sample as
+ * before.
  */
 export function routineCadence(res: IdentitySampleResponse): { inMs: number | null; label: 'periodic' | 'server_request'; followUpInMs: number | null } {
-  const state = res.evidence?.state;
-  const v2 = res.nextSampleInMs !== undefined || res.evidence !== undefined || res.burst !== undefined;
-  const label: 'periodic' | 'server_request' = v2 && (res.followUpInMs != null || state === 'suspect' || state === 'monitoring' || state === 'confirmed_mismatch') ? 'server_request' : 'periodic';
-  const suspect = state === 'suspect' || state === 'confirmed_mismatch';
+  const v2 = res.nextSampleInMs !== undefined || res.burst !== undefined;
+  const label: 'periodic' | 'server_request' = v2 && res.followUpInMs != null ? 'server_request' : 'periodic';
   let inMs: number | null = null;
   if (res.nextSampleInMs != null && Number.isFinite(res.nextSampleInMs)) inMs = Math.max(0, res.nextSampleInMs);
   else if (v2 && res.followUpInMs != null) inMs = Math.max(0, res.followUpInMs);
-  else if (suspect) inMs = SUSPECT_INTERVAL_MS;
   return { inMs, label, followUpInMs: !v2 && res.followUpInMs != null ? res.followUpInMs : null };
 }

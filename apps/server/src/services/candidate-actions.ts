@@ -6,6 +6,7 @@ import {
   EVENT_TYPES,
   PRIVACY_NOTICE_VERSION,
   type EventType,
+  type ExamVersionQuestionDTO,
   type CandidateCommand,
   type ConsentRequest,
   type HeartbeatRequest,
@@ -17,15 +18,19 @@ import {
 } from '@sp/shared';
 import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { answers, examSessions, pauseRequests, questions, sessionCommands, type ExamSession, type Question } from '../db/schema.js';
+import { answers, examSessions, pauseRequests, sessionCommands, type ExamSession } from '../db/schema.js';
 import { audit } from '../lib/audit.js';
 import { badRequest, conflict, invalidState, notFound, validationFailed } from '../lib/errors.js';
 import { assertInControl, buildCandidateState, instanceInControl, SUPERSEDED_MESSAGE } from './candidate-state.js';
 import { recordMultipleInstances } from './checks.js';
 import { applyInstanceUsage, evaluateInstanceUsage } from './instance-usage.js';
-import { identitySampleRequest } from './identity-evidence.js';
+import { currentCapacity } from './capacity.js';
+import { sessionExamContent } from './exam-versions.js';
+import { identitySampleRequest, sampleWatchdog } from './identity-evidence.js';
 import { remainingMs, sessionClock, staffVisibleKey } from './dto.js';
-import { assertStatus, finalizeSession, pauseNow, pendingPauseRequest, requiredCheckFor, startExam, TERMINAL, withSession } from './session-state.js';
+import { applyOfflineLimit } from './recovery.js';
+import { assertWindowAllows } from './scheduling.js';
+import { assertStatus, finalizeSession, identityState, pauseNow, pendingPauseRequest, recordReportingTimeout, requiredCheckFor, startExam, TERMINAL, withSession, type SessionMutation } from './session-state.js';
 import { clockExpired } from '@sp/shared';
 
 export const OUTBOX_DELAY_MS = 30_000;
@@ -44,11 +49,41 @@ export async function acceptConsent(ctx: Ctx, sessionId: string, body: ConsentRe
 
 /* ------------------------------------------------------------------ start / submit */
 
-export async function startSession(ctx: Ctx, sessionId: string, instanceId: string): Promise<void> {
-  await withSession(ctx, sessionId, async (m) => {
+/** Retry-After of a deferred exam start: about how long the face-analysis backlog needs, within these bounds. */
+export const START_RETRY_AFTER_SEC = Object.freeze({ min: 5, max: 30 });
+
+/**
+ * Start the exam — unless this instance is at capacity (services/capacity.ts): then the start is deferred and the
+ * candidate app tries again after `retryAfterSec`. A scheduled exam starts everyone at once, and every start adds a
+ * burst of identity samples for its first minutes (PERFORMANCE.md §6), so letting starts through only while there is
+ * room staggers them by itself and keeps swap detection prompt for those already writing. The exam clock does not run
+ * while a start is deferred, and no candidate waits longer than `examStartAdmission.maxDeferMs` in total (from the
+ * first deferral); the start then goes ahead whatever the load. The delay is noted on the "Exam started" timeline entry.
+ *
+ * Outside the session's scheduling window the start is refused (409 exam_window_not_open / exam_window_closed,
+ * services/scheduling.ts); a start the server deferred counts from the first request.
+ */
+export async function startSession(ctx: Ctx, sessionId: string, instanceId: string): Promise<{ deferred: { retryAfterSec: number } | null }> {
+  return withSession(ctx, sessionId, async (m) => {
     assertInControl(m.session, instanceId);
+    if (m.session.status === 'ready') assertWindowAllows(m.session, 'start', m.now, m.session.startDeferredSince?.getTime() ?? m.now);
+    const deferred = examStartDeferral(m);
+    if (deferred) return { deferred };
     await startExam(m);
+    return { deferred: null };
   });
+}
+
+function examStartDeferral(m: SessionMutation): { retryAfterSec: number } | null {
+  const admission = m.ctx.config.examStartAdmission;
+  if (!admission.enabled || m.session.status !== 'ready') return null; // startExam explains a wrong state
+  const capacity = currentCapacity(m.ctx);
+  const since = m.session.startDeferredSince?.getTime() ?? null;
+  if (capacity.accepting || (since != null && m.now - since >= admission.maxDeferMs)) return null;
+  if (since == null) m.set({ startDeferredSince: new Date(m.now) });
+  m.ctx.metrics.examStartsDeferred.inc();
+  const waitSec = Math.ceil((capacity.visionWaitMs ?? 0) / 1000);
+  return { retryAfterSec: Math.min(START_RETRY_AFTER_SEC.max, Math.max(START_RETRY_AFTER_SEC.min, waitSec)) };
 }
 
 export async function candidateSubmit(ctx: Ctx, sessionId: string, instanceId: string): Promise<void> {
@@ -62,7 +97,7 @@ export async function candidateSubmit(ctx: Ctx, sessionId: string, instanceId: s
 
 /* ------------------------------------------------------------------ answers */
 
-function validateAnswer(q: Question, value: SaveAnswerRequest['value']): void {
+function validateAnswer(q: Pick<ExamVersionQuestionDTO, 'type' | 'options'>, value: SaveAnswerRequest['value']): void {
   if (value === null) return;
   const optionIds = new Set((q.options ?? []).map((o) => o.id));
   switch (q.type) {
@@ -86,7 +121,8 @@ function validateAnswer(q: Question, value: SaveAnswerRequest['value']): void {
 }
 
 export async function saveAnswer(ctx: Ctx, session: ExamSession, instanceId: string, questionId: string, body: SaveAnswerRequest): Promise<SaveAnswerResponse> {
-  const [q] = await ctx.db.select().from(questions).where(and(eq(questions.id, questionId), eq(questions.examId, session.examId)));
+  // Only questions of the attempt's own exam version (services/exam-versions.ts).
+  const q = (await sessionExamContent(ctx.db, session)).snapshot.questions.find((x) => x.id === questionId);
   if (!q) throw notFound('Question not found', 'question_not_found');
   validateAnswer(q, body.value);
   return withSession(ctx, session.id, async (m) => {
@@ -162,7 +198,7 @@ export async function cancelPauseRequest(ctx: Ctx, sessionId: string, instanceId
 export interface LoadedSession {
   session: ExamSession;
   sessionVersion: string;
-  /** Effective policy as loaded with the session (candidate auth); used for identitySample.burstSize. */
+  /** Effective policy as loaded with the session (candidate auth); used for identitySample (cadence, burst size). */
   policy?: ProctoringPolicy;
 }
 
@@ -201,7 +237,11 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
   if (s.activeInstanceId && s.activeInstanceId !== instanceId) return null; // superseded window
   const inControl = instanceInControl(s, instanceId) && !TERMINAL.includes(s.status);
   if (inControl && (s.reportingEventId || (s.status === 'active' && !s.runningSince))) return null;
+  // Identity samples overdue long enough for an observation: the locked path records it.
+  if (inControl && noSamplesObservationDue(s, (loaded.policy ?? DEFAULT_POLICY).identity, body, now)) return null;
   if ((s.status === 'active' || s.status === 'paused') && clockExpired(sessionClock(s), now)) return null;
+  // Silent for longer than the timeout with no sweeper having noticed: the locked path records the outage.
+  if (inControl && reportingTimedOut(s, loaded.policy ?? DEFAULT_POLICY, now)) return null;
   const usage = client ? evaluateInstanceUsage(s, instanceId, { ...client, seq: body.seq, at: now, refresh: true }) : null;
   if (usage?.signal) return null;
 
@@ -232,8 +272,48 @@ async function fastHeartbeat(ctx: Ctx, loaded: LoadedSession, instanceId: string
     timerRunning: s.runningSince != null,
     requiredCheck: requiredCheckFor(s, instanceId),
     commands: [],
-    identitySample: inControl ? identitySampleRequest(s.status, s.identityState, (loaded.policy ?? DEFAULT_POLICY).identity.burstSize, now) : null,
+    identitySample: inControl ? identitySampleRequest(s.status, s.identityState, (loaded.policy ?? DEFAULT_POLICY).identity, now) : null,
   };
+}
+
+/** An active exam whose browser has been silent past the heartbeat timeout, and no outage is recorded yet. */
+function reportingTimedOut(s: ExamSession, policy: ProctoringPolicy, now: number): boolean {
+  return s.status === 'active' && s.connection === 'online' && !s.reportingEventId && s.lastHeartbeatAt != null && now - s.lastHeartbeatAt.getTime() > policy.connection.heartbeatTimeoutSec * 1000;
+}
+
+/**
+ * The session is active and connected (this heartbeat), yet no identity sample arrived although the server has been
+ * asking (identity-evidence.ts sampleWatchdog 'unanswered') and nothing explains it (no reporting outage, the outbox
+ * is not holding a backlog), and no such observation is open yet.
+ */
+function noSamplesObservationDue(s: ExamSession, policy: ProctoringPolicy['identity'], body: HeartbeatRequest, now: number): boolean {
+  if (s.status !== 'active' || s.reportingEventId || policy.verification === 'staff' || reportingInterruptedSince(body, s, now)) return false;
+  const st = identityState(s);
+  return !st.openNoSamplesEventId && sampleWatchdog(policy, st, now) === 'unanswered';
+}
+
+/** Open the 'no_samples' observation (uncertain, never evidence of a different person); closed by the next sample. */
+async function recordNoSamples(m: SessionMutation, policy: ProctoringPolicy['identity'], body: HeartbeatRequest): Promise<void> {
+  const st = identityState(m.session);
+  const last = st.evidence.lastSampleAt ?? st.activeSince ?? m.now;
+  const ev = await m.addEvent({
+    type: 'identity_unverifiable',
+    source: 'server_identity',
+    open: true,
+    startedAt: last,
+    confidence: null,
+    observation:
+      'No identity images arrived from the candidate’s browser for a while although the exam was running and the browser was connected; the server’s requests for one went unanswered. The identity could not be checked in this time. This is not evidence of a different person.',
+    details: {
+      reason: 'no_samples',
+      lastSampleAt: st.evidence.lastSampleAt,
+      activeSince: st.activeSince,
+      expectedIntervalSec: policy.periodicCheckIntervalSec,
+      cameraState: body.monitoring?.cameraState ?? null,
+      facesInView: body.monitoring?.faces ?? null,
+    },
+  });
+  m.setIdentityState({ ...identityState(m.session), openNoSamplesEventId: ev.id });
 }
 
 export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string, body: HeartbeatRequest, client?: HeartbeatClient, loaded?: LoadedSession): Promise<HeartbeatResponse> {
@@ -277,6 +357,17 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
       return { serverTime: now, status: s.status, remainingMs: remainingMs(s, now), timerRunning: s.runningSince != null, requiredCheck: requiredCheckFor(s, instanceId), commands };
     }
 
+    // The browser was silent for longer than the timeout and no sweeper recorded it (every instance was down or
+    // restarting): record the outage as the sweeper would have — the event from the last heartbeat and, under
+    // disconnect policy 'stop', the clock stopped there; then the resume policy's offline limit, as the sweeper's
+    // next step would (services/recovery.ts) — so it is closed below exactly as after a noticed outage.
+    if (instanceInControl(s, instanceId)) {
+      const policy = await m.policy();
+      if (reportingTimedOut(s, policy, now)) {
+        await recordReportingTimeout(m, policy, s.lastHeartbeatAt!.getTime(), 'late_heartbeat');
+        await applyOfflineLimit(m, policy);
+      }
+    }
     m.set({ lastHeartbeatAt: new Date(now), lastHeartbeatInstanceId: instanceId, connection: 'online' });
     // Same verified instance id used from two places at once (copied id): IP/UA/seq (services/instance-usage.ts).
     // A signal clears verifiedInstanceId, so the block below is skipped and a reconnect check is required.
@@ -299,6 +390,8 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
     if ((s.status === 'active' || s.status === 'paused') && clockExpired(sessionClock(s), now)) await finalizeSession(m, 'time_expired');
     await deliver(false);
     const inControl = instanceInControl(m.session, instanceId) && !TERMINAL.includes(m.session.status);
+    const policy = await m.policy();
+    if (inControl && noSamplesObservationDue(m.session, policy.identity, body, now)) await recordNoSamples(m, policy.identity, body);
     return {
       serverTime: now,
       status: m.session.status,
@@ -306,7 +399,7 @@ export async function heartbeat(ctx: Ctx, sessionId: string, instanceId: string,
       timerRunning: m.session.runningSince != null,
       requiredCheck: requiredCheckFor(m.session, instanceId),
       commands,
-      identitySample: inControl ? identitySampleRequest(m.session.status, m.session.identityState, (await m.policy()).identity.burstSize, now) : null,
+      identitySample: inControl ? identitySampleRequest(m.session.status, m.session.identityState, policy.identity, now) : null,
     };
   });
 }

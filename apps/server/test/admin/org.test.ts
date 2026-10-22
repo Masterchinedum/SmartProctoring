@@ -1,7 +1,7 @@
 /**
  * Staff API: organisation settings (validation, audit), staff user management rules, audit log.
  */
-import type { AuditLogEntryDTO, OrgSettingsDTO, StaffUserDTO } from '@sp/shared';
+import { DEFAULT_IDENTITY_THRESHOLDS, type AuditLogEntryDTO, type OrgSettingsDTO, type StaffUserDTO } from '@sp/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { organizations, staffUsers } from '../../src/db/schema.js';
@@ -30,14 +30,11 @@ describe('settings', () => {
     expect(s.defaultPolicy.pause.timerBehavior).toBe('stop');
   });
 
-  it('validates thresholds, retention and the default policy', async () => {
-    const bad1 = await admin.put('/settings', { identityThresholds: { match: 0.3, mismatch: 0.35 } });
-    expect(bad1.statusCode).toBe(400);
-    expect(bad1.json().details).toEqual([{ path: 'identityThresholds.mismatch', message: expect.stringMatching(/lower than the match threshold/) }]);
-    const bad2 = await admin.put('/settings', { identityThresholds: { idPhotoMismatch: 0.5 } });
-    expect(bad2.json().details[0].path).toBe('identityThresholds.idPhotoMismatch');
-    // mismatch alone raised above the stored match threshold is also caught (merged with current values)
-    expect((await admin.put('/settings', { identityThresholds: { mismatch: 0.9 } })).statusCode).toBe(400);
+  it('refuses threshold changes (decision configurations) and validates retention and the default policy', async () => {
+    // Thresholds change only through an approved decision configuration (test/governance.test.ts).
+    const thresholds = await admin.put('/settings', { identityThresholds: { match: 0.5 } });
+    expect(thresholds.statusCode).toBe(409);
+    expect(thresholds.json().error).toBe('decision_config_required');
     expect((await admin.put('/settings', { identityThresholds: { match: 1.5 } })).statusCode).toBe(400);
     expect((await admin.put('/settings', { evidenceRetentionDays: 0 })).statusCode).toBe(400);
     expect((await admin.put('/settings', { evidenceRetentionDays: 400 })).json().details[0].path).toBe('eventRetentionDays');
@@ -59,18 +56,19 @@ describe('settings', () => {
         evidenceRetentionDays: 14,
         eventRetentionDays: 180,
         privacyContact: 'dpo@test.example',
-        identityThresholds: { match: 0.5, mismatch: 0.3, mismatchConfirmations: 3 },
+        // A form posting back the thresholds in use is accepted (and changes nothing).
+        identityThresholds: { ...DEFAULT_IDENTITY_THRESHOLDS },
         defaultPolicy: { pause: { requireReason: true }, bogus: 1 },
       }),
     );
-    expect(s).toMatchObject({ name: 'Test University (Main)', evidenceRetentionDays: 14, eventRetentionDays: 180, privacyContact: 'dpo@test.example' });
-    expect(s.identityThresholds).toMatchObject({ match: 0.5, mismatch: 0.3, mismatchConfirmations: 3 });
+    expect(s).toMatchObject({ name: 'Test University (Main)', evidenceRetentionDays: 14, eventRetentionDays: 180, privacyContact: 'dpo@test.example', decisionConfigVersion: 1 });
+    expect(s.identityThresholds).toEqual(DEFAULT_IDENTITY_THRESHOLDS);
     expect(s.defaultPolicy.pause.requireReason).toBe(true);
     const [org] = await env.ctx.db.select().from(organizations).where(eq(organizations.id, env.org.id));
     expect(org.name).toBe('Test University (Main)');
     expect(org.settings.defaultPolicy).toEqual({ pause: { requireReason: true } });
     // only explicit overrides are stored (defaults keep coming from the code)
-    expect(org.settings.identityThresholds).toEqual({ match: 0.5, mismatch: 0.3, mismatchConfirmations: 3 });
+    expect(org.settings.identityThresholds).toBeUndefined();
     // exams inherit the org default policy
     const exam = json(await reviewer.get(`/exams/${env.exam.id}`));
     expect(exam.policy.pause.requireReason).toBe(true);
@@ -78,8 +76,8 @@ describe('settings', () => {
     const log = json(await admin.get('/audit-log', { action: 'settings.' }));
     expect(log.total).toBe(1);
     expect(log.items[0]).toMatchObject({ action: 'settings.updated', actorName: 'Test admin', targetType: 'organization' });
-    expect(log.items[0].meta.fields).toEqual(expect.arrayContaining(['name', 'evidenceRetentionDays', 'identityThresholds', 'defaultPolicy']));
-    expect(log.items[0].meta.identityThresholds.to).toMatchObject({ match: 0.5 });
+    expect(log.items[0].meta.fields).toEqual(expect.arrayContaining(['name', 'evidenceRetentionDays', 'defaultPolicy']));
+    expect(log.items[0].meta.fields).not.toContain('identityThresholds');
   });
 });
 

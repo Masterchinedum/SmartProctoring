@@ -1,3 +1,4 @@
+import { DETECTION_ENGINE_VERSION } from '@sp/detection';
 import type {
   CandidateSessionState,
   CheckFrameResponse,
@@ -15,6 +16,7 @@ import type {
   SaveAnswerResponse,
   StartCheckRequest,
   StartCheckResponse,
+  WithdrawConsentRequest,
 } from '@sp/shared';
 
 /**
@@ -32,13 +34,16 @@ export class CandidateApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: unknown;
+  /** The server's Retry-After (ms) on a busy / rate-limited answer; null when it sent none. */
+  readonly retryAfterMs: number | null;
 
-  constructor(status: number, code: string, message: string, details?: unknown) {
+  constructor(status: number, code: string, message: string, details?: unknown, retryAfterMs: number | null = null) {
     super(message);
     this.name = 'CandidateApiError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.retryAfterMs = retryAfterMs;
   }
 
   get isNetwork(): boolean {
@@ -79,6 +84,23 @@ export function classifyApiError(err: unknown): ApiErrorKind {
  */
 export function isServerBusy(err: unknown): boolean {
   return err instanceof CandidateApiError && (err.status === 503 || err.status === 429 || err.code === 'vision_busy');
+}
+
+/**
+ * How long to wait before retrying a request the server refused as busy: at least the server's Retry-After (its
+ * estimate of when the queued work is done) and at least `fallbackMs`, stretched by a random 0–50 %. Candidates of
+ * a scheduled exam start together, so without the spread everyone refused at the same moment would come back at
+ * the same moment and be refused again.
+ */
+export function busyRetryDelayMs(err: unknown, fallbackMs: number, random: () => number = Math.random): number {
+  const serverMs = err instanceof CandidateApiError && err.retryAfterMs != null ? err.retryAfterMs : 0;
+  return Math.round(Math.max(fallbackMs, serverMs) * (1 + 0.5 * random()));
+}
+
+/** Retry-After in seconds (the only form the server sends), as ms; null when absent or unusable. */
+export function parseRetryAfterMs(value: string | null): number | null {
+  if (value == null || !/^\s*\d+\s*$/.test(value)) return null;
+  return Math.min(300, Number(value)) * 1000;
 }
 
 /** True when retrying the same request later may succeed. */
@@ -140,6 +162,8 @@ export interface CandidateApi {
   pause(reason?: string): Promise<PauseResponse>;
   cancelPause(): Promise<Timed<CandidateSessionState>>;
   submit(): Promise<Timed<CandidateSessionState>>;
+  /** Withdraw consent: the exam ends and its face images are deleted (POST /api/candidate/consent/withdraw). */
+  withdrawConsent(req: WithdrawConsentRequest): Promise<CandidateSessionState>;
 }
 
 export interface CandidateApiOptions {
@@ -183,7 +207,7 @@ async function readError(res: Response): Promise<CandidateApiError> {
   } catch {
     /* non-JSON error body */
   }
-  return new CandidateApiError(res.status, code, message, details);
+  return new CandidateApiError(res.status, code, message, details, parseRetryAfterMs(res.headers.get('Retry-After')));
 }
 
 export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
@@ -272,7 +296,7 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
     start: () => request<CandidateSessionState>('POST', '/api/candidate/start'),
     saveAnswer: (questionId, req) => json<SaveAnswerResponse>('PUT', `/api/candidate/answers/${encodeURIComponent(questionId)}`, req),
     heartbeat: (req) => request<HeartbeatResponse>('POST', '/api/candidate/heartbeat', req),
-    sendEvents: (events) => json<EventBatchResponse>('POST', '/api/candidate/events/batch', { events }),
+    sendEvents: (events) => json<EventBatchResponse>('POST', '/api/candidate/events/batch', { events, engineVersion: DETECTION_ENGINE_VERSION }),
     uploadEvidence: async (evidenceId, jpeg, q) =>
       (
         await request<EvidenceUploadResponse>(
@@ -301,6 +325,7 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
     pause: (reason) => json<PauseResponse>('POST', '/api/candidate/pause', reason ? { reason } : {}),
     cancelPause: () => request<CandidateSessionState>('POST', '/api/candidate/pause/cancel'),
     submit: () => request<CandidateSessionState>('POST', '/api/candidate/submit'),
+    withdrawConsent: (req) => json<CandidateSessionState>('POST', '/api/candidate/consent/withdraw', req),
   };
 }
 

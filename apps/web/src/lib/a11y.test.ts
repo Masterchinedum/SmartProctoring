@@ -65,14 +65,14 @@ function colourRules(css: string, prefix: string): { cls: string; bg: string; fg
 
 describe('colour tokens meet WCAG AA contrast', () => {
   it('text and status colours on the page backgrounds (>= 4.5:1)', () => {
-    for (const fg of ['text', 'text-muted', 'primary', 'danger', 'warning', 'success', 'info', 'cat-integrity', 'cat-uncertain', 'cat-neutral', 'cat-technical']) {
+    for (const fg of ['text', 'text-muted', 'primary', 'danger', 'warning', 'success', 'info', 'cat-integrity', 'cat-uncertain', 'cat-neutral', 'cat-technical', 'cat-exception']) {
       for (const bg of ['bg', 'surface', 'surface-2']) {
         expect(contrastRatio(tokens[fg], tokens[bg]), `--${fg} on --${bg}`).toBeGreaterThanOrEqual(4.5);
       }
     }
   });
   it('white text on filled buttons / chips (>= 4.5:1)', () => {
-    for (const bg of ['primary', 'danger', 'warning', 'success', 'cat-integrity', 'cat-uncertain', 'cat-neutral', 'cat-technical']) {
+    for (const bg of ['primary', 'danger', 'warning', 'success', 'cat-integrity', 'cat-uncertain', 'cat-neutral', 'cat-technical', 'cat-exception']) {
       expect(contrastRatio('#ffffff', tokens[bg]), `white on --${bg}`).toBeGreaterThanOrEqual(4.5);
     }
   });

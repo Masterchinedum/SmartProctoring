@@ -1,3 +1,5 @@
+import { fullscreenSupported } from './fullscreen';
+
 /**
  * System requirements check shown on the welcome screen.
  * `required` items block the exam; others are advisory.
@@ -58,8 +60,10 @@ async function indexedDbWorks(): Promise<boolean> {
   });
 }
 
-export async function checkSystemRequirements(opts: { requireFullscreen: boolean }): Promise<RequirementResult[]> {
+/** `camera: false` — an exam without a camera (an approved arrangement): no camera requirements are checked. */
+export async function checkSystemRequirements(opts: { requireFullscreen: boolean; camera?: boolean }): Promise<RequirementResult[]> {
   const browser = detectBrowser(navigator.userAgent);
+  const camera = opts.camera !== false;
   const results: RequirementResult[] = [];
   results.push({
     id: 'secure_context',
@@ -68,14 +72,14 @@ export async function checkSystemRequirements(opts: { requireFullscreen: boolean
     required: true,
     help: 'Open the exam link exactly as you received it (it must start with https://).',
   });
-  results.push({
+  if (camera) results.push({
     id: 'camera_api',
     label: 'Camera access supported',
     ok: typeof navigator.mediaDevices?.getUserMedia === 'function',
     required: true,
     help: 'Use a current version of Chrome, Edge, Firefox or Safari on a computer with a webcam.',
   });
-  results.push({
+  if (camera) results.push({
     id: 'webassembly',
     label: 'WebAssembly supported',
     ok: typeof WebAssembly === 'object' && typeof WebAssembly.instantiate === 'function',
@@ -96,25 +100,27 @@ export async function checkSystemRequirements(opts: { requireFullscreen: boolean
     required: false,
     help: 'We recommend a current version of Chrome, Edge, Firefox or Safari. Other browsers may not work reliably.',
   });
-  let cameraPresent = true;
-  try {
-    const devices = (await navigator.mediaDevices?.enumerateDevices?.()) ?? [];
-    cameraPresent = devices.some((d) => d.kind === 'videoinput');
-  } catch {
-    cameraPresent = false;
+  if (camera) {
+    let cameraPresent = true;
+    try {
+      const devices = (await navigator.mediaDevices?.enumerateDevices?.()) ?? [];
+      cameraPresent = devices.some((d) => d.kind === 'videoinput');
+    } catch {
+      cameraPresent = false;
+    }
+    results.push({
+      id: 'camera_present',
+      label: 'Camera connected',
+      ok: cameraPresent,
+      required: false,
+      help: 'No camera was detected. Connect a webcam before you continue.',
+    });
   }
-  results.push({
-    id: 'camera_present',
-    label: 'Camera connected',
-    ok: cameraPresent,
-    required: false,
-    help: 'No camera was detected. Connect a webcam before you continue.',
-  });
   if (opts.requireFullscreen) {
     results.push({
       id: 'fullscreen',
       label: 'Fullscreen mode supported',
-      ok: typeof document.documentElement.requestFullscreen === 'function',
+      ok: fullscreenSupported(),
       required: false,
       help: 'This exam requires fullscreen mode, which your browser does not appear to support. Use a current desktop browser.',
     });

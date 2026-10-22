@@ -1,0 +1,1 @@
+ALTER TABLE "exam_sessions" ADD COLUMN "start_deferred_since" timestamp with time zone;

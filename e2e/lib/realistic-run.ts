@@ -1,9 +1,12 @@
+import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
+import { cpus, loadavg } from 'node:os';
 import { join } from 'node:path';
-import { expect, test, type Browser, type TestInfo } from '@playwright/test';
-import type { ProctoringPolicyInput } from '../../packages/shared/src/policy';
+import { expect, type Browser, type TestInfo } from '@playwright/test';
+import { SAMPLING_PROFILES, type ProctoringPolicyInput, type SamplingProfile } from '../../packages/shared/src/policy';
 import { CandidatePage, launchCameraFile, type CheckOutcome } from './candidate';
 import { ARTIFACTS_DIR } from './config';
+import { requireImages } from './require-images';
 import { rwFixtureAvailable, rwFixturePath, type RwFixtureName } from './realistic';
 import { QUESTIONS, type SessionHandle, type StaffApi } from './staff-api';
 
@@ -23,8 +26,10 @@ export function reps(): number[] {
 }
 
 export function skipUnlessRw(...names: RwFixtureName[]): void {
-  const missing = names.filter((n) => !rwFixtureAvailable(n));
-  test.skip(missing.length > 0, `identity-set images for realistic fixture(s) ${missing.join(', ')} not found (set E2E_FACESETS_DIR)`);
+  requireImages(
+    names.filter((n) => !rwFixtureAvailable(n)),
+    'identity-set images (set E2E_FACESETS_DIR; pnpm --filter @sp/server eval:fetch-faces) for realistic fixture(s)',
+  );
 }
 
 export function launchRw(name: RwFixtureName): Promise<Browser> {
@@ -32,12 +37,23 @@ export function launchRw(name: RwFixtureName): Promise<Browser> {
 }
 
 /**
+ * Identity sampling profile of the realistic runs: `E2E_SAMPLING=balanced` uses the Balanced preset (2-frame routine
+ * samples every 12 s for 180 s, then every 30 s; triggered samples 3 frames); default the product default
+ * ('maximum'). Recorded with every measurement (`samplingProfile`).
+ */
+export const RW_SAMPLING: Exclude<SamplingProfile, 'custom'> = process.env.E2E_SAMPLING === 'balanced' ? 'balanced' : 'maximum';
+
+/**
  * The PRODUCT DEFAULT policy (identity: 15 s periodic samples, 6 s start-up interval for 180 s, bursts of 3,
- * hold for review on a confirmed mismatch, 5 attempts) — only liveness is chosen per scenario, and fullscreen is
- * off (headless Chromium). The older specs' BASE_POLICY (30 s samples) is deliberately not used.
+ * hold for review on a confirmed mismatch, 5 attempts) — or the Balanced sampling preset (E2E_SAMPLING) — only
+ * liveness is chosen per scenario, and fullscreen is off (headless Chromium). The older specs' BASE_POLICY (30 s
+ * samples) is deliberately not used.
  */
 export function rwPolicy(o: { liveness: 'active' | 'off'; identity?: Record<string, unknown> }): ProctoringPolicyInput {
-  return { identity: { liveness: o.liveness, idPhotoComparison: 'off', ...(o.identity ?? {}) }, browser: { requireFullscreen: false } } as ProctoringPolicyInput;
+  return {
+    identity: { liveness: o.liveness, idPhotoComparison: 'off', ...SAMPLING_PROFILES[RW_SAMPLING], ...(o.identity ?? {}) },
+    browser: { requireFullscreen: false },
+  } as ProctoringPolicyInput;
 }
 
 export async function createRwSession(staff: StaffApi, policy: ProctoringPolicyInput, title: string): Promise<SessionHandle> {
@@ -54,10 +70,37 @@ export interface MetricRecord {
   [k: string]: unknown;
 }
 
-/** Append one measurement (JSON line) for the report. */
+let commit: string | null | undefined;
+function gitCommit(): string | null {
+  if (commit === undefined) {
+    try {
+      commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() + (execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim() ? '+dirty' : '');
+    } catch {
+      commit = null;
+    }
+  }
+  return commit;
+}
+
+/**
+ * Append one measurement (JSON line) for the report, with the machine's load (1 / 5 min load average, CPUs) —
+ * timings (time to pass, detection delay, liveness within the challenge window) depend on it.
+ */
 export function recordMetric(info: TestInfo, rec: MetricRecord): void {
   mkdirSync(ARTIFACTS_DIR, { recursive: true });
-  const line = { runId: process.env.E2E_RUN_ID ?? null, at: new Date().toISOString(), test: info.title, workers: info.config.workers, ...rec };
+  const [load1, load5] = loadavg();
+  const line = {
+    runId: process.env.E2E_RUN_ID ?? null,
+    at: new Date().toISOString(),
+    test: info.title,
+    workers: info.config.workers,
+    load1: Math.round(load1! * 10) / 10,
+    load5: Math.round(load5! * 10) / 10,
+    cpus: cpus().length,
+    commit: gitCommit(),
+    samplingProfile: RW_SAMPLING,
+    ...rec,
+  };
   appendFileSync(METRICS_FILE, `${JSON.stringify(line)}\n`);
   console.log(`[metric] ${JSON.stringify(line)}`);
 }
@@ -114,7 +157,8 @@ export async function checkWithRetries(c: CandidatePage, o: { purpose?: 'resume'
       const rp = await c.tid('verify-reprompt').isVisible().catch(() => false);
       if (rp && !repromptVisible) res.reprompts++;
       repromptVisible = rp;
-      await c.page.waitForTimeout(400);
+      await c.traceVerify();
+      await c.page.waitForTimeout(250);
     }
     res.attemptMs.push(Date.now() - ta);
     if (!outcome) {

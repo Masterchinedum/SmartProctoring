@@ -1,15 +1,31 @@
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CATEGORY_LABELS, EVENT_CATALOG, type EventDTO, type EvidenceRefDTO, type NoteDTO, type ReviewStatus } from '@sp/shared';
+import {
+  CATEGORY_LABELS,
+  EVENT_CATALOG,
+  isFlagCategory,
+  RESOLUTION_INFO,
+  resolutionsFor,
+  reviewDecisionLabel,
+  type EventDetailDTO,
+  type EventDTO,
+  type EvidenceRefDTO,
+  type NoteDTO,
+  type ReviewDecisionDTO,
+  type ReviewResolution,
+  type SessionDetailDTO,
+} from '@sp/shared';
 import { useDialogFocus } from '../../lib/a11y';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { applyEvent, qk } from '../api/queries';
 import { formatDateTime, formatPercent } from '../lib/format';
-import { contextLabel, PERIOD_LABELS, SOURCE_LABELS, TRIGGER_LABELS } from '../lib/labels';
+import { contextLabel, PERIOD_LABELS, reviewerGuidance, SOURCE_LABELS, TRIGGER_LABELS } from '../lib/labels';
 import { mismatchEvidence } from '../lib/cameraTest';
+import { useAuth } from '../auth';
 import { CategoryBadge, ReviewBadge, SeverityBadge } from './Badges';
+import { ExplanationPanel } from './Explanation';
 import { ErrorState, KeyValueTable, Loading } from './Common';
 import { evidenceAlt, EvidenceImage } from './EvidenceImage';
 import { Lightbox, type LightboxItem } from './Lightbox';
@@ -18,8 +34,11 @@ import { Clock, LiveDuration, RelativeTime } from './Time';
 export const COMPARABLE_TYPES = ['identity_mismatch', 'identity_unverifiable'];
 
 /** Right-hand drawer with everything about one event. */
-export function EventDrawer({ eventId, sessionId, initial, onClose }: { eventId: string; sessionId: string; initial?: EventDTO; onClose: () => void }) {
-  const q = useQuery({
+/** The event as listed (EventDTO) until its detail (explanation, history, incident) has loaded. */
+type EventView = EventDTO & Partial<Pick<EventDetailDTO, 'explanation' | 'history' | 'incident'>>;
+
+export function EventDrawer({ eventId, sessionId, initial, onClose, onOpenIncident }: { eventId: string; sessionId: string; initial?: EventDTO; onClose: () => void; onOpenIncident?: (incidentId: string) => void }) {
+  const q = useQuery<EventView>({
     queryKey: qk.event(eventId),
     queryFn: () => api.event(eventId),
     placeholderData: initial,
@@ -41,7 +60,7 @@ export function EventDrawer({ eventId, sessionId, initial, onClose }: { eventId:
         </div>
         <div className="drawer-body">
           {q.data ? (
-            <EventDetailBody event={q.data} sessionId={sessionId} />
+            <EventDetailBody event={q.data} sessionId={sessionId} onOpenIncident={onOpenIncident} />
           ) : q.isError ? (
             <ErrorState error={q.error} onRetry={() => void q.refetch()} />
           ) : (
@@ -54,16 +73,19 @@ export function EventDrawer({ eventId, sessionId, initial, onClose }: { eventId:
   );
 }
 
-export function EventDetailBody({ event, sessionId }: { event: EventDTO; sessionId: string }) {
+export function EventDetailBody({ event, sessionId, onOpenIncident }: { event: EventView; sessionId: string; onOpenIncident?: (incidentId: string) => void }) {
   const catalog = EVENT_CATALOG[event.type];
   const canCompare = COMPARABLE_TYPES.includes(event.type);
+  const guidance = reviewerGuidance(event);
+  const flag = isFlagCategory(event.category);
+  const incident = event.incident && event.incident.eventIds.length > 1 ? event.incident : null;
   return (
     <div className="stack event-detail">
       <div>
         <div className="row event-detail-badges">
           <CategoryBadge category={event.category} long />
           <SeverityBadge severity={event.severity} />
-          <ReviewBadge status={event.review.status} />
+          {flag ? <ReviewBadge status={event.review.status} resolution={event.review.resolution} /> : null}
           {event.status === 'open' ? <span className="badge badge-warning">Ongoing</span> : null}
         </div>
         <h2 className="event-title">{event.title}</h2>
@@ -101,16 +123,33 @@ export function EventDetailBody({ event, sessionId }: { event: EventDTO; session
         </Link>
       ) : null}
 
-      {catalog?.reviewerNote ? (
+      {event.explanation ? <ExplanationPanel explanation={event.explanation} /> : null}
+
+      {incident ? (
+        <div className="incident-note" data-testid="event-incident">
+          <div>
+            <strong>Part of an incident</strong> with {incident.eventIds.length - 1} other flag{incident.eventIds.length === 2 ? '' : 's'} close in time: {incident.title}.
+            {incident.undecided ? <span className="muted"> {incident.undecided} not decided yet.</span> : null}
+          </div>
+          {onOpenIncident ? (
+            <button type="button" className="btn btn-sm" onClick={() => onOpenIncident(incident.id)}>
+              Review the incident together
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {guidance ? (
         <div className="guidance">
           <div className="guidance-title">Reviewer guidance</div>
-          {catalog.reviewerNote}
+          {guidance}
         </div>
       ) : null}
 
       <section>
         <h3>Screenshots</h3>
         <EvidenceGallery evidence={event.evidence} emptyText="No screenshots were captured for this event." context={event.title} />
+        {flag && event.evidence.length && !canCompare ? <BaselineCompare sessionId={sessionId} event={event} /> : null}
       </section>
 
       {event.type === 'identity_mismatch' ? <MismatchEvidenceSection details={event.details} /> : null}
@@ -127,7 +166,12 @@ export function EventDetailBody({ event, sessionId }: { event: EventDTO; session
 
       <section>
         <h3>Review</h3>
-        <ReviewPanel event={event} />
+        {flag ? (
+          <ReviewPanel event={event} />
+        ) : (
+          <p className="muted small">{event.category === 'exception' ? 'A policy exception' : 'A session change'} is context for reviewers; it needs no decision.</p>
+        )}
+        {event.history?.length ? <DecisionHistory history={event.history} /> : null}
       </section>
 
       <section>
@@ -244,31 +288,36 @@ export function EvidenceGallery({
   );
 }
 
-const REVIEW_ACTIONS: { status: ReviewStatus; label: string; cls: string }[] = [
-  { status: 'reviewed', label: 'Mark reviewed', cls: 'btn btn-primary' },
-  { status: 'dismissed', label: 'Dismiss as false positive', cls: 'btn' },
-  { status: 'unreviewed', label: 'Reset to unreviewed', cls: 'btn' },
-];
-
-export function ReviewPanel({ event }: { event: EventDTO }) {
+/** The reviewer's conclusion (structured resolution), with the reason required to change someone else's decision. */
+export function ReviewPanel({ event }: { event: EventView }) {
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const formId = useId();
+  const [resolution, setResolution] = useState<ReviewResolution | null>(null);
   const [note, setNote] = useState('');
-  const m = useMutation({
-    mutationFn: (status: ReviewStatus) => api.reviewEvent(event.id, status, note.trim() || undefined),
-    onSuccess: (ev) => {
-      qc.setQueryData(qk.event(ev.id), ev);
-      applyEvent(qc, ev);
-      setNote('');
-      void qc.invalidateQueries({ queryKey: qk.session(ev.sessionId), exact: true });
-      void qc.invalidateQueries({ queryKey: qk.eventNotes(ev.id) });
-      void qc.invalidateQueries({ queryKey: qk.report(ev.sessionId) });
-    },
-  });
   const r = event.review;
+  const decidedByOther = r.status !== 'unreviewed' && r.by != null && r.by !== user.id;
+  const onSuccess = (ev: EventDetailDTO) => {
+    qc.setQueryData(qk.event(ev.id), ev);
+    applyEvent(qc, ev);
+    setNote('');
+    setResolution(null);
+    void qc.invalidateQueries({ queryKey: qk.session(ev.sessionId), exact: true });
+    void qc.invalidateQueries({ queryKey: qk.eventNotes(ev.id) });
+    void qc.invalidateQueries({ queryKey: qk.report(ev.sessionId) });
+    void qc.invalidateQueries({ queryKey: qk.reviewQueueAll });
+  };
+  const decide = useMutation({ mutationFn: () => api.reviewEvent(event.id, { resolution: resolution!, note: note.trim() || undefined }), onSuccess });
+  const reset = useMutation({ mutationFn: () => api.reviewEvent(event.id, { status: 'unreviewed', note: note.trim() || undefined }), onSuccess });
+  const options = resolutionsFor(event.category);
+  const changes = resolution != null && !(r.status === RESOLUTION_INFO[resolution].status && r.resolution === resolution);
+  const reasonNeeded = decidedByOther;
+  const busy = decide.isPending || reset.isPending;
+  const error = decide.error ?? reset.error;
   return (
-    <div className="stack review-panel">
+    <div className="stack review-panel" data-testid="review-panel">
       <div className="row">
-        <ReviewBadge status={r.status} />
+        <ReviewBadge status={r.status} resolution={r.resolution} />
         {r.status !== 'unreviewed' && r.at ? (
           <span className="muted small">
             by {r.byName ?? 'staff'} · <RelativeTime at={r.at} />
@@ -276,30 +325,105 @@ export function ReviewPanel({ event }: { event: EventDTO }) {
         ) : null}
       </div>
       {r.note ? <blockquote className="review-note">{r.note}</blockquote> : null}
-      <label>
-        Review note (optional)
-        <textarea
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          maxLength={2000}
-          rows={2}
-          placeholder="What did you check? e.g. “Second face is a photo on the wall.”"
-        />
-      </label>
-      <div className="row">
-        {REVIEW_ACTIONS.filter((a) => a.status !== r.status).map((a) => (
-          <button key={a.status} type="button" className={`${a.cls} btn-sm`} disabled={m.isPending} onClick={() => m.mutate(a.status)}>
-            {a.label}
+      <form
+        className="stack"
+        aria-labelledby={`${formId}-legend`}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (resolution && changes && (!reasonNeeded || note.trim())) decide.mutate();
+        }}
+      >
+        <fieldset className="resolution-options">
+          <legend id={`${formId}-legend`}>{r.status === 'unreviewed' ? 'Your conclusion' : 'Change the decision'}</legend>
+          {options.map((o) => (
+            <label key={o} className={`resolution-option${resolution === o ? ' selected' : ''}`}>
+              <input type="radio" name={`${formId}-resolution`} value={o} checked={resolution === o} onChange={() => setResolution(o)} data-testid={`resolution-${o}`} />
+              <span>
+                <strong>{RESOLUTION_INFO[o].label}</strong>
+                <span className="muted small"> — {RESOLUTION_INFO[o].description}</span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+        <label>
+          {reasonNeeded ? `Reason for changing ${r.byName ?? 'another reviewer'}’s decision (required)` : 'Note (optional)'}
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            maxLength={2000}
+            rows={2}
+            required={reasonNeeded}
+            placeholder="What did you check? e.g. “Second face is a photo on the wall.”"
+            data-testid="review-note"
+          />
+        </label>
+        <div className="row">
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !resolution || !changes || (reasonNeeded && !note.trim())} data-testid="record-decision">
+            {decide.isPending ? 'Saving…' : 'Record decision'}
           </button>
-        ))}
-      </div>
-      <div className="muted small">
-        <strong>Reviewed</strong>: you checked the evidence and the observation stands. <strong>Dismissed</strong>: a false positive (e.g. a poster detected as a
-        face). Neither is a finding of misconduct.
-      </div>
-      {m.isError ? (
+          {r.status !== 'unreviewed' ? (
+            <button type="button" className="btn btn-sm" disabled={busy || (reasonNeeded && !note.trim())} onClick={() => reset.mutate()}>
+              Reset to not reviewed
+            </button>
+          ) : null}
+        </div>
+      </form>
+      <div className="muted small">A conclusion about one observation, not about the candidate. The final outcome of the exam is recorded on the session’s Review tab.</div>
+      {error ? (
         <div className="banner banner-danger" role="alert">
-          {errorMessage(m.error)}
+          {errorMessage(error)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Every decision on the event, oldest first: who, what, why, and whether it changed someone else's decision. */
+export function DecisionHistory({ history }: { history: ReviewDecisionDTO[] }) {
+  return (
+    <details className="decision-history" data-testid="decision-history" open={history.some((h) => h.overrides)}>
+      <summary>
+        Decision history ({history.length}){history.some((h) => h.overrides) ? <span className="badge badge-warning">Reviewers disagreed</span> : null}
+      </summary>
+      <ol className="stack">
+        {history.map((h) => (
+          <li key={h.id} className="small">
+            <strong>{reviewDecisionLabel(h.status, h.resolution)}</strong> — {h.reviewerName ?? 'Staff'}, {formatDateTime(h.at)}
+            {h.overrides ? <span className="badge badge-warning">Changed another reviewer’s decision</span> : null}
+            {h.bulk ? <span className="badge">Decided together</span> : null}
+            {h.note ? <div className="review-note">{h.note}</div> : null}
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
+/**
+ * One-click comparison with how the candidate normally looked: the identity reference taken at check-in next to this
+ * event's first screenshot.
+ */
+function BaselineCompare({ sessionId, event }: { sessionId: string; event: EventView }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const session = qc.getQueryData<SessionDetailDTO>(qk.session(sessionId));
+  const ref = session?.references.find((r) => r.images.length) ?? null;
+  if (!ref) return null;
+  return (
+    <div className="stack">
+      <button type="button" className="btn btn-sm" aria-expanded={open} onClick={() => setOpen((v) => !v)} data-testid="baseline-compare">
+        {open ? 'Hide the comparison' : 'Compare with the start of the exam'}
+      </button>
+      {open ? (
+        <div className="baseline-compare">
+          <div className="baseline-side">
+            <EvidenceImage evidence={ref.images[0]} size="medium" context="Check-in reference" />
+            <div className="small muted">At check-in ({formatDateTime(ref.createdAt)})</div>
+          </div>
+          <div className="baseline-side">
+            <EvidenceImage evidence={event.evidence[0]} size="medium" context={event.title} />
+            <div className="small muted">This event ({formatDateTime(event.evidence[0].capturedAt)})</div>
+          </div>
         </div>
       ) : null}
     </div>

@@ -3,8 +3,10 @@ import type { Config } from './config.js';
 import type { Database, Db } from './db/index.js';
 import type { JobRunner } from './jobs/runner.js';
 import type { Keyring } from './lib/crypto.js';
+import type { LoadMonitor } from './lib/load-monitor.js';
+import type { AppMetrics } from './lib/metrics.js';
 import type { Mailer } from './lib/mailer.js';
-import type { BlobStorage } from './lib/storage.js';
+import type { BlobStorage, StorageLocations } from './lib/storage.js';
 import type { RealtimeBus } from './realtime/bus.js';
 import type { LiveNotifier } from './realtime/notifier.js';
 import type { VerifierRegistry } from './verifiers/registry.js';
@@ -19,7 +21,10 @@ export interface Ctx {
   database: Database;
   db: Db;
   vision: VisionService;
+  /** The default evidence store (storage location `default`). Evidence rows are read where they were written: storageAt(). */
   storage: BlobStorage;
+  /** Every configured evidence storage location, `default` (= storage) included (data residency, lib/storage.ts). */
+  storageLocations: StorageLocations;
   keyring: Keyring;
   bus: RealtimeBus;
   /** Clock (epoch ms). Always use this instead of Date.now() so tests can control time. */
@@ -33,4 +38,8 @@ export interface Ctx {
   mailer: Mailer | null;
   /** Optional external second-opinion face verifiers (src/verifiers; per-org settings, off by default). */
   verifiers: VerifierRegistry;
+  /** Event-loop / database-pool / vision-queue sampling of this instance (snapshot null until it has run). */
+  loadMonitor: LoadMonitor;
+  /** Prometheus metrics of this instance (lib/metrics.ts; served at /metrics when METRICS_TOKEN is set). */
+  metrics: AppMetrics;
 }

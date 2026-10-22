@@ -39,13 +39,14 @@ export function WelcomeScreen() {
   const consentHintId = useId();
 
   const requireFullscreen = state?.exam.policy.browser.requireFullscreen ?? false;
+  const cameraUsed = state?.exam.policy.camera?.enabled !== false;
   useEffect(() => {
     let alive = true;
-    void checkSystemRequirements({ requireFullscreen }).then((r) => alive && setReqs(r));
+    void checkSystemRequirements({ requireFullscreen, camera: cameraUsed }).then((r) => alive && setReqs(r));
     return () => {
       alive = false;
     };
-  }, [requireFullscreen]);
+  }, [requireFullscreen, cameraUsed]);
 
   if (!state) return null;
   const { exam, candidate, consent } = state;
@@ -71,6 +72,12 @@ export function WelcomeScreen() {
       <BrandHeader title={exam.title} />
       <main className="stack" aria-labelledby="welcome-title">
         {(small || noCamera) && <DeviceNotice small={small} noCamera={noCamera} />}
+        {state.sandbox ? (
+          <div className="banner banner-info" role="note" data-testid="practice-notice">
+            <strong>Practice environment.</strong> This exam is set up for trying SmartProctoring out, not for a real exam. What you do here is deleted automatically after a
+            few days.
+          </div>
+        ) : null}
         <section className="card stack">
           <ScreenHeading id="welcome-title" title="Welcome">
             {exam.title}
@@ -106,6 +113,19 @@ export function WelcomeScreen() {
             </div>
           )}
         </section>
+
+        {state.accommodations?.length ? (
+          <section className="card stack" aria-labelledby="arrangements-title" data-testid="candidate-accommodations">
+            <h2 id="arrangements-title">Your approved arrangements</h2>
+            <p>Your organisation has set up this exam for you with:</p>
+            <ul>
+              {state.accommodations.map((a) => (
+                <li key={a}>{a}</li>
+              ))}
+            </ul>
+            <p className="muted small">If something here is not what you agreed, contact {consent.notice.contact} before you start.</p>
+          </section>
+        ) : null}
 
         <section className="card stack" aria-labelledby="access-title" data-testid="accessibility-note">
           <h2 id="access-title">Accessibility &amp; accommodations</h2>
@@ -150,10 +170,13 @@ export function WelcomeScreen() {
         </section>
 
         <section className="card stack" aria-labelledby="privacy-title">
-          <h2 id="privacy-title">Privacy notice: camera monitoring</h2>
+          <h2 id="privacy-title">{cameraUsed ? 'Privacy notice: camera monitoring' : 'Privacy notice: exam monitoring'}</h2>
           <p>
-            This exam is proctored. Before you start we will check your camera and confirm that you are a live person, and we will establish a protected reference of
-            your face so we can check that the same person continues the exam. Please read what is monitored and what is kept.
+            {!cameraUsed
+              ? 'This exam is proctored without a camera. A staff member verifies your identity before you start, and the exam page records events such as leaving the exam tab. Please read what is monitored and what is kept.'
+              : p.identity.verification === 'staff'
+                ? 'This exam is proctored. Before you start we check that your camera works, and a staff member verifies your identity. Please read what is monitored and what is kept.'
+                : 'This exam is proctored. Before you start we will check your camera and confirm that you are a live person, and we will establish a protected reference of your face so we can check that the same person continues the exam. Please read what is monitored and what is kept.'}
           </p>
           <PrivacyNotice notice={consent.notice} />
           <label className="inline cand-consent">

@@ -47,8 +47,9 @@ async function completeSession(browser: Browser, s: SessionHandle): Promise<void
   }
 }
 
+/** Evidence whose image still exists (surplus burst-frame and passed-check images are purged by design). */
 async function evidenceIds(databaseUrl: string, sessionId: string): Promise<{ id: string; kind: string }[]> {
-  return sql<{ id: string; kind: string }>(databaseUrl, 'SELECT id, kind FROM evidence WHERE session_id = $1 ORDER BY created_at', [sessionId]);
+  return sql<{ id: string; kind: string }>(databaseUrl, 'SELECT id, kind FROM evidence WHERE session_id = $1 AND purged_at IS NULL ORDER BY created_at', [sessionId]);
 }
 
 async function statuses(staff: StaffApi, ids: string[]): Promise<number[]> {
@@ -217,6 +218,8 @@ test.describe('key rotation', () => {
     const hook = await staff.json<{ webhook: { id: string }; secret: string }>('post', '/api/admin/webhooks', { url: receiver.url(), events: ['session.held', 'session.submitted'], minSeverity: 'medium', active: true });
     const ping1 = await staff.json<{ status: string }>('post', `/api/admin/webhooks/${hook.webhook.id}/test`, {});
     expect(ping1.status).toBe('succeeded');
+    // An accommodation with an administrators' note (encrypted).
+    const acc = await staff.json<{ id: string }>('post', `/api/admin/candidates/${c2.id}/accommodations`, { kind: 'extra_time', params: { minutes: 10 }, basis: 'accessibility', note: 'Rekey e2e note' });
 
     const browser = await launchCamera('a');
     try {
@@ -250,7 +253,7 @@ test.describe('key rotation', () => {
       const drySum = cliJson<{ targets: { target: string; outdated: number }[]; remaining: Record<string, number>; oldKeyIds: string[] }>(dry);
       const outdated = Object.fromEntries(drySum.targets.map((t) => [t.target, t.outdated]));
       console.log(`rekey --dry-run: ${JSON.stringify(outdated)}`);
-      for (const t of ['evidence_blobs', 'id_photo_embeddings', 'reference_embeddings', 'check_frame_embeddings', 'access_tokens', 'webhook_secrets']) expect(outdated[t], `${t} under K1`).toBeGreaterThan(0);
+      for (const t of ['evidence_blobs', 'id_photo_embeddings', 'reference_embeddings', 'check_frame_embeddings', 'access_tokens', 'webhook_secrets', 'accommodation_notes']) expect(outdated[t], `${t} under K1`).toBeGreaterThan(0);
       expect(drySum.remaining[drySum.oldKeyIds[0]]).toBeGreaterThan(0);
 
       // Run right after the restart, like the documented procedure (the server's retention job runs at start too).
@@ -267,6 +270,8 @@ test.describe('key rotation', () => {
       for (const [id, h] of bytes) expect(sha(await (await staff.raw(`/api/admin/evidence/${id}`)).body()), `evidence ${id} readable after rekey`).toBe(h);
       expect((await staff.session(s1.sessionId)).summary.accessLink, 'access link (stored encrypted) still shown').toBe(accessLink);
       expect((await staff.session(s2.sessionId)).summary.accessLink).toBe(s2.link);
+      const notes = await staff.json<{ items: { id: string; note: string | null }[] }>('get', `/api/admin/candidates/${c2.id}/accommodations`);
+      expect(notes.items.find((a) => a.id === acc.id)?.note, 'accommodation note (stored encrypted) still readable').toBe('Rekey e2e note');
 
       // Webhook secret: the receiver still verifies with the secret it was given at creation.
       const n0 = receiver.requests.length;

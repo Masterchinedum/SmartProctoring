@@ -4,7 +4,7 @@
  * (vision/calibration.ts) is tested by the vision module.
  */
 import type { FaceQuality, IdentityCheckTrigger } from '@sp/shared';
-import { DEFAULT_POLICY } from '@sp/shared';
+import { DEFAULT_POLICY, SAMPLING_PROFILES } from '@sp/shared';
 import { describe, expect, it } from 'vitest';
 import { CALIBRATION } from '../vision/index.js';
 import {
@@ -16,6 +16,10 @@ import {
   frameEvidence,
   identitySampleRequest,
   nextSampleDelayMs,
+  periodBaseline,
+  poorLightSuspect,
+  SAMPLE_WATCHDOG,
+  sampleWatchdog,
   windowSum,
   type EvidenceAccumulator,
   type SessionBaseline,
@@ -24,9 +28,10 @@ import {
 /* ---------------------------------------------------------------- fixtures */
 
 const GOOD: FaceQuality = { faceCount: 1, detectionScore: 0.93, interEyePx: 62, faceWidthRatio: 0.3, brightness: 125, contrast: 42, sharpness: 320, yawDeg: 2, pitchDeg: -9, cutOff: false, issues: [], usable: true };
-/** A dim room: usable, but only 'fair' / 'poor' quality for comparisons. */
-const FAIR: FaceQuality = { ...GOOD, brightness: 48, contrast: 19, sharpness: 120 };
-const POOR: FaceQuality = { ...GOOD, brightness: 34, contrast: 12, sharpness: 60, interEyePx: 29, detectionScore: 0.78 };
+/** Somewhat dim / flat light: 'fair' under the calibrated buckets (brightness 50–70, contrast 12–18). */
+const FAIR: FaceQuality = { ...GOOD, brightness: 60, contrast: 15, sharpness: 120 };
+/** A dim room: usable, but 'poor' (brightness < 50, low contrast, low detector score). */
+const POOR: FaceQuality = { ...GOOD, brightness: 34, contrast: 11, sharpness: 60, interEyePx: 29, detectionScore: 0.78 };
 const UNUSABLE: FaceQuality = { ...GOOD, brightness: 22, issues: ['too_dark'], usable: false };
 
 /** Deterministic PRNG (mulberry32) and a normal sampler. */
@@ -65,10 +70,10 @@ function run(samples: { sim: number | null; q: FaceQuality; trigger?: IdentityCh
 
 describe('per-session normalisation', () => {
   it('a drop from the person’s own level counts as evidence even above the global mismatch threshold', () => {
-    // 0.40 is above CALIBRATION.mismatch (0.30): globally nearly neutral, for a person whose own frames agree at 0.78 strong.
-    expect(0.4).toBeGreaterThan(CALIBRATION.mismatch);
-    const global = comparisonLLR(0.4, 'good', null).llr;
-    const personal = comparisonLLR(0.4, 'good', BASELINE_78).llr;
+    // 0.35 is above CALIBRATION.mismatch (0.30): globally about neutral, for a person whose own frames agree at 0.78 strong.
+    expect(0.35).toBeGreaterThan(CALIBRATION.mismatch);
+    const global = comparisonLLR(0.35, 'good', null).llr;
+    const personal = comparisonLLR(0.35, 'good', BASELINE_78).llr;
     expect(global).toBeLessThan(1.5);
     expect(personal).toBeGreaterThan(3);
     expect(personal).toBeGreaterThan(global + 2);
@@ -117,7 +122,7 @@ describe('evidence accumulator (SPRT)', () => {
     }
   });
 
-  it('a different person is confirmed within 2 samples after a track break, 2–3 routine samples otherwise', () => {
+  it('a different person is confirmed within 2 samples after a track break, 2–3 routine samples otherwise; in poor light only suspected', () => {
     const r = rng(11);
     const genuine = Array.from({ length: 40 }, () => ({ sim: r.normal(0.7, 0.07), q: GOOD }));
     const impostor = (trigger: IdentityCheckTrigger) => Array.from({ length: 6 }, (_, i) => ({ sim: r.normal(0.12, 0.08), q: GOOD, trigger: i === 0 ? trigger : ('server_request' as IdentityCheckTrigger) }));
@@ -126,9 +131,18 @@ describe('evidence accumulator (SPRT)', () => {
     const routine = run([...genuine, ...impostor('periodic')], null);
     expect(routine.confirmedAfter).not.toBeNull();
     expect(routine.confirmedAfter! - genuine.length).toBeLessThanOrEqual(3);
-    // ...also when the impostor is only seen in poor light.
-    const dim = run([...genuine, ...Array.from({ length: 6 }, () => ({ sim: r.normal(0.1, 0.08), q: POOR }))], BASELINE_78);
-    expect(dim.confirmedAfter! - genuine.length).toBeLessThanOrEqual(4);
+    // An impostor seen only in poor light is 'suspect' within 2 samples (faster sampling, lighting guidance, an uncertain
+    // observation for staff) but never confirmed: poor-only evidence is capped below the confirm threshold ...
+    const dimImpostor = Array.from({ length: 6 }, (_, i) => ({ sim: r.normal(0.05, 0.05), q: POOR, trigger: (i === 0 ? 'track_break' : 'server_request') as IdentityCheckTrigger }));
+    const dim = run([...genuine, ...dimImpostor], BASELINE_78);
+    expect(dim.confirmedAfter).toBeNull();
+    expect(dim.states.slice(genuine.length, genuine.length + 2)).toContain('suspect');
+    expect(dim.states.slice(genuine.length + 2).every((st) => st === 'suspect')).toBe(true);
+    expect(poorLightSuspect(dim.acc)).toBe(true);
+    expect(windowSum(dim.acc.window)).toBeLessThanOrEqual(CALIBRATION.sprt.maxPoorEvidence);
+    // ... until a fair or good frame of the same face arrives.
+    const lit = run([...genuine, ...dimImpostor, { sim: 0.12, q: FAIR, trigger: 'server_request' }], BASELINE_78);
+    expect(lit.confirmedAfter).toBe(genuine.length + dimImpostor.length + 1);
   });
 
   it('one sample can never confirm on its own (clamp + weight below the confirm threshold)', () => {
@@ -206,6 +220,26 @@ describe('evidence accumulator (SPRT)', () => {
     expect(r.states).toEqual(['suspect', 'confirmed_mismatch', 'confirmed_mismatch', 'confirmed_mismatch', 'confirmed_mismatch', 'consistent']);
   });
 
+  it('a late (out-of-order) discontinuity sample takes its place in time and does not drop newer genuine evidence', () => {
+    let acc: EvidenceAccumulator = { ...EMPTY_ACCUMULATOR, window: [] };
+    // Mild genuine samples (the window keeps them: their sum stays above `sprt.clear`).
+    acc = accumulate(acc, { id: 'g1', at: 100_000, trigger: 'periodic', evidence: frameEvidence(GOOD, 0.4, null) }).acc;
+    acc = accumulate(acc, { id: 'g2', at: 115_000, trigger: 'periodic', evidence: frameEvidence(GOOD, 0.41, null) }).acc;
+    expect(acc.window.map((e) => e.id)).toEqual(['g1', 'g2']);
+    expect(windowSum(acc.window)).toBeLessThan(0);
+    // A track_break sample captured BEFORE g2, delivered after it.
+    const late = accumulate(acc, { id: 'tb', at: 110_000, trigger: 'track_break', evidence: frameEvidence(GOOD, 0.1, null) });
+    expect(late.acc.window.map((e) => e.id)).toEqual(['g1', 'tb', 'g2']); // in time order, g1 / g2 kept
+    const raw = frameEvidence(GOOD, 0.1, null).llr;
+    expect(raw).toBeGreaterThan(0);
+    expect(late.acc.window.find((e) => e.id === 'tb')!.llr).toBeCloseTo(raw, 4); // not weighted as a discontinuity
+    expect(late.acc.lastSampleAt).toBe(115_000);
+    // The same sample in order is a discontinuity: earlier genuine evidence is dropped and it counts more.
+    const inOrder = accumulate(acc, { id: 'tb2', at: 120_000, trigger: 'track_break', evidence: frameEvidence(GOOD, 0.1, null) });
+    expect(inOrder.acc.window.map((e) => e.id)).toEqual(['tb2']);
+    expect(inOrder.acc.window[0].llr).toBeGreaterThan(raw);
+  });
+
   it('old samples leave the window', () => {
     let acc: EvidenceAccumulator = { ...EMPTY_ACCUMULATOR, window: [] };
     acc = accumulate(acc, { id: 'a', at: 0, trigger: 'periodic', evidence: frameEvidence(GOOD, 0.1, null) }).acc;
@@ -239,8 +273,18 @@ describe('check assessment (resume / reconnect / reverify)', () => {
 
   it('waits for enough usable frames, and all-unusable stays pending', () => {
     expect(assessCheck([ev(0.7, GOOD), ev(0.7, GOOD)]).status).toBe('pending');
-    expect(assessCheck([ev(0.7, GOOD), ev(0.7, GOOD)], { atLimit: true }).status).toBe('likely_match');
+    // At the collection limit two usable frames are assessed (not pending) — too little evidence to decide either way.
+    expect(assessCheck([ev(0.7, GOOD), ev(0.7, GOOD)], { atLimit: true }).status).toBe('uncertain');
+    expect(assessCheck([ev(0.7, GOOD), ev(0.7, GOOD), ev(0.68, GOOD)], { atLimit: true }).status).toBe('likely_match');
     expect(assessCheck(Array.from({ length: 10 }, () => ev(null, UNUSABLE))).status).toBe('pending');
+  });
+
+  it('poor-light-only evidence of a different person ends uncertain (lighting guidance), never likely_mismatch', () => {
+    const dark = assessCheck(Array.from({ length: 10 }, () => ev(0.05, POOR)));
+    expect(dark).toMatchObject({ status: 'uncertain', poorLight: true });
+    expect(dark.llr).toBeLessThanOrEqual(CALIBRATION.sprt.maxPoorEvidence);
+    // Fair / good frames of the same face still decide.
+    expect(assessCheck([...Array.from({ length: 4 }, () => ev(0.05, POOR)), ev(0.1, GOOD), ev(0.12, FAIR)]).status).toBe('likely_mismatch');
   });
 
   it('mixed clear evidence (two people) stays uncertain', () => {
@@ -266,11 +310,69 @@ describe('cadence', () => {
     expect(nextSampleDelayMs(policy, { activeSince: 0, acc: acc('consistent', 1) }, late)).toBe(CADENCE.unusableMs);
   });
 
+  it('watchdog: a server_request when no sample came for 3 intervals; "unanswered" after 6 intervals (at least 1 min)', () => {
+    const late = policy.startupWindowSec * 1000 + 1;
+    const iv = policy.periodicCheckIntervalSec * 1000;
+    const st = (lastSampleAt: number) => ({ activeSince: 0, evidence: { state: 'consistent' as const, lastSampleAt, unusableStreak: 0 } });
+    expect(sampleWatchdog(policy, st(late), late + 3 * iv)).toBe('ok');
+    expect(sampleWatchdog(policy, st(late), late + 3 * iv + 1)).toBe('request');
+    expect(sampleWatchdog(policy, st(late), late + Math.max(SAMPLE_WATCHDOG.observeAfterIntervals * iv, SAMPLE_WATCHDOG.minObserveMs) + 1)).toBe('unanswered');
+    // No sample since the period began: measured from its start (the start-up interval applies).
+    expect(sampleWatchdog(policy, { activeSince: 0, evidence: null }, 3 * policy.startupIntervalSec * 1000 + 1)).toBe('request');
+    expect(sampleWatchdog(policy, { activeSince: 0, evidence: null }, 50_000)).toBe('request');
+    expect(sampleWatchdog(policy, { activeSince: 0, evidence: null }, SAMPLE_WATCHDOG.minObserveMs + 1)).toBe('unanswered');
+    expect(sampleWatchdog(policy, { activeSince: null, evidence: null }, 1e9)).toBe('ok');
+    // identitySampleRequest asks for it (from the policy's own intervals), for the fast heartbeat too.
+    expect(identitySampleRequest('active', { sampleRequest: null, ...st(late) }, policy, late + 3 * iv)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: null, ...st(late) }, policy, late + 3 * iv + 1)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('paused', { sampleRequest: null, ...st(late) }, policy, late + 10 * iv)).toBeNull();
+  });
+
+  it('honours the Balanced sampling profile: its intervals for the cadence and the watchdog, 3-frame (triggered) requests', () => {
+    const balanced = { ...policy, ...SAMPLING_PROFILES.balanced };
+    const late = balanced.startupWindowSec * 1000 + 1;
+    const iv = balanced.periodicCheckIntervalSec * 1000;
+    expect(nextSampleDelayMs(balanced, { activeSince: 0, acc: acc('consistent') }, 10_000)).toBe(12_000);
+    expect(nextSampleDelayMs(balanced, { activeSince: 0, acc: acc('consistent') }, late)).toBe(30_000);
+    expect(nextSampleDelayMs(balanced, { activeSince: 0, acc: acc('suspect') }, late)).toBe(CADENCE.suspectMs); // a suspicion is as fast as before
+    const st = { activeSince: 0, evidence: { state: 'consistent' as const, lastSampleAt: late, unusableStreak: 0 } };
+    expect(sampleWatchdog(balanced, st, late + 3 * 15_000 + 1)).toBe('ok'); // Maximum would already ask
+    expect(sampleWatchdog(balanced, st, late + 3 * iv + 1)).toBe('request');
+    expect(identitySampleRequest('active', { sampleRequest: null, ...st }, balanced, late + 3 * iv + 1)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, balanced, 10)).toEqual({ trigger: 'exam_start', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, { ...balanced, burstSize: 4 }, 10)!.burstSize).toBe(4);
+  });
+
   it('identitySampleRequest: exam_start until a sample arrives; server_request while suspect and late', () => {
-    expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, 3, 10)).toEqual({ trigger: 'exam_start', inMs: 0, burstSize: 3 });
-    expect(identitySampleRequest('paused', { sampleRequest: { trigger: 'exam_start', since: 5 } }, 3, 10)).toBeNull();
-    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, 3, 1000)).toBeNull();
-    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, 3, CADENCE.lateAfterMs)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
-    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'consistent', lastSampleAt: 0 } }, 3, 60_000)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: { trigger: 'exam_start', since: 5 } }, policy, 10)).toEqual({ trigger: 'exam_start', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('paused', { sampleRequest: { trigger: 'exam_start', since: 5 } }, policy, 10)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, policy, 1000)).toBeNull();
+    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'suspect', lastSampleAt: 0 } }, policy, CADENCE.lateAfterMs)).toEqual({ trigger: 'server_request', inMs: 0, burstSize: 3 });
+    expect(identitySampleRequest('active', { sampleRequest: null, evidence: { state: 'consistent', lastSampleAt: 0 } }, policy, 30_000)).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------- period baseline (after a resume) */
+
+describe('period baseline', () => {
+  const f = (similarity: number | null, usable = true, bucket: 'good' | 'fair' | 'poor' = 'good') => ({ usable, similarity, bucket });
+
+  it("is measured from the check's usable frames, with the reference's bucket", () => {
+    const b = periodBaseline([f(0.7), f(0.72), f(null, false), f(0.68)], 'fair')!;
+    expect(b).toMatchObject({ n: 3, bucket: 'fair', calibrationVersion: CALIBRATION.version });
+    expect(b.mean).toBeCloseTo(0.7, 4);
+    expect(b.sd).toBeCloseTo(0.02, 4);
+  });
+
+  it("needs at least 3 usable frames and a level inside the band the continuous model covers (else 'relaxed')", () => {
+    expect(periodBaseline([f(0.7), f(0.72)], 'good')).toBeNull();
+    expect(periodBaseline([f(0.5), f(0.52), f(0.51)], 'good')).toBeNull(); // far below: another day, room or camera
+    expect(periodBaseline([f(0.7), f(0.72), f(0.71)], 'good')).not.toBeNull();
+  });
+
+  it("continuous against the period's own level: a drop from it is evidence, the level itself is not", () => {
+    const pb = periodBaseline([f(0.7), f(0.72), f(0.71), f(0.7)], 'good')!;
+    expect(comparisonLLR(0.7, 'good', pb, 'continuous').llr).toBeLessThan(-2);
+    expect(comparisonLLR(0.4, 'good', pb, 'continuous').llr).toBeGreaterThan(comparisonLLR(0.4, 'good', { ...BASELINE_78, bucket: 'good' }, 'relaxed').llr);
   });
 });

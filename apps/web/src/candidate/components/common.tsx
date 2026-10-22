@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { PrivacyNoticeDTO } from '@sp/shared';
 import { formatClock } from '@sp/shared';
 import { announce, countdownAnnouncement, useDialogFocus, useDocumentTitle, useFocusOnMount } from '../../lib/a11y';
@@ -120,17 +120,84 @@ export function PrivacyNotice({ notice, compact }: { notice: PrivacyNoticeDTO; c
   );
 }
 
-export function PrivacyNoticeDialog({ notice, onClose }: { notice: PrivacyNoticeDTO; onClose: () => void }) {
+/**
+ * The privacy notice during the exam. `canWithdraw` (consent was given and the exam has not ended) adds the way to
+ * withdraw consent: a second step that says what happens and asks for confirmation.
+ */
+export function PrivacyNoticeDialog({ notice, onClose, canWithdraw = false }: { notice: PrivacyNoticeDTO; onClose: () => void; canWithdraw?: boolean }) {
+  const [withdrawing, setWithdrawing] = useState(false);
+  if (withdrawing) return <WithdrawConsentDialog onCancel={() => setWithdrawing(false)} />;
   return (
     <Modal title="What is monitored during your exam" onClose={onClose}>
       {/* Focusable so the notice can be scrolled with the keyboard. */}
       <div className="cand-modal-scroll" tabIndex={0} role="region" aria-label="Privacy notice">
         <PrivacyNotice notice={notice} compact />
       </div>
-      <div className="row" style={{ justifyContent: 'flex-end', marginTop: 12 }}>
+      <div className="row" style={{ marginTop: 12 }}>
+        {canWithdraw && (
+          <button type="button" className="btn" onClick={() => setWithdrawing(true)} data-testid="withdraw-consent">
+            Withdraw my consent…
+          </button>
+        )}
+        <div className="spacer" />
         <button className="btn btn-primary" onClick={onClose} data-autofocus>
           Close
         </button>
+      </div>
+    </Modal>
+  );
+}
+
+/** Second step of withdrawing consent: what happens, an optional reason, and an explicit confirmation. */
+function WithdrawConsentDialog({ onCancel }: { onCancel: () => void }) {
+  const ctrl = useController();
+  const [reason, setReason] = useState('');
+  const [understood, setUnderstood] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const confirm = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await ctrl.withdrawConsent(reason);
+      // The exam has ended: the ended screen replaces this one.
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Your consent could not be withdrawn. Please try again.');
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title="Withdraw your consent?" onClose={busy ? undefined : onCancel}>
+      <div className="stack">
+        <p>If you withdraw your consent, your exam ends now. You cannot continue it later.</p>
+        <ul>
+          <li>Monitoring stops and your camera is turned off.</li>
+          <li>The images and identity data recorded for this exam are deleted straight away.</li>
+          <li>The answers you have given are kept, but the exam is not scored.</li>
+          <li>The exam provider is told and will contact you about another way to take the exam.</li>
+        </ul>
+        <label>
+          Tell the exam provider why (optional)
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} rows={3} disabled={busy} data-testid="withdraw-reason" />
+        </label>
+        <label className="inline">
+          <input type="checkbox" checked={understood} onChange={(e) => setUnderstood(e.target.checked)} disabled={busy} data-testid="withdraw-understood" />
+          <span>I understand that my exam ends now.</span>
+        </label>
+        {error && (
+          <div className="banner banner-danger" role="alert">
+            {error}
+          </div>
+        )}
+        <div className="row">
+          <button type="button" className="btn" onClick={onCancel} disabled={busy} data-autofocus>
+            Keep my consent
+          </button>
+          <div className="spacer" />
+          <button type="button" className="btn btn-danger" onClick={() => void confirm()} disabled={!understood || busy} data-testid="withdraw-confirm">
+            {busy ? 'Ending your exam…' : 'Withdraw consent and end my exam'}
+          </button>
+        </div>
       </div>
     </Modal>
   );
@@ -245,5 +312,31 @@ export function ContactLine() {
     <p className="muted small">
       Questions or problems? Contact <strong>{contact}</strong>.
     </p>
+  );
+}
+
+/**
+ * "Download monitoring trace" — only with `?trace=1` (accuracy evaluation by the exam owner / testers): the
+ * numbers the in-browser monitoring analysed (face positions, head direction, frame statistics, interaction
+ * timing — no images, no typed text), as a JSONL file for `pnpm --filter @sp/detection eval -- --trace <file>`.
+ * The file stays on this computer unless the person sends it.
+ */
+export function TraceDownload({ className }: { className?: string }) {
+  const ctrl = useController();
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!ctrl.trace) return;
+    const id = setInterval(() => force((x) => x + 1), 2000);
+    return () => clearInterval(id);
+  }, [ctrl.trace]);
+  const t = ctrl.trace;
+  if (!t) return null;
+  return (
+    <div className={`cand-trace ${className ?? ''}`} data-testid="trace-tools">
+      <button type="button" className="btn btn-sm" onClick={() => t.download()} data-testid="trace-download">
+        Download monitoring trace
+      </button>
+      <span className="muted small">{t.observationCount} observations recorded (evaluation mode)</span>
+    </div>
   );
 }

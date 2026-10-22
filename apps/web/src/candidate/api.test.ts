@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CandidateApiError, classifyApiError, createCandidateApi, isRetryable, isServerBusy, sha256Hex, uuid } from './api';
+import { busyRetryDelayMs, CandidateApiError, classifyApiError, createCandidateApi, isRetryable, isServerBusy, parseRetryAfterMs, sha256Hex, uuid } from './api';
 
 function mockFetch(handler: (url: string, init: RequestInit) => Response | Promise<Response>) {
   const calls: { url: string; init: RequestInit }[] = [];
@@ -79,6 +79,19 @@ describe('candidate api client', () => {
     expect(err).toBeInstanceOf(CandidateApiError);
     expect(err).toMatchObject({ status: 409, code: 'invalid_state', message: 'Not now' });
     expect(classifyApiError(err)).toBe('invalid_state');
+  });
+
+  it('keeps the server’s Retry-After of a busy answer', async () => {
+    const { fn } = mockFetch(() => new Response(JSON.stringify({ error: 'vision_busy', message: 'busy', retryAfterSec: 7 }), { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '7' } }));
+    const api = createCandidateApi({ token: 't', instanceId: 'inst-abcdef', fetchImpl: fn });
+    const err = await api.identitySample('s1', new Uint8Array([1]), { trigger: 'periodic', capturedAt: 1 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CandidateApiError);
+    expect(err).toMatchObject({ status: 503, code: 'vision_busy', retryAfterMs: 7000 });
+    expect(isServerBusy(err)).toBe(true);
+    expect(busyRetryDelayMs(err, 1000, () => 0)).toBe(7000);
+    expect(busyRetryDelayMs(err, 1000, () => 1)).toBe(10_500);
+    expect(busyRetryDelayMs(err, 9000, () => 0)).toBe(9000); // never shorter than the caller's own back-off
+    expect([parseRetryAfterMs(null), parseRetryAfterMs('Wed, 21 Oct 2026 07:28:00 GMT'), parseRetryAfterMs(' 3 '), parseRetryAfterMs('9999')]).toEqual([null, null, 3000, 300_000]);
   });
 
   it('reports superseded and invalid links as fatal', async () => {

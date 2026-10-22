@@ -8,6 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import {
+  ACCOMMODATION_CATALOG,
   clockStart as clockStartFn,
   clockStop as clockStopFn,
   EVENT_CATALOG,
@@ -22,7 +23,7 @@ import {
   type ProctoringPolicy,
   type SessionStatus,
 } from '@sp/shared';
-import { and, desc, eq, getTableColumns, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { Tx } from '../db/index.js';
 import {
@@ -30,6 +31,7 @@ import {
   events,
   examSessions,
   exams,
+  identitySampleFrames,
   organizations,
   pauseRequests,
   sessionCommands,
@@ -38,15 +40,19 @@ import {
   type EventRow,
   type Exam,
   type ExamSession,
+  type IdentityCheck,
   type IdentityEngineState,
   type Organization,
   type SessionPeriod,
 } from '../db/schema.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { sessionClock, staffVisibleKey } from './dto.js';
+import { refreshSessionAccommodations, withAccommodations } from './accommodations.js';
+import { transactionWithEvidence } from './evidence.js';
+import { loadVersion, versionForStart } from './exam-versions.js';
 import { gradeSession } from './grading.js';
 import { enqueueIntegrationNotifications } from './integration-events.js';
-import { mergePolicy, orgThresholds } from './org.js';
+import { decisionStamp, mergePolicy, orgThresholds, type DecisionStamp } from './org.js';
 import { capturesWithin, GAP_NOT_RETURNED, loadLateCaptures } from './reporting-gaps.js';
 import { EMPTY_ACCUMULATOR } from './identity-evidence.js';
 
@@ -73,6 +79,9 @@ export const EMPTY_IDENTITY_STATE: IdentityEngineState = {
   pendingBursts: [],
   secondOpinionPending: null,
   secondOpinionVeto: null,
+  normalisation: 'continuous',
+  periodBaseline: null,
+  openNoSamplesEventId: null,
 };
 
 export function identityState(s: Pick<ExamSession, 'identityState'>): IdentityEngineState {
@@ -81,9 +90,14 @@ export function identityState(s: Pick<ExamSession, 'identityState'>): IdentityEn
 }
 
 /** Effective policy: snapshot taken at exam start, else org default merged with the exam policy. */
-export function effectivePolicy(session: Pick<ExamSession, 'policy'>, exam: Pick<Exam, 'policy'>, org: Pick<Organization, 'settings'> | null): ProctoringPolicy {
+/**
+ * The rules a session runs under: the snapshot taken at start (accommodations included); before that the exam's rules
+ * merged with the organisation default, with the session's approved accommodations applied (services/accommodations.ts).
+ */
+export function effectivePolicy(session: Pick<ExamSession, 'policy'> & Partial<Pick<ExamSession, 'accommodations'>>, exam: Pick<Exam, 'policy'>, org: Pick<Organization, 'settings'> | null): ProctoringPolicy {
   if (session.policy) return mergePolicy(undefined, session.policy as Record<string, unknown>);
-  return mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, exam.policy as Record<string, unknown>);
+  const examPolicy = mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, exam.policy as Record<string, unknown>);
+  return withAccommodations(examPolicy, session.accommodations).policy;
 }
 
 /** Which check (if any) THIS browser instance must pass before continuing. */
@@ -123,9 +137,12 @@ export class SessionMutation {
   readonly now: number;
   private patch: Partial<typeof examSessions.$inferInsert> = {};
   private readonly touchedEvents = new Set<string>();
-  private readonly identityChecksToPublish: string[] = [];
+  private readonly identityChecksToPublish: Pick<IdentityCheck, 'id' | 'checkId' | 'trigger' | 'decision'>[] = [];
   private readonly pauseRequestsToPublish: string[] = [];
   private readonly afterCommit: (() => void | Promise<void>)[] = [];
+  /** Bursts dropped undecided (resetIdentityCounters / dropPendingBursts): their frame embeddings are erased at flush. */
+  private readonly droppedBurstIds = new Set<string>();
+  private eraseAllUndecidedFrames = false;
   private cache: { exam?: Exam; org?: Organization | null; candidate?: Candidate; periods?: SessionPeriod[] } = {};
   /** What staff saw of the session before this mutation (dto.ts staffVisibleKey). */
   private readonly visibleBefore: string;
@@ -188,6 +205,11 @@ export class SessionMutation {
     return orgThresholds(await this.org());
   }
 
+  /** The versions an identity decision made now records (same organisation row as thresholds()). */
+  async decisionStamp(): Promise<DecisionStamp> {
+    return decisionStamp(await this.org());
+  }
+
   /* ---------------------------------------------------------------- notifications */
 
   onCommit(fn: () => void | Promise<void>): void {
@@ -200,8 +222,9 @@ export class SessionMutation {
   touchEvent(id: string): void {
     this.touchedEvents.add(id);
   }
-  publishIdentityCheck(id: string): void {
-    this.identityChecksToPublish.push(id);
+  /** A recorded identity decision: staff dashboards are told, and it is counted (metrics), once committed. */
+  publishIdentityCheck(row: Pick<IdentityCheck, 'id' | 'checkId' | 'trigger' | 'decision'>): void {
+    this.identityChecksToPublish.push(row);
   }
   publishPauseRequest(id: string): void {
     this.pauseRequestsToPublish.push(id);
@@ -209,6 +232,23 @@ export class SessionMutation {
 
   /** @internal */
   async flush(): Promise<void> {
+    if (this.droppedBurstIds.size || this.eraseAllUndecidedFrames) {
+      // Frame embeddings of bursts that will never be decided are erased with the change that dropped them
+      // (PRIVACY.md: burst-frame templates are kept only until the burst is decided).
+      await this.tx
+        .update(identitySampleFrames)
+        .set({ embeddingEnc: null })
+        .where(
+          and(
+            eq(identitySampleFrames.sessionId, this.session.id),
+            isNull(identitySampleFrames.identityCheckId),
+            isNotNull(identitySampleFrames.embeddingEnc),
+            this.eraseAllUndecidedFrames ? sql`true` : inArray(identitySampleFrames.burstId, [...this.droppedBurstIds]),
+          ),
+        );
+      this.droppedBurstIds.clear();
+      this.eraseAllUndecidedFrames = false;
+    }
     if (this.dirty) {
       this.patch.updatedAt = new Date(this.now);
       await this.tx.update(examSessions).set(this.patch).where(eq(examSessions.id, this.session.id));
@@ -228,7 +268,10 @@ export class SessionMutation {
     const orgId = this.session.orgId;
     // Events / identity checks / pause requests refresh the summary themselves (counts, last decision...).
     for (const id of this.touchedEvents) live.eventChanged(id, sid, orgId);
-    for (const id of this.identityChecksToPublish) live.identityCheck(sid, id, orgId);
+    for (const c of this.identityChecksToPublish) {
+      live.identityCheck(sid, c.id, orgId);
+      this.ctx.metrics.identityDecision(c.checkId ? 'check' : 'sample', c.trigger, c.decision);
+    }
     for (const id of this.pauseRequestsToPublish) live.pauseRequest(sid, id, orgId);
     // A routine heartbeat (only timestamps changed) only keeps the summary fresh at the keepalive rate.
     live.sessionChanged(sid, { orgId, visible: this.staffVisibleChange });
@@ -407,6 +450,7 @@ export class SessionMutation {
         openMismatchEventId: st.openMismatchEventId && ids.has(st.openMismatchEventId) ? null : st.openMismatchEventId,
         openUnverifiableEventId: st.openUnverifiableEventId && ids.has(st.openUnverifiableEventId) ? null : st.openUnverifiableEventId,
         openFeedSuspectEventId: st.openFeedSuspectEventId && ids.has(st.openFeedSuspectEventId) ? null : st.openFeedSuspectEventId,
+        openNoSamplesEventId: st.openNoSamplesEventId && ids.has(st.openNoSamplesEventId) ? null : (st.openNoSamplesEventId ?? null),
       });
       if (this.session.reportingEventId && ids.has(this.session.reportingEventId)) this.set({ reportingEventId: null });
     }
@@ -421,11 +465,12 @@ export class SessionMutation {
    * session is (again) active, the start-up sampling cadence begins and an exam_start sample is requested
    * (CandidateSessionState / HeartbeatResponse.identitySample): a swap is most likely right after a (re)start.
    * Bursts still being collected belong to the previous period; they are dropped (identity-samples.ts decides
-   * frames that still arrive as late frames, without effect).
+   * frames that still arrive as late frames, without effect) and their frame embeddings erased.
    */
   resetIdentityCounters(): void {
     const st = identityState(this.session);
     const active = this.session.status === 'active';
+    for (const b of st.pendingBursts) this.droppedBurstIds.add(b.id);
     this.setIdentityState({
       ...st,
       consecutiveMatch: 0,
@@ -441,7 +486,18 @@ export class SessionMutation {
       secondOpinionVeto: null,
       activeSince: active ? this.now : null,
       sampleRequest: active ? { trigger: 'exam_start', since: this.now } : null,
+      cadenceMs: null,
     });
+  }
+
+  /**
+   * The session ends: bursts still being collected are never decided — dropped, and every undecided frame's embedding
+   * of the session erased (at flush).
+   */
+  dropPendingBursts(): void {
+    const st = identityState(this.session);
+    if (st.pendingBursts.length) this.setIdentityState({ ...st, pendingBursts: [] });
+    this.eraseAllUndecidedFrames = true;
   }
 
   /* ---------------------------------------------------------------- commands */
@@ -464,7 +520,8 @@ export interface SessionPreload {
  */
 export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: SessionMutation) => Promise<T>, preload?: SessionPreload): Promise<T> {
   let mutation: SessionMutation | null = null;
-  const result = await ctx.db.transaction(async (tx) => {
+  // Evidence stored in a transaction that rolls back is deleted again (services/evidence.ts).
+  const result = await transactionWithEvidence(ctx, async (tx) => {
     // The lock query also tells whether the organisation has active webhooks (the integration outbox hook can
     // then skip its savepoint and lookups for the common "no webhooks" case).
     const [locked] = await tx
@@ -488,6 +545,26 @@ export async function withSession<T>(ctx: Ctx, sessionId: string, fn: (m: Sessio
 
 /* =================================================================== transitions */
 
+/**
+ * The browser stopped reporting at `last` (its last heartbeat) and the heartbeat timeout has passed: the connection is
+ * offline; during an active exam a `reporting_interrupted` event opens at `last` and, under disconnect policy 'stop',
+ * the clock stops there. Recorded by the sweeper, or by the browser's next heartbeat when no sweeper saw the silence
+ * (every instance was down or restarting) — the outcome must not depend on which comes first.
+ */
+export async function recordReportingTimeout(m: SessionMutation, policy: ProctoringPolicy, last: number, detectedBy: 'sweeper' | 'late_heartbeat'): Promise<void> {
+  const s = m.session;
+  m.set({ connection: 'offline' });
+  if (s.status !== 'active') return;
+  const ev = await m.addEvent({
+    type: 'reporting_interrupted',
+    open: true,
+    startedAt: last,
+    details: { lastHeartbeatAt: last, instanceId: s.lastHeartbeatInstanceId, timerBehavior: policy.connection.disconnectTimerBehavior, ...(detectedBy === 'sweeper' ? {} : { detectedBy }) },
+  });
+  m.set({ reportingEventId: ev.id, reportingInterruptedSince: new Date(Math.min(last, s.reportingInterruptedSince?.getTime() ?? Infinity)) });
+  if (policy.connection.disconnectTimerBehavior === 'stop') m.clockStop(Math.max(last, s.runningSince?.getTime() ?? last));
+}
+
 export function assertStatus(m: SessionMutation, allowed: SessionStatus[], message?: string): void {
   if (!allowed.includes(m.session.status)) {
     throw new HttpError(409, 'invalid_state', message ?? `This action is not possible while the exam is ${m.session.status.replace('_', ' ')}`, { status: m.session.status });
@@ -497,12 +574,45 @@ export function assertStatus(m: SessionMutation, allowed: SessionStatus[], messa
 /** ready -> active: clock starts, active period opens, policy snapshot taken. */
 export async function startExam(m: SessionMutation): Promise<void> {
   assertStatus(m, ['ready'], 'The exam can only be started after the readiness check');
-  const policy = await m.policy();
-  m.set({ status: 'active', startedAt: m.session.startedAt ?? new Date(m.now), policy, currentQuestionIndex: m.session.currentQuestionIndex ?? 0 });
+  // The attempt is pinned to the exam's current version (questions, answer keys, the exam's own rules) for good:
+  // later edits of the exam never reach it (services/exam-versions.ts).
+  const pinned = m.session.examVersionId ? await loadVersion(m.tx, m.session.examVersionId) : null;
+  const version = pinned ?? (await versionForStart(m.tx, m.session.examId, m.now));
+  const org = await m.org();
+  // Approved accommodations as of now (a grant or revocation up to the very start counts), then frozen with the policy.
+  await refreshSessionAccommodations(m);
+  const examPolicy = mergePolicy(org?.settings?.defaultPolicy as Record<string, unknown> | undefined, version.policy as Record<string, unknown>);
+  const acc = m.session.accommodations;
+  const { policy, exceptions } = withAccommodations(examPolicy, acc, m.session.durationMs);
+  // Admission at exam start (candidate-actions.ts startSession) may have held the start back while the server was busy.
+  const deferredMs = m.session.startDeferredSince ? Math.max(0, m.now - m.session.startDeferredSince.getTime()) : null;
+  m.set({
+    status: 'active',
+    startedAt: m.session.startedAt ?? new Date(m.now),
+    examVersionId: version.id,
+    policy,
+    accommodations: acc?.items.length ? { ...acc, exceptions } : null,
+    currentQuestionIndex: m.session.currentQuestionIndex ?? 0,
+    startDeferredSince: null,
+  });
   m.clockStart();
   await m.switchPeriod('active', m.now);
   m.resetIdentityCounters();
-  await m.addEvent({ type: 'session_started', details: { durationMs: m.session.durationMs } });
+  await m.addEvent({
+    type: 'session_started',
+    details: { durationMs: m.session.durationMs, ...(deferredMs != null ? { startDeferredMs: deferredMs } : {}) },
+    ...(deferredMs != null
+      ? { observation: `The exam was started. The start was held back ${Math.round(deferredMs / 1000)} s while the server was busy; the exam clock started only now.` }
+      : {}),
+  });
+  if (acc?.items.length) {
+    const labels = acc.items.map((i) => ACCOMMODATION_CATALOG[i.kind].label(i.params));
+    await m.addEvent({
+      type: 'accommodations_applied',
+      observation: `Approved accommodations were applied: ${labels.join('; ')}.`,
+      details: { items: acc.items.map((i, n) => ({ id: i.id, kind: i.kind, label: labels[n], params: i.params })), extraTimeMs: acc.extraTimeMs, exceptions },
+    });
+  }
 }
 
 /** active -> paused (formal pause). Monitoring stops; paused period (unobserved) opens. */
@@ -531,10 +641,17 @@ export const HOLD_MESSAGES: Record<HoldReason, string> = {
   staff: 'An administrator has put your exam on hold. Please wait for further instructions.',
   id_photo_unverifiable:
     'We could not compare you clearly with the identity photo on file (for example because of lighting or image quality). This is not a finding that you are a different person. An administrator will review this before you can start.',
+  staff_verification: 'A staff member will now verify your identity, as arranged with your organisation. Please keep this page open. The exam clock is stopped.',
+  resume_limit:
+    'Your exam was interrupted more often or for longer than the exam rules allow, so it is on hold. An administrator needs to approve before you can continue. Your answers and remaining time are saved.',
+  recovery: 'An administrator has reopened your exam. Complete the camera and identity check to continue where you stopped. Your answers are saved, and the exam clock starts again only after the check.',
 };
 
 /** Put the session on hold (clock stopped, on_hold period opens, candidate gets a 'hold' command). */
-export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; message?: string; canReverify?: boolean; source?: EventSource; details?: Record<string, unknown>; by?: string | null }): Promise<void> {
+export async function holdNow(
+  m: SessionMutation,
+  opts: { reason: HoldReason; message?: string; canReverify?: boolean; source?: EventSource; details?: Record<string, unknown>; by?: string | null; /** Timeline wording (default: the catalog's). */ observation?: string },
+): Promise<void> {
   assertStatus(m, ['invited', 'ready', 'active', 'paused', 'on_hold']);
   const at = m.now;
   const prev = m.session.status;
@@ -561,7 +678,7 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
     reEnrollAuthorizedBy: null,
   });
   m.resetIdentityCounters();
-  await m.addEvent({ type: 'session_held', source: opts.source ?? 'server_system', details: { reason: opts.reason, previousStatus: prev, by: opts.by ?? null, ...(opts.details ?? {}) } });
+  await m.addEvent({ type: 'session_held', source: opts.source ?? 'server_system', observation: opts.observation, details: { reason: opts.reason, previousStatus: prev, by: opts.by ?? null, ...(opts.details ?? {}) } });
   await m.enqueueCommand({ kind: 'hold', hold: { reason: opts.reason, since: m.session.holdSince?.getTime() ?? at, message, canReverify: opts.canReverify ?? false } });
 }
 
@@ -571,15 +688,16 @@ export async function holdNow(m: SessionMutation, opts: { reason: HoldReason; me
 export async function finalizeSession(
   m: SessionMutation,
   endReason: SessionEndReason,
-  opts: { by?: string | null; note?: string | null; /** 'abandoned' only */ observation?: string; details?: Record<string, unknown>; candidateMessage?: string } = {},
+  opts: { by?: string | null; note?: string | null; /** 'abandoned' / 'candidate_withdrew' / 'resume_limit' only */ observation?: string; details?: Record<string, unknown>; candidateMessage?: string } = {},
 ): Promise<void> {
   if (TERMINAL.includes(m.session.status)) return;
   // Time expiry is recorded at the moment the clock ran out (the sweeper may run a few seconds later).
   const rs = m.session.runningSince?.getTime();
   const at = endReason === 'time_expired' && rs != null ? Math.max(rs, Math.min(m.now, rs + m.session.durationMs - m.session.usedMs)) : m.now;
   m.clockStop(at);
-  // 'abandoned' (housekeeping after inactivity) ends as terminated so no score is implied; answers are kept.
-  const status: SessionStatus = endReason === 'staff_terminated' || endReason === 'abandoned' ? 'terminated' : 'submitted';
+  // 'abandoned' (housekeeping after inactivity) and 'candidate_withdrew' (consent withdrawn) end as terminated so no
+  // score is implied; answers are kept.
+  const status: SessionStatus = endReason === 'staff_terminated' || endReason === 'abandoned' || endReason === 'candidate_withdrew' ? 'terminated' : 'submitted';
   await closeReportingGapAtEnd(m, at, endReason);
   await m.closeOpenEvents(at, 'session_end');
   await m.closeOpenPeriod(at);
@@ -588,6 +706,7 @@ export async function finalizeSession(
     .set({ status: 'cancelled', decidedAt: new Date(at) })
     .where(and(eq(pauseRequests.sessionId, m.session.id), eq(pauseRequests.status, 'pending')));
   const wasStarted = m.session.startedAt != null;
+  m.dropPendingBursts();
   m.set({
     status,
     endReason,
@@ -604,12 +723,23 @@ export async function finalizeSession(
   } else if (endReason === 'staff_terminated') {
     await m.addEvent({ type: 'session_terminated', source: 'staff', startedAt: at, details: { reason: opts.note ?? null, by: opts.by ?? null } });
     await m.enqueueCommand({ kind: 'terminated', message: 'Your exam was ended by an administrator.' });
+  } else if (endReason === 'candidate_withdrew') {
+    // services/privacy-requests.ts withdrawConsent: the candidate's own decision, not an integrity observation.
+    await m.addEvent({
+      type: 'session_terminated',
+      source: 'server_system',
+      startedAt: at,
+      observation: opts.observation ?? 'The candidate withdrew their consent, so the exam ended. Its face images and templates were deleted.',
+      details: { reason: 'consent_withdrawn', ...(opts.details ?? {}) },
+    });
+    await m.enqueueCommand({ kind: 'terminated', message: opts.candidateMessage ?? 'You withdrew your consent, so your exam has ended.' });
   } else {
-    await m.addEvent({ type: 'session_submitted', startedAt: at, source: 'server_system', details: { endReason, by: opts.by ?? null, note: opts.note ?? null } });
+    // 'resume_limit' (services/recovery.ts): the resume policy ended the exam; submitted and graded like a time expiry.
+    await m.addEvent({ type: 'session_submitted', startedAt: at, source: 'server_system', observation: opts.observation, details: { endReason, by: opts.by ?? null, note: opts.note ?? null, ...(opts.details ?? {}) } });
     if (endReason !== 'candidate_submitted') await m.enqueueCommand({ kind: 'submitted', reason: endReason });
   }
-  if (wasStarted && endReason !== 'abandoned') {
-    const score = await gradeSession(m.tx, m.session.id, m.session.examId, at);
+  if (wasStarted && endReason !== 'abandoned' && endReason !== 'candidate_withdrew') {
+    const score = await gradeSession(m.tx, m.session, at);
     m.set({ score });
   }
 }

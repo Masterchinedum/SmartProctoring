@@ -1,12 +1,17 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { accommodationRoutes } from './accommodations.js';
 import { candidatesRoutes } from './candidates.js';
 import { eventRoutes } from './events.js';
 import { evidenceRoutes } from './evidence.js';
 import { examRoutes } from './exams.js';
+import { governanceRoutes } from './governance.js';
 import { integrationRoutes } from './integrations.js';
 import { metricsRoutes } from './metrics.js';
 import { orgRoutes } from './org.js';
+import { privacyRoutes } from './privacy.js';
+import { reviewRoutes } from './review.js';
 import { sessionRoutes } from './sessions.js';
+import { ssoAdminRoutes } from './sso.js';
 import { toolRoutes } from './tools.js';
 import { verifierRoutes } from './verifiers.js';
 
@@ -24,23 +29,32 @@ import { verifierRoutes } from './verifiers.js';
  *   evidence.ts    decrypted evidence images (audited), identity comparison view
  *   exams.ts       exams CRUD, publish/archive, exam sessions, assignments
  *   candidates.ts  candidates CRUD, approved ID photos
+ *   accommodations.ts  per-candidate accommodations (grant / revoke)
  *   org.ts         organisation settings, staff users, audit log
  *   metrics.ts     detection quality, offline evaluation uploads
+ *   governance.ts  versioned identity decision configurations (propose / approve / rollback), calibration, drift
+ *   privacy.ts     privacy request register (export, erasure), retention preview, operational checks
  *   integrations.ts  API keys, webhooks (+ deliveries), email-alert test, integration status
  *   tools.ts       staff camera self-test of the identity pipeline (transient, nothing stored)
  *   verifiers.ts   external second-opinion face verifier: providers offered, test connection
+ *   sso.ts         single sign-on identity providers (OIDC / SAML), SCIM token, unlinking accounts
  */
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(sessionRoutes);
   await app.register(eventRoutes);
+  await app.register(reviewRoutes);
   await app.register(evidenceRoutes);
   await app.register(examRoutes);
   await app.register(candidatesRoutes);
+  await app.register(accommodationRoutes);
   await app.register(orgRoutes);
   await app.register(metricsRoutes);
+  await app.register(governanceRoutes);
+  await app.register(privacyRoutes);
   await app.register(integrationRoutes);
   await app.register(toolRoutes);
   await app.register(verifierRoutes);
+  await app.register(ssoAdminRoutes);
 };
 
 export default adminRoutes;

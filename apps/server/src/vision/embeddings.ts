@@ -31,6 +31,15 @@ export const DEFAULT_EMBEDDING_RECIPE: Readonly<EmbeddingRecipe> = RECIPE_V2;
 /** Model id written by `serializeEmbeddings` by default: the id of DEFAULT_EMBEDDING_RECIPE. */
 export const EMBEDDING_MODEL_CURRENT = EMBEDDING_MODEL_SFACE_2021DEC_FLIP;
 
+/** Readable names of the model ids (stamped on identity decisions as `model_version`, shown on the Quality page). */
+export const EMBEDDING_MODEL_NAMES: Readonly<Record<number, string>> = Object.freeze({
+  [EMBEDDING_MODEL_SFACE_2021DEC]: 'sface-2021dec',
+  [EMBEDDING_MODEL_SFACE_2021DEC_FLIP]: 'sface-2021dec-flip',
+});
+
+/** The recogniser model the server decides with. */
+export const EMBEDDING_MODEL_VERSION = EMBEDDING_MODEL_NAMES[EMBEDDING_MODEL_CURRENT];
+
 /** Model ids whose embeddings live in the current embedding space (accepted by `deserializeEmbeddings`). */
 export const COMPATIBLE_EMBEDDING_MODELS: readonly number[] = Object.freeze([EMBEDDING_MODEL_SFACE_2021DEC, EMBEDDING_MODEL_SFACE_2021DEC_FLIP]);
 export const EMBEDDING_DIM = 128;

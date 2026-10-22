@@ -9,7 +9,7 @@ import { expect, test } from '../lib/test';
  *  - Opening the same link in another browser takes over after its reconnect check; the first window is
  *    told calmly that the exam continues in another window (superseded) and stops.
  */
-test('reload requires a reconnect check; a second browser supersedes the first', async ({ staff }) => {
+test('reload requires a reconnect check; a second browser supersedes the first', { tag: '@cross-browser' }, async ({ staff }) => {
   skipUnlessFixtures('a');
   const s = await staff.createSession();
   const browser1 = await launchCamera('a');

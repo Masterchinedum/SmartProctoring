@@ -7,7 +7,8 @@ export async function loginViaUi(page: Page, email: string, password: string): P
   await expect(page).toHaveURL(/\/admin\/login/);
   await page.getByLabel(/email/i).fill(email);
   await page.getByLabel(/password/i).fill(password);
-  await page.getByRole('button', { name: /sign in|log in/i }).click();
+  // Exact: the sign-in page also has "Sign in with your organisation" (single sign-on).
+  await page.getByRole('button', { name: /^(sign in|log in)$/i }).click();
   await expect(page.getByRole('heading', { name: 'Live', exact: true })).toBeVisible();
 }
 

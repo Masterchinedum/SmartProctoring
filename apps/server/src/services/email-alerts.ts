@@ -11,7 +11,7 @@
  * retried (1, 5, 15, 30 min; 5 attempts). Emails are plain text + simple HTML with a link to the session in the
  * staff app; they never contain images, face data or similarity scores. Rows are deleted after 30 days.
  */
-import { SEVERITY_RANK, type HoldReason, type Severity } from '@sp/shared';
+import { isFlagCategory, SEVERITY_RANK, type EventCategory, type HoldReason, type Severity } from '@sp/shared';
 import { and, asc, eq, inArray, lt, lte, max, ne } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
@@ -37,6 +37,9 @@ export const HOLD_REASON_SENTENCES: Record<HoldReason, string> = {
   pause_limit: 'the pause was longer than the exam rules allow',
   staff: 'a staff member placed it on hold',
   id_photo_unverifiable: 'the live image could not be compared dependably with the approved ID photo (image quality; not evidence of a different person)',
+  staff_verification: 'the candidate is waiting for a staff member to verify their identity (an approved arrangement instead of the automated face check)',
+  resume_limit: 'the exam was interrupted more often or for longer than the exam rules allow and needs a staff decision',
+  recovery: 'an administrator reopened the exam for recovery and the candidate has to pass a fresh identity check',
 };
 
 export function alertKindEnabled(s: Pick<OrgSettings, 'emailAlerts'>, kind: EmailAlertKind): boolean {
@@ -44,8 +47,8 @@ export function alertKindEnabled(s: Pick<OrgSettings, 'emailAlerts'>, kind: Emai
 }
 
 /** Whether a new event of this severity/category is a "high severity" alert. */
-export function isHighSeverityAlert(category: string, severity: Severity): boolean {
-  return category !== 'neutral' && SEVERITY_RANK[severity] >= SEVERITY_RANK.high;
+export function isHighSeverityAlert(category: EventCategory, severity: Severity): boolean {
+  return isFlagCategory(category) && SEVERITY_RANK[severity] >= SEVERITY_RANK.high;
 }
 
 export interface EmailAlertInput {
@@ -103,7 +106,11 @@ export interface DigestContext {
   candidate: { name: string; externalId: string | null };
   exam: { title: string };
   staffUrl: string;
+  /** The organisation is a sandbox (test data): the subject and the first line say so. */
+  sandbox?: boolean;
 }
+
+const SANDBOX_EMAIL_NOTE = 'This alert comes from a sandbox organisation: test data, not real candidates.';
 
 /**
  * One email for a session's pending alerts (oldest first). Observational wording, no images. No links except our
@@ -121,9 +128,10 @@ export function composeAlertEmail(c0: DigestContext, items0: Pick<EmailAlert, 't
   };
   const items = items0.map((i) => ({ ...i, title: stripUrls(i.title), observation: stripUrls(i.observation) }));
   const who = `${c.candidate.name} — ${c.exam.title}`;
-  const subject = headerSafe(`[SmartProctoring] ${items.length === 1 ? items[0].title : `${items.length} alerts`}: ${who}`);
+  const subject = headerSafe(`[SmartProctoring${c.sandbox ? ' sandbox' : ''}] ${items.length === 1 ? items[0].title : `${items.length} alerts`}: ${who}`);
   const lines = items.map((i) => `• ${formatUtc(i.occurredAt.getTime())} — ${i.title}: ${i.observation}`);
   const text = [
+    ...(c.sandbox ? [SANDBOX_EMAIL_NOTE, ''] : []),
     `SmartProctoring alert for ${c.orgName}`,
     '',
     `Candidate: ${c.candidate.name}${c.candidate.externalId ? ` (external ID ${c.candidate.externalId})` : ''}`,
@@ -139,6 +147,7 @@ export function composeAlertEmail(c0: DigestContext, items0: Pick<EmailAlert, 't
   ].join('\n');
   const html = [
     '<!doctype html><html><body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;color:#1f2933;line-height:1.5">',
+    ...(c.sandbox ? [`<p style="margin:0 0 12px;padding:8px 12px;background:#fff4d6;border-radius:6px"><strong>Sandbox:</strong> ${escapeHtml(SANDBOX_EMAIL_NOTE.replace('This alert comes from a sandbox organisation: ', 'this alert comes from a sandbox organisation — '))}</p>`] : []),
     `<p style="margin:0 0 12px"><strong>SmartProctoring alert</strong> for ${escapeHtml(c.orgName)}</p>`,
     `<p style="margin:0 0 12px">Candidate: <strong>${escapeHtml(c.candidate.name)}</strong>${c.candidate.externalId ? ` (external ID ${escapeHtml(c.candidate.externalId)})` : ''}<br>Exam: ${escapeHtml(c.exam.title)}</p>`,
     '<ul style="padding-left:18px;margin:0 0 12px">',
@@ -246,6 +255,7 @@ export async function sendDueEmailAlerts(ctx: Ctx): Promise<EmailRunSummary> {
           candidate: { name: info.candidateName, externalId: info.externalId ?? null },
           exam: { title: info.examTitle },
           staffUrl: sessionStaffUrl(ctx.config.publicUrl, sessionId),
+          sandbox: org.kind === 'sandbox',
         },
         enabled,
         settings.alertRecipients,

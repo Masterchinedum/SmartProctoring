@@ -6,7 +6,9 @@ import { errorMessage, useController, useSnapshot } from '../context';
 import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
 import { captureFaceCrop } from '../monitoring/frames';
 import { AdaptiveCheck } from './adaptive';
-import { CheckProgress } from './progress';
+import { PoseSmoother } from './poseFilter';
+import { attemptsAfterText, CheckProgress } from './progress';
+import { frameSendRetry, type FrameSendState } from './sendRetry';
 import { plausibleFaces, useFrameAnalysis, type FrameAnalysis } from './useFrameAnalysis';
 
 /**
@@ -45,6 +47,10 @@ export function isFrontal(face: Pose, centre: Pose | null): boolean {
 }
 
 const MIN_CAPTURE_SPACING_MS = 300;
+
+/** Measurement hook only (e2e A/B of the pose smoothing): `window.__spRawPose = true` feeds the raw pose. */
+const smootherFor = () =>
+  new PoseSmoother(typeof window !== 'undefined' && (window as { __spRawPose?: boolean }).__spRawPose === true ? { minWindowMs: 0, maxWindowMs: 0 } : {});
 
 type Phase = 'starting' | 'frontal' | 'liveness' | 'completing' | 'expired' | 'error';
 
@@ -112,6 +118,8 @@ export function VerifyStep({
     centre: null as Pose | null,
     /** When to hand the attempt to the server although the guided capture did not finish. */
     progress: new CheckProgress(),
+    /** Noise-adaptive pose smoothing for the liveness tracker (dim-light pose jitter, poseFilter.ts). */
+    pose: smootherFor(),
   });
 
   const setPhaseBoth = (p: Phase) => {
@@ -157,6 +165,7 @@ export function VerifyStep({
       r.tracker = null;
       r.trackerCentred = false;
       r.completing = false;
+      r.pose = smootherFor();
       const b = ctrl.currentBaseline();
       r.centre = b && b.samples > 0 ? { yaw: b.yaw, pitch: b.pitch } : null;
       r.progress.start(performance.now());
@@ -246,7 +255,8 @@ export function VerifyStep({
             return;
           }
           // Transient failures (network, server busy) are retried with the same image and timestamp.
-          for (let attempt = 0; ; attempt++) {
+          const retries: FrameSendState = { networkFailures: 0, busyWaitedMs: 0 };
+          for (;;) {
             try {
               const res = await api.uploadCheckFrame(c.checkId, crop.blob, {
                 step,
@@ -290,13 +300,13 @@ export function VerifyStep({
                 setPhaseBoth('error');
                 return;
               }
-              if (attempt >= 3) {
-                setGuidance(['We could not send the picture. Check your internet connection.']);
+              const next = frameSendRetry(e, retries);
+              setGuidance([next.guidance]);
+              if (!next.retry) {
                 onFail?.();
                 return;
               }
-              setGuidance(['Connection problem while sending the picture — retrying…']);
-              await new Promise((res) => setTimeout(res, 1000 * (attempt + 1)));
+              await new Promise((res) => setTimeout(res, next.delayMs));
               if (r.cancelled) return;
             }
           }
@@ -384,6 +394,11 @@ export function VerifyStep({
       if (!r.check || !a || r.cancelled || r.completing) return;
       const faces = plausibleFaces(fa.faces);
       const face = faces.length === 1 ? faces[0] : null;
+      // The liveness tracker sees the smoothed pose (warmed up during the frontal phase, so its noise estimate is
+      // ready when the head turns start); frontal frames are gated on the raw pose.
+      const sm = face ? r.pose.push(fa.t, face.yaw, face.pitch) : null;
+      if (!face) r.pose.reset();
+      const turnFace = face && sm ? { ...face, yaw: sm.yaw, pitch: sm.pitch } : null;
       const spacedOk = performance.now() - r.lastCaptureAt >= MIN_CAPTURE_SPACING_MS;
       advance();
       if (r.completing) return;
@@ -418,7 +433,7 @@ export function VerifyStep({
 
       if (r.phase === 'liveness' && r.tracker) {
         const tr = r.tracker;
-        const prog = tr.update(face, faces.length, fa.t);
+        const prog = tr.update(turnFace, faces.length, fa.t);
         r.progress.liveness(prog.stepIndex, prog.stage === 'verify' ? 1 : (prog.progress ?? 0), performance.now());
         const steps: LivenessStep[] = r.check.liveness?.steps ?? [];
         const step = steps.find((s) => s.index === prog.stepIndex) ?? steps[Math.min(steps.length - 1, Math.max(0, prog.stepIndex))];
@@ -435,14 +450,14 @@ export function VerifyStep({
           advance();
           return;
         }
-        if (face && prog.readyToCapture && spacedOk && r.inflight < 2) {
+        if (turnFace && prog.readyToCapture && spacedOk && r.inflight < 2) {
           const idx = prog.stepIndex;
           tr.markCaptured(fa.t);
           r.progress.captured(performance.now());
           a.stepSentOne(idx);
           upload(
             idx,
-            face,
+            turnFace,
             ctrl.api,
             (res) => {
               a.stepResult(idx, res);
@@ -634,7 +649,7 @@ export function VerifyStep({
           </div>
           {(phase === 'starting' || phase === 'completing' || vs.loading) && <Spinner label={phase === 'completing' ? 'Verifying…' : 'Please wait…'} />}
           {noVision && <p className="muted small">Automatic guidance is unavailable in this browser; follow the instructions and the pictures are checked on the server.</p>}
-          {check && <p className="muted small">Attempts remaining after this one: {Math.max(0, check.attemptsRemaining - 1)}</p>}
+          {check && <p className="muted small">{attemptsAfterText(check)}</p>}
         </div>
       </div>
     </div>

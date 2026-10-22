@@ -22,8 +22,11 @@ Protocols
            photo j != i. Genuine = same identity; impostor = different identity; family = different identity,
            same family (Azure family photos: parents/children/spouses). Near-duplicate photo pairs (clean baseline
            similarity >= 0.97) are excluded from genuine trials.
-  checkin  enrol with the MEAN TEMPLATE of the 5 'good' check-in frames of the identity's enrolment photo (the
-           vision agent's v2 recommendation, identity-v2.md §6.1), probe with frames of the identity's other photos.
+  checkin[:<cond>]  enrol with the MEAN TEMPLATE of the 5 check-in frames (640x480, session jitter) of the identity's
+           enrolment photo rendered in <cond> (default good; >= 3 frames with a face needed, else not enrolled) -- the
+           vision agent's v2 recommendation, identity-v2.md §6.1 -- and probe with frames of the identity's other
+           photos. checkin:dim / checkin:backlit give the MATCHED-DEGRADATION case (dim room enrolment vs dim room
+           probes, where SFace impostor similarity inflates); conditions "<cond>@640x480" restrict probes to 480p.
   "3f"     suffix: probe = normalise(mean of the 3 burst frames' embeddings) of one scene (resume-check style).
   mixed    (--mixed) enrolment templates computed with the BASELINE model (existing stored templates) and probes
            with the candidate: backward compatibility without re-enrolment.
@@ -39,6 +42,7 @@ intervals of the difference to the first model/recipe (same resamples), which is
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -140,7 +144,7 @@ def build_crops(out: Path, frames_dir: Path = FRAMES) -> dict:
         base = dict(kind=r["role"], photo=r["photoKey"], identity=r["identity"], family=r["family"] or "", resolution=r["resolution"],
                     scene=r["scene"], frame=r["frame"], usable=bool(r["quality"].get("usable")))
         emb = r.get("embeddings") or {}
-        de = np.frombuffer(__import__("base64").b64decode(emb["default"]), np.float32) if "default" in emb else np.zeros(128, np.float32)
+        de = np.frombuffer(base64.b64decode(emb["default"]), np.float32) if "default" in emb else np.zeros(128, np.float32)
         add(_align_valid(decode_image(rgb), f), condition=r["condition"], default_emb=de, **base)
         if r["role"] == "probe" and r["condition"] == "typical":
             for kind in DERIVED:
@@ -199,14 +203,17 @@ def build_trials(d: dict, E_enrol: np.ndarray, E_probe: np.ndarray, base_clean: 
     idx = {k: i for i, k in enumerate(ids)}
     kind, photo, ident, fam, condition = d["kind"], d["photo"], d["identity"], d["family"], d["condition"]
     # --- probes
-    if cond == "clean":
+    cname, _, res = cond.partition("@")
+    if cname == "clean":
         pm = kind == "clean"
     else:
-        pm = (kind == "probe") & np.isin(condition, POOLED.get(cond, (cond,)))
+        pm = (kind == "probe") & np.isin(condition, POOLED.get(cname, (cname,)))
+        if res:
+            pm &= d["resolution"] == res
         if usable_only:
             pm &= d["usable"]
     pidx = np.nonzero(pm)[0]
-    if three and cond != "clean":
+    if three and cname != "clean":
         groups = {}
         for i in pidx:
             groups.setdefault((photo[i], condition[i], d["resolution"][i], d["scene"][i]), []).append(i)
@@ -223,11 +230,14 @@ def build_trials(d: dict, E_enrol: np.ndarray, E_probe: np.ndarray, base_clean: 
     clean_of = {photo[i]: i for i in clean_idx}
     if protocol == "photo":
         enrol = [(photo[i], ident[i], fam[i], E_enrol[i][None]) for i in clean_idx]
-    else:  # checkin
-        em = (kind == "enrol") & (condition == "good")
+    else:  # checkin[:<enrolment condition>], default good light
+        econd = protocol.partition(":")[2] or "good"
+        em = (kind == "enrol") & (condition == econd)
         enrol = []
         for ph in sorted(set(photo[em])):
             g = np.nonzero(em & (photo == ph))[0]
+            if len(g) < 3:  # production needs >= 3 frames with a face to enrol (CALIBRATION.minFramesForDecision)
+                continue
             enrol.append((ph, ident[g[0]], fam[g[0]], l2n(E_enrol[g].mean(0))[None]))  # mean template (identity-v2 §6.1)
     # --- scores
     gs, gid, is_, ie, ip, ifam = [], [], [], [], [], []
@@ -280,7 +290,7 @@ def _metrics_from_hist(hg: np.ndarray, hi: np.ndarray) -> dict:
     return out
 
 
-def point_metrics(t: dict) -> dict:
+def point_metrics(t: dict, thresholds: dict | None = None) -> dict:
     g, i = t["g"], t["i"]
     res = {"n_genuine": int(len(g)), "n_impostor": int(len(i)), "n_family": int(t["fam"].sum()), "n_identities_genuine": int(len(set(t["gid"].tolist()))),
            "n_probe_photos": t["n_probe_photos"], "n_enrol": t["n_enrol"]}
@@ -294,20 +304,23 @@ def point_metrics(t: dict) -> dict:
                impostor_p99=float(np.quantile(i, 0.99)), impostor_max=float(i.max()))
     thr = float(np.quantile(i, 1 - 1e-3))
     res["thr_far1e-3"] = thr
+    for name, th in (thresholds or {}).items():
+        res[f"fmr_at_{name}"] = float((i >= th).mean())
+        res[f"fnmr_at_{name}"] = float((g < th).mean())
     f = i[t["fam"]]
     if len(f):
         res.update({"family_mean": float(f.mean()), "family_max": float(f.max()), "family_fmr_at_thr1e-3": float((f >= thr).mean())})
     return res
 
 
-def bootstrap(trials: list[dict], reps: int = 400, seed: int = 0) -> list[dict]:
+def bootstrap(trials: list[dict], reps: int = 400, seed: int = 0, thresholds: list[dict] | None = None) -> list[dict]:
     """Identity-cluster bootstrap for several trial sets over the SAME identities (paired). Returns per set the
     (R,) arrays of EER / TAR metrics."""
     n_ids = trials[0]["n_ids"]
     rng = np.random.default_rng(seed)
     cnt = rng.multinomial(n_ids, np.full(n_ids, 1 / n_ids), size=reps).astype(float)  # (R, n_ids)
     out = []
-    for t in trials:
+    for k, t in enumerate(trials):
         if len(t["g"]) == 0 or len(t["i"]) == 0:
             out.append(None)
             continue
@@ -315,7 +328,12 @@ def bootstrap(trials: list[dict], reps: int = 400, seed: int = 0) -> list[dict]:
         Hi = _hist(t["i"], t["ie"] * n_ids + t["ip"], n_ids * n_ids)  # (ids*ids, bins)
         wg = cnt @ Hg
         wi = np.einsum("ra,rb->rab", cnt, cnt).reshape(reps, -1) @ Hi
-        out.append(_metrics_from_hist(wg, wi))
+        m = _metrics_from_hist(wg, wi)
+        for name, th in ((thresholds[k] if thresholds else None) or {}).items():
+            b = int(np.clip(np.searchsorted(BINS, th, side="right") - 1, 0, len(BINS) - 2))
+            m[f"fmr_at_{name}"] = wi[:, b:].sum(1) / np.maximum(wi.sum(1), 1e-12)
+            m[f"fnmr_at_{name}"] = wg[:, :b].sum(1) / np.maximum(wg.sum(1), 1e-12)
+        out.append(m)
     return out
 
 
@@ -343,7 +361,7 @@ def main() -> None:
     d = build_crops(Path(args.crops))
     models = [m.split("=", 1) for m in args.model]
     recipes = args.recipe or ["none"]
-    protocols = args.protocol or ["photo", "checkin"]
+    protocols = args.protocol or ["photo", "checkin", "checkin:dim", "checkin:backlit"]
     conds = args.conditions.split(",")
     cache = WORK / "eval" / "emb"
     base_path = str(SFACE_ONNX)
@@ -369,17 +387,29 @@ def main() -> None:
                 variants.append((f"{name}|{rc}|mixed", Eb, E))
     report = {"generated": time.strftime("%Y-%m-%d %H:%M"), "parity": parity, "models": {n: {"path": p, "sha256": sha256_file(p)} for n, p in models},
               "usable_only": args.usable_only, "near_duplicate_threshold": NEAR_DUP, "results": {}}
+    # Operating points per variant: its OWN good-light threshold (check-in in good light vs good-light probes,
+    # FAR 1e-3) and the fixed product match threshold 0.45. FMR at these on matched-degradation pairs = inflation.
+    op = []
+    for _, Ee, Ep in variants:
+        ti = build_trials(d, Ee, Ep, base_raw, "checkin", "good", False, args.usable_only)["i"]
+        op.append({"own_good_thr": float(np.quantile(ti, 1 - 1e-3)), "0.45": 0.45})
+    report["operating_points"] = {lab: o for (lab, _, _), o in zip(variants, op)}
+    print("operating points:", report["operating_points"], flush=True)
     for proto in protocols:
+        pconds = conds
+        if proto.startswith("checkin:") and proto != "checkin:good":
+            ec = proto.split(":")[1]
+            pconds = [c for c in (ec, f"{ec}@640x480", "webcam_all", "good") if c.split("@")[0] in conds or c == f"{ec}@640x480"]
         for three in (False, True):
-            for cond in conds:
+            for cond in pconds:
                 if three and cond == "clean":
                     continue
                 key = f"{proto}{'-3f' if three else ''}|{cond}"
                 trials = [build_trials(d, Ee, Ep, base_raw, proto, cond, three, args.usable_only) for _, Ee, Ep in variants]
-                boots = bootstrap(trials, args.reps)
+                boots = bootstrap(trials, args.reps, thresholds=op)
                 row = {}
-                for (label, _, _), t, b in zip(variants, trials, boots):
-                    m = point_metrics(t)
+                for (label, _, _), t, b, o in zip(variants, trials, boots, op):
+                    m = point_metrics(t, o)
                     if b is not None:
                         m["ci"] = {k: ci(v) for k, v in b.items()}
                         if boots[0] is not None and label != variants[0][0]:

@@ -51,6 +51,21 @@ describe('decideIdentity', () => {
     expect(decideIdentity(0.7, dim, T).decision).toBe('match');
   });
 
+  it('with calibrated evidence, "match" also needs the evidence to favour the candidate (dim-room look-alike => inconclusive)', () => {
+    const dim = good({ brightness: 45, contrast: 9 });
+    expect(decideIdentity(0.55, dim, T).decision).toBe('match');
+    expect(decideIdentity(0.55, dim, T, 'reference', { llr: 2 }).decision).toBe('inconclusive');
+    expect(decideIdentity(0.55, dim, T, 'reference', { llr: -3 }).decision).toBe('match');
+    // The same through an evidence context: a candidate enrolled in the same dim room (baseline 0.87), mid-exam.
+    const ctx = { reference: 'poor' as const, baseline: { mean: 0.87, sd: 0.03, n: 8 }, context: 'continuous' as const, frames: 3 };
+    expect(decideIdentity(0.55, dim, T, 'reference', ctx).decision).toBe('inconclusive');
+    expect(decideIdentity(0.9, dim, T, 'reference', ctx).decision).toBe('match');
+    // Evidence is ignored for ID-photo comparisons; a strong per-sample LLR turns a low good-light score into "mismatch".
+    expect(decideIdentity(0.55, dim, T, 'id_photo', { llr: 5 }).decision).toBe('match');
+    expect(decideIdentity(0.2, good(), T, 'reference', { llr: 4 }).decision).toBe('mismatch');
+    expect(decideIdentity(0.2, good(), T, 'reference', { llr: 0.5 }).decision).toBe('inconclusive');
+  });
+
   it('templates: mean of unit embeddings; scoreAgainst compares burst template with gallery template', () => {
     const a = fakeEmbedding('a');
     const a2 = fakeEmbedding('a', 0.8);

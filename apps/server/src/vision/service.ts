@@ -11,16 +11,16 @@
  * FIFO queue; more than `maxQueue` waiting analyses are refused with VisionBusyError (map to HTTP 503).
  */
 import { availableParallelism } from 'node:os';
-import { VisionEngine } from './engine';
+import { disableOrtTelemetry, VisionEngine } from './engine';
 import { processIdPhoto } from './id-photo';
 import { resolveModelsDir } from './models';
-import { VisionBusyError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
-import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate } from './types';
+import { retryAfterSecFor, VisionBusyError, VisionCancelledError, VisionClosedError, VisionWorkerPool, type WorkerScript } from './pool';
+import type { AnalyzeOptions, DetectedFace, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, QualityGate, TimedAnalysis, VisionLoad, VisionObserver } from './types';
 import { DEFAULT_DETECT_THRESHOLD } from './detect';
 import { DEFAULT_MAX_DECODE_SIDE } from './image';
 import type { EmbeddingRecipe } from './embed-prep';
 
-export { VisionBusyError, VisionClosedError };
+export { VisionBusyError, VisionCancelledError, VisionClosedError };
 
 export interface VisionServiceOptions {
   /** Directory containing the two ONNX files (default: MODELS_DIR or apps/server/models). */
@@ -51,6 +51,8 @@ export interface VisionServiceOptions {
   embedding?: EmbeddingRecipe;
   /** Second, low-light-enhanced detection pass when no face is found (default true). */
   enhanceLowLight?: boolean;
+  /** Mirror-symmetric head pose (one extra detector pass on frames with a face; default true). */
+  symmetricPose?: boolean;
   /**
    * Linux: nice increment for the vision threads (env VISION_NICE, default 0). A positive value lets request
    * handling win when the CPU is saturated, but on a shared host other processes then win over vision too.
@@ -60,6 +62,8 @@ export interface VisionServiceOptions {
   workerScript?: WorkerScript;
   /** Unexpected worker exits (logging). */
   onWorkerExit?: (info: { code: number; error: Error | null }) => void;
+  /** Queue wait / analysis time of every analysis in pool mode (metrics; not reported in-process). */
+  observer?: VisionObserver;
 }
 
 export interface VisionStats {
@@ -105,9 +109,11 @@ export function resolveVisionThreading(options: VisionServiceOptions, env: NodeJ
 class Limiter {
   private active = 0;
   private readonly waiting: (() => void)[] = [];
+  /** Moving average of one run (ms). */
+  serviceMs = 100;
   constructor(
-    private readonly max: number,
-    private readonly maxQueue: number,
+    readonly max: number,
+    readonly maxQueue: number,
   ) {}
   get inFlight() {
     return this.active;
@@ -115,15 +121,27 @@ class Limiter {
   get queued() {
     return this.waiting.length;
   }
+  estimatedWaitMs(): number {
+    return this.active < this.max ? 0 : Math.round(((this.waiting.length + 1) * this.serviceMs) / this.max);
+  }
   async run<T>(fn: () => Promise<T>): Promise<T> {
+    return (await this.runTimed(fn)).value;
+  }
+  /** run(), plus the time spent waiting for a slot and running (ms). */
+  async runTimed<T>(fn: () => Promise<T>): Promise<{ value: T; waitMs: number; runMs: number }> {
+    const queuedAt = performance.now();
     if (this.active >= this.max) {
-      if (this.waiting.length >= this.maxQueue) throw new VisionBusyError();
+      if (this.waiting.length >= this.maxQueue) throw new VisionBusyError(retryAfterSecFor(this.estimatedWaitMs()));
       await new Promise<void>((res) => this.waiting.push(res));
     } else {
       this.active++;
     }
+    const t0 = performance.now();
     try {
-      return await fn();
+      const value = await fn();
+      const runMs = performance.now() - t0;
+      this.serviceMs += 0.1 * (runMs - this.serviceMs);
+      return { value, waitMs: Math.round(t0 - queuedAt), runMs: Math.round(runMs) };
     } finally {
       const next = this.waiting.shift();
       if (next) next();
@@ -133,10 +151,11 @@ class Limiter {
 }
 
 interface Backend {
-  analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis>;
+  analyzeTimed(image: Buffer, opts: AnalyzeOptions, signal?: AbortSignal): Promise<TimedAnalysis>;
   detect(image: Buffer): Promise<DetectedFace[]>;
   readonly inFlight: number;
   readonly queued: number;
+  readonly load: VisionLoad;
   close(): Promise<void>;
 }
 
@@ -152,11 +171,26 @@ class InProcessBackend implements Backend {
   get queued() {
     return this.limiter.queued;
   }
-  analyze(image: Buffer, opts: AnalyzeOptions): Promise<ImageAnalysis> {
-    return this.limiter.run(async () => {
+  /** One FIFO without priorities: everything counts as interactive; waits are not tracked per item. */
+  get load(): VisionLoad {
+    const l = this.limiter;
+    const wait = l.estimatedWaitMs();
+    return {
+      workers: this.closed ? 0 : l.max,
+      inFlight: l.inFlight,
+      queued: { interactive: l.queued, background: 0 },
+      oldestWaitMs: { interactive: 0, background: 0 },
+      serviceMs: Math.round(l.serviceMs * 10) / 10,
+      estimatedWaitMs: { interactive: wait, background: wait },
+      maxQueue: l.maxQueue,
+    };
+  }
+  async analyzeTimed(image: Buffer, opts: AnalyzeOptions): Promise<TimedAnalysis> {
+    const r = await this.limiter.runTimed(async () => {
       if (this.closed) throw new VisionClosedError();
       return this.engine.analyze(image, opts);
     });
+    return { analysis: r.value, waitMs: r.waitMs, runMs: r.runMs };
   }
   detect(image: Buffer): Promise<DetectedFace[]> {
     return this.limiter.run(async () => {
@@ -187,6 +221,8 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
   static async create(options: VisionServiceOptions = {}): Promise<OnnxVisionService> {
     const modelsDir = resolveModelsDir(options.modelsDir);
     const threading = resolveVisionThreading(options);
+    disableOrtTelemetry(); // before the workers start: they inherit the environment
+
     const engineOpts = {
       modelsDir,
       threads: threading.threadsPerWorker,
@@ -195,6 +231,7 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
       gate: options.gate,
       ...(options.embedding ? { embedding: options.embedding } : {}),
       ...(options.enhanceLowLight != null ? { enhanceLowLight: options.enhanceLowLight } : {}),
+      ...(options.symmetricPose != null ? { symmetricPose: options.symmetricPose } : {}),
     };
     const maxQueue = options.maxQueue ?? 256;
     let backend: Backend;
@@ -208,6 +245,7 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
         workerData: { engine: engineOpts, nice: Math.max(0, Math.min(19, nice)) },
         script: options.workerScript,
         onWorkerExit: options.onWorkerExit,
+        observer: options.observer,
       });
     }
     return new OnnxVisionService(backend, modelsDir, threading);
@@ -225,16 +263,29 @@ export class OnnxVisionService implements IdPhotoCapableVisionService {
     };
   }
 
+  /** The face-analysis queue right now (VisionService.load). */
+  get load(): VisionLoad {
+    return this.backend.load;
+  }
+
   async analyze(image: Buffer, opts: AnalyzeOptions = {}): Promise<ImageAnalysis> {
+    return (await this.analyzeTimed(image, opts)).analysis;
+  }
+
+  /**
+   * analyze(), plus the queue wait and analysis time of this image (ms; the dedicated vision worker reports them).
+   * `signal` drops the analysis while it is still queued (worker pool only; VisionCancelledError).
+   */
+  async analyzeTimed(image: Buffer, opts: AnalyzeOptions = {}, signal?: AbortSignal): Promise<TimedAnalysis> {
     if (this.closed) throw new VisionClosedError();
     const t0 = performance.now();
     try {
-      const result = await this.backend.analyze(image, opts);
+      const result = await this.backend.analyzeTimed(image, opts, signal);
       this.analyzed++;
       this.totalMs += performance.now() - t0;
       return result;
     } catch (err) {
-      if (!(err instanceof VisionBusyError) && !(err instanceof VisionClosedError)) this.failed++;
+      if (!(err instanceof VisionBusyError) && !(err instanceof VisionClosedError) && !(err instanceof VisionCancelledError)) this.failed++;
       throw err;
     }
   }

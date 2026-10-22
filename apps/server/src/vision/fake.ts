@@ -14,8 +14,9 @@ import sharp from 'sharp';
 import type { FaceQuality, QualityIssue } from '@sp/shared';
 import { VisionInputError } from './image';
 import { processIdPhoto } from './id-photo';
+import { VisionBusyError } from './pool';
 import { poseWithinGate } from './quality';
-import type { AnalyzeOptions, DetectedFace, HeadPose, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, Point } from './types';
+import type { AnalyzeOptions, DetectedFace, HeadPose, IdPhotoCapableVisionService, IdPhotoResult, ImageAnalysis, Point, VisionLoad } from './types';
 
 export interface FakeImageSpec {
   /** Identity key. Same key => identical embedding. null/undefined (and faces unset) => no face. */
@@ -190,6 +191,8 @@ export class FakeVisionService implements IdPhotoCapableVisionService {
   private defaultSpec: FakeImageSpec;
   private readonly latencyMs: number;
   private closed = false;
+  private loadOverride: Partial<VisionLoad> = {};
+  private busy: { left: number; retryAfterSec: number } | null = null;
   /** Every analyze() call, in order. */
   readonly calls: { spec: FakeImageSpec; opts: AnalyzeOptions; at: number }[] = [];
 
@@ -235,8 +238,29 @@ export class FakeVisionService implements IdPhotoCapableVisionService {
     return this.queue.length;
   }
 
+  /** What `load` reports from now on (merged over an idle 3-worker queue). */
+  setLoad(load: Partial<VisionLoad>): this {
+    this.loadOverride = load;
+    return this;
+  }
+
+  /** The next `count` analyze() calls are refused as a full queue (VisionBusyError). */
+  busyNext(count: number, retryAfterSec?: number): this {
+    this.busy = { left: count, retryAfterSec: retryAfterSec ?? 2 };
+    return this;
+  }
+
+  get load(): VisionLoad {
+    const idle = { interactive: 0, background: 0 };
+    return { workers: this.closed ? 0 : 3, inFlight: 0, queued: idle, oldestWaitMs: idle, serviceMs: 80, estimatedWaitMs: idle, maxQueue: 256, ...this.loadOverride };
+  }
+
   async analyze(image: Buffer, opts: AnalyzeOptions = {}): Promise<ImageAnalysis> {
     if (this.closed) throw new Error('FakeVisionService closed');
+    if (this.busy && this.busy.left > 0) {
+      this.busy.left--;
+      throw new VisionBusyError(this.busy.retryAfterSec);
+    }
     const spec = this.queue.shift() ?? FakeVisionService.decode(image) ?? this.defaultSpec;
     this.calls.push({ spec, opts, at: Date.now() });
     if (this.latencyMs > 0) await new Promise((r) => setTimeout(r, this.latencyMs));

@@ -24,6 +24,8 @@ async function freshSession(policy?: Record<string, unknown>, candidateId?: stri
 const sessionRow = async (id: string) => (await env.ctx.db.select().from(examSessions).where(eq(examSessions.id, id)))[0];
 const eventsOf = async (id: string) => env.ctx.db.select().from(events).where(eq(events.sessionId, id)).orderBy(events.startedAt);
 const actor = () => ({ id: env.users.admin.id, orgId: env.org.id });
+/** The staff-side decision behind a candidate's sample receipt (the candidate is never told it). */
+const decisionOf = async (res: { result: { id: string } }) => (await env.ctx.db.select().from(identityChecks).where(eq(identityChecks.id, res.result.id)))[0]?.decision;
 
 describe('initial check', () => {
   it('rejects a failed liveness challenge (no head movement) and asks to retry', async () => {
@@ -41,13 +43,17 @@ describe('initial check', () => {
     expect(ok.complete!.outcome).toBe('passed');
   });
 
-  it('holds as identity_unverifiable after maxVerificationAttempts poor-quality attempts', async () => {
+  it('holds as identity_unverifiable after maxVerificationAttempts poor-quality attempts (quality-only attempts count half)', async () => {
     const { s, c } = await freshSession({ identity: { maxVerificationAttempts: 2 } });
     await consent(c);
     const dark = { person: 'alice', usable: false, issues: ['too_dark'] as const };
-    const r1 = await runCheck(env, c, 'initial', { spec: { ...dark, issues: ['too_dark'] } });
-    expect(r1.complete!.outcome).toBe('retry');
-    expect(r1.complete!.guidance.join(' ')).toMatch(/dark/i);
+    // Image quality alone: lighting guidance and more tries (each counts QUALITY_RETRY_WEIGHT) before human review.
+    for (const remaining of [2, 1, 1]) {
+      const r = await runCheck(env, c, 'initial', { spec: { ...dark, issues: ['too_dark'] } });
+      expect(r.complete!.outcome).toBe('retry');
+      expect(r.complete!.attemptsRemaining).toBe(remaining);
+      expect(r.complete!.guidance.join(' ')).toMatch(/dark/i);
+    }
     const r2 = await runCheck(env, c, 'initial', { spec: { ...dark, issues: ['too_dark'] } });
     expect(r2.complete!.outcome).toBe('held');
     expect(r2.complete!.state.session.hold).toMatchObject({ reason: 'identity_unverifiable', canReverify: false });
@@ -74,7 +80,7 @@ describe('initial check', () => {
     await consent(a.c);
     const ra = await runCheck(env, a.c, 'initial', { spec: { person: 'someone-else' } });
     expect(ra.complete!.outcome).toBe('passed');
-    expect(ra.complete!.idPhoto).toMatchObject({ decision: 'mismatch' });
+    expect(ra.idPhoto!).toMatchObject({ decision: 'mismatch' });
     const evA = await eventsOf(a.s.id);
     expect(evA.find((e) => e.type === 'id_photo_compared')!.details).toMatchObject({ decision: 'mismatch' });
     const mm = evA.find((e) => e.type === 'identity_mismatch')!;
@@ -89,7 +95,7 @@ describe('initial check', () => {
     await consent(d.c);
     const rd = await runCheck(env, d.c, 'initial', { spec: { person: 'photo-owner' } });
     expect(rd.complete!.outcome).toBe('passed');
-    expect(rd.complete!.idPhoto!.decision).toBe('match');
+    expect(rd.idPhoto!.decision).toBe('match');
     // release of an id-photo hold (reference exists) without a fresh check -> ready
     await releaseHold(env.ctx, b.s.id, actor(), { requireCheck: false });
     expect((await sessionRow(b.s.id)).status).toBe('ready');
@@ -115,9 +121,9 @@ describe('resume identity comparison', () => {
     env.clock.advance(60_000);
     await c.req('POST', '/api/candidate/pause', { reason: 'break' });
     env.clock.advance(20 * 60_000);
-    const { complete } = await runCheck(env, c, 'resume', { spec: { person: 'mallory' } });
+    const { complete, identity } = await runCheck(env, c, 'resume', { spec: { person: 'mallory' } });
     expect(complete!.outcome).toBe('held');
-    expect(complete!.identity!.decision).toBe('mismatch');
+    expect(identity!.decision).toBe('mismatch');
     expect(complete!.state.session.hold).toMatchObject({ reason: 'identity_mismatch' });
     expect(complete!.state.session.timerRunning).toBe(false);
     expect(complete!.state.questions).toBeNull();
@@ -141,10 +147,12 @@ describe('resume identity comparison', () => {
     await startedSession(env, c);
     await c.req('POST', '/api/candidate/pause', {});
     const blurry = { person: 'alice', usable: false, issues: ['blurry' as const] };
-    const r1 = await runCheck(env, c, 'resume', { spec: blurry });
-    expect(r1.complete!.outcome).toBe('retry');
-    expect(r1.complete!.identity!.decision).toBe('unable_to_verify');
-    expect(r1.complete!.guidance.join(' ')).toMatch(/blurry/i);
+    for (let i = 0; i < 3; i++) {
+      const r1 = await runCheck(env, c, 'resume', { spec: blurry });
+      expect(r1.complete!.outcome).toBe('retry');
+      expect(r1.identity!.decision).toBe('unable_to_verify');
+      expect(r1.complete!.guidance.join(' ')).toMatch(/blurry/i);
+    }
     const r2 = await runCheck(env, c, 'resume', { spec: blurry });
     expect(r2.complete!.outcome).toBe('held');
     expect(r2.complete!.state.session.hold!.reason).toBe('identity_unverifiable');
@@ -184,7 +192,7 @@ describe('resume identity comparison', () => {
     // new reference is used afterwards
     env.clock.advance(30_000);
     const r = (await sample(env, c, { person: 'alice-new-look' })).json();
-    expect(r.result.decision).toBe('match');
+    expect(await decisionOf(r)).toBe('match');
     const types = (await eventsOf(s.id)).map((e) => e.type);
     expect(types).toEqual(expect.arrayContaining(['hold_released', 'reference_created']));
   });
@@ -214,7 +222,8 @@ describe('mid-exam identity samples', () => {
     await startedSession(env, c);
     env.clock.advance(30_000);
     const m1 = (await sample(env, c, { person: 'mallory' }, 'face_return')).json();
-    expect(m1.result.decision).toBe('mismatch');
+    expect(await decisionOf(m1)).toBe('mismatch');
+    expect(m1.result).toEqual({ id: expect.any(String), trigger: 'face_return', at: expect.any(Number), usable: true, guidance: [] }); // no verdict for the candidate
     expect(m1.followUpInMs).toBeGreaterThan(0);
     expect(m1.status).toBe('active');
     expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('identity_mismatch');
@@ -266,12 +275,13 @@ describe('mid-exam identity samples', () => {
     for (let i = 0; i < 3; i++) {
       env.clock.advance(10_000);
       const r = (await sample(env, c, dark)).json();
-      expect(r.result.decision).toBe('unable_to_verify');
+      expect(await decisionOf(r)).toBe('unable_to_verify');
+      expect(r.result.usable).toBe(false);
       expect(r.result.guidance.join(' ')).toMatch(/dark/i);
     }
     // grey zone counts as uncertain too
     env.clock.advance(10_000);
-    expect((await sample(env, c, { person: 'alice', similarity: 0.33 })).json().result.decision).toBe('inconclusive');
+    expect(await decisionOf((await sample(env, c, { person: 'alice', similarity: 0.33 })).json())).toBe('inconclusive');
     let evs = await eventsOf(s.id);
     const unv = evs.find((e) => e.type === 'identity_unverifiable')!;
     expect(unv).toMatchObject({ category: 'uncertain', status: 'open' });
@@ -296,6 +306,18 @@ describe('mid-exam identity samples', () => {
     env.clock.advance(30_000);
     await sample(env, c, { person: 'alice' });
     expect((await eventsOf(s.id)).find((e) => e.type === 'camera_feed_suspect')!.status).toBe('closed');
+  });
+
+  it('identical frames are not flagged when the exam switched camera-integrity checks off', async () => {
+    const { exam } = await env.newExam({ policy: { detection: { enabled: { cameraIntegrity: false } } } });
+    const s = await env.newSession({ examId: exam.id });
+    const c = env.candidateClient(s.token);
+    await startedSession(env, c);
+    for (let i = 0; i < 4; i++) {
+      env.clock.advance(30_000);
+      await sample(env, c, { person: 'alice', dhash: 'abcdefabcdef0123' });
+    }
+    expect((await eventsOf(s.id)).map((e) => e.type)).not.toContain('camera_feed_suspect');
   });
 
   it('stores probe images only for non-matching samples by default', async () => {

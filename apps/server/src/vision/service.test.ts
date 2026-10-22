@@ -209,6 +209,22 @@ describe.skipIf(!haveModels || !haveImages)('OnnxVisionService on real images', 
     expect(vision.stats.analyzed).toBeGreaterThan(8);
   });
 
+  it('head pose is mirror-symmetric: a turned frame and its mirror image measure opposite yaw, same pitch', async () => {
+    // YuNet alone places landmarks asymmetrically: biden.jpg measured yaw +12.7 deg, its mirror image -23.2 deg (the
+    // e2e head-turn fixture: +30.6 / -18.4), so turns to one side read ~1.5x larger. The engine averages the
+    // landmarks of the frame and of its mirror image (VisionEngineOptions.symmetricPose, default on).
+    for (const name of ['biden.jpg', 'obama2.jpg']) {
+      const frame = await webcam(img(name));
+      const a = await vision.analyze(frame);
+      const m = await vision.analyze(await sharp(frame).flop().jpeg({ quality: 90 }).toBuffer());
+      expect(Math.abs(a.pose!.yawDeg)).toBeGreaterThan(10);
+      expect(Math.abs(a.pose!.yawDeg + m.pose!.yawDeg)).toBeLessThan(2);
+      expect(Math.abs(a.pose!.pitchDeg - m.pose!.pitchDeg)).toBeLessThan(2);
+      // The quality gate therefore treats both sides alike.
+      expect(a.quality.issues.includes('face_turned')).toBe(m.quality.issues.includes('face_turned'));
+    }
+  });
+
   it('applies back-pressure and refuses work after close()', async () => {
     const small = await createVisionService({ concurrency: 1, maxQueue: 1 });
     const buf = await webcam(img('obama_small.jpg'));

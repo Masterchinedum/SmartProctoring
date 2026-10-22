@@ -1,0 +1,19 @@
+# tools/recognizer: code only. Never commit images, crops, datasets, embeddings, checkpoints or model weights
+# (they live under $RECOG_WORK, default /tmp/claude-0/recognizer).
+__pycache__/
+*.pyc
+*.onnx
+*.pt
+*.pth
+*.npz
+*.npy
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.jsonl
+data/
+runs/
+export/
+valframes/
+harness/

@@ -13,6 +13,7 @@ import { EvidenceImage } from '../../components/EvidenceImage';
 import { Lightbox } from '../../components/Lightbox';
 import { ConfirmDialog } from '../../components/Modal';
 import { QualitySummary } from '../session/IdentityTab';
+import { AccommodationsPanel } from './AccommodationsPanel';
 import { CandidateFormModal } from './CandidatesPage';
 
 export function CandidateDetailPage() {
@@ -85,6 +86,7 @@ export function CandidateDetailPage() {
           <div className="muted small">Added {formatDateTime(c.createdAt)}</div>
         </section>
       </div>
+      <AccommodationsPanel candidateId={c.id} canEdit={isAdmin} />
       {editing ? (
         <CandidateFormModal
           candidate={c}

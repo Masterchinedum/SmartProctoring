@@ -1,7 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
-import { isPublicAddress, postJson, validateWebhookUrl, WebhookUrlError } from './net-guard.js';
+import { guardedFetch, isPublicAddress, postJson, validateWebhookUrl, WebhookUrlError } from './net-guard.js';
 
 describe('isPublicAddress (fail-closed SSRF classification)', () => {
   it('accepts global unicast addresses', () => {
@@ -119,6 +119,50 @@ describe('postJson', () => {
       const redirect = await postJson(new URL(`http://127.0.0.1:${port}/r`), '{}', {}, { timeoutMs: 2000, allowPrivateNetworks: true });
       expect(redirect).toMatchObject({ ok: false, statusCode: 302 });
       expect(redirect.error).toMatch(/redirects are not followed/);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+});
+
+describe('guardedFetch (requests to identity providers)', () => {
+  it('blocks private destinations unless allowed, never follows redirects, limits size and time, enforces https', async () => {
+    let hits = 0;
+    const server = http.createServer((req, res) => {
+      hits++;
+      if (req.url === '/big') return void res.end('x'.repeat(4096));
+      if (req.url === '/slow') return void setTimeout(() => res.end('late'), 2000);
+      if (req.url === '/redirect') return void res.writeHead(302, { Location: 'http://169.254.169.254/latest/meta-data' }).end();
+      if (req.url === '/echo') {
+        const chunks: Buffer[] = [];
+        req.on('data', (c: Buffer) => chunks.push(c));
+        req.on('end', () => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ method: req.method, type: req.headers['content-type'], body: Buffer.concat(chunks).toString() })));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      const strict = guardedFetch({ allowPrivateNetworks: false, requireHttps: false, timeoutMs: 2000 });
+      await expect(strict(`${base}/`)).rejects.toThrow(/not a public address/);
+      await expect(strict(`http://localhost:${port}/`)).rejects.toThrow(/not a public address|blocked/);
+      expect(hits).toBe(0);
+      await expect(guardedFetch({ allowPrivateNetworks: true, requireHttps: true, timeoutMs: 2000 })(`${base}/`)).rejects.toThrow(/Only https/);
+
+      const f = guardedFetch({ allowPrivateNetworks: true, requireHttps: false, timeoutMs: 300, maxBytes: 1024 });
+      const ok = await f(`${base}/`);
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toEqual({ ok: true });
+      const redirect = await f(`${base}/redirect`, { redirect: 'manual' });
+      expect(redirect.status).toBe(302);
+      expect(hits).toBe(2); // the redirect target was not requested
+      await expect(f(`${base}/big`)).rejects.toThrow(/larger than 1 KB/);
+      await expect(f(`${base}/slow`)).rejects.toThrow(/Timed out/);
+      const posted = await (await f(`${base}/echo`, { method: 'POST', body: new URLSearchParams({ a: '1', b: 'x y' }) })).json();
+      expect(posted).toEqual({ method: 'POST', type: 'application/x-www-form-urlencoded;charset=UTF-8', body: 'a=1&b=x+y' });
     } finally {
       server.closeAllConnections();
       server.close();

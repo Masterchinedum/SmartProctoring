@@ -97,7 +97,7 @@ describe('sequential swap test', () => {
 
   it('simulation: an obvious impostor is caught in 2 samples, a clear genuine session never alarms', () => {
     const llr = (s: number) => (s < 0.3 ? 5 : -5);
-    const base: Omit<Session, 'kind' | 'sims' | 'bursts'> = { key: 'k', condition: 'good', resolution: '640x480', enrol: 'good', bucket: 'good', usableRate: 1, refSelf: 0.95, refBaseline: null };
+    const base: Omit<Session, 'kind' | 'sims' | 'bursts'> = { key: 'k', condition: 'good', resolution: '640x480', enrol: 'good', bucket: 'good', usableRate: 1, refSelf: 0.95, refBaseline: null, refBucket: 'good', frames: 3 };
     const sd = { good: 0.02, fair: 0.03, poor: 0.04 };
     const bursts = (sims: number[], bucket: 'good' | 'poor' = 'good') => sims.map((sim) => ({ sim, bucket }));
     const imp = simulateSequential([{ ...base, kind: 'impostor', sims: [0.1, 0.12], bursts: bursts([0.1, 0.12]) }], { type: 'sprt', llr, params: sprt }, sd, { mode: 'impostor', runs: 20 });

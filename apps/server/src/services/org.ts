@@ -1,7 +1,9 @@
-import { DEFAULT_IDENTITY_THRESHOLDS, identityThresholdsSchema, resolvePolicy, type IdentityThresholds, type ProctoringPolicy } from '@sp/shared';
+import { DEFAULT_IDENTITY_THRESHOLDS, DEFAULT_REVIEW_SLA, identityThresholdsSchema, resolvePolicy, reviewSlaSchema, type IdentityThresholds, type ProctoringPolicy } from '@sp/shared';
 import { eq } from 'drizzle-orm';
 import type { DbOrTx } from '../db/index.js';
 import { organizations, type Organization, type OrgSettings } from '../db/schema.js';
+import { CALIBRATION } from '../vision/calibration.js';
+import { EMBEDDING_MODEL_VERSION } from '../vision/embeddings.js';
 import { DEFAULT_EXTERNAL_VERIFIER_SETTINGS, normalizeExternalVerifierSettings } from '../verifiers/settings.js';
 
 export const DEFAULT_ORG_SETTINGS: OrgSettings = {
@@ -20,6 +22,11 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   alertRecipients: [],
   emailAlerts: { holds: true, pauseRequests: true, highSeverity: true },
   externalVerifier: DEFAULT_EXTERNAL_VERIFIER_SETTINGS,
+  requireMfa: 'off',
+  reviewSla: { ...DEFAULT_REVIEW_SLA },
+  decisionConfigVersion: 1,
+  evidenceLocation: 'default',
+  requireSso: false,
 };
 
 /** Organisation settings with every field filled from defaults. */
@@ -35,6 +42,11 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
     alertRecipients: Array.isArray(s.alertRecipients) ? s.alertRecipients : [],
     emailAlerts: { ...DEFAULT_ORG_SETTINGS.emailAlerts, ...(s.emailAlerts ?? {}) },
     externalVerifier: normalizeExternalVerifierSettings(s.externalVerifier),
+    requireMfa: s.requireMfa === 'admins' || s.requireMfa === 'everyone' ? s.requireMfa : 'off',
+    reviewSla: reviewSlaSchema.safeParse({ ...DEFAULT_REVIEW_SLA, ...(s.reviewSla ?? {}) }).data ?? { ...DEFAULT_REVIEW_SLA },
+    decisionConfigVersion: Number.isInteger(s.decisionConfigVersion) && s.decisionConfigVersion! >= 1 ? s.decisionConfigVersion! : 1,
+    evidenceLocation: typeof s.evidenceLocation === 'string' && s.evidenceLocation ? s.evidenceLocation : DEFAULT_ORG_SETTINGS.evidenceLocation,
+    requireSso: s.requireSso === true,
   };
 }
 
@@ -42,6 +54,20 @@ export function orgSettings(org: Pick<Organization, 'settings'> | null | undefin
 export function orgThresholds(org: Pick<Organization, 'settings'> | null | undefined): IdentityThresholds {
   const parsed = identityThresholdsSchema.safeParse(orgSettings(org).identityThresholds);
   return parsed.success ? parsed.data : DEFAULT_IDENTITY_THRESHOLDS;
+}
+
+/**
+ * What an identity decision records about how it was made (model governance): the organisation's decision
+ * configuration version (whose thresholds orgThresholds() returns), the server's calibration and recogniser model.
+ */
+export interface DecisionStamp {
+  decisionConfigVersion: number;
+  calibrationVersion: string;
+  modelVersion: string;
+}
+
+export function decisionStamp(org: Pick<Organization, 'settings'> | null | undefined): DecisionStamp {
+  return { decisionConfigVersion: orgSettings(org).decisionConfigVersion, calibrationVersion: CALIBRATION.version, modelVersion: EMBEDDING_MODEL_VERSION };
 }
 
 /** Effective policy for a new exam: org default policy merged with the exam's own (exam wins, deep per section). */
@@ -62,12 +88,19 @@ export async function loadOrg(db: DbOrTx, orgId: string): Promise<Organization |
   return o ?? null;
 }
 
-export async function createOrganization(db: DbOrTx, name: string, settings: Partial<OrgSettings> = {}, now = Date.now()): Promise<Organization> {
+/** `kind` / `quotas` / `sandboxPurgeDays`: operator-only (services/tenancy.ts, services/quotas.ts); default production, no limits. */
+export async function createOrganization(
+  db: DbOrTx,
+  name: string,
+  settings: Partial<OrgSettings> = {},
+  now = Date.now(),
+  tenancy: Partial<Pick<Organization, 'kind' | 'quotas' | 'sandboxPurgeDays'>> = {},
+): Promise<Organization> {
   const [org] = await db
     .insert(organizations)
     // Only explicit overrides are stored; defaults (e.g. identity thresholds) are filled in by orgSettings()
     // so improved defaults reach organisations that never customised them.
-    .values({ name, settings: { ...settings }, createdAt: new Date(now), updatedAt: new Date(now) })
+    .values({ name, settings: { ...settings }, ...tenancy, createdAt: new Date(now), updatedAt: new Date(now) })
     .returning();
   return org;
 }

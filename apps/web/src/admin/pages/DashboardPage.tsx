@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { EVENT_CATALOG, type EventCategory, type LiveEventDTO, type SessionSummaryDTO } from '@sp/shared';
+import { EVENT_CATALOG, isFlagCategory, type EventCategory, type LiveEventDTO, type SessionSummaryDTO } from '@sp/shared';
 import { announce, tabProps } from '../../lib/a11y';
 import { api, errorMessage, shouldRetry } from '../api/client';
 import { afterSessionAction, qk } from '../api/queries';
@@ -10,6 +10,7 @@ import { setServerTime, useNow } from '../lib/clock';
 import { formatDuration, formatPercent, formatSimilarity, formatTime } from '../lib/format';
 import { monitoringStale } from '../lib/liveness';
 import { CATEGORY_SHORT, HOLD_REASON_LABELS } from '../lib/labels';
+import { kindsSummary } from '../lib/accommodations';
 import {
   BOARD_GROUP_LABELS,
   BOARD_GROUPS,
@@ -25,6 +26,7 @@ import {
 import { CategoryBadge, CategoryCounts, ConnectionBadge, DecisionBadge, ReviewBadge, StatusBadge } from '../components/Badges';
 import { EmptyState, ErrorState, Loading, PageHeader, Stat } from '../components/Common';
 import { EvidenceImage } from '../components/EvidenceImage';
+import { DueBadge } from '../components/ReviewBits';
 import { Clock, Countdown, LiveDuration, RelativeTime, ReportingInterrupted } from '../components/Time';
 
 const FLASH_MS = 10_000;
@@ -99,7 +101,7 @@ export function DashboardPage() {
     if (msg.type === 'event' && isNew && (msg.event.severity === 'high' || msg.event.category === 'integrity')) {
       flashIds([msg.event.id, msg.event.sessionId]);
     }
-    if (msg.type === 'event' && isNew && msg.event.category !== 'neutral') {
+    if (msg.type === 'event' && isNew && isFlagCategory(msg.event.category)) {
       announceFlag({ ...msg.event, candidateName: msg.candidateName, examTitle: msg.examTitle });
     }
   });
@@ -165,6 +167,7 @@ function NeedsAttention({ pauses, holds }: { pauses: AttentionPause[]; holds: Re
                 {h.hold.canReverify ? <span className="muted"> · released by staff, waiting for the candidate’s fresh identity check</span> : null}
               </div>
               {h.hold.message ? <div className="muted small">{h.hold.message}</div> : null}
+              {h.due && !h.hold.canReverify ? <DueBadge due={h.due} /> : null}
             </div>
             <Link className="btn btn-primary btn-sm" to={`/admin/sessions/${h.sessionId}`}>
               Review<span className="visually-hidden"> hold of {h.candidateName}</span>
@@ -315,12 +318,19 @@ export function SessionCard({ s, flash }: { s: LiveSession; flash: boolean }) {
         <div className="sc-badges">
           <StatusBadge status={s.status} />
           {s.status !== 'submitted' && s.status !== 'terminated' ? <ConnectionBadge connection={s.connection} /> : null}
+          {s.accommodations?.length ? (
+            <span className="badge badge-info" title={`Approved accommodations: ${kindsSummary(s.accommodations)}`} aria-label={`Approved accommodations: ${kindsSummary(s.accommodations)}`}>
+              Acc.
+            </span>
+          ) : null}
         </div>
       </div>
       {s.reportingInterruptedSince ? <ReportingInterrupted since={s.reportingInterruptedSince} /> : null}
       {s.hold ? (
         s.hold.canReverify ? (
           <div className="sc-alert warning">On hold — waiting for the candidate to re-verify</div>
+        ) : s.hold.reason === 'staff_verification' ? (
+          <div className="sc-alert warning">Waiting for staff to verify identity</div>
         ) : (
           <div className="sc-alert danger">On hold: {HOLD_REASON_LABELS[s.hold.reason] ?? s.hold.reason}</div>
         )
@@ -467,7 +477,7 @@ function FlagsFeed({ events, flash }: { events: LiveEventDTO[]; flash: Set<strin
                     )}
                     {e.confidence != null ? <> · {formatPercent(e.confidence)} confidence</> : null}
                     {e.deliveredLate ? <span className="badge badge-technical">Delivered late</span> : null}
-                    {e.review.status !== 'unreviewed' ? <ReviewBadge status={e.review.status} /> : null}
+                    {e.review.status !== 'unreviewed' ? <ReviewBadge status={e.review.status} resolution={e.review.resolution} /> : null}
                   </div>
                 </div>
               </button>

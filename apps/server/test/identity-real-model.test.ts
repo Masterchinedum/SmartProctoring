@@ -10,7 +10,7 @@ import { DEFAULT_IDENTITY_THRESHOLDS, type IdentityTestResponse } from '@sp/shar
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runSelfTest } from '../src/services/identity-selftest.js';
-import { createVisionService, resolveModelsDir, type VisionService } from '../src/vision/index.js';
+import { createVisionService, qualityBucket, resolveModelsDir, type VisionService } from '../src/vision/index.js';
 
 const FACES = process.env.SP_TEST_FACES_DIR ?? '/tmp/claude-0/faces';
 const FACESETS = process.env.SP_TEST_FACESETS_DIR ?? '/tmp/claude-0/facesets';
@@ -69,7 +69,7 @@ describe.skipIf(!haveModels || !(havePhotos || haveFamily))('identity engine wit
     return (await runSelfTest(ctx(), { staffId: 'staff', testId, mode: 'probe', thresholds: DEFAULT_IDENTITY_THRESHOLDS }, b)).response;
   }
 
-  it.skipIf(!havePhotos)('the same person (another, low-resolution photo) stays consistent; a different person is confirmed within two samples', async () => {
+  it.skipIf(!havePhotos)('the same person (another, low-resolution photo) stays consistent; a different person is suspected after two samples and confirmed after three', async () => {
     const e = await enrol('obama', join(FACES, 'obama.jpg'));
     expect(e.enrolledFrames).toBeGreaterThanOrEqual(3);
     const same = await probe('obama', join(FACES, 'obama_small.jpg')); // another photo, low resolution
@@ -80,9 +80,14 @@ describe.skipIf(!haveModels || !(havePhotos || haveFamily))('identity engine wit
     const other1 = await probe('obama', join(FACES, 'biden.jpg'));
     expect(other1.decision).toBe('mismatch');
     expect(other1.llr!).toBeGreaterThan(3);
+    // The genuine probe before still counts in the evidence window (no track break in a self-test), so the other
+    // person is 'suspect' after two samples and confirmed after three (llrClamp 5 < confirm 7 needs >= 2 anyway).
     const other2 = await probe('obama', join(FACES, 'biden.jpg'), 2);
-    expect(other2.evidence!.state).toBe('confirmed_mismatch');
-    expect(other2.evidence!.swapProbability).toBeGreaterThan(0.5);
+    expect(other2.evidence!.state).toBe('suspect');
+    const other3 = await probe('obama', join(FACES, 'biden.jpg'), 3);
+    expect(qualityBucket(other3.quality!)).not.toBe('poor');
+    expect(other3.evidence!.state).toBe('confirmed_mismatch');
+    expect(other3.evidence!.swapProbability).toBeGreaterThan(0.5);
   }, 120_000);
 
   it.skipIf(!haveFamily)('family photos: the father’s other photos never confirm a mismatch; the son (look-alike) builds evidence', async () => {

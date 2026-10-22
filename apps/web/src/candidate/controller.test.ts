@@ -16,7 +16,7 @@ import { Outbox } from './outbox';
 
 const h = vi.hoisted(() => ({
   api: null as unknown,
-  runtimes: [] as { started: boolean; stopped: boolean }[],
+  runtimes: [] as { started: boolean; stopped: boolean; deps: { attentionState?: unknown }; learned: unknown }[],
 }));
 
 vi.mock('./api', async (importOriginal) => {
@@ -28,8 +28,13 @@ vi.mock('./monitoring/runtime', () => ({
   MonitoringRuntime: class {
     started = false;
     stopped = false;
-    constructor() {
+    /** What the engine "learned" this period (the working region handed to the next period). */
+    learned: unknown = null;
+    constructor(readonly deps: { attentionState?: unknown }) {
       h.runtimes.push(this);
+    }
+    attentionState() {
+      return this.learned;
     }
     async start() {
       this.started = true;
@@ -89,6 +94,7 @@ class FakeServer {
         verifiedInstanceId: verified,
         hold: null,
         pauseRequest: null,
+        window: null,
         ...overrides,
       },
       exam: {
@@ -147,6 +153,7 @@ class FakeServer {
       pause: fail,
       cancelPause: fail,
       submit: fail,
+      withdrawConsent: fail,
     };
   }
 }
@@ -178,6 +185,41 @@ afterEach(() => {
 });
 
 /* ------------------------------------------------------------------ tests */
+
+describe('CandidateController — exam start deferred while the server is at capacity', () => {
+  it('waits as long as the server asks (plus a spread), tells the screen, then starts by itself', async () => {
+    server.status = 'ready';
+    const c = newController();
+    await c.load();
+    let calls = 0;
+    (h.api as CandidateApi).start = async () => {
+      calls++;
+      if (calls === 1) throw new CandidateApiError(503, 'start_deferred', 'Many candidates are starting at the same time.', undefined, 8_000);
+      server.status = 'active';
+      return { data: server.state(), timing: { sentAt: Date.now(), receivedAt: Date.now() } };
+    };
+    let told = 0;
+    const started = c.startExam(() => told++);
+    await tick(10);
+    expect([calls, told]).toEqual([1, 1]);
+    await tick(7_900);
+    expect(calls).toBe(1); // never before the server's Retry-After
+    await tick(4_200); // at most +50 %
+    expect(calls).toBe(2);
+    await started;
+    expect(c.getSnapshot().state?.session.status).toBe('active');
+  });
+
+  it('throws any other failure as before', async () => {
+    server.status = 'ready';
+    const c = newController();
+    await c.load();
+    (h.api as CandidateApi).start = async () => {
+      throw new CandidateApiError(409, 'invalid_state', 'The exam can only be started after the readiness check');
+    };
+    await expect(c.startExam()).rejects.toMatchObject({ code: 'invalid_state' });
+  });
+});
 
 describe('CandidateController — answers typed just after a staff-approved pause (P1-1)', () => {
   it('keeps the answer, does not signal a reporting outage, and saves it once the exam is active again', async () => {
@@ -360,6 +402,46 @@ describe('CandidateController — "Check complete" waits for the click (P1-2, P2
   });
 });
 
+describe('CandidateController — withdrawing consent', () => {
+  it('delivers the answers first, then ends the exam, stops monitoring and deletes images queued on this device', async () => {
+    const c = newController();
+    await c.load();
+    await tick(10);
+    expect(h.runtimes).toHaveLength(1);
+    const api = h.api as CandidateApi;
+    api.uploadEvidence = async () => {
+      throw new CandidateApiError(0, 'network_error', 'Could not reach the server.');
+    };
+    await c.outbox!.putEvidence({ id: 'e1', eventId: 'ev', capturedAt: Date.now(), reason: 'onset', jpeg: new Uint8Array([1, 2, 3]) });
+    await c.outbox!.putSample({ id: 's1', trigger: 'periodic', capturedAt: Date.now(), jpeg: new Uint8Array([4, 5, 6]), busy: true });
+    c.answers!.set('q1', 'my answer');
+    const calls: { reason?: string; savedBefore: boolean }[] = [];
+    api.withdrawConsent = async (req) => {
+      calls.push({ reason: req.reason, savedBefore: server.answers.get('q1')?.value === 'my answer' });
+      server.status = 'terminated';
+      return { ...server.state(), session: { ...server.state().session, status: 'terminated', endReason: 'candidate_withdrew' } };
+    };
+    await c.withdrawConsent('  I prefer an exam centre.  ');
+    expect(calls).toEqual([{ reason: 'I prefer an exam centre.', savedBefore: true }]);
+    expect(h.runtimes[0].stopped).toBe(true);
+    expect(c.getSnapshot()).toMatchObject({ monitoringActive: false, state: { session: { status: 'terminated', endReason: 'candidate_withdrew' } } });
+    expect(c.outbox!.stats()).toMatchObject({ pendingAnswers: 0 });
+    expect(c.outbox!.stats().size).toBe(0);
+  });
+
+  it('keeps the exam going when the request cannot reach the server, and says so', async () => {
+    const c = newController();
+    await c.load();
+    await tick(10);
+    (h.api as CandidateApi).withdrawConsent = async () => {
+      throw new CandidateApiError(0, 'network_error', 'Could not reach the server.');
+    };
+    await expect(c.withdrawConsent()).rejects.toThrow(/could not reach the server/i);
+    expect(h.runtimes[0].stopped).toBe(false);
+    expect(c.getSnapshot().state?.session.status).toBe('active');
+  });
+});
+
 describe('CandidateController — reporting interrupted (P2-4)', () => {
   it('is not signalled while identity samples wait in a busy server vision queue', async () => {
     const c = newController();
@@ -369,7 +451,7 @@ describe('CandidateController — reporting interrupted (P2-4)', () => {
     const api = h.api as CandidateApi;
     api.identitySample = async () => {
       if (busy) throw new CandidateApiError(503, 'vision_busy', 'The server is busy analysing images.');
-      return { result: { id: 'r', trigger: 'face_return', decision: 'match', similarity: 0.7, confidence: 0.9, quality: null, guidance: [], at: 1 }, followUpInMs: null, status: 'active', hold: null };
+      return { result: { id: 'r', trigger: 'face_return', usable: true, guidance: [], at: 1 }, followUpInMs: null, status: 'active', hold: null };
     };
     await c.outbox!.putSample({ id: 's1', trigger: 'face_return', capturedAt: Date.now(), jpeg: new Uint8Array([1, 2, 3]) });
     await tick(30_000);
@@ -421,5 +503,28 @@ describe('CandidateController — camera released on screens without monitoring 
     await c.camera.start();
     c.releaseIdleCamera();
     expect(c.camera.state.wanted).toBe(true);
+  });
+});
+
+describe('CandidateController — the working region across monitoring periods', () => {
+  it('hands the engine state learned in one period to the next (pause / resume in this page)', async () => {
+    const c = newController();
+    await c.load();
+    await tick(10);
+    expect(h.runtimes).toHaveLength(1);
+    expect(h.runtimes[0].deps.attentionState ?? null).toBeNull();
+    const learned = { v: 1, cameraId: 'cam-a', prior: { yaw: 0, pitch: -5 }, pointer: [30, -5, 0, 0], typed: [], calm: [], keyboard: [] };
+    h.runtimes[0].learned = learned;
+
+    server.status = 'paused';
+    await c.applyState(server.state());
+    await tick(10);
+    expect(h.runtimes[0].stopped).toBe(true);
+
+    server.status = 'active';
+    await c.applyState(server.state());
+    await tick(10);
+    expect(h.runtimes).toHaveLength(2);
+    expect(h.runtimes[1].deps.attentionState).toEqual(learned);
   });
 });

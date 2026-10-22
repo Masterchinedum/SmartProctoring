@@ -55,6 +55,7 @@ for (const cs of TURNING) {
           completes,
           stepFramesSent: stepFrames.length,
           stepFramesSatisfied: stepFrames.filter((l) => / sat=true /.test(l)).length,
+          poseSmoothing: process.env.E2E_RAW_POSE === '1' ? 'off (A/B)' : 'on',
           about: RW_FIXTURES[cs.fixture].about,
         });
         expect(r.final, `outcome after ${r.attempts} attempt(s): ${JSON.stringify(completes)}`).toBe('ready');

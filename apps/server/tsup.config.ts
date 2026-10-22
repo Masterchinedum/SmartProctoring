@@ -2,18 +2,25 @@ import { existsSync } from 'node:fs';
 import { defineConfig } from 'tsup';
 
 /**
- * Production bundle: dist/main.js (+ CLI scripts). Everything is bundled (incl. the workspace
- * @sp/shared TS sources) except native / platform-specific modules, which stay in node_modules.
- * Migrations are read at runtime from apps/server/drizzle (found by walking up from dist/).
+ * Production bundle: dist/main.js, dist/vision-server.js (the dedicated vision worker process) and the CLI scripts.
+ * Everything is bundled (incl. the workspace @sp/shared TS sources) except native / platform-specific modules, which
+ * stay in node_modules. Migrations are read at runtime from apps/server/drizzle (found by walking up from dist/).
  */
 const candidates: Record<string, string> = {
   main: 'src/main.ts',
   // Vision worker thread entry: the pool (src/vision/pool.ts) loads dist/vision-worker.js next to the bundle.
   'vision-worker': 'src/vision/worker.ts',
+  // Dedicated vision worker PROCESS (HTTP, VISION_DRIVER=remote on the servers): `node dist/vision-server.js`. Not
+  // named vision-worker*: the pool looks for dist/vision-worker.js (the thread entry above).
+  'vision-server': 'src/vision-worker/main.ts',
   'scripts/seed': 'src/scripts/seed.ts',
   'scripts/migrate': 'src/db/migrate-cli.ts',
   'scripts/retention': 'src/scripts/retention-cli.ts',
   'scripts/rekey': 'src/scripts/rekey-cli.ts',
+  'scripts/storage-move': 'src/scripts/storage-move-cli.ts',
+  'scripts/staff-access': 'src/scripts/staff-access-cli.ts',
+  'scripts/openapi': 'src/scripts/openapi-cli.ts',
+  'scripts/org': 'src/scripts/org-cli.ts',
   'scripts/identity-eval': 'src/eval/identity-eval-cli.ts',
 };
 const NATIVE = ['onnxruntime-node', 'sharp', 'pg-native', 'bufferutil', 'utf-8-validate', 'pino-pretty'];
@@ -23,7 +30,7 @@ export default defineConfig({
   entry,
   format: ['esm'],
   platform: 'node',
-  target: 'node22',
+  target: 'node24',
   outDir: 'dist',
   clean: true,
   sourcemap: true,

@@ -3,7 +3,7 @@
  * reference enrolment, liveness verification. See types.ts for the contract.
  */
 export * from './types';
-export { createVisionService, OnnxVisionService, VisionBusyError, VisionClosedError, type VisionServiceOptions, type VisionStats } from './service';
+export { createVisionService, OnnxVisionService, VisionBusyError, VisionCancelledError, VisionClosedError, type VisionServiceOptions, type VisionStats } from './service';
 export {
   cosineSimilarity,
   maxSimilarity,
@@ -16,6 +16,7 @@ export {
   aggregateFrames,
   CONFIDENCE_MARGIN,
   MISMATCH_MIN_LLR,
+  MATCH_MAX_LLR,
   INCONCLUSIVE_GUIDANCE,
   NO_EMBEDDING_GUIDANCE,
   REFERENCE_MIN_FRAMES,
@@ -25,6 +26,7 @@ export {
   REFERENCE_MAX_PITCH_DEG,
   REFERENCE_INCONSISTENT_REASON,
   type ComparisonTarget,
+  type DecisionEvidence,
 } from './identity';
 export {
   CALIBRATION,
@@ -32,6 +34,16 @@ export {
   BUCKET_THRESHOLDS,
   LLR_TAIL_EPS,
   qualityBucket,
+  referenceBucket,
+  referenceClass,
+  bucketModel,
+  REFERENCE_MODELS,
+  CONTINUOUS_MODEL,
+  continuousLLR,
+  continuousApplies,
+  usableReferenceBaseline,
+  windowEvidence,
+  GENUINE_DRIFT,
   sampleLLR,
   rawLLR,
   posteriorSwap,
@@ -39,6 +51,13 @@ export {
   type BucketModel,
   type BucketThresholds,
   type Calibration,
+  type ComparisonContext,
+  type ContinuousParams,
+  type DriftModel,
+  type EvidenceContext,
+  type ReferenceBaseline,
+  type ReferenceClass,
+  type WindowEntry,
 } from './calibration';
 export {
   verifyLiveness,
@@ -58,6 +77,7 @@ export {
   resolveGate,
   assessQuality,
   regateQuality,
+  lowContrast,
   poseWithinGate,
   FRONTAL_PITCH_DEG,
   guidanceForIssues,

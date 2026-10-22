@@ -61,6 +61,8 @@ export class Driver {
       baseline: opts.baseline === undefined ? BASELINE : opts.baseline,
       idFactory: opts.idFactory ?? sequentialIdFactory(),
       recalibrateOnCameraChange: opts.recalibrateOnCameraChange,
+      attentionState: opts.attentionState,
+      attentionParams: opts.attentionParams,
     });
   }
 

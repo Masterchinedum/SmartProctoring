@@ -1,10 +1,13 @@
-import { chromium, expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
-import { BASE_URL, HEADED } from './config';
+import { chromium, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { BASE_URL, CHROMIUM_EXECUTABLE, DELEGATE, HEADED } from './config';
+import { requireImages } from './require-images';
 import { fixtureAvailable, fixturePath, type FixtureName } from './fixtures';
+import { cameraMode, cameraPermissions, installCamera, launchShimCamera, launchShimPersistentCamera, shimStats } from './camera';
 
 /**
- * Candidate side: a Chromium per fake camera (the Y4M file is a launch argument) and a page object for
- * the candidate app (/take/:token).
+ * Candidate side: a browser per fake camera (Chromium: the Y4M file is a launch argument; E2E_CAMERA=shim, Firefox
+ * and WebKit: the camera shim of lib/camera.ts plays the same file) and a page object for the candidate app
+ * (/take/:token).
  *
  * Timing notes (from the candidate app's own drafts):
  *  - the camera (and the Y4M video, from frame 0) starts at the camera check and stays on through the exam;
@@ -37,18 +40,25 @@ import { fixtureAvailable, fixturePath, type FixtureName } from './fixtures';
  */
 
 export function skipUnlessFixtures(...names: FixtureName[]): void {
-  const missing = names.filter((n) => !fixtureAvailable(n));
-  test.skip(missing.length > 0, `face images for fixture(s) ${missing.join(', ')} not found (set E2E_FACES_DIR)`);
+  requireImages(
+    names.filter((n) => !fixtureAvailable(n)),
+    'face images (set E2E_FACES_DIR; pnpm --filter @sp/e2e fetch-faces) for fixture(s)',
+  );
 }
 
 export async function launchCamera(fixture: FixtureName): Promise<Browser> {
   return launchCameraFile(fixturePath(fixture));
 }
 
-/** A Chromium whose fake camera plays the given Y4M file (e.g. a realistic fixture, lib/realistic.ts). */
+/**
+ * A browser whose fake camera plays the given Y4M file (e.g. a realistic fixture, lib/realistic.ts): Chromium's
+ * fake capture device, or in shim mode the project's browser with the camera shim (lib/camera.ts).
+ */
 export async function launchCameraFile(y4m: string): Promise<Browser> {
+  if (cameraMode() === 'shim') return launchShimCamera(y4m);
   return chromium.launch({
     headless: !HEADED,
+    executablePath: CHROMIUM_EXECUTABLE,
     args: [
       '--use-fake-device-for-media-stream',
       '--use-fake-ui-for-media-stream',
@@ -67,8 +77,10 @@ export async function launchCameraFile(y4m: string): Promise<Browser> {
  * fixtures model the same computer/browser whose camera view changed (e.g. the candidate moved seats).
  */
 export async function launchPersistentCamera(fixture: FixtureName, userDataDir: string): Promise<BrowserContext> {
+  if (cameraMode() === 'shim') return launchShimPersistentCamera(fixturePath(fixture), userDataDir, { baseURL: BASE_URL, viewport: { width: 1280, height: 900 } });
   return chromium.launchPersistentContext(userDataDir, {
     headless: !HEADED,
+    executablePath: CHROMIUM_EXECUTABLE,
     baseURL: BASE_URL,
     viewport: { width: 1280, height: 900 },
     permissions: ['camera'],
@@ -94,16 +106,20 @@ export const TRACK_CAMERA_STREAMS = `(() => {
   window.__spTracks = [];
   window.__spCamOpens = [];
   const orig = md.getUserMedia.bind(md);
-  md.getUserMedia = async (c) => {
+  const tracked = async (c) => {
     const s = await orig(c);
     const tracks = s.getVideoTracks();
     window.__spTracks.push(...tracks);
     if (tracks.length) {
       const st = tracks[0].getSettings ? tracks[0].getSettings() : {};
       window.__spCamOpens.push({ at: Date.now(), width: st.width || 0, height: st.height || 0 });
+      console.info('[e2e] camera opened ' + (st.width || 0) + 'x' + (st.height || 0));
     }
     return s;
   };
+  md.getUserMedia = tracked;
+  // Also on the prototype (WebKit on macOS hands the page another MediaDevices object; see the camera shim).
+  if (window.MediaDevices && window.MediaDevices.prototype !== md) window.MediaDevices.prototype.getUserMedia = tracked;
 })();`;
 
 /** Every CandidatePage of the running test (lib/test.ts attaches their API logs when a test fails). */
@@ -119,17 +135,19 @@ async function summarizeApiResponse(url: string, status: number, body: unknown):
   if (/\/api\/candidate\/checks\/[^/]+\/frames/.test(path)) {
     const qa = b.quality ?? {};
     const pr = b.progress ?? {};
-    return `frame step=${q.get('step')} ${status} accepted=${b.accepted} usable=${qa.usable} issues=${(qa.issues ?? []).join('+') || '-'} bright=${qa.brightness?.toFixed?.(0)} contrast=${qa.contrast?.toFixed?.(1)} ie=${qa.interEyePx?.toFixed?.(0)} yaw=${qa.yawDeg?.toFixed?.(0)} sat=${b.stepSatisfied ?? '-'} measured=${b.measured ? `${b.measured.yawDeg?.toFixed(0)}/${b.measured.pitchDeg?.toFixed(0)}` : '-'} client=${q.get('clientYaw') ?? '-'} progress=${pr.frontalAccepted ?? '-'}+${pr.frontalNeeded ?? '-'} id=${pr.identity ?? '-'} steps=${(pr.steps ?? []).map((x: any) => (x.satisfied ? 1 : 0)).join('')} canComplete=${pr.canComplete ?? '-'}`;
+    return `frame step=${q.get('step')} ${status} accepted=${b.accepted} usable=${qa.usable} issues=${(qa.issues ?? []).join('+') || '-'} bright=${qa.brightness?.toFixed?.(0)} contrast=${qa.contrast?.toFixed?.(1)} ie=${qa.interEyePx?.toFixed?.(0)} yaw=${qa.yawDeg?.toFixed?.(0)} sat=${b.stepSatisfied ?? '-'} measured=${b.measured ? `${b.measured.yawDeg?.toFixed(0)}/${b.measured.pitchDeg?.toFixed(0)}` : '-'} client=${q.get('clientYaw') ?? '-'} progress=${pr.frontalAccepted ?? '-'}+${pr.frontalNeeded ?? '-'} steps=${(pr.steps ?? []).map((x: any) => (x.satisfied ? 1 : 0)).join('')} canComplete=${pr.canComplete ?? '-'}`;
   }
   if (/\/api\/candidate\/checks\/[^/]+\/complete/.test(path)) {
-    return `complete ${status} outcome=${b.outcome} identity=${b.identity?.decision}/${b.identity?.similarity?.toFixed?.(3)} liveness=${b.liveness ? `${b.liveness.passed}:${(b.liveness.reasons ?? []).join('+')}` : '-'} remaining=${b.attemptsRemaining} guidance=${JSON.stringify(b.guidance ?? [])}`;
+    return `complete ${status} outcome=${b.outcome} liveness=${b.liveness ? `${b.liveness.passed}:${(b.liveness.reasons ?? []).join('+')}` : '-'} remaining=${b.attemptsRemaining} guidance=${JSON.stringify(b.guidance ?? [])}`;
   }
   if (/\/api\/candidate\/checks$/.test(path.split('?')[0]!)) {
     return `check start ${status} purpose=${b.purpose ?? '-'} liveness=${(b.liveness?.steps ?? []).map((x: any) => x.action).join(',') || '-'} frontal=${b.frontalFramesRequired ?? '-'}/${b.maxFrontalFrames ?? '-'}`;
   }
   if (/\/api\/candidate\/identity\/sample/.test(path)) {
     const r = b.result ?? {};
-    return `sample trigger=${q.get('trigger')} burst=${q.get('burstIndex') ?? '-'}/${q.get('burstSize') ?? '-'} ${status} decision=${r.decision} sim=${r.similarity?.toFixed?.(3)} issues=${(r.quality?.issues ?? []).join('+') || '-'} complete=${b.burst?.complete ?? '-'} evidence=${b.evidence ? `${b.evidence.state}:${b.evidence.swapProbability?.toFixed?.(3)}:${b.evidence.samples}` : '-'} next=${b.nextSampleInMs ?? '-'} status=${b.status}`;
+    // The candidate is told only whether the image was usable (and guidance) — never a decision, score or evidence
+    // state; `faster=yes` is the server's cadence hint (followUpInMs: it wants the next sample sooner).
+    return `sample trigger=${q.get('trigger')} burst=${q.get('burstIndex') ?? '-'}/${q.get('burstSize') ?? '-'} ${status} usable=${r.usable ?? '-'} guidance=${JSON.stringify(r.guidance ?? [])} complete=${b.burst?.complete ?? '-'} faster=${b.followUpInMs != null ? 'yes' : 'no'} next=${b.nextSampleInMs ?? '-'} status=${b.status}`;
   }
   return null;
 }
@@ -139,8 +157,33 @@ export type CheckOutcome = 'ready' | 'passed' | 'retry' | 'hold' | 'problem' | '
 export class CandidatePage {
   readonly logs: string[] = [];
   readonly httpErrors: string[] = [];
+  private webglProbe: Promise<string | null> | null = null;
   /** Identity-relevant API answers (check frames, check completes, identity samples), one line each. */
   readonly apiLog: string[] = [];
+  /** What the identity check screen showed over time (phase / stage / instruction / progress), on change. */
+  readonly verifyTrace: string[] = [];
+  private lastVerify = '';
+
+  /** Sample the identity check screen once; appends a line to `verifyTrace` when it changed. */
+  async traceVerify(): Promise<void> {
+    const v = await this.page
+      .evaluate(() => {
+        const q = (id: string) => document.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+        const step = q('verify-step');
+        if (!step) return null;
+        const prog = q('verify-step-progress')?.getAttribute('aria-valuenow') ?? '-';
+        const hold = q('verify-hold') ? (q('verify-hold')!.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') ?? '?') : '-';
+        const g = (q('verify-guidance')?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 120);
+        const live = (step.querySelector('.cand-live-slot') as HTMLElement | null)?.innerText.replace(/\s+/g, ' ').slice(0, 120) ?? '';
+        return `${step.dataset.phase ?? '-'} ${step.dataset.stage ?? '-'} prog=${prog} hold=${hold} "${(q('verify-instruction')?.innerText ?? '').replace(/\s+/g, ' ')}"${q('verify-reprompt') ? ' REPROMPT' : ''}${live || g ? ` | ${live || g}` : ''}`;
+      })
+      .catch(() => null);
+    if (v && v !== this.lastVerify) {
+      this.lastVerify = v;
+      this.verifyTrace.push(`${hhmmss(Date.now())} ${v}`);
+      if (this.verifyTrace.length > 3000) this.verifyTrace.splice(0, 1000);
+    }
+  }
 
   private constructor(
     readonly context: BrowserContext,
@@ -152,13 +195,18 @@ export class CandidatePage {
    * or a new page in `opts.context` (e.g. a persistent profile).
    */
   static async open(browser: Browser | null, link: string, opts: { context?: BrowserContext } = {}): Promise<CandidatePage> {
-    const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, permissions: ['camera'] }));
+    const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, ...cameraPermissions() }));
+    await installCamera(context); // shim mode only; before the tracker below, which wraps whatever getUserMedia is
     await context.addInitScript(TRACK_CAMERA_STREAMS);
+    if (DELEGATE) await context.addInitScript(`try { localStorage.setItem('sp:delegate', ${JSON.stringify(DELEGATE)}); } catch {}`);
+    // A/B measurement of the check's pose smoothing (apps/web/src/candidate/check/poseFilter.ts): raw poses.
+    if (process.env.E2E_RAW_POSE === '1') await context.addInitScript('window.__spRawPose = true;');
     const page = await context.newPage();
     const c = new CandidatePage(context, page);
     OPEN_CANDIDATE_PAGES.add(c);
     c.attach(page);
     await page.goto(new URL(link, BASE_URL).pathname + new URL(link, BASE_URL).search);
+    c.webglProbe = c.probeWebgl();
     return c;
   }
 
@@ -166,7 +214,12 @@ export class CandidatePage {
     page.on('dialog', (d) => void d.accept().catch(() => undefined)); // beforeunload on reload/close
     page.on('console', (m) => {
       const t = m.text();
-      if ((m.type() === 'error' || m.type() === 'warning') && !/GL Driver|OpenGL|XNNPACK|gl_context|face_landmarker_graph|swiftshader|GroupMarkerNotSet|WebGL|TensorFlow Lite/i.test(t)) {
+      // Camera opens in the API log's timeline: the fixture video starts again from frame 0 at each one.
+      if (t.startsWith('[e2e] camera opened')) this.apiLog.push(`${hhmmss(Date.now())} ${t.slice(6)}`);
+      // Browser / MediaPipe driver noise is dropped, but never the app's own messages ("[check] …", "[vision] …"),
+      // whose errors can mention WebGL.
+      const own = /^\[(check|vision|monitoring|controller|camera)\]/i.test(t);
+      if ((m.type() === 'error' || m.type() === 'warning') && (own || !/GL Driver|OpenGL|XNNPACK|gl_context|face_landmarker_graph|swiftshader|GroupMarkerNotSet|WebGL|TensorFlow Lite/i.test(t))) {
         this.logs.push(`[${m.type()}] ${t.slice(0, 400)}`);
       }
     });
@@ -207,6 +260,104 @@ export class CandidatePage {
     return this.page.evaluate(() => ((window as unknown as { __spTracks?: MediaStreamTrack[] }).__spTracks ?? []).filter((t) => t.readyState === 'live').length);
   }
 
+  /** Camera shim mode: its frame statistics (fetches, slowest fetch, largest lag) for the failure diagnostics. */
+  cameraShimSummary(): string | null {
+    const s = shimStats(this.page);
+    if (!s) return null;
+    return `camera shim: ${s.fetched} frames fetched, ${s.failed} failed, ${(s.msTotal / Math.max(1, s.fetched)).toFixed(0)} ms mean / ${s.msMax.toFixed(0)} ms max per frame, largest lag ${s.lagMax} frames, ${s.mutes} track mute events; frame timer late by ${(s.lateTotal / Math.max(1, s.ticks)).toFixed(0)} ms mean / ${s.lateMax.toFixed(0)} ms max (page main thread busy) (as of the last frame request)`;
+  }
+
+  /** The page's visible text when a test fails (e.g. the readiness checklist's messages), null once the page is closed. */
+  async visibleText(maxChars = 4000): Promise<string | null> {
+    if (this.page.isClosed()) return null;
+    try {
+      return (await this.page.locator('body').innerText({ timeout: 3_000 })).replace(/\n{2,}/g, '\n').slice(0, maxChars);
+    } catch {
+      return null;
+    }
+  }
+
+  /** The page's WebGL renderer, probed when the page opened (the page may be closed by the time a test fails). */
+  webglSummary(): Promise<string | null> {
+    return this.webglProbe ?? Promise.resolve(null);
+  }
+
+  /**
+   * For the failure diagnostics: MediaPipe needs a WebGL context even on its CPU path, and a headless browser on a
+   * machine without a GPU may have none (Firefox / WebKit in CI run headed under Xvfb for that).
+   */
+  private probeWebgl(): Promise<string | null> {
+    const probe = this.page.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      const gl = (canvas.getContext('webgl2') ?? canvas.getContext('webgl')) as WebGLRenderingContext | null;
+      if (!gl) return 'WebGL: not available';
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      const version = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext ? 'WebGL 2' : 'WebGL 1';
+      return `${version}: ${String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER))}`;
+    });
+    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000));
+    return Promise.race([probe, timeout]).catch(() => null);
+  }
+
+  /** The readiness checklist's items (ok or not, with their messages) and the page's status line, for failures. */
+  async readinessSummary(): Promise<string> {
+    try {
+      return await this.page.evaluate(async () => {
+        const items = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="readiness-checklist"] [data-item]')).map(
+          (el) => `${el.dataset.item}=${el.dataset.ok === '1' ? 'ok' : 'NOT ok'} "${(el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160)}"`,
+        );
+        const status = Array.from(document.querySelectorAll<HTMLElement>('[role="status"], [role="alert"]')).map((el) => (el.innerText || '').trim()).filter(Boolean);
+        // The app's hidden analysis video and (shim mode) the camera canvas: is video actually flowing?
+        const v = document.querySelector<HTMLVideoElement>('video[data-sp-analysis]');
+        const tracks = v && v.srcObject instanceof MediaStream ? v.srcObject.getVideoTracks() : [];
+        const video = v
+          ? `analysis video: readyState ${v.readyState}, ${v.videoWidth}x${v.videoHeight}, ${v.paused ? 'paused' : 'playing'}, t=${v.currentTime.toFixed(1)}s, tracks [${tracks.map((t) => `${t.readyState} ${t.muted ? 'muted' : 'unmuted'} ${t.enabled ? 'enabled' : 'disabled'}`).join(', ')}]${v.error ? `, error ${v.error.code} ${v.error.message}` : ''}`
+          : 'no analysis video';
+        const banners = Array.from(document.querySelectorAll<HTMLElement>('.banner')).map((el) => (el.innerText || '').trim()).filter(Boolean);
+        const cam = document.querySelector<HTMLCanvasElement>('canvas[data-sp-e2e-camera]');
+        // What a 2D canvas reads from each (the app's analysis samples the video this way): mean / spread of luma.
+        const pixels = (src: CanvasImageSource | null) => {
+          if (!src) return '-';
+          try {
+            const c = document.createElement('canvas');
+            c.width = 64;
+            c.height = 48;
+            const g = c.getContext('2d')!;
+            g.drawImage(src, 0, 0, 64, 48);
+            const d = g.getImageData(0, 0, 64, 48).data;
+            let sum = 0;
+            let sq = 0;
+            for (let k = 0; k < d.length; k += 4) {
+              const y = 0.299 * d[k]! + 0.587 * d[k + 1]! + 0.114 * d[k + 2]!;
+              sum += y;
+              sq += y * y;
+            }
+            const n = d.length / 4;
+            const mean = sum / n;
+            return `mean ${mean.toFixed(2)} sd ${Math.sqrt(Math.max(0, sq / n - mean * mean)).toFixed(2)}`;
+          } catch (err) {
+            return `unreadable (${(err as Error).name})`;
+          }
+        };
+        // Frozen or changing: the same reading twice, 600 ms apart (the fixtures change every 200 ms).
+        const before = [pixels(v), cam ? pixels(cam) : ''];
+        await new Promise((r) => setTimeout(r, 600));
+        const moving = (a: string, b: string) => (a === b ? 'FROZEN' : 'changing');
+        const after = [pixels(v), cam ? pixels(cam) : ''];
+        const has = (x: unknown) => (x ? 'yes' : 'NO');
+        const shimInfo = (window as unknown as { __spFakeCamera?: { mode?: string; calls?: string[] } }).__spFakeCamera;
+        const gum = navigator.mediaDevices?.getUserMedia;
+        const gumKind = !gum ? 'none' : /\[native code\]/.test(Function.prototype.toString.call(gum)) ? 'NATIVE' : 'replaced';
+        const calls = shimInfo ? ` | shim mode ${shimInfo.mode}, page getUserMedia ${gumKind}, calls: ${(shimInfo.calls ?? []).join(' ; ').slice(0, 600) || 'none'}` : '';
+        const mainText = (document.querySelector<HTMLElement>('main')?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 500);
+        const page = `secure context ${window.isSecureContext}, mediaDevices ${has(navigator.mediaDevices)}, getUserMedia ${has(navigator.mediaDevices?.getUserMedia)}, MediaStream ${has(typeof MediaStream === 'function')}, canvas captureStream ${has(typeof HTMLCanvasElement.prototype.captureStream === 'function')}, shim ${has((window as unknown as { __spFakeCamera?: unknown }).__spFakeCamera)}`;
+        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''}${banners.length ? ` | banners: ${banners.join(' / ').slice(0, 300)}` : ''} | ${page}${calls} | main: ${mainText} | ${video}, pixels ${after[0]} (${moving(before[0]!, after[0]!)})${cam ? ` | shim canvas ${cam.width}x${cam.height}, pixels ${after[1]} (${moving(before[1]!, after[1]!)})` : ''}`;
+      });
+    } catch (e) {
+      return `(unreadable: ${(e as Error).message.slice(0, 120)})`;
+    }
+  }
+
   get pageErrors(): string[] {
     return this.logs.filter((l) => l.startsWith('[pageerror]'));
   }
@@ -234,7 +385,11 @@ export class CandidatePage {
    */
   async passReadiness(timeout = 90_000, opts: { strict?: boolean } = {}): Promise<void> {
     await expect(this.tid('readiness-checklist')).toBeVisible();
-    await expect(this.tid('readiness-continue')).toBeEnabled({ timeout });
+    try {
+      await expect(this.tid('readiness-continue')).toBeEnabled({ timeout });
+    } catch (e) {
+      throw new Error(`readiness never completed; checklist: ${await this.readinessSummary()}\n${(e as Error).message}`);
+    }
     const item = (id: string) => this.page.locator(`[data-testid="readiness-checklist"] [data-item="${id}"]`);
     for (const id of ['frames', 'one_face']) await expect(item(id)).toHaveAttribute('data-ok', '1');
     for (const id of ['size_position', 'lighting', 'sharpness']) {
