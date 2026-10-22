@@ -237,8 +237,8 @@ Status (see also `docs/HANDOVER.md` §4 item 3 and `docs/ROADMAP.md` §2):
 * **Chromium**: every `@cross-browser` scenario green in both camera modes.
 * **Firefox** (CI): all ten `@cross-browser` scenarios green.
 * **WebKit on macOS** (CI job `e2e-webkit-macos`, headed, Postgres from Homebrew): 9 of the 10 scenarios pass; the one
-  failure so far was the staff browser's page crashing on a reload in 04 (after the swap had been held and released
-  correctly). WebKit on macOS needed two shim changes: it exposes no `navigator.mediaDevices` headless, and it hands the
+  failure, on every run so far, is the staff browser's page crashing on a reload in 04 (after the swap has been held and
+  released correctly). WebKit on macOS needed two shim changes: it exposes no `navigator.mediaDevices` headless, and it hands the
   page a different `MediaDevices` object than the init script saw, so the shim also installs itself on
   `MediaDevices.prototype` (the readiness failure reports whether the page's `getUserMedia` is native or the shim's,
   and every camera request the shim received).

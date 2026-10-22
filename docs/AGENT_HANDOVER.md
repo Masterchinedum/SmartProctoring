@@ -119,8 +119,9 @@ Migrations are numbered in the order the items landed, not by item number (13 �
    readiness check passes everywhere and 6 of 10 scenarios pass on Linux (slow / uneven frames). The new
    `e2e-webkit-macos` job (headed, Postgres from Homebrew) needed the shim to supply `navigator.mediaDevices` and to sit
    on `MediaDevices.prototype` (macOS WebKit hands the page another MediaDevices object, whose native getUserMedia
-   waits for a permission prompt); it then passed 9 of 10 — the failure was the staff browser's page crashing on a
-   reload in 04. Owner's call (`docs/ROADMAP.md` §4 item 7): make the macOS job the WebKit check and drop or demote the
+   waits for a permission prompt); it then passed 9 of 10 — the failure, on every run, is the staff browser's page
+   crashing on a reload in 04 (`sp.reload()` after Identity tab → Compare images → back → Release hold); not yet known
+   whether real Safari crashes there. Owner's call (`docs/ROADMAP.md` §4 item 7): make the macOS job the WebKit check and drop or demote the
    Linux entry. Do not skip or quarantine the WebKit scenarios to get green.
    Firefox needed: headed under Xvfb, one worker, `E2E_DELEGATE=gpu` (CPU delegate WASM starved the main thread; in-process
    WebGL broke MediaPipe — keep `webgl.out-of-process` at its default).
