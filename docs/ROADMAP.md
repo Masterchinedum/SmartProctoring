@@ -147,7 +147,12 @@ All are documented where the feature is, and all can be changed. These are the o
   liveness checks are unchanged (a turn passes when two frames reach 10° or one reaches 12°); a turn it does not accept
   is re-prompted 6° further, capped at 35°. This answered the former open question on the hardest realistic camera
   (`rwTurnA2_other`, a 16° turn that failed every attempt): it now passes at the first attempt, and the realistic still
-  photos still fail.
+  photos still fail. Measured on the three realistic turning-head cases, 6 runs each, capturing at 14° vs 20°: 18/18 vs
+  12/18 passed, 16/18 vs 7/18 at the first attempt (the 480p camera in another room: 6/6 vs 0/6). The server's
+  "Submitted frames are identical" rejection came up only at 20° (2 runs), so the smaller turn does not cause it.
+* **Browser gates no stricter than the server (`8fcb344`):** the "look straight at the screen" step after the centre is
+  known accepts the server's ±12° (it was 8°), and straight ahead may be up to the server gate's 30° (it was 25°, the
+  earlier gate's limit) for the frontal pictures and the centre.
 * `01-happy-path` now bounds the exam time used after a resume by the wall time since the server restarted the clock
   (its `session_resumed` event) instead of a fixed 6 s, which a slow browser reached without any clock error.
 

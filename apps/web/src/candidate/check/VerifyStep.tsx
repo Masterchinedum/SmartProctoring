@@ -31,17 +31,20 @@ export const FRAMES_PER_STEP = 3;
 export const MAX_FRAMES_PER_STEP = 6;
 /**
  * Client-side "frontal" gate: relative to the candidate's calibrated centre pose when known (camera
- * placement varies), otherwise a margin inside the server's quality gate (|yaw| ≤ 25°,
- * −35° ≤ pitch ≤ 25°), which is authoritative.
+ * placement varies), otherwise a margin inside the server's quality gate (|yaw| ≤ 30°,
+ * −35° ≤ pitch ≤ 25°), which is authoritative. In every case no further from straight ahead than that gate's
+ * yaw limit (it was 25°, the limit of the server's earlier gate); the browser's yaw reads larger than the
+ * server's for the same head, so the browser is never the stricter of the two.
  */
 const FRONTAL_MAX_YAW = 18;
 const FRONTAL_REL_DEG = 15;
+const FRONTAL_ABS_MAX_YAW = 30;
 const FRONTAL_PITCH_RANGE_ABS = [-28, 18] as const;
 
 type Pose = { yaw: number; pitch: number };
 
 export function isFrontal(face: Pose, centre: Pose | null): boolean {
-  if (Math.abs(face.yaw) > 25) return false;
+  if (Math.abs(face.yaw) > FRONTAL_ABS_MAX_YAW) return false;
   if (centre) return Math.abs(face.yaw - centre.yaw) <= FRONTAL_REL_DEG && Math.abs(face.pitch - centre.pitch) <= FRONTAL_REL_DEG;
   return Math.abs(face.yaw) <= FRONTAL_MAX_YAW && face.pitch >= FRONTAL_PITCH_RANGE_ABS[0] && face.pitch <= FRONTAL_PITCH_RANGE_ABS[1];
 }

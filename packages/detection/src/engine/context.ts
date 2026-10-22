@@ -47,7 +47,11 @@ export const K = {
   reconnectSampleMinMs: 1000,
   lowFps: 1.5,
   lowFpsOnsetMs: 15000,
-  /** Identity samples need a roughly frontal face (server quality gate rejects |yaw| > 25°). */
+  /**
+   * Samples the engine triggers wait for a roughly frontal face, relative to the candidate's baseline (the server's
+   * quality gate rejects |yaw| > 30°). A sample the server requests takes whatever the camera shows after 3 s
+   * without such a frame (monitoring/sampler.ts, SERVER_REQUEST_FORCE_MS).
+   */
   identityMaxYawOffset: 22,
   identityMaxPitchOffset: 22,
   /**
