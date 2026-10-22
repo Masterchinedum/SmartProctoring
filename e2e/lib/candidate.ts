@@ -296,7 +296,14 @@ export class CandidatePage {
           (el) => `${el.dataset.item}=${el.dataset.ok === '1' ? 'ok' : 'NOT ok'} "${(el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160)}"`,
         );
         const status = Array.from(document.querySelectorAll<HTMLElement>('[role="status"], [role="alert"]')).map((el) => (el.innerText || '').trim()).filter(Boolean);
-        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''}`;
+        // The app's hidden analysis video and (shim mode) the camera canvas: is video actually flowing?
+        const v = document.querySelector<HTMLVideoElement>('video[data-sp-analysis]');
+        const tracks = v && v.srcObject instanceof MediaStream ? v.srcObject.getVideoTracks() : [];
+        const video = v
+          ? `analysis video: readyState ${v.readyState}, ${v.videoWidth}x${v.videoHeight}, ${v.paused ? 'paused' : 'playing'}, t=${v.currentTime.toFixed(1)}s, tracks [${tracks.map((t) => `${t.readyState} ${t.muted ? 'muted' : 'unmuted'} ${t.enabled ? 'enabled' : 'disabled'}`).join(', ')}]${v.error ? `, error ${v.error.code} ${v.error.message}` : ''}`
+          : 'no analysis video';
+        const cam = document.querySelector<HTMLCanvasElement>('canvas[data-sp-e2e-camera]');
+        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''} | ${video}${cam ? ` | shim canvas ${cam.width}x${cam.height}` : ''}`;
       });
     } catch (e) {
       return `(unreadable: ${(e as Error).message.slice(0, 120)})`;
