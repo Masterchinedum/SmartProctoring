@@ -61,6 +61,32 @@ function preferredDelegates(): Delegate[] {
   return isSoftwareRenderer(webglRenderer()) ? ['CPU'] : ['GPU', 'CPU'];
 }
 
+/** Whether an OffscreenCanvas can hold a WebGL 2 context. */
+export function offscreenWebgl2Supported(): boolean {
+  try {
+    if (typeof OffscreenCanvas === 'undefined') return false;
+    const gl = new OffscreenCanvas(1, 1).getContext('webgl2');
+    gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    return !!gl;
+  } catch {
+    return false;
+  }
+}
+
+let offscreenWebgl2: boolean | null = null;
+
+/**
+ * The canvas a MediaPipe task draws on (its WebGL context, used on the CPU delegate too). MediaPipe picks an
+ * OffscreenCanvas when the browser has one, judging Safari by its version number, but WebKitGTK / WPE browsers (GNOME
+ * Web, Playwright's WebKit on Linux) report a recent Safari version and have no WebGL 2 on OffscreenCanvas: detection
+ * then throws on every frame ("undefined is not an object (evaluating 'GLctx.activeTexture')") and the readiness check
+ * never sees a face. Where an OffscreenCanvas cannot hold WebGL 2, each task gets a regular canvas of its own; elsewhere
+ * MediaPipe keeps its own choice (undefined).
+ */
+export function taskCanvas(offscreenOk: boolean = (offscreenWebgl2 ??= offscreenWebgl2Supported())): HTMLCanvasElement | undefined {
+  return offscreenOk ? undefined : document.createElement('canvas');
+}
+
 function errMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === 'string') return e;
@@ -110,6 +136,7 @@ async function createVision(): Promise<Vision> {
         face = await withTimeout(
           FaceLandmarker.createFromOptions(fileset, {
             baseOptions: { modelAssetPath: FACE_MODEL_URL, delegate },
+            canvas: taskCanvas(),
             runningMode: 'VIDEO',
             numFaces: 4,
             outputFaceBlendshapes: true,
@@ -133,6 +160,7 @@ async function createVision(): Promise<Vision> {
         objects = await withTimeout(
           ObjectDetector.createFromOptions(fileset, {
             baseOptions: { modelAssetPath: OBJECT_MODEL_URL, delegate },
+            canvas: taskCanvas(),
             runningMode: 'VIDEO',
             scoreThreshold: 0.3,
             maxResults: 8,

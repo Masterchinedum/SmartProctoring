@@ -127,6 +127,9 @@ jobs:
       # Headed under Xvfb (24-bit, so Mesa's software GL has visuals): headless Firefox / WebKit on a runner without a
       # GPU have no WebGL, which MediaPipe needs even on its CPU path. Users' browsers have WebGL.
       E2E_HEADED: "1"
+      # One test at a time: a headed browser rendering through software GL plus the in-page face analysis starve a
+      # second candidate browser on a 4-vCPU runner (camera frames seconds late, clicks timing out).
+      E2E_WORKERS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
