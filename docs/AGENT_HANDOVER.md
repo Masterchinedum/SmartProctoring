@@ -19,7 +19,8 @@ Verification at the end of the roadmap (head `fbf2e28`, the last code change):
   (`SP_REQUIRE_TEST_IMAGES=1`, nothing skipped).
 * Browser suite, Chromium, everything (`playwright test`, 84 tests incl. the 32 realistic-webcam scenarios), run locally
   on the integrated roadmap (`b00c7c0`, before the cross-browser follow-ups): 82 passed; the 2 failures are the realistic
-  liveness case `rwTurnA2_other` (`docs/ROADMAP.md` §4 item 6), which fails the same way at the PR's base `d4be596`.
+  liveness case `rwTurnA2_other`, which failed the same way at `d4be596` and passes since the head-turn change
+  `f850777` (`docs/ROADMAP.md` §3, cross-browser).
 * CI on the head: `test`, `docker` (image boot, in-process and remote vision worker), `e2e` (core 01–19, Chromium),
   `e2e-browsers (firefox)` and `e2e-webkit-macos` (the `@cross-browser` scenarios), on Playwright 1.64.1.
 

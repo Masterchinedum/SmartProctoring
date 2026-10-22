@@ -142,6 +142,12 @@ All are documented where the feature is, and all can be changed. These are the o
 * Two candidate-app changes came out of the first cross-browser runs: MediaPipe gets a regular canvas where an
   OffscreenCanvas cannot hold WebGL 2 (WebKitGTK browsers such as GNOME Web), and the hidden analysis video sits inside
   the viewport (2 px, transparent), because Safari on iOS (WebKit's autoplay policy) and Chrome on Android pause a muted video outside it.
+* **Head-turn check (after the roadmap, `f850777`):** the browser takes a turn's pictures at 70 % of the server's target
+  (14° of 20°) instead of the full target, with a live gauge on the preview (a dot moving into a green area). The server's
+  liveness checks are unchanged (a turn passes when two frames reach 10° or one reaches 12°); a turn it does not accept
+  is re-prompted 6° further, capped at 35°. This answered the former open question on the hardest realistic camera
+  (`rwTurnA2_other`, a 16° turn that failed every attempt): it now passes at the first attempt, and the realistic still
+  photos still fail.
 * `01-happy-path` now bounds the exam time used after a resume by the wall time since the server restarted the clock
   (its `session_resumed` event) instead of a fixed 6 s, which a slow browser reached without any clock error.
 
@@ -155,16 +161,6 @@ All are documented where the feature is, and all can be changed. These are the o
 3. **Refuse to start vs degrade** when a storage location in use is missing (17, above).
 4. **Owners and single sign-on** (16, above): allow, or password + two-step sign-in only for owners?
 5. **Counsel review** of the privacy notice and the consent-withdrawal wording (HANDOVER §4 item 6).
-6. **Active liveness with the hardest realistic camera fails.** The realistic scenarios 20 and 23 with the fixture
-   `rwTurnA2_other` (another day, another room, a USB camera at 640×480 with a side lamp, inter-eye distance 39 px)
-   now fail every attempt: the face's turn to one side reaches about 16° from the calibrated centre, and the browser
-   only captures a turn at the full 20° target (the server would accept 12°). `docs/accuracy/end-to-end.md` recorded
-   3/3 passes (2/3 at the first attempt) for this case. It fails the same way at the PR's base commit (`d4be596`), so
-   the roadmap did not cause it, and nothing in the liveness code or the fixtures changed since that measurement; the
-   realistic scenarios only run nightly, which cannot run from this branch. The other 30 realistic scenarios pass.
-   Options: lower the browser's capture target towards the server's (a liveness-strength decision), or accept that
-   such a camera needs a second attempt / staff review. Needs a decision and a pilot on real webcams (HANDOVER §4
-   item 1).
 
 ## 5. Verification at the end of the roadmap
 
@@ -174,8 +170,9 @@ At the end of the roadmap (unit and browser suites on `fbf2e28`; the later commi
 * `pnpm test`: **1,509 tests** — shared 64, detection 169, server 881, web 395 — all pass, with the face images present
   (`SP_REQUIRE_TEST_IMAGES=1`, nothing skipped).
 * Browser suite in Chromium, **everything** (84 tests: the core scenarios 01–19 and the 32 realistic-webcam scenarios
-  20–24), run locally on the integrated roadmap (`b00c7c0`): **82 pass**. The 2 failures are the realistic liveness case
-  of §4 item 6; it fails the same way at the PR's base commit `d4be596`.
+  20–24), run locally on the integrated roadmap (`b00c7c0`): **82 pass**. The 2 failures were the realistic liveness case
+  `rwTurnA2_other` (it failed the same way at `d4be596`); the head-turn change `f850777` fixed it (scenarios 03 and 23
+  pass, 8 of 8).
 * CI: `test` (typecheck + all unit tests), `docker` (image built and booted; a dedicated vision worker and a
   remote-driver server probed), `e2e` (core scenarios 01–19 in Chromium) and `e2e-browsers (firefox)` (the ten
   `@cross-browser` scenarios) and `e2e-webkit-macos` (the same ten in WebKit on macOS) **green** on Playwright 1.64.1.
