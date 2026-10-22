@@ -102,15 +102,16 @@ jobs:
           retention-days: 7
 
   e2e-browsers:
-    # The scenarios tagged @cross-browser in Firefox and WebKit (e2e/README.md "Browsers"). Their candidate camera is
-    # the canvas shim of e2e/lib/camera.ts playing the same fixtures (Chromium's fake capture device has no
-    # equivalent there). Same command on a developer machine: E2E_BROWSERS=webkit pnpm --filter @sp/e2e exec playwright test
+    # The scenarios tagged @cross-browser in Firefox (e2e/README.md "Browsers"); WebKit runs them on macOS
+    # (e2e-webkit-macos). Their candidate camera is the canvas shim of e2e/lib/camera.ts playing the same fixtures
+    # (Chromium's fake capture device has no equivalent there). Same command on a developer machine:
+    # E2E_BROWSERS=firefox pnpm --filter @sp/e2e exec playwright test
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        browser: [firefox, webkit]
+        browser: [firefox]
     services:
       postgres:
         image: postgres:16
@@ -124,17 +125,15 @@ jobs:
       E2E_NO_SKIP: "1"
       E2E_SKIP_REALISTIC: "1"
       E2E_BROWSERS: ${{ matrix.browser }}
-      # Headed under Xvfb (24-bit, so Mesa's software GL has visuals): headless Firefox / WebKit on a runner without a
-      # GPU have no WebGL, which MediaPipe needs even on its CPU path. Users' browsers have WebGL.
+      # Headed under Xvfb (24-bit, so Mesa's software GL has visuals): headless Firefox on a runner without a GPU has
+      # no WebGL, which MediaPipe needs even on its CPU path. Users' browsers have WebGL.
       E2E_HEADED: "1"
       # One test at a time: a headed browser rendering through software GL plus the in-page face analysis starve a
       # second candidate browser on a 4-vCPU runner (camera frames seconds late, clicks timing out).
       E2E_WORKERS: "1"
-      # MediaPipe's delegate on this GPU-less runner. Firefox: GPU (WebGL, run by Firefox's GPU process) instead of the
-      # app's choice for a software renderer (CPU: WASM on the page's main thread, which starved the camera shim and the
-      # clicks). WebKit: CPU, the app's own choice for a software renderer, which it cannot make there because WebKit
-      # reports every renderer as "Apple GPU" (the GPU delegate then runs in software in the page's process).
-      E2E_DELEGATE: ${{ matrix.browser == 'firefox' && 'gpu' || 'cpu' }}
+      # MediaPipe's GPU delegate (WebGL, run by Firefox's GPU process) instead of the app's choice for a software
+      # renderer (CPU: WASM on the page's main thread, which starved the camera shim and the clicks).
+      E2E_DELEGATE: gpu
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -171,11 +170,17 @@ jobs:
           retention-days: 7
 
   e2e-webkit-macos:
-    # The @cross-browser scenarios in WebKit on macOS, where WebKit uses Apple's media stack: on Linux (the e2e-browsers
-    # webkit entry) Playwright's WebKit delivers the camera shim's canvas to the app's video only intermittently
-    # (docs/ROADMAP.md §2, item 20). macOS runners have no service containers, so Postgres comes from Homebrew.
+    # The @cross-browser scenarios in WebKit, on macOS: Safari's platform, where WebKit uses Apple's media stack. Not on
+    # Linux: there Playwright's WebKit (WebKitGTK) stops delivering the camera shim's canvas frames to the app's video
+    # within seconds, in its WebKit 26.0 and 27.2 builds alike, while the canvas keeps changing (docs/ROADMAP.md §3).
+    # macOS runners have no service containers, so Postgres comes from Homebrew.
     runs-on: macos-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Temporary: three runs side by side, to measure how stable the suite is on these 3-vCPU runners.
+        run: [1, 2, 3]
     env:
       E2E_FACES_DIR: /tmp/sp-faces
       E2E_NO_SKIP: "1"
@@ -184,8 +189,6 @@ jobs:
       E2E_WORKERS: "1"
       # Headed (macOS runners have a display): headless, Playwright's WebKit on macOS exposed no media capture API.
       E2E_HEADED: "1"
-      # The browser processes' own output in the test log (WebKit says there why a page crashed).
-      DEBUG: pw:browser
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -241,213 +244,12 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-webkit-macos-artifacts
+          name: e2e-webkit-macos-${{ matrix.run }}-artifacts
           path: |
             e2e/.artifacts
             e2e/test-results
             e2e/playwright-report
           retention-days: 7
-
-  pwnext-webkit-linux:
-    # Temporary: the WebKit scenarios with the newest Playwright (its newer WebKit build), MediaPipe delegate GPU and CPU.
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        browser: [webkit]
-        delegate: [gpu, cpu]
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
-    env:
-      E2E_FACES_DIR: /tmp/sp-faces
-      E2E_NO_SKIP: "1"
-      E2E_SKIP_REALISTIC: "1"
-      E2E_BROWSERS: ${{ matrix.browser }}
-      # Headed under Xvfb (24-bit, so Mesa's software GL has visuals): headless Firefox / WebKit on a runner without a
-      # GPU have no WebGL, which MediaPipe needs even on its CPU path. Users' browsers have WebGL.
-      E2E_HEADED: "1"
-      # One test at a time: a headed browser rendering through software GL plus the in-page face analysis starve a
-      # second candidate browser on a 4-vCPU runner (camera frames seconds late, clicks timing out).
-      E2E_WORKERS: "1"
-      # MediaPipe's delegate on this GPU-less runner. Firefox: GPU (WebGL, run by Firefox's GPU process) instead of the
-      # app's choice for a software renderer (CPU: WASM on the page's main thread, which starved the camera shim and the
-      # clicks). WebKit: CPU, the app's own choice for a software renderer, which it cannot make there because WebKit
-      # reports every renderer as "Apple GPU" (the GPU delegate then runs in software in the page's process).
-      E2E_DELEGATE: ${{ matrix.delegate }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @sp/e2e add -D @playwright/test@1.64.1 && pnpm --filter @sp/e2e exec playwright --version
-      - uses: actions/cache@v4
-        with:
-          path: |
-            /tmp/sp-faces
-            /tmp/sp-facesets
-          key: face-images-${{ hashFiles('e2e/scripts/fetch-faces.ts', 'apps/server/src/eval/datasets.ts') }}
-      - run: pnpm --filter @sp/e2e fetch-faces
-      - run: pnpm --filter @sp/e2e exec playwright install --with-deps ${{ matrix.browser }}
-      - run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" pnpm --filter @sp/e2e exec playwright test --project=${{ matrix.browser }}
-      - if: failure()
-        name: Print the browser-side diagnostics of failed tests
-        # Candidate logs (identity API answers, console errors, HTTP errors, camera shim statistics) and page snapshots,
-        # readable in the job log without downloading the artifacts.
-        run: |
-          find e2e/test-results \( -name 'candidate-*.log' -o -name 'error-context.md' \) -not -path '*/attachments/*' | sort | while read -r f; do
-            echo "::group::$f"; head -c 12000 "$f"; echo; echo "::endgroup::"
-          done
-      - if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pwnext-webkit-linux-${{ matrix.delegate }}-artifacts
-          path: |
-            e2e/.artifacts
-            e2e/test-results
-            e2e/playwright-report
-          retention-days: 7
-
-  pwnext-webkit-macos:
-    # Temporary: the WebKit scenarios on macOS with the newest Playwright (its newer WebKit build).
-    runs-on: macos-latest
-    timeout-minutes: 60
-    env:
-      E2E_FACES_DIR: /tmp/sp-faces
-      E2E_NO_SKIP: "1"
-      E2E_SKIP_REALISTIC: "1"
-      E2E_BROWSERS: webkit
-      E2E_WORKERS: "1"
-      # Headed (macOS runners have a display): headless, Playwright's WebKit on macOS exposed no media capture API.
-      E2E_HEADED: "1"
-      # The browser processes' own output in the test log (WebKit says there why a page crashed).
-      DEBUG: pw:browser
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Postgres 16 (Homebrew), role postgres with trust auth like the Linux service
-        run: |
-          brew install postgresql@16
-          brew services start postgresql@16
-          PG="$(brew --prefix postgresql@16)/bin"
-          for i in $(seq 1 60); do "$PG/pg_isready" -h 127.0.0.1 -p 5432 && break; sleep 1; done
-          "$PG/createuser" -h 127.0.0.1 -s postgres
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @sp/e2e add -D @playwright/test@1.64.1 && pnpm --filter @sp/e2e exec playwright --version
-      - uses: actions/cache@v4
-        with:
-          path: |
-            /tmp/sp-faces
-            /tmp/sp-facesets
-          key: face-images-${{ hashFiles('e2e/scripts/fetch-faces.ts', 'apps/server/src/eval/datasets.ts') }}
-      - run: pnpm --filter @sp/e2e fetch-faces
-      - run: pnpm --filter @sp/e2e exec playwright install webkit
-      - run: pnpm --filter @sp/e2e exec playwright test --project=webkit
-      - if: failure()
-        name: Print macOS crash reports (a "Page crashed" leaves the WebKit process's crashing stack here)
-        run: |
-          ls -lt ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -20 || true
-          python3 - <<'PY'
-          import glob, json, os
-          files = sorted(glob.glob(os.path.expanduser('~/Library/Logs/DiagnosticReports/*.ips')), key=os.path.getmtime, reverse=True)[:4]
-          for f in files:
-              head, _, body = open(f, errors='replace').read().partition('\n')
-              try:
-                  h, b = json.loads(head), json.loads(body)
-              except Exception as e:
-                  print('=====', os.path.basename(f), 'unparsed:', e); print(head[:500]); continue
-              print('=====', os.path.basename(f), h.get('app_name'), h.get('bug_type'), h.get('timestamp'))
-              print('exception:', json.dumps(b.get('exception')), 'termination:', json.dumps(b.get('termination')))
-              images = b.get('usedImages') or []
-              threads = b.get('threads') or []
-              t = threads[b.get('faultingThread', 0)] if threads else {}
-              for fr in (t.get('frames') or [])[:45]:
-                  img = images[fr['imageIndex']].get('name', '?') if images and 'imageIndex' in fr else '?'
-                  print('   ', img, fr.get('symbol', '?'), fr.get('symbolLocation', ''))
-          PY
-      - if: failure()
-        name: Print the browser-side diagnostics of failed tests
-        run: |
-          find e2e/test-results \( -name 'candidate-*.log' -o -name 'error-context.md' \) -not -path '*/attachments/*' | sort | while read -r f; do
-            echo "::group::$f"; head -c 12000 "$f"; echo; echo "::endgroup::"
-          done
-      - if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pwnext-webkit-macos-artifacts
-          path: |
-            e2e/.artifacts
-            e2e/test-results
-            e2e/playwright-report
-          retention-days: 7
-
-  webkit-reload-repro:
-    # Temporary diagnostic: does a reload after same-document history navigation crash WebKit (scenario 04 on macOS)?
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-        playwright: [repo, 1.64.1]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - if: matrix.playwright != 'repo'
-        run: pnpm --filter @sp/e2e add -D @playwright/test@${{ matrix.playwright }}
-      - run: pnpm --filter @sp/e2e exec playwright --version
-      - run: pnpm --filter @sp/e2e exec playwright install --with-deps webkit
-      - if: runner.os == 'macOS'
-        name: Safari's WebDriver
-        run: |
-          sw_vers
-          defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true
-          sudo safaridriver --enable
-          (safaridriver -p 4444 > /tmp/safaridriver.log 2>&1 &)
-          sleep 3
-          echo "SAFARIDRIVER_URL=http://127.0.0.1:4444" >> "$GITHUB_ENV"
-      - run: pnpm --filter @sp/e2e exec tsx scripts/webkit-reload-repro.ts
-        timeout-minutes: 10
-      - if: runner.os == 'macOS'
-        name: WebKit crash reports
-        run: |
-          ls -lt ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -20 || true
-          python3 - <<'PY'
-          import glob, json, os
-          for f in sorted(glob.glob(os.path.expanduser('~/Library/Logs/DiagnosticReports/*.ips')), key=os.path.getmtime, reverse=True)[:6]:
-              head, _, body = open(f, errors='replace').read().partition('\n')
-              try:
-                  h, b = json.loads(head), json.loads(body)
-              except Exception as e:
-                  print('=====', os.path.basename(f), 'unparsed:', e); continue
-              print('=====', os.path.basename(f), h.get('app_name'), h.get('app_version'), h.get('timestamp'))
-              print('exception:', json.dumps(b.get('exception')))
-              images = b.get('usedImages') or []
-              threads = b.get('threads') or []
-              t = threads[b.get('faultingThread', 0)] if threads else {}
-              for fr in (t.get('frames') or [])[:12]:
-                  img = images[fr['imageIndex']].get('name', '?') if images and 'imageIndex' in fr else '?'
-                  print('   ', img, fr.get('symbol', '?'), fr.get('symbolLocation', ''))
-          PY
-          cat /tmp/safaridriver.log || true
 
   docker:
     # Builds the production image and boots it: migrations, the vision workers on Node 24, the web app, health probes.

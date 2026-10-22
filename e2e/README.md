@@ -33,10 +33,12 @@ include their own server starts. Global setup adds ~15 s (plus ~1 minute the fir
 
 ## Prerequisites
 
-* Node 24, `pnpm install` done, Chromium for Playwright 1.56.1 available (`PLAYWRIGHT_BROWSERS_PATH`;
-  the suite never runs `playwright install`). For the Firefox / WebKit runs also those builds:
-  `pnpm --filter @sp/e2e exec playwright install firefox webkit` (on Linux add `--with-deps` once for their system
-  libraries, GStreamer included).
+* Node 24, `pnpm install` done, Chromium for Playwright 1.64.1 available (`pnpm --filter @sp/e2e exec playwright
+  install chromium`, or `PLAYWRIGHT_BROWSERS_PATH`; the suite itself never runs `playwright install`). A machine that
+  has another Chromium build preinstalled and cannot download points `E2E_CHROMIUM_EXECUTABLE` at it (the Claude Code
+  cloud sandbox: `E2E_CHROMIUM_EXECUTABLE=/opt/pw-browsers/chromium`, Chromium 141; the core suite passes with it).
+  For the Firefox / WebKit runs also those builds: `pnpm --filter @sp/e2e exec playwright install firefox webkit`
+  (on Linux add `--with-deps` once for their system libraries, GStreamer included).
 * Postgres reachable at `postgres://postgres@127.0.0.1:5432` (trust auth, like the server's unit tests).
   The database **`proctor_e2e` is dropped and re-created on every run** (global setup refuses to reset a
   database whose name does not contain `e2e`).
@@ -96,6 +98,7 @@ scenarios through the HTTP hop, e.g. `E2E_VISION=remote … playwright test test
 | `E2E_SKIP_BUILD` | — | `1` = reuse `apps/web/dist` |
 | `E2E_WORKERS` | `2` | Parallel workers (each camera test launches its own Chromium) |
 | `E2E_HEADED` | — | `1` = headed candidate browsers |
+| `E2E_CHROMIUM_EXECUTABLE` | — | A Chromium binary to use instead of the one Playwright downloads (a machine with another build preinstalled, see Prerequisites) |
 | `E2E_DELEGATE` | — | `gpu` / `cpu` = the candidate app's MediaPipe delegate (its `sp:delegate` switch); unset = the app's choice (CPU on a software renderer) |
 | `E2E_BROWSERS` | `chromium` | Playwright projects to define: `chromium`, `firefox`, `webkit`, comma-separated. Firefox and WebKit run only the `@cross-browser` scenarios; a plain run is the Chromium suite |
 | `E2E_CAMERA` | `device` | Chromium's candidate camera: `device` (Chromium's fake capture device plays the Y4M) or `shim` (the canvas camera shim, `lib/camera.ts`). Firefox and WebKit always use the shim |
@@ -213,17 +216,22 @@ held 65.5–66.9 s vs 63.2–67.3 s after the camera started (B appears at 60 s)
 9–10.5 s after the camera opened — hence the `headturn` fixture's 15 s frontal hold (it was 10 s, which already made the
 turning-head scenario borderline in device mode).
 
-**In CI** (`e2e-browsers`, matrix `firefox` / `webkit`) the candidate browsers run **headed under Xvfb**
-(`E2E_HEADED=1`, `xvfb-run` with a 24-bit screen) and **one test at a time** (`E2E_WORKERS=1`): headless Firefox and
-WebKit on a runner without a GPU have no WebGL, which MediaPipe needs even on its CPU path; under Xvfb Mesa's software
-renderer provides it. Firefox also runs MediaPipe on its **GPU delegate** (`E2E_DELEGATE=gpu`, the app's own
+**In CI** Firefox runs on Linux (`e2e-browsers`) and WebKit on macOS (`e2e-webkit-macos`), both **headed** and **one
+test at a time** (`E2E_WORKERS=1`). On Linux Firefox runs under Xvfb (`xvfb-run` with a 24-bit screen): headless on a
+runner without a GPU it has no WebGL, which MediaPipe needs even on its CPU path; under Xvfb Mesa's software renderer
+provides it. Firefox also runs MediaPipe on its **GPU delegate** (`E2E_DELEGATE=gpu`, the app's own
 `sp:delegate` switch): on a software renderer the app picks the CPU delegate, whose WASM inference on the page's main
 thread starved the camera shim (frames 2–3 s late) and the clicks in headed Firefox; with the GPU delegate Firefox runs
 the work in its GPU process. The failure diagnostics (`candidate-<n>.log`, printed into the job log) end with the
 page's WebGL renderer, and a readiness check that never completes names each checklist item and the analysis video's
 state.
 
-Run Firefox / WebKit locally (after `playwright install firefox webkit`, see Prerequisites; the CI job runs the same
+WebKit runs on macOS, Safari's platform, where WebKit uses Apple's media stack (`E2E_HEADED=1`: headless, Playwright's
+WebKit on macOS exposed no media capture API; Postgres from Homebrew, as macOS runners have no service containers).
+Not on Linux: there Playwright's WebKit (WebKitGTK) delivers the shim's canvas frames to the app's video only for a
+while, then shows one frozen frame while the canvas keeps changing (below).
+
+Run Firefox / WebKit locally (after `playwright install firefox webkit`, see Prerequisites; the CI jobs run the same
 with `E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1`, and on Linux without a GPU add `E2E_HEADED=1` under `xvfb-run`):
 
 ```bash
@@ -236,17 +244,21 @@ Status (see also `docs/HANDOVER.md` §4 item 3 and `docs/ROADMAP.md` §2):
 
 * **Chromium**: every `@cross-browser` scenario green in both camera modes.
 * **Firefox** (CI): all ten `@cross-browser` scenarios green.
-* **WebKit on macOS** (CI job `e2e-webkit-macos`, headed, Postgres from Homebrew): 9 of the 10 scenarios pass; the one
-  failure, on every run so far, is the staff browser's page crashing on a reload in 04 (after the swap has been held and
-  released correctly). WebKit on macOS needed two shim changes: it exposes no `navigator.mediaDevices` headless, and it hands the
-  page a different `MediaDevices` object than the init script saw, so the shim also installs itself on
+* **WebKit on macOS** (CI job `e2e-webkit-macos`): all ten `@cross-browser` scenarios green with Playwright 1.64.1
+  (WebKit 27.2). WebKit on macOS needed two shim changes: it exposes no `navigator.mediaDevices` headless, and it hands
+  the page a different `MediaDevices` object than the init script saw, so the shim also installs itself on
   `MediaDevices.prototype` (the readiness failure reports whether the page's `getUserMedia` is native or the shim's,
-  and every camera request the shim received).
-* **WebKit on Linux** (`e2e-browsers`): 6 of 10 pass, a different four failing each run. Playwright's WebKitGTK delivers
-  the shim's canvas to the app's video only intermittently: with change-driven capture the video showed one frozen
-  frame while the canvas changed (the readiness failure reports both, read twice 600 ms apart); the shim therefore
-  captures at the fixture's frame rate (`captureStream(fps)`) from an opaque 64×48 px canvas in WebKit, which made
-  frames flow but slowly and unevenly.
+  and every camera request the shim received). With Playwright 1.56.1 (WebKit 26.0) the staff page crashed on the
+  reload in 04, every run: that WebKit build's Navigation API lost track of same-document entries, and a reload after
+  going back to one (`pushState`, `pushState`, back, reload) crashed its web process, on a bare page too, on macOS and
+  Linux. Safari 26.6.2 and WebKit 27.2 run the same sequences without a crash; hence the upgrade.
+* **WebKit on Linux** (not in CI): Playwright's WebKitGTK delivers the shim's canvas to the app's video only for a
+  while. The readiness failure then shows the video playing (`currentTime` advancing, track live and unmuted) with one
+  frozen frame while the canvas changes (both read twice 600 ms apart). Change-driven and timer-driven capture
+  (`captureStream(fps)`, which the shim uses in WebKit, from an opaque 64×48 px canvas) both freeze; WebKit 26.0 passed
+  4–6 of 10, a different set each run, and WebKit 27.2 passed 3 of 10 (the three without a camera check). The same app
+  code passes on macOS, so this is the test camera's path in WebKitGTK, not the app; a real webcam there comes through
+  another source (PipeWire / V4L2).
 
 The first cross-browser runs also found two candidate-app problems, both fixed: MediaPipe's OffscreenCanvas could not
 hold WebGL 2 in WebKitGTK (detection threw "GLctx" on every frame; the app now gives MediaPipe a regular canvas
