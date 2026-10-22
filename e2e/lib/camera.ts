@@ -567,14 +567,16 @@ function fakeCameraInit(cfg: ShimConfig): void {
 
   // Every request and its outcome, for the failure diagnostics (`__spFakeCamera.calls`).
   const calls: string[] = [];
-  const record = <T,>(what: string, p: Promise<T>): Promise<T> =>
-    p.then(
-      (v) => (calls.push(`${what}: ok`), v),
+  const record = <T,>(what: string, p: Promise<T>): Promise<T> => {
+    const k = calls.push(`${what}: pending`) - 1;
+    return p.then(
+      (v) => ((calls[k] = `${what}: ok`), v),
       (e: unknown) => {
-        calls.push(`${what}: ${(e as Error)?.name ?? 'error'} ${(e as Error)?.message ?? ''}`.trim());
+        calls[k] = `${what}: ${(e as Error)?.name ?? 'error'} ${(e as Error)?.message ?? ''}`.trim();
         throw e;
       },
     );
+  };
   md.getUserMedia = (constraints?: MediaStreamConstraints): Promise<MediaStream> =>
     record(`getUserMedia(${JSON.stringify(constraints ?? {}).slice(0, 200)})`, getUserMedia(constraints));
   const getUserMedia = async (constraints?: MediaStreamConstraints): Promise<MediaStream> => {

@@ -338,7 +338,9 @@ export class CandidatePage {
         const after = [pixels(v), cam ? pixels(cam) : ''];
         const has = (x: unknown) => (x ? 'yes' : 'NO');
         const shimInfo = (window as unknown as { __spFakeCamera?: { mode?: string; calls?: string[] } }).__spFakeCamera;
-        const calls = shimInfo ? ` | shim mode ${shimInfo.mode}, getUserMedia calls: ${(shimInfo.calls ?? []).join(' ; ').slice(0, 600) || 'none'}` : '';
+        const gum = navigator.mediaDevices?.getUserMedia;
+        const gumKind = !gum ? 'none' : /\[native code\]/.test(Function.prototype.toString.call(gum)) ? 'NATIVE' : 'replaced';
+        const calls = shimInfo ? ` | shim mode ${shimInfo.mode}, page getUserMedia ${gumKind}, calls: ${(shimInfo.calls ?? []).join(' ; ').slice(0, 600) || 'none'}` : '';
         const mainText = (document.querySelector<HTMLElement>('main')?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 500);
         const page = `secure context ${window.isSecureContext}, mediaDevices ${has(navigator.mediaDevices)}, getUserMedia ${has(navigator.mediaDevices?.getUserMedia)}, MediaStream ${has(typeof MediaStream === 'function')}, canvas captureStream ${has(typeof HTMLCanvasElement.prototype.captureStream === 'function')}, shim ${has((window as unknown as { __spFakeCamera?: unknown }).__spFakeCamera)}`;
         return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''}${banners.length ? ` | banners: ${banners.join(' / ').slice(0, 300)}` : ''} | ${page}${calls} | main: ${mainText} | ${video}, pixels ${after[0]} (${moving(before[0]!, after[0]!)})${cam ? ` | shim canvas ${cam.width}x${cam.height}, pixels ${after[1]} (${moving(before[1]!, after[1]!)})` : ''}`;
