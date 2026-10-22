@@ -111,6 +111,7 @@ export const TRACK_CAMERA_STREAMS = `(() => {
     if (tracks.length) {
       const st = tracks[0].getSettings ? tracks[0].getSettings() : {};
       window.__spCamOpens.push({ at: Date.now(), width: st.width || 0, height: st.height || 0 });
+      console.info('[e2e] camera opened ' + (st.width || 0) + 'x' + (st.height || 0));
     }
     return s;
   };
@@ -211,6 +212,8 @@ export class CandidatePage {
     page.on('dialog', (d) => void d.accept().catch(() => undefined)); // beforeunload on reload/close
     page.on('console', (m) => {
       const t = m.text();
+      // Camera opens in the API log's timeline: the fixture video starts again from frame 0 at each one.
+      if (t.startsWith('[e2e] camera opened')) this.apiLog.push(`${hhmmss(Date.now())} ${t.slice(6)}`);
       // Browser / MediaPipe driver noise is dropped, but never the app's own messages ("[check] …", "[vision] …"),
       // whose errors can mention WebGL.
       const own = /^\[(check|vision|monitoring|controller|camera)\]/i.test(t);
@@ -259,7 +262,7 @@ export class CandidatePage {
   cameraShimSummary(): string | null {
     const s = shimStats(this.page);
     if (!s) return null;
-    return `camera shim: ${s.fetched} frames fetched, ${s.failed} failed, ${(s.msTotal / Math.max(1, s.fetched)).toFixed(0)} ms mean / ${s.msMax.toFixed(0)} ms max per frame, largest lag ${s.lagMax} frames, ${s.mutes} track mute events (as of the last frame request)`;
+    return `camera shim: ${s.fetched} frames fetched, ${s.failed} failed, ${(s.msTotal / Math.max(1, s.fetched)).toFixed(0)} ms mean / ${s.msMax.toFixed(0)} ms max per frame, largest lag ${s.lagMax} frames, ${s.mutes} track mute events; frame timer late by ${(s.lateTotal / Math.max(1, s.ticks)).toFixed(0)} ms mean / ${s.lateMax.toFixed(0)} ms max (page main thread busy) (as of the last frame request)`;
   }
 
   /** The page's visible text when a test fails (e.g. the readiness checklist's messages), null once the page is closed. */

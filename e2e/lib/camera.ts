@@ -178,6 +178,10 @@ export interface ShimStats {
   lagMax: number;
   /** `mute` events of the shim's canvas tracks (not passed on to the app, see openTrack). */
   mutes: number;
+  /** How late the frame timer ran (ms, total / worst, over `ticks`): how busy the page's main thread was. */
+  lateTotal: number;
+  lateMax: number;
+  ticks: number;
 }
 const STATS = new WeakMap<Page, ShimStats>();
 export function shimStats(page: Page): ShimStats | null {
@@ -357,8 +361,10 @@ function fakeCameraInit(cfg: ShimConfig): void {
     timer: 0 as unknown as ReturnType<typeof setTimeout>,
     images: new Map<number, Promise<Drawable | null>>(),
     inflight: 0,
+    /** When the frame timer is due (performance.now()). */
+    dueAt: 0,
     /** Diagnostics: frames fetched, their total / slowest fetch + decode time, the largest lag seen (frames). */
-    stats: { fetched: 0, failed: 0, msTotal: 0, msMax: 0, lagMax: 0, mutes: 0 },
+    stats: { fetched: 0, failed: 0, msTotal: 0, msMax: 0, lagMax: 0, mutes: 0, lateTotal: 0, lateMax: 0, ticks: 0 },
   };
 
   const decode = async (b64: string): Promise<Drawable> => {
@@ -465,6 +471,12 @@ function fakeCameraInit(cfg: ShimConfig): void {
   };
   const tick = () => {
     if (!dev.running) return;
+    if (dev.dueAt) {
+      const late = Math.max(0, performance.now() - dev.dueAt);
+      dev.stats.ticks++;
+      dev.stats.lateTotal += late;
+      dev.stats.lateMax = Math.max(dev.stats.lateMax, late);
+    }
     const n = Math.floor(((performance.now() - dev.t0) * fps) / 1000);
     if (n !== dev.due) {
       dev.due = n;
@@ -473,7 +485,9 @@ function fakeCameraInit(cfg: ShimConfig): void {
     dev.stats.lagMax = Math.max(dev.stats.lagMax, n - dev.shownN);
     evict(n % frames);
     prefetch();
-    dev.timer = setTimeout(tick, Math.max(4, dev.t0 + ((n + 1) * 1000) / fps - performance.now()));
+    const wait = Math.max(4, dev.t0 + ((n + 1) * 1000) / fps - performance.now());
+    dev.dueAt = performance.now() + wait;
+    dev.timer = setTimeout(tick, wait);
   };
   const start = async () => {
     if (!dev.canvas) {
@@ -508,6 +522,7 @@ function fakeCameraInit(cfg: ShimConfig): void {
     for (const p of dev.images.values()) release(p);
     dev.images.clear();
     dev.due = dev.shownN = dev.shownIdx = -1;
+    dev.dueAt = 0;
   };
 
   const openTrack = (constraints: MediaTrackConstraints): MediaStreamTrack => {
