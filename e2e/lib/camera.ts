@@ -283,9 +283,14 @@ type Drawable = ImageBitmap | HTMLImageElement;
 
 /** Init script (serialised into every document of the context; runs before the app's code). */
 function fakeCameraInit(cfg: ShimConfig): void {
-  const md = navigator.mediaDevices;
+  let md = navigator.mediaDevices as MediaDevices | undefined;
   const w = window as unknown as Record<string, unknown>;
-  // No mediaDevices (insecure context): leave it to the app to report, exactly like the real browser.
+  // A secure page without mediaDevices: the engine exposes no capture API at all (Playwright's WebKit on macOS), so the
+  // shim supplies the object too. An insecure page keeps none: the app reports it, exactly like the real browser.
+  if (!md && window.isSecureContext && cfg.mode === 'video') {
+    md = new EventTarget() as MediaDevices;
+    Object.defineProperty(navigator, 'mediaDevices', { value: md, configurable: true });
+  }
   if (!md || w.__spFakeCamera) return;
   const { width, height, fps, frames } = cfg;
   /** Frames per binding call: one second of video. */
