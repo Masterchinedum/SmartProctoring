@@ -104,7 +104,7 @@ export const TRACK_CAMERA_STREAMS = `(() => {
   window.__spTracks = [];
   window.__spCamOpens = [];
   const orig = md.getUserMedia.bind(md);
-  md.getUserMedia = async (c) => {
+  const tracked = async (c) => {
     const s = await orig(c);
     const tracks = s.getVideoTracks();
     window.__spTracks.push(...tracks);
@@ -114,6 +114,9 @@ export const TRACK_CAMERA_STREAMS = `(() => {
     }
     return s;
   };
+  md.getUserMedia = tracked;
+  // Also on the prototype (WebKit on macOS hands the page another MediaDevices object; see the camera shim).
+  if (window.MediaDevices && window.MediaDevices.prototype !== md) window.MediaDevices.prototype.getUserMedia = tracked;
 })();`;
 
 /** Every CandidatePage of the running test (lib/test.ts attaches their API logs when a test fails). */

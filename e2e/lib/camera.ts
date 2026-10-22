@@ -593,6 +593,14 @@ function fakeCameraInit(cfg: ShimConfig): void {
     return new MediaStream([openTrack(vc)]);
   };
 
+  // Also on the prototype: WebKit on macOS hands the page a different MediaDevices object than the one this script
+  // saw, whose getUserMedia was still the native one (a permission prompt Playwright cannot answer there).
+  const proto = (window as unknown as { MediaDevices?: { prototype: MediaDevices } }).MediaDevices?.prototype;
+  if (proto && proto !== md) {
+    proto.getUserMedia = md.getUserMedia;
+    proto.enumerateDevices = md.enumerateDevices;
+  }
+
   // Diagnostics for tests (e.g. `page.evaluate(() => __spFakeCamera.frame())`).
   // `lag()`: frames the canvas is behind the clock (0 = on time).
   w.__spFakeCamera = {
