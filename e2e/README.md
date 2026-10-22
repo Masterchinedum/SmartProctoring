@@ -232,9 +232,21 @@ E2E_BROWSERS=webkit pnpm --filter @sp/e2e exec playwright test --project=webkit 
 E2E_BROWSERS=chromium,firefox,webkit pnpm --filter @sp/e2e exec playwright test --grep @cross-browser   # all three
 ```
 
-Status: the shim was developed and verified in Chromium (every `@cross-browser` scenario green in both camera modes);
-the Firefox and WebKit jobs had not run yet when it was written (no Firefox / WebKit builds in that environment) —
-see `docs/HANDOVER.md` §4 for what is and is not verified.
+Status (see also `docs/HANDOVER.md` §4 item 3 and `docs/ROADMAP.md` §2):
+
+* **Chromium**: every `@cross-browser` scenario green in both camera modes.
+* **Firefox** (CI): all ten `@cross-browser` scenarios green.
+* **WebKit** (CI): not green yet. The readiness check passes in every scenario and 6 of the 10 pass; 01, 03b, 04 and 09
+  fail, differently from run to run. Playwright's WebKit on Linux delivers the shim's canvas to the app's video only
+  intermittently: with change-driven capture the video showed one frozen frame while the canvas changed (the readiness
+  failure reports both, read twice 600 ms apart); in WebKit the shim therefore captures at the fixture's frame rate
+  (`captureStream(fps)`) from an opaque 64×48 px canvas in the corner, which made frames flow but slowly and unevenly.
+  Candidates for a fix: a macOS runner, or an encoded-video camera source for WebKit.
+
+The first cross-browser runs also found two candidate-app problems, both fixed: MediaPipe's OffscreenCanvas could not
+hold WebGL 2 in WebKitGTK (detection threw "GLctx" on every frame; the app now gives MediaPipe a regular canvas
+there), and the hidden analysis video sat outside the viewport, where Safari on iOS and Chrome on Android pause a muted video (it now sits inside
+the viewport, 2 px and transparent).
 
 ## Realistic webcam fixtures (scenarios 20–24)
 

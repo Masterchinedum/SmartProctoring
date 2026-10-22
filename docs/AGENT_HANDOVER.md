@@ -1,76 +1,51 @@
-# Agent handover — resume the SmartProctoring roadmap
+# Agent handover — SmartProctoring after the October 2026 roadmap
 
-For the next agent picking this up. Read this first, then `docs/HANDOVER.md` (product handover, what was built) and
+For the next agent picking this up. Read this first, then `docs/ROADMAP.md` (what shipped, what was deferred and why,
+decisions to review, open questions), `docs/HANDOVER.md` (product handover: what was built, §4 before launch) and
 `docs/ARCHITECTURE.md` (how it works). Branch: `claude/sweet-hamilton-46bh7e`. PR: Masterchinedum/SmartProctoring#1
-(draft; subscribe and keep it green). Do not develop on any other branch.
+(draft; base `claude/loving-hamilton-sszj2x`, not `main`). Do not develop on any other branch unless the owner says so.
 
 ## 1. Where things stand
 
-| # | Area | State |
-|---|---|---|
-| 1–11 | Node 24, busy-server handling, health checks, metrics, load-aware sampling, CI, exam versions, accommodations, staff MFA, reviewer workflow, model governance | **Done and pushed** |
-| 12 | Privacy operations (request register, personal-data export, erasure, consent withdrawal, deletion schedule, operational checks) | **Done and pushed** (see §2), including the exam-app "withdraw consent" button |
-| 13–21 | See §3 | Not started — **#13 is next** |
+**The roadmap is complete: items 1–21 are shipped and pushed**, one commit per item (`docs/ROADMAP.md` §1 maps each
+item to its commit and documentation). One CI signal is open: the WebKit job (§5). Nothing else is in progress. There is no next task until the owner picks one. The likely
+candidates are the open questions in `docs/ROADMAP.md` §4, the deferred parts in §2, and HANDOVER §4 item 11 (security
+keys, SCIM Groups, single logout, localisation).
 
-**Before resuming, read §6 (loose ends) — in particular, check CI on the branch head first.**
+Verification at the end of the roadmap (head `fbf2e28`, the last code change):
 
-Verification at the time of writing (all green on the pushed branch):
+* `pnpm run typecheck` (shared, detection, server, web) and `pnpm --filter @sp/e2e typecheck`: clean.
+* `pnpm test`: 1,509 — shared 64, detection 169, server 881, web 395 — with the face images present
+  (`SP_REQUIRE_TEST_IMAGES=1`, nothing skipped).
+* Browser suite, Chromium, everything (`playwright test`, 84 tests incl. the 32 realistic-webcam scenarios), run locally
+  on the integrated roadmap (`b00c7c0`, before the cross-browser follow-ups): 82 passed; the 2 failures are the realistic
+  liveness case `rwTurnA2_other` (`docs/ROADMAP.md` §4 item 6), which fails the same way at the PR's base `d4be596`.
+* CI on the head: `test`, `docker` (image boot, in-process and remote vision worker), `e2e` (core 01–19, Chromium) and
+  `e2e-browsers (firefox)` — see §5 for WebKit.
 
-* `pnpm run typecheck` — shared, detection, server, web: pass. `pnpm --filter @sp/e2e typecheck`: pass.
-* `pnpm test` — shared 43, detection 169, server 693, web 359 — 1,264 (with the face images fetched, nothing skipped).
-* Core browser suite `E2E_FACES_DIR=… E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1 pnpm --filter @sp/e2e exec playwright test 'tests/[01]'` (CI's `e2e` job) — green in CI on the pushed commit. Locally (4 vCPU, 2 workers) 39/40 in 18 min: `14-accessibility`'s
-  keyboard test timed out waiting for "Monitoring active" under load, and passed when re-run alone (3/3, 50 s).
+## 2. Map of the roadmap's code (for orientation)
 
-## 2. What #12 added (for orientation)
+| # | Area | Main code | Migration | e2e |
+|---|---|---|---|---|
+| 7 | Exam versions | `services/exam-versions.ts`, `services/regrade.ts` | 0007 | 11-staff |
+| 8 | Accommodations | `services/accommodations.ts`, candidate `check/AttestStep.tsx` | 0008 | 19 |
+| 9 | Staff two-step sign-in | `lib/totp.ts`, `services/mfa.ts`, `services/staff-recovery.ts` | 0009 | 11b (PORT + 3) |
+| 10 | Reviewer workflow | `services/review.ts`, `packages/shared/src/{review,incidents,explain}.ts` | 0010 | 11c |
+| 11 | Model governance | `services/decision-configs.ts`, `services/calibration.ts` | 0011 | 11d (PORT + 4) |
+| 12 | Privacy operations | `services/privacy-{requests,export,ops}.ts`, `services/job-status.ts`, candidate `components/common.tsx` | 0012 | 11e (PORT + 5) |
+| 13 | Scheduling and recovery | `services/scheduling.ts`, `services/recovery.ts`, `jobs/sweeper.ts` | 0014 | 19c |
+| 14 | Integration API | `packages/shared/src/{integrations,openapi}.ts`, `routes/v1/index.ts`, `auth/api-key.ts`, `services/idempotency.ts` | 0015 (custom SQL tail) | 18b |
+| 15 | Sandbox and quotas | `services/{tenancy,quotas,sandbox-purge}.ts`, `scripts/org-cli.ts` | 0017 | 19d (PORT + 8) |
+| 16 | SSO and SCIM | `services/sso/*`, `routes/sso.ts`, `routes/scim.ts`, `services/scim.ts`, `lib/net-guard.ts` | 0016 | 11f (PORT + 9) |
+| 17 | Data residency | `lib/storage.ts`, `services/evidence-storage.ts`, `services/storage-move.ts` | 0013 | 19b (PORT + 10) |
+| 18 | Vision worker | `src/vision-worker/`, `vision/remote.ts`, `vision/wire.ts` | — | `E2E_VISION=remote` option |
+| 19 | Resilience | `test/chaos.test.ts`, `test/migration-upgrades.test.ts`, `test/schema-drift.test.ts`, `test/alert-rules.test.ts` | — | 19e (PORT + 12) |
+| 20 | Cross-browser | `e2e/lib/camera.ts`, `e2e/lib/browsers.ts`, `apps/web/src/candidate/fullscreen.ts` | — | `@cross-browser` tag |
 
-* Schema + migration `0012_privacy_operations`: `privacy_requests` (details encrypted, AAD `privacy-request:<id>`,
-  covered by `rekey`), `job_status` (the retention job's last run). Migration test in `test/migrations.test.ts`.
-* Server: `services/privacy-requests.ts` (register, `withdrawConsent`, `eraseCandidate` — now also behind
-  `DELETE /candidates/:id` — and `eraseForRequest`), `services/privacy-export.ts` (ZIP via `lib/zip.ts`),
-  `services/privacy-ops.ts` (retention preview, operational checks), `services/job-status.ts`, routes in
-  `routes/admin/privacy.ts`, candidate route `POST /api/candidate/consent/withdraw`. New end reason
-  `candidate_withdrew` (`END_REASONS`; terminated, no score; webhook reason `consent_withdrawn`). Evidence uploads are
-  refused for a withdrawn / purged session (`services/ingest.ts`).
-* Staff app: `pages/PrivacyPage.tsx` (admin only, nav "Privacy"), helpers `lib/privacy.ts` (+ tests).
-* Tests: `apps/server/test/privacy.test.ts`, `test/rekey.test.ts`, `test/migrations.test.ts` (0012); the test ZIP
-  reader moved to `apps/server/test/zip-reader.ts` (also used by e2e 11e); e2e `11e-privacy-operations` (dedicated
-  instance `PORT + 5`, database `proctor_e2e_privacy`).
-* Docs: `PRIVACY.md` §2, §4, §5; `OPERATIONS.md` §6 + runbooks; `SECURITY.md` (privacy operations);
-  `ARCHITECTURE.md` §8; `INTEGRATION_API.md` (end reason / webhook reason); `HANDOVER.md` (round 4 row, legal note).
+Migrations are numbered in the order the items landed, not by item number (13 → 0014, 17 → 0013, 16 → 0016,
+15 → 0017).
 
-Exam-app button for withdrawing consent: in the privacy notice dialog (`apps/web/src/candidate/components/common.tsx`
-`PrivacyNoticeDialog` / `WithdrawConsentDialog`, reachable on the start screen and in the exam), controller
-`withdrawConsent` (answers delivered first; queued images deleted on the device via `Outbox.discardImages`); the notice's
-"Your choices" paragraph says withdrawal is possible (notice version `2026-10-21`). e2e 11e clicks it. The wording is the
-owner's to have reviewed by counsel (HANDOVER §4 item 6).
-
-## 3. Remaining roadmap (from the original plan, in order)
-
-* **#13 Candidate recovery, scheduling windows, resume policy** — reschedule an invited session into a window
-  (`exam_sessions` gets `windowStartsAt`/`windowEndsAt`; start refused outside it with a candidate message), a resume
-  policy per exam (max reconnects / max time since last heartbeat before the session is ended), staff "reopen for
-  recovery" action. Reuse `candidate-actions.ts` and `session-limits.ts`.
-* **#14 Integration API maturity** — per-key scopes (read-only vs write), key expiry, idempotency keys on `POST`,
-  webhook signature verification helper documented, OpenAPI document generated from `packages/shared/src/integrations.ts`
-  zod schemas, contract tests. `docs/INTEGRATION_API.md` is the public contract: update it with every change.
-* **#15 Sandbox organisations and per-tenant quotas** — `organizations.kind` (`sandbox` | `production`), quotas for
-  exams, candidates, sessions per month, enforced in `services/session-limits.ts`; sandbox data auto-purged.
-* **#16 SSO (OIDC + SAML) and SCIM** — per-org identity provider config; SAML needs an XML library (check the licence
-  first; `docs/HANDOVER.md` lists licensing decisions). Keep local password login as break-glass for owners.
-* **#17 Data residency** — per-org evidence storage backend/region (`services/evidence.ts` uses `ctx.storage`);
-  migration path for existing blobs; documented in `docs/OPERATIONS.md` §2.
-* **#18 Dedicated vision worker** — move `vision/` analysis behind a small HTTP/queue worker; keep the in-process
-  driver for dev; `docs/PERFORMANCE.md` §6 has the capacity numbers to beat.
-* **#19 Chaos tests, migration tests, extra metrics** — kill the DB connection mid-batch, restart during an identity
-  check, migrations from every previous tag (`test/migrations.test.ts` pattern), more Prometheus series
-  (`services/metrics.ts`) and matching alerts in `docs/prometheus-alerts.yml`.
-* **#20 Cross-browser e2e** — Firefox and WebKit projects in `e2e/playwright.config.ts` with an injected fake camera
-  (Playwright's `--use-fake-device-for-media-stream` is Chromium-only; Firefox needs a `media.navigator.streams.fake`
-  pref; WebKit needs a canvas-backed `getUserMedia` shim in `e2e/lib/candidate.ts`). Only the core scenarios.
-* **#21 Final** — `docs/ROADMAP.md` (what shipped, what is deferred and why), full verification (all tests, both
-  e2e tiers, docker build), PR #1 description updated with the mirror of `.github/pull_request_template.md` if present.
-
-## 4. How to work in this repo
+## 3. How to work in this repo
 
 * Node 24 only. A fresh cloud container has Node 22: download the Node 24 tarball from nodejs.org into the scratchpad
   (check its SHA-256 against `SHASUMS256.txt`), put its `bin` first on PATH and `corepack enable` (pnpm comes from
@@ -81,69 +56,87 @@ owner's to have reviewed by counsel (HANDOVER §4 item 6).
   images: `pnpm --filter @sp/e2e fetch-faces` and `pnpm --filter @sp/server eval:fetch-faces -- --dir <dir>`.
 * Unit: `pnpm test` (all packages). Single file: `cd apps/server && pnpm exec vitest run test/governance.test.ts`.
 * DB migrations: `cd apps/server && pnpm exec drizzle-kit generate --name <name>`. To regenerate a migration you just
-  wrote: delete the `.sql`, its `meta/<n>_snapshot.json` and its journal entry, then generate again (custom SQL must be
-  re-appended by hand). Every new migration needs a case in `test/migrations.test.ts`.
+  wrote: delete the `.sql`, its `meta/<n>_snapshot.json` and its journal entry, then generate again (custom SQL — the
+  tail under `-- custom SQL (re-append after regenerating)` — must be re-appended by hand). Every new migration needs a
+  case in `test/migrations.test.ts`; `test/migration-upgrades.test.ts` and `test/schema-drift.test.ts` pick it up by
+  themselves (a schema.ts edit without a migration fails the drift test).
 * Browser suite: build first `pnpm --filter @sp/web run build`, then
   `E2E_FACES_DIR=$S/faces E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1 E2E_SKIP_BUILD=1 pnpm --filter @sp/e2e exec playwright test 'tests/[01]' --reporter=line`
-  (~15 min). Single scenario: `… playwright test tests/11d`. Dedicated-instance specs (11b, 11d, 17, 18) start their own
-  server from source at test time: do not change imported server source while they run.
+  (~20 min with 2 workers). Single scenario: `… playwright test tests/11d`. **CI's core job only runs `tests/[01]*`**:
+  name a new spec so it starts with `0` or `1` (e.g. `19f-…`), or it runs only nightly. Dedicated-instance specs
+  (e2e README table) start their own server from source at test time: do not change imported server source while they
+  run. Firefox / WebKit: `pnpm --filter @sp/e2e exec playwright install firefox webkit` on a developer machine, then
+  `E2E_BROWSERS=webkit pnpm --filter @sp/e2e exec playwright test --project=webkit` (only `@cross-browser` scenarios;
+  the cloud container has only Chromium — never run `playwright install` there). `E2E_CAMERA=shim` runs Chromium with
+  the same camera shim.
+* Several checkouts at once (parallel agents): give each its own `E2E_PORT` (dedicated instances use up to `PORT + 40`)
+  and `E2E_DATABASE_URL`, never kill processes you did not start, and never use broad `pkill -f` patterns.
 * Patterns to follow: mutations through `withSession` / `m.addEvent`; audit every staff action with `audit(tx, …)`;
-  encrypt personal free text with `keyring.encryptString(text, aad)`; organisation-scoped queries always filter by
-  `orgId`; API errors via `lib/errors.ts` (`conflict`, `forbidden` with a specific code — the staff app shows the
-  message for specific 403 codes, not for `forbidden`).
+  encrypt personal free text with `keyring.encryptString(text, aad)` and add the column to `rekey`'s `COLUMN_TARGETS`
+  (a coverage test fails otherwise); organisation-scoped queries always filter by `orgId`; API errors via
+  `lib/errors.ts` (`conflict`, `forbidden` with a specific code — the staff app shows the message for specific 403
+  codes, not for `forbidden`); a new `sp_*` metric needs a row in OPERATIONS §5 (`alert-rules.test.ts`); an
+  integration API change updates `packages/shared/src/integrations.ts`, `docs/INTEGRATION_API.md` (changelog) and the
+  committed `docs/openapi.json` (a test keeps it current).
 * Never put model identifiers in commits, PR text or code. Commit trailers: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
   and `Claude-Session: <the session link your environment gives you>` (earlier sessions: session_01EXCTMLZ92wByrEjQWUCpEF,
   session_017yjpdaeHzuYAYFpJxt51TL). PR bodies end with "🤖 Generated with [Claude Code](https://claude.com/claude-code)".
 * Never skip, disable or quarantine a failing test. Never push to another branch. Push with `git push -u origin <branch>`.
 
-## 5. Known gotchas hit so far
+## 4. Known gotchas
 
 * E2E dedicated servers run from source; editing imported server or shared source mid-run changes the running tests.
 * Staff cookies expire; re-mint in `beforeEach` for long suites. Login is rate-limited (10/min/IP).
 * Event ordering with equal timestamps is nondeterministic: use the `seq` bigserial (`event_reviews`) or content-based
   assertions.
-* A 403 `forbidden` now shows a generic message in the staff app by design; specific codes show their message.
+* A 403 `forbidden` shows a generic message in the staff app by design; specific codes show their message.
 * Candidate-app `User-Agent` must match the one captured at check-in, or the server treats it as a second device.
-* A drizzle `sql` expression with bound values (e.g. `evidenceDaysSql`) used in both SELECT and GROUP BY renders as two
-  different parameter sets, and Postgres rejects the query: group / order by position (`sql\`1\``).
+* A drizzle `sql` expression with bound values used in both SELECT and GROUP BY renders as two different parameter
+  sets, and Postgres rejects the query: group / order by position (`sql\`1\``).
 * `pluralize(n, 'day')` in the staff app already includes the number ("3 days").
-* On a 4-vCPU container the full core e2e run (2 workers, dedicated servers starting their own vision workers) can starve
-  a candidate browser's in-page monitoring: re-run a single spec alone before suspecting the change.
+* After-commit work (a passed check's frame purge, a decided burst's extra frames) runs after the response: a test
+  that counts evidence right after a check-in must wait for it (`vi.waitFor(…, { timeout: 15_000, interval: 50 })`;
+  vitest's default `waitFor` timeout of 1 s is too short under load). `chaos.test.ts` `checkInPurged` is the pattern.
+* On a 4-vCPU container the full core e2e run (2 workers, dedicated servers starting their own vision workers) can
+  starve a candidate browser's in-page monitoring, and timing tests (detection eval, vision latency bounds) can miss
+  their limits while other suites run: re-run a single spec / file alone before suspecting the change.
+* The container can restart while idle: Postgres and Redis then come back down (`service postgresql start; service
+  redis-server start`; the trust config and databases survive on disk).
+* `df` inside the container shows the session's disk allowance; agent worktrees (~2.7 GB each with `node_modules` and
+  e2e fixtures) fill it fast. Remove a worktree once its commit is integrated.
 
-## 6. Loose ends (as of 2026-10-21, 19:05 UTC)
+## 5. Loose ends (as of 2026-10-22)
 
-Do these checks first, in this order:
+1. **CI**: on `fbf2e28` `test`, `docker`, `e2e` (Chromium) and `e2e-browsers (firefox)` are green; `e2e-browsers (webkit)` is
+   red. Check CI on the head first; a red Chromium / Firefox / unit / docker job comes before anything else.
+2. **WebKit job (red)**: Playwright's WebKit on Linux delivers the camera shim's canvas to the app's `<video>` only
+   intermittently. History, all visible in the job logs' diagnostics (candidate logs end with the WebGL renderer; a
+   readiness failure names each checklist item, the analysis video's state and whether video / canvas are changing):
+   no WebGL headless → headed under Xvfb; MediaPipe "GLctx" → the app's OffscreenCanvas fix (`61c8eb7`); analysis video
+   paused off-viewport → in the viewport (`e2afb6c`); video frozen on its first frame while the canvas changed →
+   timer-driven `captureStream(fps)` from an opaque 64×48 px canvas (WebKit only, `e2e/lib/camera.ts`). Now the
+   readiness check passes everywhere and 6 of 10 scenarios pass; 01, 03b, 04, 09 fail from slow / uneven frames. Next
+   options (owner's call, `docs/ROADMAP.md` §4 item 7): a `macos-latest` runner for the WebKit matrix entry, or an
+   encoded-video camera source for WebKit. Do not skip or quarantine the WebKit scenarios to get green.
+   Firefox needed: headed under Xvfb, one worker, `E2E_DELEGATE=gpu` (CPU delegate WASM starved the main thread; in-process
+   WebGL broke MediaPipe — keep `webgl.out-of-process` at its default).
+3. **Flakes fixed in tests only — watch whether they come back:**
+   * `14-accessibility` "small screens…" (`26f0d54`): the enabled "Agree and continue" button once measured 2.93:1 (the
+     disabled opacity). The spec waits for `opacity: 1`. Root cause not confirmed (`candidate/screens/Welcome.tsx`,
+     `canContinue`).
+   * `05-resume-identity` "room goes dark…" (`015f0b9`): two prompts can show the same darkness guidance; the spec takes
+     the first match. Product question in `docs/ROADMAP.md` §4 item 1.
+4. **Owner decisions pending**: `docs/ROADMAP.md` §3 (decisions made on the owner's behalf) and §4 (open questions).
+   Do not change those behaviours without the owner's answer.
+5. **Agent branches**: local `worktree-agent-*` branches hold the agents' pre-integration commits (their content landed
+   by cherry-pick under other hashes). They are local only and can be deleted.
 
-1. **CI on the branch head.** The last code commit is `015f0b9` (test-only, see 3 below); its CI run
-   (`actions/runs/39657687588`) was still running when work stopped. If it — or the run on this handover commit — is red,
-   fixing it comes before any new task. Fetch the failing job's log (the GitHub MCP `get_job_logs` result is saved to a
-   file when large: grep it for `✘`, `failed`, `Error:`).
-2. **Two sessions pushed to this branch** (`session_01EXCTMLZ92wByrEjQWUCpEF` and `session_017yjpdaeHzuYAYFpJxt51TL`).
-   The owner stopped the first one; the second continues. Only one session should work on the branch at a time. Always `git fetch` and fast-forward before committing, and
-   check `git log origin/claude/sweet-hamilton-46bh7e` right before pushing.
-3. **Two CI flakes were fixed in the tests only** — watch whether they come back:
-   * `14-accessibility` "small screens…" (`26f0d54`): CI once measured the enabled "Agree and continue" button at
-     2.93:1, which is white at the disabled opacity 0.55 over the primary blue. The spec now waits for `opacity: 1`
-     before the contrast scan. **Root cause not confirmed** (no code path found that disables the button again; 10
-     local runs passed, also under CPU load). If it recurs, check whether the button really returns to `:disabled`
-     after the checkbox is ticked (`apps/web/src/candidate/screens/Welcome.tsx`, `canContinue`).
-   * `05-resume-identity` "room goes dark…" (`015f0b9`): the candidate can see two prompts at once — the darkness
-     guidance and "We couldn't confirm your identity…", which embeds the same guidance
-     (`apps/web/src/candidate/monitoring/runtime.ts`, around line 560). The spec now takes the first match. Product
-     question for the owner: should the candidate see the same guidance twice? Possibly show only the combined prompt.
-4. ~~Exam-app button to withdraw consent~~ — done (see §2).
-5. **PR #1's description is stale** (it still describes only Phase 1; the branch now carries #1–#12). Rewrite it in #21
-   (or earlier if the owner asks). Note its base branch is `claude/loving-hamilton-sszj2x`, not `main`.
-6. ~~A scheduled check-in on PR #1~~ — none is active any more.
-7. **The container can restart while idle**: Postgres and Redis then come back down. `service postgresql start;
-   service redis-server start` (the trust config and databases survive on disk).
-
-### Definition of done for each remaining task (#13–#21)
+### Definition of done for a new task
 
 Code with organisation scoping and audit entries; a migration plus its case in `test/migrations.test.ts` when the
 schema changes (and `rekey` coverage for any new encrypted column); server tests; web unit tests for new helpers; an e2e
-scenario for user-visible flows (a dedicated instance — `PORT + 6` onwards — when it changes organisation-wide
-settings); docs (`ARCHITECTURE.md`, `OPERATIONS.md` runbook, `SECURITY.md` / `PRIVACY.md` where relevant,
-`INTEGRATION_API.md` for any API change, a row in `HANDOVER.md` §3c, the e2e README); then `pnpm run typecheck`,
-`pnpm test`, the core e2e suite, one commit per task, push, and CI green before starting the next task. Update §1 of this
-file as each task lands.
+scenario for user-visible flows (a dedicated instance — next free offset `PORT + 6`, `+ 7`, `+ 11`, `+ 13` onwards —
+when it changes organisation-wide settings; a name starting with `0` or `1` so CI runs it); docs (`ARCHITECTURE.md`,
+`OPERATIONS.md` runbook, `SECURITY.md` / `PRIVACY.md` where relevant, `INTEGRATION_API.md` for any API change, a row in
+`HANDOVER.md` §3c, the e2e README, `docs/ROADMAP.md`); then `pnpm run typecheck`, `pnpm test`, the core e2e suite, one
+commit per task, push, and CI green before starting the next task.
