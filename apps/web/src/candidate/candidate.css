@@ -62,6 +62,16 @@
 /* Head movement reached: "hold still" feedback (green instruction, hold bar). */
 .cand-instruction-hold { background: #eaf7ef; color: #155f34; }
 .cand-arrow-hold { color: rgba(140, 235, 170, 0.95); }
+/* Head-turn gauge at the bottom of the (mirrored) preview: turn until the dot reaches the green area. */
+.cand-turn-meter { position: absolute; left: 8%; right: 8%; bottom: 14px; height: 24px; border-radius: 999px; background: rgba(15, 23, 42, 0.55); pointer-events: none; }
+.cand-turn-zone { position: absolute; top: 0; bottom: 0; width: 15%; background: rgba(140, 235, 170, 0.35); }
+.cand-turn-zone-left { left: 0; border-radius: 999px 0 0 999px; }
+.cand-turn-zone-right { right: 0; border-radius: 0 999px 999px 0; }
+.cand-turn-zone.reached { background: rgba(140, 235, 170, 0.85); }
+.cand-turn-centre { position: absolute; left: 50%; top: 4px; bottom: 4px; width: 2px; margin-left: -1px; background: rgba(255, 255, 255, 0.65); }
+.cand-turn-dot { position: absolute; top: 50%; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.45); transition: left 0.12s linear; }
+.cand-turn-dot.reached { background: #8cebaa; }
+@media (prefers-reduced-motion: reduce) { .cand-turn-dot { transition: none; } }
 .cand-hold { display: flex; align-items: center; gap: 10px; font-weight: 600; color: #155f34; }
 .cand-hold > span { flex: none; }
 .cand-hold > .cand-progress { flex: 1; }

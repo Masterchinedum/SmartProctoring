@@ -48,6 +48,15 @@ export function isFrontal(face: Pose, centre: Pose | null): boolean {
 
 const MIN_CAPTURE_SPACING_MS = 300;
 
+/**
+ * A head-movement step's pictures are taken once the movement reaches this fraction of the server's target (14° of
+ * a 20° turn). The server decides: it accepts a step when two of its frames reach 50 % of the target, or one
+ * reaches 60 %. Capturing at the full target made candidates turn further and hold longer than needed, and some
+ * never got there (a 16° turn in the realistic scenarios, docs/ROADMAP.md §4 item 6). A step the server does not
+ * accept is re-prompted in place, 6° beyond the turn captured (the tracker's retry target).
+ */
+export const CLIENT_TARGET_FRACTION = 0.7;
+
 /** Measurement hook only (e2e A/B of the pose smoothing): `window.__spRawPose = true` feeds the raw pose. */
 const smootherFor = () =>
   new PoseSmoother(typeof window !== 'undefined' && (window as { __spRawPose?: boolean }).__spRawPose === true ? { minWindowMs: 0, maxWindowMs: 0 } : {});
@@ -194,6 +203,7 @@ export function VerifyStep({
             steps: res.liveness.steps,
             targetYawDeg: res.liveness.targetYawDeg,
             targetPitchDeg: res.liveness.targetPitchDeg,
+            captureFraction: CLIENT_TARGET_FRACTION,
             framesPerStep: FRAMES_PER_STEP,
             maxFramesPerStep: MAX_FRAMES_PER_STEP,
             awaitVerdict: true,
@@ -554,6 +564,7 @@ export function VerifyStep({
   if (phase === 'completing') headline = 'Checking…';
   const holding = phase === 'liveness' && stepView?.stage === 'hold';
   const reprompt = phase === 'liveness' && stepView?.stage === 'retry';
+  const turnAction = phase === 'liveness' && stepView && stepView.stage !== 'verify' && !stepView.problem && (stepView.action === 'turn_left' || stepView.action === 'turn_right') ? stepView.action : null;
 
   if (phase === 'expired' || phase === 'error') {
     return (
@@ -587,10 +598,15 @@ export function VerifyStep({
           className="cand-preview-large"
           label="Your camera preview (mirrored)"
           overlay={
-            arrow ? (
-              <div className={`cand-arrow cand-arrow-${stepView?.action}${holding ? ' cand-arrow-hold' : ''}`} aria-hidden="true">
-                {arrow}
-              </div>
+            arrow || turnAction ? (
+              <>
+                {arrow && (
+                  <div className={`cand-arrow cand-arrow-${stepView?.action}${holding ? ' cand-arrow-hold' : ''}`} aria-hidden="true">
+                    {arrow}
+                  </div>
+                )}
+                {turnAction && stepView && <TurnMeter action={turnAction} progress={stepView.progress} reached={holding} />}
+              </>
             ) : null
           }
         />
@@ -605,8 +621,10 @@ export function VerifyStep({
               Almost there — turn your head a little further in the same direction and hold it for a moment.
             </p>
           )}
+          {turnAction && !holding && !reprompt && <p className="muted">Turn until the dot on the picture reaches the green area, then hold still for a moment.</p>}
+          {/* Head turns show the gauge on the picture instead; the bar stays for screen readers. */}
           {phase === 'liveness' && stepView && stepView.stage !== 'verify' && (
-            <div className="cand-progress cand-progress-step" role="progressbar" aria-label="Head movement" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stepView.progress * 100)} data-testid="verify-step-progress">
+            <div className={`cand-progress cand-progress-step${turnAction ? ' sr-only' : ''}`} role="progressbar" aria-label="Head movement" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stepView.progress * 100)} data-testid="verify-step-progress">
               <div className="cand-progress-bar" style={{ width: `${Math.round(Math.min(1, stepView.progress) * 100)}%` }} />
             </div>
           )}
@@ -652,6 +670,24 @@ export function VerifyStep({
           {check && <p className="muted small">{attemptsAfterText(check)}</p>}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Live head-turn gauge on the mirrored preview (decorative; the instruction and the progress bar carry the same
+ * information for screen readers): the dot moves from the centre mark toward the side the candidate turns to, and
+ * the green area is where the pictures are taken.
+ */
+function TurnMeter({ action, progress, reached }: { action: 'turn_left' | 'turn_right'; progress: number; reached: boolean }) {
+  const side = action === 'turn_left' ? 'left' : 'right';
+  // Centre at 50 %, the green area from 85 % outward (15 % inward on the left); the dot may overshoot into it.
+  const pos = 50 + (side === 'left' ? -1 : 1) * Math.min(1.25, Math.max(0, progress)) * 35;
+  return (
+    <div className="cand-turn-meter" aria-hidden="true" data-testid="verify-turn-meter">
+      <div className={`cand-turn-zone cand-turn-zone-${side}${reached ? ' reached' : ''}`} />
+      <div className="cand-turn-centre" />
+      <div className={`cand-turn-dot${reached || progress >= 1 ? ' reached' : ''}`} style={{ left: `${pos}%` }} />
     </div>
   );
 }

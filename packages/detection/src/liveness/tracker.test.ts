@@ -208,6 +208,38 @@ describe('LivenessTracker', () => {
     expect(tr.current().action).toBe('turn_right');
   });
 
+  it('captureFraction: captures at that fraction of the target; level tolerance and re-prompts follow', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left', 'turn_right'), targetYawDeg: 20, targetPitchDeg: 12, awaitVerdict: true, captureFraction: 0.7, maxFramesPerStep: 3 });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    // 12° of a 14° capture target: not yet, "a little further".
+    let p = hold(tr, 0, 800, { yaw: 12 });
+    expect(p.readyToCapture).toBe(false);
+    expect(p.progress).toBeCloseTo(12 / 14, 2);
+    expect(p.message).toMatch(/a little further/);
+    // 15° with the head 17° below the centre (within the full-target level tolerance, 1.5 × 12°): captured.
+    p = hold(tr, 900, 800, { yaw: 15, pitch: -17 });
+    expect(p.readyToCapture).toBe(true);
+    tr.markCaptured(1700);
+    hold(tr, 1800, 300, { yaw: 15, pitch: -17 });
+    tr.markCaptured(2100);
+    // Not accepted: the re-prompt asks for 6° beyond the captured turn (21°), not for the full 20° + 6°.
+    tr.verdict(0, false);
+    expect(hold(tr, 2200, 800, { yaw: 19 }).readyToCapture).toBe(false);
+    expect(hold(tr, 3100, 800, { yaw: 22 }).readyToCapture).toBe(true);
+  });
+
+  it('re-prompts never ask for more than a 35° turn', () => {
+    const tr = createLivenessTracker({ steps: steps('turn_left'), targetYawDeg: 20, targetPitchDeg: 12, awaitVerdict: true, maxFramesPerStep: 6 });
+    tr.setCentre({ yaw: 0, pitch: 0 });
+    hold(tr, 0, 600, { yaw: 33 });
+    tr.markCaptured(600);
+    hold(tr, 700, 300, { yaw: 33 });
+    tr.markCaptured(1000);
+    tr.verdict(0, false);
+    // 33° + 6° would be 39°: capped at 35°.
+    expect(hold(tr, 1100, 800, { yaw: 36 }).readyToCapture).toBe(true);
+  });
+
   it('awaitVerdict: a verdict for another step or while not waiting is ignored', () => {
     const tr = createLivenessTracker({ steps: steps('turn_left', 'turn_right'), targetYawDeg: 20, targetPitchDeg: 12, awaitVerdict: true });
     tr.setCentre({ yaw: 0, pitch: 0 });

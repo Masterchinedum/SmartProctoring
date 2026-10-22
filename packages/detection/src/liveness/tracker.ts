@@ -17,7 +17,8 @@ import { clamp01 } from '../util/math';
  *
  * Action steps are captured at the PEAK of the movement, not at the first threshold crossing: the offset
  * toward the requested direction (turn_left: yaw − centre, yaw+ = subject-left per POSE_CONVENTION;
- * turn_right: centre − yaw; look_up: pitch − centre; look_down: centre − pitch) must reach the target, the
+ * turn_right: centre − yaw; look_up: pitch − centre; look_down: centre − pitch) must reach the capture target
+ * (`captureFraction` of the target; the server, which decides, accepts less than the full target), the
  * head must have stopped (offset range ≤ 4° over the last 300 ms) close to the largest offset of the last
  * second (≥ peak − 3°), with the other axis roughly level, and be held for holdMs → readyToCapture.
  * `framesPerStep` frames are captured while the candidate holds.
@@ -80,7 +81,11 @@ const PEAK_WINDOW_MS = 1000;
 const PEAK_TOL_DEG = 3;
 /** Re-prompt: ask for this much more than the offset the server did not accept (client target). */
 const RETRY_EXTRA_DEG = 6;
-const MAX_CLIENT_TARGET_DEG = 45;
+/**
+ * Re-prompts never ask for more than this: the server's turned-frame identity floors were measured on turns of
+ * 15–35°, and further out the candidate can no longer see the screen.
+ */
+const MAX_CLIENT_TARGET_DEG = 35;
 
 export function createLivenessTracker(opts: {
   steps: LivenessStep[];
@@ -92,6 +97,11 @@ export function createLivenessTracker(opts: {
   awaitVerdict?: boolean;
   /** Frames per step in total, including re-prompts (default 3; the v2 server accepts 6 per step). */
   maxFramesPerStep?: number;
+  /**
+   * Capture once the movement reaches this fraction of the target (default 1; 0.3–1). The level / direction
+   * tolerances stay relative to the full targets.
+   */
+  captureFraction?: number;
 }): LivenessTracker {
   const steps = opts.steps ?? [];
   const holdMs = Math.max(0, opts.holdMs ?? 400);
@@ -100,6 +110,7 @@ export function createLivenessTracker(opts: {
   const maxFrames = Math.max(framesPerStep, Math.floor(opts.maxFramesPerStep ?? 3));
   const baseYaw = Math.max(1, opts.targetYawDeg);
   const basePitch = Math.max(1, opts.targetPitchDeg);
+  const captureFraction = Math.min(1, Math.max(0.3, opts.captureFraction ?? 1));
   const minCaptureGap = Math.max(150, holdMs / 2);
 
   let idx = 0;
@@ -152,7 +163,7 @@ export function createLivenessTracker(opts: {
 
   function targetFor(s: LivenessStep): number {
     const base = horizontal(s.action) ? baseYaw : basePitch;
-    return stepTarget ?? base;
+    return stepTarget ?? base * captureFraction;
   }
 
   function problemFor(face: FaceObservation | null, faceCount: number): string | null {
@@ -332,7 +343,7 @@ export function createLivenessTracker(opts: {
       holdStart = null;
       offs = [];
       if (s.action !== 'center') {
-        const base = horizontal(s.action) ? baseYaw : basePitch;
+        const base = (horizontal(s.action) ? baseYaw : basePitch) * captureFraction;
         const prev = Number.isFinite(capturedOff) ? capturedOff : base;
         stepTarget = Math.min(MAX_CLIENT_TARGET_DEG, Math.max(base, prev + RETRY_EXTRA_DEG));
       }
