@@ -9,7 +9,7 @@ import { expect, test } from '../lib/test';
  * review. Staff see the flag arrive live, compare reference vs later images, release with a fresh check
  * (the camera restarts, so A is in view again and passes), then terminate.
  */
-test('person swap mid-exam: flagged live, held, compared, released with a fresh check, terminated', async ({ staff, staffPage }) => {
+test('person swap mid-exam: flagged live, held, compared, released with a fresh check, terminated', { tag: '@cross-browser' }, async ({ staff, staffPage }) => {
   skipUnlessFixtures('swap');
   test.setTimeout(5 * 60_000);
   const s = await staff.createSession({ policy: { identity: { periodicCheckIntervalSec: 10, onMismatch: 'hold_for_review' } } });

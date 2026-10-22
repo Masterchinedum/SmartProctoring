@@ -1,9 +1,20 @@
-import { defineConfig } from '@playwright/test';
+import { defineConfig, type Project } from '@playwright/test';
+import { CROSS_BROWSER_TAG, FIREFOX_PREFS, selectedBrowsers, type BrowserName } from './lib/browsers';
 import { BASE_URL, WORKERS } from './lib/config';
 
 /**
+ * Projects = browsers (E2E_BROWSERS, default `chromium` only, so a plain run is the Chromium suite). Firefox and
+ * WebKit run the scenarios tagged @cross-browser with the camera shim (lib/camera.ts; README "Browsers").
+ */
+const PROJECTS: Record<BrowserName, Project> = {
+  chromium: { name: 'chromium', use: { browserName: 'chromium' } },
+  firefox: { name: 'firefox', grep: new RegExp(CROSS_BROWSER_TAG), use: { browserName: 'firefox', launchOptions: { firefoxUserPrefs: FIREFOX_PREFS } } },
+  webkit: { name: 'webkit', grep: new RegExp(CROSS_BROWSER_TAG), use: { browserName: 'webkit' } },
+};
+
+/**
  * SmartProctoring end-to-end suite: real server (from source) + built SPA on one origin, a fresh Postgres
- * database, real vision models, and Chromium with a fake camera fed from Y4M files (see README.md).
+ * database, real vision models, and browsers with a fake camera fed from Y4M files (see README.md).
  */
 export default defineConfig({
   testDir: './tests',
@@ -26,4 +37,5 @@ export default defineConfig({
     actionTimeout: 20_000,
     navigationTimeout: 30_000,
   },
+  projects: selectedBrowsers().map((b) => PROJECTS[b]),
 });

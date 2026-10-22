@@ -26,6 +26,7 @@ import type {
   ProctoringPolicy,
 } from '@sp/shared';
 import { CandidateApiError, classifyApiError, isServerBusy, uuid, type CandidateApi } from '../api';
+import { isFullscreen, onFullscreenChange } from '../fullscreen';
 import type { ClockSync } from '../clock';
 import type { Outbox } from '../outbox';
 import type { CameraManager, CameraSnapshot } from './camera';
@@ -636,7 +637,7 @@ export class MonitoringRuntime {
     on(document, 'visibilitychange', () => this.pushEpisodes(tr.visibility(document.visibilityState === 'hidden', this.now())));
     on(window, 'blur', () => this.pushEpisodes(tr.focus(false, this.now())));
     on(window, 'focus', () => this.pushEpisodes(tr.focus(true, this.now())));
-    on(document, 'fullscreenchange', () => this.pushEpisodes(tr.fullscreen(!!document.fullscreenElement, this.now())));
+    this.removers.push(onFullscreenChange(() => this.pushEpisodes(tr.fullscreen(isFullscreen(), this.now()))));
     for (const action of ['copy', 'cut', 'paste'] as const) {
       on(
         document,
@@ -661,7 +662,7 @@ export class MonitoringRuntime {
     const t = this.now();
     this.pushEpisodes(tr.visibility(document.visibilityState === 'hidden', t));
     this.pushEpisodes(tr.focus(document.hasFocus(), t));
-    this.pushEpisodes(tr.fullscreen(!!document.fullscreenElement, t));
+    this.pushEpisodes(tr.fullscreen(isFullscreen(), t));
     reportDisplays();
   }
 

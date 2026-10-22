@@ -1,3 +1,5 @@
+import { fullscreenSupported } from './fullscreen';
+
 /**
  * System requirements check shown on the welcome screen.
  * `required` items block the exam; others are advisory.
@@ -118,7 +120,7 @@ export async function checkSystemRequirements(opts: { requireFullscreen: boolean
     results.push({
       id: 'fullscreen',
       label: 'Fullscreen mode supported',
-      ok: typeof document.documentElement.requestFullscreen === 'function',
+      ok: fullscreenSupported(),
       required: false,
       help: 'This exam requires fullscreen mode, which your browser does not appear to support. Use a current desktop browser.',
     });

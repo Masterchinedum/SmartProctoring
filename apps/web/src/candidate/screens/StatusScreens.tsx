@@ -3,6 +3,7 @@ import { formatDuration, type CandidateEndReason } from '@sp/shared';
 import { CandidateApiError } from '../api';
 import { errorMessage, formatDateTime, formatTime, useController, useNow, useSnapshot } from '../context';
 import { formatWhen, startOpensAt, windowScreenText } from '../window';
+import { exitFullscreen } from '../fullscreen';
 import { BrandHeader, CameraPreview, ContactLine, CountdownDisplay, Page, PrivacyNoticeDialog, ReportingBanner, ScreenHeading, Spinner, Toasts, TraceDownload } from '../components/common';
 import { enterFullscreen } from './exam/ExamScreen';
 
@@ -268,7 +269,7 @@ export function EndedScreen() {
   const terminated = state.session.status === 'terminated';
   const pending = snap.outbox?.size ?? 0;
   useEffect(() => {
-    if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+    void exitFullscreen().catch(() => undefined);
     // "Your camera is off": also when the exam ended while no monitoring ran (e.g. terminated from the ready screen).
     ctrl.releaseIdleCamera();
   }, [ctrl]);

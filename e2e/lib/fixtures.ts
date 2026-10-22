@@ -103,12 +103,14 @@ export const FIXTURE_SPECS = {
 } satisfies Record<string, Segment[]>;
 
 /**
- * Synthetic videos made by scripts (run as a subprocess): `headturn` = candidate A, frontal for 10 s,
+ * Synthetic videos made by scripts (run as a subprocess): `headturn` = candidate A, frontal for 15 s,
  * then repeated cycles of turning left / right and back (real nose-vs-eyes parallax, identity preserved),
- * for the ACTIVE liveness path (scripts/synth-headturn.ts).
+ * for the ACTIVE liveness path (scripts/synth-headturn.ts). The frontal hold covers readiness and calibration
+ * (the calibrated straight-ahead pose is the reference of the check's frontal gate): they end 9–11 s after the
+ * camera opens on a loaded 4-vCPU machine (up to ~14 s with the camera shim), past the 10 s this used to be.
  */
 export const SYNTH_SPECS = {
-  headturn: { script: 'synth-headturn.ts', still: 'a.jpg' as StillName, args: ['5', '10', '6'] },
+  headturn: { script: 'synth-headturn.ts', still: 'a.jpg' as StillName, args: ['5', '15', '6'] },
 } as const;
 
 export type FixtureName = keyof typeof FIXTURE_SPECS | keyof typeof SYNTH_SPECS;

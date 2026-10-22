@@ -9,6 +9,7 @@ import { expect, test } from '../lib/test';
  * Scenario 11 — staff workflows in the admin UI: login; dashboard by status with monitoring labels; a
  * live flag arriving without reload; event drawer with screenshot; review / dismiss / notes; filters;
  * report page (all sections, print); CSV export; reviewer role restrictions.
+ * The main test is Chromium-only (`page.pdf()`); the reviewer-role test also runs in Firefox and WebKit.
  */
 test('staff UI: dashboard, live flag, drawer, review, notes, filters, report, CSV', async ({ browser, staff }) => {
   skipUnlessFixtures('two');
@@ -167,7 +168,7 @@ test('staff UI: dashboard, live flag, drawer, review, notes, filters, report, CS
   }
 });
 
-test('reviewer role cannot see Settings or Users', async ({ browser, staff }) => {
+test('reviewer role cannot see Settings or Users', { tag: '@cross-browser' }, async ({ browser, staff }) => {
   const reviewer = await staff.createUser('reviewer');
   const ctx = await browser.newContext({ baseURL: BASE_URL });
   const page = await ctx.newPage();

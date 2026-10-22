@@ -20,6 +20,7 @@ import {
   type RequestTiming,
 } from './api';
 import { AnswerStore } from './answers';
+import { isFullscreen } from './fullscreen';
 import { ClockSync, Countdown } from './clock';
 import { Outbox, type OutboxStats } from './outbox';
 import { CameraManager, type CameraSnapshot } from './monitoring/camera';
@@ -662,7 +663,7 @@ export class CandidateController {
         outboxOldestAt: stats?.oldestAt ?? null,
         currentQuestionIndex: this.currentQuestionIndex,
         visibility: document.visibilityState === 'hidden' ? 'hidden' : 'visible',
-        fullscreen: !!document.fullscreenElement,
+        fullscreen: isFullscreen(),
       });
       this.patch({ heartbeatFailingSince: null });
       await this.onHeartbeat(data, timing);

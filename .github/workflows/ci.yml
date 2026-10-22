@@ -101,6 +101,56 @@ jobs:
             e2e/playwright-report
           retention-days: 7
 
+  e2e-browsers:
+    # The scenarios tagged @cross-browser in Firefox and WebKit (e2e/README.md "Browsers"). Their candidate camera is
+    # the canvas shim of e2e/lib/camera.ts playing the same fixtures (Chromium's fake capture device has no
+    # equivalent there). Same command on a developer machine: E2E_BROWSERS=webkit pnpm --filter @sp/e2e exec playwright test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [firefox, webkit]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      E2E_FACES_DIR: /tmp/sp-faces
+      E2E_NO_SKIP: "1"
+      E2E_SKIP_REALISTIC: "1"
+      E2E_BROWSERS: ${{ matrix.browser }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/sp-faces
+            /tmp/sp-facesets
+          key: face-images-${{ hashFiles('e2e/scripts/fetch-faces.ts', 'apps/server/src/eval/datasets.ts') }}
+      - run: pnpm --filter @sp/e2e fetch-faces
+      - run: pnpm --filter @sp/e2e exec playwright install --with-deps ${{ matrix.browser }}
+      - run: pnpm --filter @sp/e2e exec playwright test --project=${{ matrix.browser }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.browser }}-artifacts
+          path: |
+            e2e/.artifacts
+            e2e/test-results
+            e2e/playwright-report
+          retention-days: 7
+
   docker:
     # Builds the production image and boots it: migrations, the vision workers on Node 24, the web app, health probes.
     runs-on: ubuntu-latest

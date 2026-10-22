@@ -3,23 +3,20 @@ import type { AnswerValue } from '@sp/shared';
 import { useDialogFocus, useDocumentTitle } from '../../../lib/a11y';
 import { useController, useSnapshot } from '../../context';
 import { CameraPreview, CountdownDisplay, PrivacyNoticeDialog, ReportingBanner, Spinner, Toasts, TraceDownload } from '../../components/common';
+import { isFullscreen, onFullscreenChange, requestFullscreen } from '../../fullscreen';
 import { PauseDialog, pauseAvailability, SubmitDialog } from './Dialogs';
 import { QuestionView } from './QuestionView';
 
 function useFullscreen(): boolean {
-  const [fs, setFs] = useState(() => !!document.fullscreenElement);
-  useEffect(() => {
-    const on = () => setFs(!!document.fullscreenElement);
-    document.addEventListener('fullscreenchange', on);
-    return () => document.removeEventListener('fullscreenchange', on);
-  }, []);
+  const [fs, setFs] = useState(() => isFullscreen());
+  useEffect(() => onFullscreenChange(() => setFs(isFullscreen())), []);
   return fs;
 }
 
 export async function enterFullscreen(): Promise<boolean> {
-  if (document.fullscreenElement) return true;
+  if (isFullscreen()) return true;
   try {
-    await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+    await requestFullscreen();
     return true;
   } catch {
     return false;

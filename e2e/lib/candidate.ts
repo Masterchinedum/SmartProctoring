@@ -2,10 +2,12 @@ import { chromium, expect, type Browser, type BrowserContext, type Page } from '
 import { BASE_URL, HEADED } from './config';
 import { requireImages } from './require-images';
 import { fixtureAvailable, fixturePath, type FixtureName } from './fixtures';
+import { cameraMode, cameraPermissions, installCamera, launchShimCamera, launchShimPersistentCamera, shimStats } from './camera';
 
 /**
- * Candidate side: a Chromium per fake camera (the Y4M file is a launch argument) and a page object for
- * the candidate app (/take/:token).
+ * Candidate side: a browser per fake camera (Chromium: the Y4M file is a launch argument; E2E_CAMERA=shim, Firefox
+ * and WebKit: the camera shim of lib/camera.ts plays the same file) and a page object for the candidate app
+ * (/take/:token).
  *
  * Timing notes (from the candidate app's own drafts):
  *  - the camera (and the Y4M video, from frame 0) starts at the camera check and stays on through the exam;
@@ -48,8 +50,12 @@ export async function launchCamera(fixture: FixtureName): Promise<Browser> {
   return launchCameraFile(fixturePath(fixture));
 }
 
-/** A Chromium whose fake camera plays the given Y4M file (e.g. a realistic fixture, lib/realistic.ts). */
+/**
+ * A browser whose fake camera plays the given Y4M file (e.g. a realistic fixture, lib/realistic.ts): Chromium's
+ * fake capture device, or in shim mode the project's browser with the camera shim (lib/camera.ts).
+ */
 export async function launchCameraFile(y4m: string): Promise<Browser> {
+  if (cameraMode() === 'shim') return launchShimCamera(y4m);
   return chromium.launch({
     headless: !HEADED,
     args: [
@@ -70,6 +76,7 @@ export async function launchCameraFile(y4m: string): Promise<Browser> {
  * fixtures model the same computer/browser whose camera view changed (e.g. the candidate moved seats).
  */
 export async function launchPersistentCamera(fixture: FixtureName, userDataDir: string): Promise<BrowserContext> {
+  if (cameraMode() === 'shim') return launchShimPersistentCamera(fixturePath(fixture), userDataDir, { baseURL: BASE_URL, viewport: { width: 1280, height: 900 } });
   return chromium.launchPersistentContext(userDataDir, {
     headless: !HEADED,
     baseURL: BASE_URL,
@@ -181,7 +188,8 @@ export class CandidatePage {
    * or a new page in `opts.context` (e.g. a persistent profile).
    */
   static async open(browser: Browser | null, link: string, opts: { context?: BrowserContext } = {}): Promise<CandidatePage> {
-    const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, permissions: ['camera'] }));
+    const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, ...cameraPermissions() }));
+    await installCamera(context); // shim mode only; before the tracker below, which wraps whatever getUserMedia is
     await context.addInitScript(TRACK_CAMERA_STREAMS);
     // A/B measurement of the check's pose smoothing (apps/web/src/candidate/check/poseFilter.ts): raw poses.
     if (process.env.E2E_RAW_POSE === '1') await context.addInitScript('window.__spRawPose = true;');
@@ -236,6 +244,13 @@ export class CandidatePage {
    */
   liveCameraTracks(): Promise<number> {
     return this.page.evaluate(() => ((window as unknown as { __spTracks?: MediaStreamTrack[] }).__spTracks ?? []).filter((t) => t.readyState === 'live').length);
+  }
+
+  /** Camera shim mode: its frame statistics (fetches, slowest fetch, largest lag) for the failure diagnostics. */
+  cameraShimSummary(): string | null {
+    const s = shimStats(this.page);
+    if (!s) return null;
+    return `camera shim: ${s.fetched} frames fetched, ${s.failed} failed, ${(s.msTotal / Math.max(1, s.fetched)).toFixed(0)} ms mean / ${s.msMax.toFixed(0)} ms max per frame, largest lag ${s.lagMax} frames, ${s.mutes} track mute events (as of the last frame request)`;
   }
 
   get pageErrors(): string[] {

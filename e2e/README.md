@@ -3,7 +3,8 @@
 Real browser, real server, real models: Chromium with a **fake camera fed from Y4M videos**, the
 server started from source with the built SPA on the same origin (production-like, `NODE_ENV=production`),
 a fresh Postgres database, the server-side YuNet/SFace identity pipeline and the in-browser MediaPipe
-monitoring engine. Nothing is mocked except the camera.
+monitoring engine. Nothing is mocked except the camera. The core scenarios also run in **Firefox and WebKit**,
+where a canvas-backed camera shim plays the same videos (see [Browsers and camera modes](#browsers-and-camera-modes)).
 
 ```bash
 pnpm test:e2e                                   # from the repo root: the whole suite
@@ -15,10 +16,14 @@ pnpm --filter @sp/e2e fixtures                  # (re)build the fake-camera vide
 pnpm --filter @sp/e2e fetch-faces               # download the face photos (pinned commits, SHA-256 checked) to E2E_FACES_DIR
 pnpm --filter @sp/e2e typecheck
 E2E_NO_SKIP=1 pnpm test:e2e                     # a missing face image fails the run instead of skipping tests (CI)
+E2E_BROWSERS=firefox,webkit pnpm --filter @sp/e2e exec playwright test   # the @cross-browser scenarios in Firefox and WebKit
+E2E_CAMERA=shim pnpm --filter @sp/e2e exec playwright test --grep @cross-browser   # the same camera shim in Chromium
 ```
 
 CI (`.github/workflows/ci.yml`) runs scenarios 01–19 (including 11b–11e, 18b, 19b and 19c) on every pull request with `E2E_NO_SKIP=1`, so a green run
-means every scenario ran; `nightly.yml` runs the whole suite, the realistic scenarios included.
+means every scenario ran, and the `@cross-browser` scenarios in Firefox and WebKit (`e2e-browsers` job); `nightly.yml` runs
+the whole suite, the realistic scenarios included, and the `@cross-browser` scenarios in Firefox, WebKit and Chromium with the
+camera shim.
 
 Runtime (65 tests, 4-core machine): ~31 minutes with the default 2 workers — scenarios 01–18 (33 tests) take
 ~14 minutes; the realistic-webcam scenarios 20–24 (32 tests, incl. two 5-minute genuine-candidate runs) ~17 minutes.
@@ -29,7 +34,9 @@ include their own server starts. Global setup adds ~15 s (plus ~1 minute the fir
 ## Prerequisites
 
 * Node 24, `pnpm install` done, Chromium for Playwright 1.56.1 available (`PLAYWRIGHT_BROWSERS_PATH`;
-  the suite never runs `playwright install`).
+  the suite never runs `playwright install`). For the Firefox / WebKit runs also those builds:
+  `pnpm --filter @sp/e2e exec playwright install firefox webkit` (on Linux add `--with-deps` once for their system
+  libraries, GStreamer included).
 * Postgres reachable at `postgres://postgres@127.0.0.1:5432` (trust auth, like the server's unit tests).
   The database **`proctor_e2e` is dropped and re-created on every run** (global setup refuses to reset a
   database whose name does not contain `e2e`).
@@ -89,6 +96,8 @@ scenarios through the HTTP hop, e.g. `E2E_VISION=remote … playwright test test
 | `E2E_SKIP_BUILD` | — | `1` = reuse `apps/web/dist` |
 | `E2E_WORKERS` | `2` | Parallel workers (each camera test launches its own Chromium) |
 | `E2E_HEADED` | — | `1` = headed candidate browsers |
+| `E2E_BROWSERS` | `chromium` | Playwright projects to define: `chromium`, `firefox`, `webkit`, comma-separated. Firefox and WebKit run only the `@cross-browser` scenarios; a plain run is the Chromium suite |
+| `E2E_CAMERA` | `device` | Chromium's candidate camera: `device` (Chromium's fake capture device plays the Y4M) or `shim` (the canvas camera shim, `lib/camera.ts`). Firefox and WebKit always use the shim |
 | `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD` | `owner@example.com` / `e2e-owner-password-1` | Bootstrap owner used by the tests |
 | `E2E_SERVER_LOG_LEVEL` | `info` | Server log level |
 | `E2E_DEBUG` | — | `1` = verbose liveness diagnostics (per-frame server verdicts) |
@@ -132,7 +141,7 @@ Fixtures (`lib/fixtures.ts`; times are seconds since the camera started):
 | `aDim` | A in a dim room (×0.44: brightness ~65, contrast ~17 — refused by identity v1, usable since webcam-v2.0) |
 | `darkThenLight` | A in a dark room 0–30 (×0.25: below the server gate's minimum brightness), then lit |
 | `darkPeriod` | A 0–50, dark room 50–90, then A |
-| `headturn` | A frontal 0–10, then cycles of turning left / right (`scripts/synth-headturn.ts`: synthetic nose-vs-eyes parallax + head translation) for the *passing* active-liveness path |
+| `headturn` | A frontal 0–15 (readiness and calibration happen in this time), then cycles of turning left / right (`scripts/synth-headturn.ts`: synthetic nose-vs-eyes parallax + head translation) for the *passing* active-liveness path |
 
 **Using your own images:** point `E2E_FACES_DIR` at a folder with the same file names (or edit the
 `STILLS` crops in `lib/fixtures.ts`). Requirements: A and B frontal (|yaw| < ~15°), well lit, one face each,
@@ -151,6 +160,70 @@ How the fake camera behaves (and how the tests rely on it):
   identity samples, which the server flags the same way. Both are **expected** in every session.
 * A camera fixture is a Chromium launch argument, so every camera test launches its own browser
   (`lib/candidate.ts` → `launchCamera`); new contexts in that browser share the same camera.
+
+## Browsers and camera modes
+
+Projects (`playwright.config.ts`, chosen with `E2E_BROWSERS`): `chromium` (default; every scenario), `firefox` and
+`webkit` (the scenarios tagged `@cross-browser`, i.e. `test(title, { tag: '@cross-browser' }, …)`):
+
+| Scenario | Why it represents the product in another browser |
+|---|---|
+| `01-happy-path` | consent, readiness, check-in, every question type, pause with the camera released, reopen, resume check, submit, report |
+| `03-liveness-photo` (still photo; turning head) | the guided head-turn check with the browser's own face landmarks, both outcomes |
+| `04-person-swap` | routine identity samples, the hold, release with a fresh check (camera re-opened) |
+| `08-browser-events` | page visibility and the real Fullscreen API (prefixed in older Safari) |
+| `09-offline` | offline banner, the IndexedDB outbox, late delivery with original timestamps |
+| `10-reconnect` | reload → reconnect check, a second browser takes over, the trace download |
+| `11-staff-ui` (reviewer role) | staff sign-in and navigation in the staff app |
+| `19-accommodations` (both) | a camera-only check with staff verification; an exam without any camera |
+
+Not cross-browser, with the reason: `14-accessibility` (the checker reads Chromium's accessibility tree over CDP),
+`11-staff-ui` main test (`page.pdf()` is Chromium-only), `03-liveness-photo` tampered client (a server-side check; the
+browser only drives the API), the dedicated-instance and staff-workflow scenarios (server behaviour, no
+browser-specific code), the realistic scenarios 20–24 (accuracy measurements, nightly in Chromium).
+
+**Camera modes** (`E2E_CAMERA`, `lib/camera.ts`): `device` = Chromium's `--use-file-for-fake-video-capture` (Chromium
+only); `shim` = an init script that replaces `navigator.mediaDevices.getUserMedia` / `enumerateDevices` with a
+`HTMLCanvasElement.captureStream()` track showing the frames of the **same Y4M file**. The test process reads frame *i*,
+converts it to RGB (BT.601, like the browser does for the device's frames) and passes it to the page as a JPEG (quality
+95) through a Playwright binding (no network request: it works offline and under the app's CSP), one second of video
+per call, three seconds ahead. Like the device: frame 0 at every camera open, the file's frame rate (5 fps), looping;
+tracks opened while another is live share its timeline and the camera closes with its last track (pause, hold,
+reconnect and re-verification re-open it at frame 0); the file's own size whatever the app asks for (constraints the
+file cannot meet — exact / min / max size, frame rate, deviceId, facingMode — fail with `OverconstrainedError`);
+`getSettings()` with a stable fake `deviceId`, size and frame rate; a label the engine reports as a fake camera
+(`camera_feed_suspect`, as with Chromium's device). A browser launched without a fixture (the `browser` fixture) has
+**no camera**: no `videoinput` device and `NotFoundError`. Differences: Chromium shares one device among all pages of a
+browser, the shim has one per page; Firefox's `media.navigator.streams.fake` (a test pattern) and WebKit's mock
+devices are not used. Firefox and WebKit contexts get no `camera` permission (Playwright has none to grant there; the
+shim needs none).
+
+On a loaded machine the shim's frames depend on the page's main thread (shared with MediaPipe), which the device's do
+not. The shim therefore decodes the first two seconds before `getUserMedia()` resolves (a camera's warm-up), keeps three
+seconds decoded ahead, and hides the `mute` events a browser fires on a canvas track that briefly got no new frame (a
+camera does not stop because the page is busy; Chromium did this ~2.5 s after the open while MediaPipe warmed up, and the
+app then disabled *Continue* for a moment). `window.__spFakeCamera.stats()` (and the `# camera shim` line of a test's
+`candidate-<n>.log`) gives the frames fetched, the mean / slowest fetch, the largest lag behind the clock and the hidden
+mute events.
+
+Measured with both modes in Chromium on a shared 4-vCPU machine (load average 4–16), shim vs device: identical
+server-side quality of the check frames (brightness 148, contrast 38.4–39.3, inter-eye distance 88–92 px); person swap
+held 65.5–66.9 s vs 63.2–67.3 s after the camera started (B appears at 60 s); readiness + calibration over 9–14 s vs
+9–10.5 s after the camera opened — hence the `headturn` fixture's 15 s frontal hold (it was 10 s, which already made the
+turning-head scenario borderline in device mode).
+
+Run Firefox / WebKit locally (after `playwright install firefox webkit`, see Prerequisites; the CI job runs exactly
+this with `E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1`):
+
+```bash
+E2E_BROWSERS=firefox pnpm --filter @sp/e2e exec playwright test --project=firefox
+E2E_BROWSERS=webkit pnpm --filter @sp/e2e exec playwright test --project=webkit tests/04-person-swap.spec.ts
+E2E_BROWSERS=chromium,firefox,webkit pnpm --filter @sp/e2e exec playwright test --grep @cross-browser   # all three
+```
+
+Status: the shim was developed and verified in Chromium (every `@cross-browser` scenario green in both camera modes);
+the Firefox and WebKit jobs had not run yet when it was written (no Firefox / WebKit builds in that environment) —
+see `docs/HANDOVER.md` §4 for what is and is not verified.
 
 ## Realistic webcam fixtures (scenarios 20–24)
 
@@ -270,7 +343,7 @@ the run id); `pnpm --filter @sp/e2e rw:report [-- --run <id> | --all]` prints th
   browser scenario.
 * The login endpoint allows 10 attempts/min per IP, so the staff API client logs in once per worker and
   staff pages reuse its cookie; only the UI-login tests type a password.
-* Test artifacts: `e2e/test-results/` (trace + screenshot on failure), server log in `e2e/.artifacts/`.
+* Test artifacts: `e2e/test-results/<test>-<project>/` (trace + screenshot on failure), server log in `e2e/.artifacts/`.
   Playwright traces cover the staff contexts only; candidate browsers are launched separately (the camera
   file is a launch argument), so their failures are diagnosed from the screenshot, the server log and the
   staff API state the tests assert on.

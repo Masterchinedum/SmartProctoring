@@ -17,6 +17,8 @@ import { expect, test } from '../lib/test';
  *     table, the event drawer and the image viewer are keyboard operable with proper semantics.
  *  b) phones / small screens and devices without a camera get a friendly notice (not a block); the
  *     welcome screen reflows at 320 px; prefers-reduced-motion stops animations; the staff sign-in page.
+ *
+ * Chromium-only (not @cross-browser): the checker reads Chromium's accessibility tree over CDP.
  */
 
 /** Simulated switch to another tab (see 08-browser-events): produces an integrity flag within seconds. */

@@ -12,7 +12,7 @@ import { expect, test } from '../lib/test';
  *  b) "No camera": the candidate takes the exam in a browser without a camera — no camera step, no camera opened —
  *     after a staff member verified them.
  */
-test('extra time and identity verified by staff, granted and verified in the staff app', async ({ staff, staffPage }) => {
+test('extra time and identity verified by staff, granted and verified in the staff app', { tag: '@cross-browser' }, async ({ staff, staffPage }) => {
   skipUnlessFixtures('a');
   const s = await staff.createSession({ durationSec: 1800 });
   const sp = await staffPage();
@@ -83,7 +83,7 @@ test('extra time and identity verified by staff, granted and verified in the sta
   }
 });
 
-test('no camera: the exam runs without opening a camera', async ({ staff, browser }) => {
+test('no camera: the exam runs without opening a camera', { tag: '@cross-browser' }, async ({ staff, browser }) => {
   const s = await staff.createSession({ durationSec: 900 });
   await staff.json<AccommodationDTO>('post', `/api/admin/candidates/${s.candidateId}/accommodations`, { kind: 'no_camera', basis: 'technical' });
   const c = await CandidatePage.open(browser, s.link);

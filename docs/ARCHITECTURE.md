@@ -367,6 +367,13 @@ whenever the server asks via `identitySample`), `server_request` / `follow_up`, 
 The two quick-swap triggers are rate-limited to one per 4 s (a trigger inside the window is deferred, not
 lost). Tuning evidence: packages/detection/src/engine/detectors/continuity.ts.
 
+Browser support. Nothing in the candidate app is Chromium-only: the camera uses `getUserMedia` with `ideal`
+constraints (an HD refusal retries in SD), the Permissions API for the camera is optional, MediaPipe loads its
+self-hosted WASM (SIMD or not) with the GPU delegate and falls back to CPU (CPU first on a software renderer),
+the outbox stores ArrayBuffers in IndexedDB, and fullscreen goes through `candidate/fullscreen.ts` (standard API,
+WebKit-prefixed fallback for Safari 16.0–16.3; "not supported" where neither exists, e.g. iPhone). The e2e suite
+runs every scenario in Chromium and the core ones in Firefox and WebKit with a camera shim (`e2e/README.md`).
+
 ## 6. Events, evidence, delivery
 
 * `EventUpsert` (client) is idempotent: primary key = episode UUID; server applies only if

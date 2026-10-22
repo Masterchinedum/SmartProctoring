@@ -8,7 +8,7 @@ import { expect, test } from '../lib/test';
  * type → pause (clock stops) → close the page → reopen the link in a new context → resume check →
  * answers, current question and remaining time preserved → submit → staff report.
  */
-test('happy path: check-in, answers, pause with browser closed, resume, submit, report', async ({ staff, staffPage }) => {
+test('happy path: check-in, answers, pause with browser closed, resume, submit, report', { tag: '@cross-browser' }, async ({ staff, staffPage }) => {
   skipUnlessFixtures('a');
   const s = await staff.createSession({ policy: { pause: { allowed: true, requireReason: false, requireApproval: false, timerBehavior: 'stop' } } });
   const browser = await launchCamera('a');
