@@ -303,7 +303,31 @@ export class CandidatePage {
           ? `analysis video: readyState ${v.readyState}, ${v.videoWidth}x${v.videoHeight}, ${v.paused ? 'paused' : 'playing'}, t=${v.currentTime.toFixed(1)}s, tracks [${tracks.map((t) => `${t.readyState} ${t.muted ? 'muted' : 'unmuted'} ${t.enabled ? 'enabled' : 'disabled'}`).join(', ')}]${v.error ? `, error ${v.error.code} ${v.error.message}` : ''}`
           : 'no analysis video';
         const cam = document.querySelector<HTMLCanvasElement>('canvas[data-sp-e2e-camera]');
-        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''} | ${video}${cam ? ` | shim canvas ${cam.width}x${cam.height}` : ''}`;
+        // What a 2D canvas reads from each (the app's analysis samples the video this way): mean / spread of luma.
+        const pixels = (src: CanvasImageSource | null) => {
+          if (!src) return '-';
+          try {
+            const c = document.createElement('canvas');
+            c.width = 64;
+            c.height = 48;
+            const g = c.getContext('2d')!;
+            g.drawImage(src, 0, 0, 64, 48);
+            const d = g.getImageData(0, 0, 64, 48).data;
+            let sum = 0;
+            let sq = 0;
+            for (let k = 0; k < d.length; k += 4) {
+              const y = 0.299 * d[k]! + 0.587 * d[k + 1]! + 0.114 * d[k + 2]!;
+              sum += y;
+              sq += y * y;
+            }
+            const n = d.length / 4;
+            const mean = sum / n;
+            return `mean ${mean.toFixed(0)} sd ${Math.sqrt(Math.max(0, sq / n - mean * mean)).toFixed(1)}`;
+          } catch (err) {
+            return `unreadable (${(err as Error).name})`;
+          }
+        };
+        return `${items.join('; ') || '(no items)'}${status.length ? ` | status: ${status.join(' / ').slice(0, 300)}` : ''} | ${video}, pixels ${pixels(v)}${cam ? ` | shim canvas ${cam.width}x${cam.height}, pixels ${pixels(cam)}` : ''}`;
       });
     } catch (e) {
       return `(unreadable: ${(e as Error).message.slice(0, 120)})`;

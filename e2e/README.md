@@ -96,6 +96,7 @@ scenarios through the HTTP hop, e.g. `E2E_VISION=remote … playwright test test
 | `E2E_SKIP_BUILD` | — | `1` = reuse `apps/web/dist` |
 | `E2E_WORKERS` | `2` | Parallel workers (each camera test launches its own Chromium) |
 | `E2E_HEADED` | — | `1` = headed candidate browsers |
+| `E2E_DELEGATE` | — | `gpu` / `cpu` = the candidate app's MediaPipe delegate (its `sp:delegate` switch); unset = the app's choice (CPU on a software renderer) |
 | `E2E_BROWSERS` | `chromium` | Playwright projects to define: `chromium`, `firefox`, `webkit`, comma-separated. Firefox and WebKit run only the `@cross-browser` scenarios; a plain run is the Chromium suite |
 | `E2E_CAMERA` | `device` | Chromium's candidate camera: `device` (Chromium's fake capture device plays the Y4M) or `shim` (the canvas camera shim, `lib/camera.ts`). Firefox and WebKit always use the shim |
 | `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD` | `owner@example.com` / `e2e-owner-password-1` | Bootstrap owner used by the tests |
@@ -212,8 +213,18 @@ held 65.5–66.9 s vs 63.2–67.3 s after the camera started (B appears at 60 s)
 9–10.5 s after the camera opened — hence the `headturn` fixture's 15 s frontal hold (it was 10 s, which already made the
 turning-head scenario borderline in device mode).
 
-Run Firefox / WebKit locally (after `playwright install firefox webkit`, see Prerequisites; the CI job runs exactly
-this with `E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1`):
+**In CI** (`e2e-browsers`, matrix `firefox` / `webkit`) the candidate browsers run **headed under Xvfb**
+(`E2E_HEADED=1`, `xvfb-run` with a 24-bit screen) and **one test at a time** (`E2E_WORKERS=1`): headless Firefox and
+WebKit on a runner without a GPU have no WebGL, which MediaPipe needs even on its CPU path; under Xvfb Mesa's software
+renderer provides it. Firefox also runs MediaPipe on its **GPU delegate** (`E2E_DELEGATE=gpu`, the app's own
+`sp:delegate` switch): on a software renderer the app picks the CPU delegate, whose WASM inference on the page's main
+thread starved the camera shim (frames 2–3 s late) and the clicks in headed Firefox; with the GPU delegate Firefox runs
+the work in its GPU process. The failure diagnostics (`candidate-<n>.log`, printed into the job log) end with the
+page's WebGL renderer, and a readiness check that never completes names each checklist item and the analysis video's
+state.
+
+Run Firefox / WebKit locally (after `playwright install firefox webkit`, see Prerequisites; the CI job runs the same
+with `E2E_NO_SKIP=1 E2E_SKIP_REALISTIC=1`, and on Linux without a GPU add `E2E_HEADED=1` under `xvfb-run`):
 
 ```bash
 E2E_BROWSERS=firefox pnpm --filter @sp/e2e exec playwright test --project=firefox
