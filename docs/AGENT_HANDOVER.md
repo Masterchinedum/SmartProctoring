@@ -107,17 +107,21 @@ Migrations are numbered in the order the items landed, not by item number (13 �
 
 ## 5. Loose ends (as of 2026-10-22)
 
-1. **CI**: on `fbf2e28` `test`, `docker`, `e2e` (Chromium) and `e2e-browsers (firefox)` are green; `e2e-browsers (webkit)` is
-   red. Check CI on the head first; a red Chromium / Firefox / unit / docker job comes before anything else.
+1. **CI**: `test`, `docker`, `e2e` (Chromium) and `e2e-browsers (firefox)` are green; WebKit is not fully green:
+   `e2e-webkit-macos` 9/10 (`d8adb14`), `e2e-browsers (webkit)` on Linux 6/10. Check CI on the head first; a red
+   Chromium / Firefox / unit / docker job comes before anything else.
 2. **WebKit job (red)**: Playwright's WebKit on Linux delivers the camera shim's canvas to the app's `<video>` only
    intermittently. History, all visible in the job logs' diagnostics (candidate logs end with the WebGL renderer; a
    readiness failure names each checklist item, the analysis video's state and whether video / canvas are changing):
    no WebGL headless → headed under Xvfb; MediaPipe "GLctx" → the app's OffscreenCanvas fix (`61c8eb7`); analysis video
    paused off-viewport → in the viewport (`e2afb6c`); video frozen on its first frame while the canvas changed →
    timer-driven `captureStream(fps)` from an opaque 64×48 px canvas (WebKit only, `e2e/lib/camera.ts`). Now the
-   readiness check passes everywhere and 6 of 10 scenarios pass; 01, 03b, 04, 09 fail from slow / uneven frames. Next
-   options (owner's call, `docs/ROADMAP.md` §4 item 7): a `macos-latest` runner for the WebKit matrix entry, or an
-   encoded-video camera source for WebKit. Do not skip or quarantine the WebKit scenarios to get green.
+   readiness check passes everywhere and 6 of 10 scenarios pass on Linux (slow / uneven frames). The new
+   `e2e-webkit-macos` job (headed, Postgres from Homebrew) needed the shim to supply `navigator.mediaDevices` and to sit
+   on `MediaDevices.prototype` (macOS WebKit hands the page another MediaDevices object, whose native getUserMedia
+   waits for a permission prompt); it then passed 9 of 10 — the failure was the staff browser's page crashing on a
+   reload in 04. Owner's call (`docs/ROADMAP.md` §4 item 7): make the macOS job the WebKit check and drop or demote the
+   Linux entry. Do not skip or quarantine the WebKit scenarios to get green.
    Firefox needed: headed under Xvfb, one worker, `E2E_DELEGATE=gpu` (CPU delegate WASM starved the main thread; in-process
    WebGL broke MediaPipe — keep `webgl.out-of-process` at its default).
 3. **Flakes fixed in tests only — watch whether they come back:**

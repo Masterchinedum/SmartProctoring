@@ -27,7 +27,7 @@ Status of the October 2026 roadmap carried by Masterchinedum/SmartProctoring#1 (
 | 17 | Data residency (evidence storage locations, `storage:move`) | Shipped | `c2ffcfc` | HANDOVER §3c, OPERATIONS §2 |
 | 18 | Dedicated vision worker | Shipped | `50dfea1` | HANDOVER §3c, PERFORMANCE §8 |
 | 19 | Chaos tests, upgrade tests from every migration, schema drift check, metrics | Shipped | `8cc8d45` | HANDOVER §3c, OPERATIONS §5, §7 |
-| 20 | Cross-browser e2e (Firefox, WebKit) | Shipped — Firefox green in CI; the WebKit job is not green yet (§2) | `b00c7c0`, CI follow-ups `6191103`…`fbf2e28` (app fixes `61c8eb7`, `e2afb6c`) | HANDOVER §3c and §4 item 3, e2e README |
+| 20 | Cross-browser e2e (Firefox, WebKit) | Shipped — Firefox green in CI; WebKit on macOS 9/10, on Linux 6/10 (§2) | `b00c7c0`, CI follow-ups `6191103`…`d8adb14` (app fixes `61c8eb7`, `e2afb6c`) | HANDOVER §3c and §4 item 3, e2e README |
 | 21 | This document, final verification, PR description | Done | (this commit) | §5 below |
 
 ## 2. Deferred, and why
@@ -58,7 +58,7 @@ liveness scope, phone detection) are in `HANDOVER.md` §4 and are unchanged by t
 | 20 Cross-browser | The accessibility scan (14) and the PDF report check (11) in Firefox / WebKit | Both use Chromium-only Playwright features (the accessibility tree over CDP, `page.pdf()`); they test the app's markup and the server's PDF, not the browser |
 | 20 Cross-browser | Dedicated-instance scenarios and the realistic accuracy scenarios (20–24) in Firefox / WebKit | They test server behaviour; the browser only drives it |
 | 20 Cross-browser | Real Safari and Firefox with a real webcam (their camera prompts) | Playwright's WebKit is Safari's engine, not Safari; the CI camera is a canvas shim. One manual pass per browser before launch (HANDOVER §4 item 3) |
-| 20 Cross-browser | **A green WebKit job.** It runs on every pull request; the readiness check now passes in every scenario and 6 of the 10 scenarios pass, but 01, 03b (turning head), 04 (swap held after 57 s, bound 45 s) and 09 still fail, differently from run to run | Playwright's WebKit on Linux delivers the camera shim's canvas to the app's video only intermittently: the video showed one frozen frame while the canvas changed (diagnostics in the job log); timer-driven capture and an opaque 64×48 px canvas made frames flow, but slowly and unevenly, so identity and head-turn checks retry. Safari on macOS has its own media stack, which this does not exercise. Options: run the WebKit job on a macOS runner (Safari's own media stack and a GPU; macOS minutes cost more), or give WebKit a different camera source (an encoded video file). Owner decision (§4 item 7) |
+| 20 Cross-browser | **A fully green WebKit check.** WebKit runs twice on every pull request. **On macOS** (`e2e-webkit-macos`, Apple's media stack) 9 of the 10 scenarios pass; in the one failure (04) the swap was held and released correctly, and then the *staff* browser's page crashed on a reload ("Page crashed", WebKit's web process) — to watch on the next runs. **On Linux** (`e2e-browsers`, WebKitGTK) 6 of 10 pass, a different four failing each run | Linux: Playwright's WebKit delivers the camera shim's canvas to the app's video only intermittently (one frozen frame while the canvas changed; slow, uneven frames after timer-driven capture), so identity and head-turn checks retry. macOS needed two shim fixes: WebKit there exposes no `navigator.mediaDevices` headless and hands the page a different `MediaDevices` object than the init script saw (the shim now also sits on `MediaDevices.prototype`). Recommendation: make the macOS job the WebKit check and drop or demote the Linux entry (owner decision, §4 item 7) |
 | 20 Cross-browser | Fullscreen on iPhone | iPhone Safari has no element fullscreen, so an exam that requires fullscreen cannot be taken there; the welcome-screen system check says so |
 
 ## 3. Decisions made on your behalf
@@ -158,12 +158,13 @@ All are documented where the feature is, and all can be changed. These are the o
    Options: lower the browser's capture target towards the server's (a liveness-strength decision), or accept that
    such a camera needs a second attempt / staff review. Needs a decision and a pilot on real webcams (HANDOVER §4
    item 1).
-7. **The WebKit CI job.** It is red (§2, item 20): run it on a macOS runner, give WebKit another camera source, or
-   keep it as a signal while the Linux build's canvas capture stays unreliable? Firefox and Chromium are green.
+7. **The WebKit CI jobs.** On macOS 9 of 10 scenarios pass (one staff-page crash in WebKit to watch); on Linux 6 of 10
+   (the Linux build's canvas capture is unreliable). Make the macOS job the WebKit check and remove the Linux entry, or
+   keep the Linux entry as a non-required signal? Firefox and Chromium are green.
 
 ## 5. Verification at the end of the roadmap
 
-At the end of the roadmap (head `fbf2e28`, the last code change; the commit adding this document changes documentation only):
+At the end of the roadmap (unit and browser suites on `fbf2e28`; the later commits change only the cross-browser test harness, CI, documentation and one code comment):
 
 * `pnpm run typecheck` (shared, detection, server, web) and the e2e typecheck: clean.
 * `pnpm test`: **1,509 tests** — shared 64, detection 169, server 881, web 395 — all pass, with the face images present
@@ -171,8 +172,9 @@ At the end of the roadmap (head `fbf2e28`, the last code change; the commit addi
 * Browser suite in Chromium, **everything** (84 tests: the core scenarios 01–19 and the 32 realistic-webcam scenarios
   20–24), run locally on the integrated roadmap (`b00c7c0`): **82 pass**. The 2 failures are the realistic liveness case
   of §4 item 6; it fails the same way at the PR's base commit `d4be596`.
-* CI on the head: `test` (typecheck + all unit tests), `docker` (image built and booted; a dedicated vision worker and
-  a remote-driver server probed), `e2e` (core scenarios 01–19 in Chromium) and `e2e-browsers (firefox)` (the ten
-  `@cross-browser` scenarios) **green**; `e2e-browsers (webkit)` **red** (§2, item 20).
+* CI: `test` (typecheck + all unit tests), `docker` (image built and booted; a dedicated vision worker and a
+  remote-driver server probed), `e2e` (core scenarios 01–19 in Chromium) and `e2e-browsers (firefox)` (the ten
+  `@cross-browser` scenarios) **green**; WebKit **not yet green**: `e2e-webkit-macos` 9/10 (`d8adb14`),
+  `e2e-browsers (webkit)` on Linux 6/10 (§2, item 20).
 * Not run here: the nightly workflow (it runs only from the default branch), real SMTP / S3 / identity-provider tenants
   (HANDOVER §4 items 5 and 10).

@@ -236,12 +236,17 @@ Status (see also `docs/HANDOVER.md` §4 item 3 and `docs/ROADMAP.md` §2):
 
 * **Chromium**: every `@cross-browser` scenario green in both camera modes.
 * **Firefox** (CI): all ten `@cross-browser` scenarios green.
-* **WebKit** (CI): not green yet. The readiness check passes in every scenario and 6 of the 10 pass; 01, 03b, 04 and 09
-  fail, differently from run to run. Playwright's WebKit on Linux delivers the shim's canvas to the app's video only
-  intermittently: with change-driven capture the video showed one frozen frame while the canvas changed (the readiness
-  failure reports both, read twice 600 ms apart); in WebKit the shim therefore captures at the fixture's frame rate
-  (`captureStream(fps)`) from an opaque 64×48 px canvas in the corner, which made frames flow but slowly and unevenly.
-  Candidates for a fix: a macOS runner, or an encoded-video camera source for WebKit.
+* **WebKit on macOS** (CI job `e2e-webkit-macos`, headed, Postgres from Homebrew): 9 of the 10 scenarios pass; the one
+  failure so far was the staff browser's page crashing on a reload in 04 (after the swap had been held and released
+  correctly). WebKit on macOS needed two shim changes: it exposes no `navigator.mediaDevices` headless, and it hands the
+  page a different `MediaDevices` object than the init script saw, so the shim also installs itself on
+  `MediaDevices.prototype` (the readiness failure reports whether the page's `getUserMedia` is native or the shim's,
+  and every camera request the shim received).
+* **WebKit on Linux** (`e2e-browsers`): 6 of 10 pass, a different four failing each run. Playwright's WebKitGTK delivers
+  the shim's canvas to the app's video only intermittently: with change-driven capture the video showed one frozen
+  frame while the canvas changed (the readiness failure reports both, read twice 600 ms apart); the shim therefore
+  captures at the fixture's frame rate (`captureStream(fps)`) from an opaque 64×48 px canvas in WebKit, which made
+  frames flow but slowly and unevenly.
 
 The first cross-browser runs also found two candidate-app problems, both fixed: MediaPipe's OffscreenCanvas could not
 hold WebGL 2 in WebKitGTK (detection threw "GLctx" on every frame; the app now gives MediaPipe a regular canvas
