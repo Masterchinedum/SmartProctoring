@@ -14,6 +14,9 @@
  *   GET  /exams/:id/sessions                 -> { items: SessionSummaryDTO[] }           [reviewer]
  *   POST /exams/:id/assignments {candidateIds, window?} -> { items: AssignmentDTO[] }    [admin]  (window: services/scheduling.ts)
  *
+ * Quotas (services/quotas.ts): creating or importing an exam, publishing an archived one again and assignments that
+ * create sessions answer 409 quota_exceeded at the organisation's limit (nothing is created).
+ *
  * Versions (services/exam-versions.ts). Publishing an exam, and every later edit of a published exam, writes an
  * immutable version; an attempt keeps the version it started with (questions, options, answer keys, points). An edit
  * therefore never reaches a candidate who already started, and the content can be edited freely — questions added,
@@ -51,6 +54,7 @@ import { listVersions, loadVersion, recordExamVersion, snapshotOf, totalPoints, 
 import { createExam, loadQuestions } from '../../services/exams.js';
 import { regradeExam } from '../../services/regrade.js';
 import { mergePolicy } from '../../services/org.js';
+import { assertExamQuota, assertSessionQuota, recordSessionsCreated } from '../../services/quotas.js';
 import { createExamSession } from '../../services/session-actions.js';
 import { idParam, loadOrgRow, sanitizePolicyInput } from './common.js';
 
@@ -296,6 +300,7 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
     const input = normaliseExamInput(examInputSchema.parse(req.body ?? {}), org);
     const now = ctx.now();
     const exam = await ctx.db.transaction(async (tx) => {
+      await assertExamQuota(tx, staff.orgId, 1, now);
       const { exam: created } = await createExam(tx, staff.orgId, { ...input, questions: input.questions.map(({ id: _id, ...q }) => q) }, { createdBy: staff.id, status: 'draft', now });
       await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'exam.created', targetType: 'exam', targetId: created.id, meta: { title: created.title, questions: input.questions.length }, ip: req.ip, at: now });
       return created;
@@ -310,6 +315,7 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
     const input = normaliseExamInput(doc.exam, org);
     const now = ctx.now();
     const exam = await ctx.db.transaction(async (tx) => {
+      await assertExamQuota(tx, staff.orgId, 1, now);
       const { exam: created } = await createExam(tx, staff.orgId, { ...input, questions: input.questions.map(({ id: _id, ...q }) => q) }, { createdBy: staff.id, status: 'draft', now });
       await audit(tx, { orgId: staff.orgId, actorType: 'staff', actorId: staff.id, action: 'exam.imported', targetType: 'exam', targetId: created.id, meta: { title: created.title, questions: input.questions.length, source: doc.source ?? null }, ip: req.ip, at: now });
       return created;
@@ -356,6 +362,8 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
     const exam = await ctx.db.transaction(async (tx) => {
       const cur = await loadScopedExam(tx, staff.orgId, id, true);
       if (cur.status === status) return cur;
+      // An archived exam does not count against the exam limit; bringing it back does.
+      if (cur.status === 'archived') await assertExamQuota(tx, staff.orgId, 1, now);
       if (status === 'published') {
         // Re-validate what is stored (it may predate current validation rules).
         mergePolicy(org.settings?.defaultPolicy as Record<string, unknown> | undefined, cur.policy as Record<string, unknown>);
@@ -469,6 +477,7 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
       const existingByCandidate = new Map<string, (typeof current)[number]>();
       for (const s of current) if (!existingByCandidate.has(s.candidateId)) existingByCandidate.set(s.candidateId, s);
 
+      await assertSessionQuota(tx, staff.orgId, requested.filter((c) => !existingByCandidate.has(c)).length, now);
       const out: AssignmentDTO[] = [];
       let created = 0;
       for (const candidateId of requested) {
@@ -481,6 +490,7 @@ export const examRoutes: FastifyPluginAsync = async (app) => {
         out.push({ sessionId: s.session.id, candidateId, candidateName: names.get(candidateId)!, accessLink: s.accessLink, existing: false, window });
         created++;
       }
+      await recordSessionsCreated(tx, staff.orgId, created, now);
       await audit(tx, {
         orgId: staff.orgId,
         actorType: 'staff',

@@ -10,6 +10,7 @@ import { ErrorState, Loading, PageHeader } from '../components/Common';
 import { PolicyEditor } from '../components/PolicyEditor';
 import { EvidenceStorageSection } from './EvidenceStorageSection';
 import { SingleSignOnSection } from './SsoSection';
+import { QUOTA_LEVEL_CLASS, QUOTA_LEVEL_TEXT, usageFootnote, usageRow, usageWarnings } from '../lib/quotas';
 
 export function SettingsPage() {
   const q = useQuery({ queryKey: qk.settings, queryFn: api.settings, retry: shouldRetry });
@@ -17,12 +18,83 @@ export function SettingsPage() {
   if (q.isError) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
   return (
     <div className="stack">
+      <PageHeader
+        title="Settings"
+        subtitle="Organisation-wide defaults. Individual exams can override the proctoring policy and evidence retention."
+        actions={
+          <Link className="btn" to="/admin/integrations">
+            Integrations: API keys, webhooks, email alerts, face verifier ›
+          </Link>
+        }
+      />
+      <UsageSection />
       <SettingsForm key={JSON.stringify(q.data)} initial={q.data} />
       <ReviewTargetsSection key={`sla-${JSON.stringify(q.data.reviewSla)}`} settings={q.data} />
       <SecuritySection settings={q.data} />
       <EvidenceStorageSection />
       <SingleSignOnSection />
     </div>
+  );
+}
+
+/**
+ * Usage this month against the limits the server operator set (exams, candidates, exam sessions per month), with a
+ * warning from 80 %. Read-only: the organisation's kind and limits are not staff settings.
+ */
+function UsageSection() {
+  const q = useQuery({ queryKey: qk.usage, queryFn: api.usage, retry: shouldRetry });
+  return (
+    <section className="card stack" aria-labelledby="usage-title" data-testid="settings-usage">
+      <h2 id="usage-title">Usage and limits</h2>
+      {q.isPending ? (
+        <Loading />
+      ) : q.isError ? (
+        <ErrorState error={q.error} onRetry={() => void q.refetch()} />
+      ) : (
+        <>
+          {q.data.kind === 'sandbox' ? (
+            <p className="small" data-testid="usage-sandbox">
+              This is a <strong>sandbox</strong> organisation for trying SmartProctoring out and testing integrations: exam sessions, images and candidates are deleted{' '}
+              {q.data.sandbox ? `${q.data.sandbox.purgeAfterDays} days` : 'a few days'} after their last use. Do not use it for real candidates.
+            </p>
+          ) : null}
+          {usageWarnings(q.data).map((w) => (
+            <div key={w} className={`banner ${w.startsWith('Limit reached') ? 'banner-danger' : 'banner-warning'} small`} data-testid="usage-warning">
+              {w}
+            </div>
+          ))}
+          <table className="table usage-table">
+            <thead>
+              <tr>
+                <th scope="col">What</th>
+                <th scope="col">Used</th>
+                <th scope="col">
+                  <span className="visually-hidden">Share of the limit</span>
+                </th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {q.data.quotas.map(usageRow).map((r) => (
+                <tr key={r.quota} data-testid={`usage-${r.quota}`}>
+                  <th scope="row">{r.label}</th>
+                  <td>{r.text}</td>
+                  <td className="usage-bar-cell">
+                    {r.percent != null ? (
+                      <div className={`usage-bar level-${r.level}`} aria-hidden="true">
+                        <span style={{ width: `${r.percent}%` }} />
+                      </div>
+                    ) : null}
+                  </td>
+                  <td>{r.percent != null ? <span className={QUOTA_LEVEL_CLASS[r.level]}>{QUOTA_LEVEL_TEXT[r.level]}</span> : <span className="muted small">No limit</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="small muted">{usageFootnote(q.data)}</p>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -205,15 +277,6 @@ function SettingsForm({ initial }: { initial: OrgSettingsDTO }) {
         if (!hasErrors) m.mutate();
       }}
     >
-      <PageHeader
-        title="Settings"
-        subtitle="Organisation-wide defaults. Individual exams can override the proctoring policy and evidence retention."
-        actions={
-          <Link className="btn" to="/admin/integrations">
-            Integrations: API keys, webhooks, email alerts, face verifier ›
-          </Link>
-        }
-      />
       <section className="card stack">
         <h2>Organisation</h2>
         <div className="grid-2">

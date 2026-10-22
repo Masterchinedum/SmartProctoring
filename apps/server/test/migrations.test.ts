@@ -23,6 +23,7 @@ import {
   exams,
   examVersions,
   organizations,
+  orgUsage,
   privacyRequests,
   staffSessions,
   staffSsoIdentities,
@@ -41,6 +42,8 @@ import { MemoryStorage } from '../src/lib/storage.js';
 import { readEvidence } from '../src/services/evidence.js';
 import { assertStorageLocationsConfigured, evidenceCountsByLocation, evidenceLocationsInUse } from '../src/services/evidence-storage.js';
 import { orgSettings } from '../src/services/org.js';
+import { assertSessionQuota, effectiveQuotas, orgUsageDTO, recordSessionsCreated } from '../src/services/quotas.js';
+import { runSandboxPurge } from '../src/services/sandbox-purge.js';
 import { sessionWindow, windowColumns } from '../src/services/scheduling.js';
 import { sessionExamContent, versionForStart } from '../src/services/exam-versions.js';
 import { dbUrl, TEST_ADMIN_URL } from './global-setup.js';
@@ -405,5 +408,52 @@ describe('0016_sso_scim', () => {
     expect(linked).toMatchObject({ created: false, linked: true });
     expect(linked.user.id).toBe(user);
     expect(await db.select().from(staffSsoIdentities)).toHaveLength(1);
+  });
+});
+
+describe('0017_sandbox_quotas', () => {
+  it('makes existing organisations production without limits (never touched by the sandbox clean-up); usage counting starts empty', async () => {
+    const database = await databaseAt('0016_sso_scim');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    const org = (await one(`INSERT INTO organizations (name, settings) VALUES ('Old Org', '{"evidenceRetentionDays": 10}') RETURNING id`)).id;
+    const cand = (await one(`INSERT INTO candidates (org_id, name, created_at, updated_at) VALUES ($1, 'Old Candidate', now() - interval '400 days', now() - interval '400 days') RETURNING id`, [org])).id;
+    const exam = (await one(`INSERT INTO exams (org_id, title, duration_sec, status, policy) VALUES ($1, 'Old', 600, 'published', '{}') RETURNING id`, [org])).id;
+    const ended = (
+      await one(
+        `INSERT INTO exam_sessions (org_id, exam_id, candidate_id, access_token_hash, duration_ms, status, ended_at, created_at, updated_at) VALUES ($1, $2, $3, 'h1', 600000, 'submitted', now() - interval '300 days', now() - interval '301 days', now() - interval '300 days') RETURNING id`,
+        [org, exam, cand],
+      )
+    ).id;
+
+    await migrate(database);
+
+    const db = database.db;
+    const [row] = await db.select().from(organizations).where(eq(organizations.id, org));
+    expect(row).toMatchObject({ kind: 'production', quotas: {}, sandboxPurgeDays: null, settings: { evidenceRetentionDays: 10 } });
+    expect(effectiveQuotas(row)).toEqual({ exams: null, candidates: null, sessionsPerMonth: null });
+    expect(await db.select().from(orgUsage)).toEqual([]);
+    const now = Date.now();
+    const usage = await orgUsageDTO(db, row, now);
+    expect(usage).toMatchObject({ kind: 'production', sandbox: null });
+    expect(usage.quotas.map((q) => [q.quota, q.limit, q.used])).toEqual([
+      ['exams', null, 1],
+      ['candidates', null, 1],
+      ['sessionsPerMonth', null, 0],
+    ]);
+    // No limit: any number of sessions may be created, and they are counted from now on.
+    await db.transaction(async (tx) => {
+      await assertSessionQuota(tx, org, 10_000, now);
+      await recordSessionsCreated(tx, org, 3, now);
+    });
+    expect((await orgUsageDTO(db, row, now)).quotas[2].used).toBe(3);
+    // The sandbox clean-up does not select it, however old its data.
+    const purge = await runSandboxPurge({ db, storage: new MemoryStorage(), keyring: createKeyring(randomBytes(32)), now: () => now, log: { error: () => undefined } as never }, { now: now + 3650 * 24 * 3600_000 });
+    expect(purge.organisations).toEqual([]);
+    expect(await db.select().from(examSessions).where(eq(examSessions.id, ended))).toHaveLength(1);
+    // Only the two kinds exist.
+    await expect(sql(`UPDATE organizations SET kind = 'trial' WHERE id = $1`, [org])).rejects.toThrow(/organizations_kind_check/);
+    const fresh = (await one(`INSERT INTO organizations (name) VALUES ('New Org') RETURNING kind, quotas, sandbox_purge_days`));
+    expect(fresh).toEqual({ kind: 'production', quotas: {}, sandbox_purge_days: null });
   });
 });

@@ -14,7 +14,9 @@ reverse proxy (camera access requires HTTPS in browsers) and set `PUBLIC_URL`, `
 `COOKIE_SECURE=true`. WebSockets must be proxied for `/api/admin/live`.
 
 Database migrations run automatically at start-up. On first start, if no staff user exists, the
-organisation owner is created from `BOOTSTRAP_ADMIN_*`.
+organisation owner is created from `BOOTSTRAP_ADMIN_*`. Further organisations — production tenants or **sandbox**
+organisations for trials and integration testing — and their quotas are created and changed with the operator CLI
+(§9).
 
 **Dedicated vision workers** (optional, §2): face analysis in separate `vision` containers of the same image, scaled
 on their own. Set `VISION_WORKER_TOKEN` in `.env` (`openssl rand -hex 32`), then
@@ -326,7 +328,7 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_db_pool_acquire_seconds` (histogram) | how long requests wait for a pooled Postgres connection (opening a new one included): saturation shows here before requests queue |
   | `sp_db_connection_errors_total{kind}` | `connect`: a connection could not be opened (Postgres down, refusing connections, max_connections reached); `lost`: an open connection was closed by Postgres or the network (restart, failover, killed session) — each request it was serving failed with 500 and was retried by the client |
   | `sp_staff_websockets` | open staff dashboards |
-  | `sp_job_runs_total{job,result}`, `sp_job_duration_seconds`, `sp_job_last_success_timestamp_seconds` `{job}` | background jobs (`retention`, `webhooks`, `email-alerts`, `abandoned-sessions`, `api-idempotency`, `sweeper`): ok / failed / skipped (another instance ran it) |
+  | `sp_job_runs_total{job,result}`, `sp_job_duration_seconds`, `sp_job_last_success_timestamp_seconds` `{job}` | background jobs (`retention`, `webhooks`, `email-alerts`, `abandoned-sessions`, `api-idempotency`, `sandbox-purge`, `sweeper`): ok / failed / skipped (another instance ran it) |
   | `sp_retention_failures_total` | sessions retention could not purge (retried next hour) |
   | `sp_evidence_storage_errors_total{op,location}` | evidence store put / get / delete failures (disk, S3), per storage location (§2) |
   | `sp_evidence_storage_seconds{op,location}` (histogram) | evidence store latency per operation and storage location (failures included); a check frame or identity sample holds its database transaction while its image is written |
@@ -338,6 +340,7 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_cluster_job_last_success_timestamp_seconds{job}`, `sp_cluster_job_last_run_failed{job}` | background jobs that record their runs in the database (`retention`): the last success on any instance (kept across restarts, unlike `sp_job_last_success_timestamp_seconds`), and whether the last run failed — Privacy → Deletion schedule shows the same |
   | `sp_cluster_retention_overdue_sessions`, `sp_cluster_retention_overdue_oldest_seconds` | ended sessions whose images are past their deletion date and still stored (legal holds excluded), and how long the oldest is overdue — Privacy → Operational checks "Deletion on schedule" |
   | `sp_cluster_privacy_requests_open{kind}`, `sp_cluster_privacy_requests_overdue` | data-subject requests open or in progress, by kind, and those past their response deadline |
+  | `sp_cluster_organizations_at_quota{quota,level}` | organisations at (`level="reached"`) or near (`"warning"`, from 80 %) a quota (`exams`, `candidates`, `sessionsPerMonth`) — a customer will soon be refused, or is (§9) |
   | `sp_cluster_metrics_up` | 0 = the `sp_cluster_*` values could not be read in this scrape |
   | `process_*`, `nodejs_*` | CPU, memory, heap, GC, event-loop lag |
 
@@ -626,6 +629,21 @@ its image is written, so a slow disk or S3 endpoint slows check-ins and can exha
 volume (I/O wait, nearly full disk) or the S3 endpoint's latency and throttling (region, VPC endpoint, request
 rate); `sp_evidence_storage_errors_total` rising alongside means it is failing, not only slow.
 
+**A customer hit a quota** (staff see "… can have at most N candidates", "This would create N exam sessions, but only
+M more can be created this month…"; integrations get `409 quota_exceeded` with `details: { quota, limit, used,
+requested, resetsAt }`; `sp_cluster_organizations_at_quota{level="reached"}`; nothing was created). Look at the
+organisation's usage: `pnpm --filter @sp/server org:list` (or Settings → *Usage and limits* in their staff app).
+* *Exams*: archived exams do not count — they can archive exams they no longer use.
+* *Candidates*: deleting candidates who are no longer needed frees places (a sandbox also deletes unused ones
+  automatically after its clean-up period).
+* *Exam sessions this month*: sessions count in the calendar month (UTC) they were **created** in; deleting candidates
+  or sessions does not give them back. The count starts again at 00:00 UTC on the 1st (the message gives the date).
+* To raise a limit (after checking the contract or the trial's terms):
+  `pnpm --filter @sp/server org:set -- --org <id> --sessions-per-month 500 --reason "Ticket 123"` (`unlimited` removes
+  the limit, `default` returns to the kind's default). It applies to the next request; the change is in the
+  organisation's audit log (`organization.updated`, actor *system*). A sandbox that becomes a customer:
+  `org:set -- --org <id> --kind production --reset-quotas` (the clean-up stops for it at once).
+
 **An API key was leaked.** Integrations → API keys → **Revoke** (effective immediately), create a new key with the
 same access and deploy it. The audit log (actor “API key ‘name’”, actions `api.*`) shows what the key did.
 
@@ -671,7 +689,7 @@ for a different request within 24 hours — it must send a new key per new reque
 
 Background jobs (advisory-lock guarded, one instance at a time): `webhooks` every 5 s (plus immediately
 after a change), `email-alerts` every 10 s, `abandoned-sessions` hourly, `api-idempotency` hourly (deletes stored
-`Idempotency-Key` responses older than 24 hours). Webhook attempts have a 10 s
+`Idempotency-Key` responses older than 24 hours), `sandbox-purge` hourly (sandbox organisations only, §9). Webhook attempts have a 10 s
 timeout and are retried after 30 s, 1 min, 2 min, 5 min, 15 min, 30 min, 1 h, 2 h and 6 h (10 attempts).
 Delivery records and queued alert emails contain candidate names and are deleted after 30 days.
 Customer-facing documentation of the API and webhooks: `docs/INTEGRATION_API.md`; the OpenAPI 3.1 document is served
@@ -685,3 +703,79 @@ the external face verifier, to `rekognition.<region>.amazonaws.com`; with OpenID
 identity providers' issuer, JWKS and token endpoints — SAML needs no outbound call). Webhook requests come
 from the server's own IP with `User-Agent: SmartProctoring-Webhooks/1.0`. Nothing else calls out: the face-analysis
 runtime's own usage telemetry (onnxruntime) is switched off (`ORT_DISABLE_TELEMETRY=1`, set by the server when unset).
+
+## 9. Organisations: sandbox and quotas
+
+Every organisation is a **production** organisation (the default, and every organisation that existed before this
+feature) or a **sandbox**: a tenant for trying SmartProctoring out and for testing integrations, **not for real
+candidates**. Only the server operator creates organisations and sets their kind and quotas — staff see them
+(Settings → *Usage and limits*) but cannot change them.
+
+A sandbox is marked everywhere: a permanent banner in the staff app ("Sandbox — data is deleted after 14 days; not
+for real candidates"), a *Practice environment* notice on the candidate's welcome screen, `[SmartProctoring sandbox]`
+and a first line in alert emails, and `"sandbox": true` in every webhook envelope (`docs/INTEGRATION_API.md` §3).
+
+**Quotas** (per organisation; `null` = no limit):
+
+| Quota | Counts | Production default | Sandbox default |
+|---|---|---|---|
+| `exams` | exams that are not archived (drafts and published) | no limit | 5 |
+| `candidates` | candidate records | no limit | 50 |
+| `sessionsPerMonth` | exam sessions **created** in the calendar month, in **UTC** (assignments in the staff app and the integration API; an assignment that returns a candidate's existing session does not count; deleted sessions still count) | no limit | 100 |
+
+They are enforced when an exam is created, imported or published again from the archive, when a candidate is
+created (staff app or `POST /api/v1/candidates`; updating an existing one is always allowed), and when an assignment
+creates sessions (a batch is accepted whole or refused whole). Checks run under a per-organisation lock, so parallel
+requests cannot exceed a limit. A refusal is HTTP 409 `quota_exceeded` with a plain-language message. The monthly
+session count is kept per month in `org_usage` (a counter, also kept for organisations without limits, so Settings
+shows usage and a limit set mid-month counts what was already created). Counting started with the upgrade that
+introduced it: sessions created earlier in that month are not counted.
+
+**Creating an organisation** (with the servers' environment; in the Docker image `node dist/scripts/org.js create …`):
+
+```bash
+pnpm --filter @sp/server org:create -- --name "Acme University (trial)" --kind sandbox \
+  --owner-email it-admin@acme.example --owner-name "Pat Admin" --reason "Trial, ticket 123"
+# optional: --candidates 20 --sessions-per-month 50 --exams 3 (or unlimited) --purge-after-days 7 --json
+```
+
+It prints the organisation (id, kind, limits) and the first owner's **temporary password, once** — hand it over
+through a trusted channel; the owner signs in at the staff app and changes it on their account page (and sets up
+two-step sign-in). An address can belong to one organisation only (exit 4 if it is taken). Without `--kind` the
+organisation is production without limits.
+
+**Changing kind, quotas or the clean-up period**:
+
+```bash
+pnpm --filter @sp/server org:list                      # every organisation with its kind, limits and usage (--json)
+pnpm --filter @sp/server org:set -- --org <id> --candidates 200 --sessions-per-month unlimited --reason "Ticket 124"
+pnpm --filter @sp/server org:set -- --org <id> --exams default        # back to the kind's default
+pnpm --filter @sp/server org:set -- --org <id> --kind production --reset-quotas   # a trial becomes a customer
+pnpm --filter @sp/server org:set -- --org <id> --kind sandbox --confirm-purge     # see the warning below
+```
+
+Each change is audited in the organisation's audit log (`organization.created` / `organization.updated`, actor
+*system*, with `--reason`) and applies to the next request on every instance. **Turning a production organisation
+into a sandbox deletes its data**: the next clean-up deletes every session, image and candidate not used for the
+clean-up period — so `org:set` refuses it without `--confirm-purge` (exit 3). Exit codes: 0 done, 2 bad arguments,
+3 confirmation needed, 4 unknown organisation.
+
+**Sandbox clean-up** (job `sandbox-purge`, hourly on a server with background jobs; `sandbox:purge` by hand). For each
+sandbox organisation, data not used for its clean-up period (`--purge-after-days`, default 14):
+* exam sessions that ended before the cut-off, and unfinished ones without activity since (last change, heartbeat,
+  hold, scheduling window) — their images and face templates first (each image in the storage location its row
+  records, §2), then the records (events, answers, checks, notes, reviews…);
+* candidates left without any session, created and last changed before the cut-off (with their approved ID photo).
+
+Kept: sessions under **legal hold** (and so their candidates; listed in the run's audit entry), exams (configuration;
+the exam quota limits them), staff accounts, API keys, webhooks, the privacy register and the audit log. Production
+organisations are never touched. Each run that deleted (or kept for a legal hold) something writes a `sandbox.purge`
+audit entry to the organisation with the counts; every real run is recorded in `job_status`, and a sandbox's
+**Privacy → Operational checks** shows *Sandbox clean-up* (warning after 3 hours without a successful run, failing on
+an error). By hand (holds the same lock as the job; safe while the servers run):
+
+```bash
+pnpm --filter @sp/server sandbox:purge -- --dry-run          # what would be deleted (all sandboxes; --org <id> for one, --json)
+pnpm --filter @sp/server sandbox:purge                       # exit 3 when some images could not be deleted (retried next run), 75 when a run is in progress
+```
+

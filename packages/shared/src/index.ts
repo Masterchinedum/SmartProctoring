@@ -19,3 +19,4 @@ export * from './residency';
 export * from './scheduling';
 export * from './openapi';
 export * from './sso';
+export * from './quotas';

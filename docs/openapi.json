@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "SmartProctoring Integration API",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Connect an LMS, HR system or other back office: list exams, create or update candidates, assign them to exams (you receive their personal exam links), and read attempts, final reports and event lists. Webhooks (notifications we send to you) are described in docs/INTEGRATION_API.md §3.\n\nConventions: JSON in and out; timestamps are epoch milliseconds (UTC); errors are `{ error, message, details? }` with a specific `error` code; lists take `limit` / `offset`. Responses may gain new fields at any time: ignore fields you do not know.\n\nPrivacy: responses never contain images, face templates or face-similarity scores; evidence stays behind staff sign-in (`staffUrl` links)."
   },
   "servers": [
@@ -253,7 +253,7 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "409": {
-            "description": "Conflict: `idempotency_key_in_use` — a request with this Idempotency-Key is still being processed: retry after `Retry-After` seconds.",
+            "description": "Conflict: `quota_exceeded`; `idempotency_key_in_use` — a request with this Idempotency-Key is still being processed: retry after `Retry-After` seconds.",
             "headers": {
               "Retry-After": {
                 "$ref": "#/components/headers/RetryAfter"
@@ -499,7 +499,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `exam_not_published` — the exam is a draft or archived; `idempotency_key_in_use` — a request with this Idempotency-Key is still being processed: retry after `Retry-After` seconds.",
+            "description": "Conflict: `exam_not_published` — the exam is a draft or archived; `quota_exceeded`; `idempotency_key_in_use` — a request with this Idempotency-Key is still being processed: retry after `Retry-After` seconds.",
             "headers": {
               "Retry-After": {
                 "$ref": "#/components/headers/RetryAfter"

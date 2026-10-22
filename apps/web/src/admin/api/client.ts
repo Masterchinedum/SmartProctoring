@@ -40,6 +40,8 @@ import type {
   NoteDTO,
   OpsChecksDTO,
   OrgSettingsDTO,
+  OrgUsageDTO,
+  StaffOrgDTO,
   MfaChallengeResponse,
   Paged,
   CreatePrivacyRequest,
@@ -194,7 +196,8 @@ const enc = encodeURIComponent;
 
 export interface MeResponse {
   user: StaffUserDTO;
-  org: { id: string; name: string };
+  /** kind / sandbox may be missing from older servers (treated as production). */
+  org: Pick<StaffOrgDTO, 'id' | 'name'> & Partial<Pick<StaffOrgDTO, 'kind' | 'sandbox'>>;
   security: StaffSecurityDTO;
 }
 
@@ -308,6 +311,8 @@ export const api = {
   ) => request<OrgSettingsDTO>('PUT', `${A}/settings`, { body: patch }),
   /** Storage locations, the organisation's choice for new images and its images per location (owner changes it via updateSettings). */
   evidenceStorage: () => request<EvidenceStorageDTO>('GET', `${A}/evidence-storage`),
+  /** Usage this month against the limits the server operator set (sandbox / quotas). */
+  usage: () => request<OrgUsageDTO>('GET', `${A}/usage`),
   users: () => request<{ items: StaffUserDTO[] }>('GET', `${A}/users`),
   createUser: (input: { email: string; name: string; role: StaffRole; password: string }) => request<StaffUserDTO>('POST', `${A}/users`, { body: input }),
   updateUser: (id: string, patch: { name?: string; role?: StaffRole; disabled?: boolean; password?: string }) =>

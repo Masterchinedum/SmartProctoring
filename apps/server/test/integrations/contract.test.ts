@@ -23,7 +23,8 @@ import {
 import Fastify, { type InjectOptions, type LightMyRequestResponse } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ZodFirstPartyTypeKind as K, type ZodTypeAny } from 'zod';
-import { apiIdempotencyKeys } from '../../src/db/schema.js';
+import { eq, sql } from 'drizzle-orm';
+import { apiIdempotencyKeys, candidates, organizations } from '../../src/db/schema.js';
 import { idempotencyRequestHash } from '../../src/services/idempotency.js';
 import { integrationApiRoutes } from '../../src/routes/v1/index.js';
 import { clientEvent, json, MIN, screenshot, staffApi, type Api } from '../admin/fixtures.js';
@@ -292,6 +293,18 @@ describe('every endpoint answers as documented', () => {
     const archived = await env.newExam({ title: 'Contract archived' });
     json(await admin.post(`/exams/${archived.exam.id}/archive`));
     expect((await call('assignCandidates', { params: [archived.exam.id], body: { externalIds: ['C-1'] } })).json().error).toBe('exam_not_published');
+  });
+
+  it('quota_exceeded on upsertCandidate and assignCandidates (the organisation’s limits, services/quotas.ts)', async () => {
+    const [{ n }] = await env.ctx.db.select({ n: sql<number>`count(*)::int` }).from(candidates).where(eq(candidates.orgId, env.org.id));
+    await env.ctx.db.update(organizations).set({ quotas: { candidates: n, sessionsPerMonth: 0 } }).where(eq(organizations.id, env.org.id));
+    try {
+      expect((await call('upsertCandidate', { body: { name: 'Over the limit' } })).json().error).toBe('quota_exceeded');
+      const { exam } = await env.newExam({ title: 'Contract quota' });
+      expect((await call('assignCandidates', { params: [exam.id], body: { externalIds: ['C-1'] } })).json().error).toBe('quota_exceeded');
+    } finally {
+      await env.ctx.db.update(organizations).set({ quotas: {} }).where(eq(organizations.id, env.org.id));
+    }
   });
 
   it('listSessions', async () => {

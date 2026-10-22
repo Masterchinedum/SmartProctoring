@@ -6,6 +6,7 @@
  *        (externalVerifier takes ExternalVerifierUpdate: write-only key pair, see src/verifiers/settings.ts;
  *         requireMfa, requireSso and evidenceLocation: owner only)
  *   GET  /evidence-storage                          -> EvidenceStorageDTO           [admin]
+ *   GET  /usage                                     -> OrgUsageDTO                  [admin]  (kind and quotas: operator-only, services/quotas.ts)
  *   GET  /users                                     -> { items: StaffUserDTO[] }    [admin]
  *   POST /users {email,name,role,password}          -> StaffUserDTO                 [admin; only an owner may create owners/admins]
  *   PUT  /users/:id {name?,role?,disabled?,password?} -> StaffUserDTO               [admin]
@@ -25,6 +26,7 @@ import {
   type AuditLogEntryDTO,
   type EvidenceStorageDTO,
   type OrgSettingsDTO,
+  type OrgUsageDTO,
   type Paged,
   type StaffRole,
 } from '@sp/shared';
@@ -40,6 +42,7 @@ import { badRequest, conflict, forbidden, notFound, validationFailed } from '../
 import { toStaffUserDTO } from '../../services/dto.js';
 import { evidenceStorageSummary } from '../../services/evidence-storage.js';
 import { mergePolicy, orgSettings } from '../../services/org.js';
+import { orgUsageDTO } from '../../services/quotas.js';
 import { clearLoginFailures } from '../../services/login-throttle.js';
 import { disableMfa } from '../../services/mfa.js';
 import { notifySecurityChange } from '../../services/security-notices.js';
@@ -220,6 +223,12 @@ export const orgRoutes: FastifyPluginAsync = async (app) => {
   app.get('/evidence-storage', admin, async (req): Promise<EvidenceStorageDTO> => {
     const staff = getStaff(req);
     return evidenceStorageSummary(ctx, staff.orgId);
+  });
+
+  /** Usage this month against the limits the server operator set (kind and quotas are not editable here). */
+  app.get('/usage', admin, async (req): Promise<OrgUsageDTO> => {
+    const staff = getStaff(req);
+    return orgUsageDTO(ctx.db, await loadOrgRow(ctx, staff.orgId), ctx.now());
   });
 
   /* ------------------------------------------------------------------ users */

@@ -120,6 +120,13 @@
       "when": 1792630285658,
       "tag": "0016_sso_scim",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1792633738309,
+      "tag": "0017_sandbox_quotas",
+      "breakpoints": true
     }
   ]
 }

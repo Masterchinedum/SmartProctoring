@@ -6,7 +6,8 @@
  *    (job_status, services/job-status.ts). Nothing is deleted. The due dates use the same SQL as the job's pre-filter
  *    (the job decides per session with the effective policy, so an invalid stored policy may make it a day apart).
  *  - opsChecks: retention, overdue privacy requests, face-analysis capacity of this instance, failing webhooks, email
- *    alerts and expiring API keys — each as ok / warning / failing with one sentence saying what to do.
+ *    alerts, expiring API keys (and, for a sandbox organisation, its automatic clean-up) — each as ok / warning /
+ *    failing with one sentence saying what to do.
  */
 import { API_KEY_EXPIRY_WARNING_DAYS, PRIVACY_DUE_SOON_DAYS, type OpsCheckDTO, type OpsChecksDTO, type RetentionPreviewDTO } from '@sp/shared';
 import { and, asc, eq, gt, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
@@ -14,6 +15,8 @@ import type { Ctx } from '../context.js';
 import { apiKeys, candidates, emailAlerts, events, examSessions, exams, organizations, privacyRequests, webhooks } from '../db/schema.js';
 import { currentCapacity, type CapacityReason } from './capacity.js';
 import { loadJobStatus, RETENTION_JOB, toRetentionJobStatusDTO } from './job-status.js';
+import { orgKind, sandboxPurgeDays } from './quotas.js';
+import { SANDBOX_PURGE_JOB } from './sandbox-purge.js';
 import { OPEN_PRIVACY_STATUSES } from './privacy-requests.js';
 import { DAY_MS, evidenceDaysSql, eventDaysSql } from './retention.js';
 
@@ -106,7 +109,7 @@ function ago(now: number, t: number): string {
 
 export async function opsChecks(ctx: Ctx, orgId: string, now: number): Promise<OpsChecksDTO> {
   const nowDate = new Date(now);
-  const [preview, [requests], hooks, [mail], keys] = await Promise.all([
+  const [preview, [requests], hooks, [mail], keys, [org]] = await Promise.all([
     retentionPreview(ctx, orgId, 1, now),
     ctx.db
       .select({
@@ -132,6 +135,7 @@ export async function opsChecks(ctx: Ctx, orgId: string, now: number): Promise<O
       .from(apiKeys)
       .where(and(eq(apiKeys.orgId, orgId), isNull(apiKeys.revokedAt)))
       .orderBy(asc(apiKeys.expiresAt)),
+    ctx.db.select({ kind: organizations.kind, sandboxPurgeDays: organizations.sandboxPurgeDays }).from(organizations).where(eq(organizations.id, orgId)),
   ]);
   const checks: OpsCheckDTO[] = [];
 
@@ -236,5 +240,19 @@ export async function opsChecks(ctx: Ctx, orgId: string, now: number): Promise<O
           },
   );
 
+  if (orgKind(org) === 'sandbox') checks.push(sandboxPurgeCheck(toRetentionJobStatusDTO(await loadJobStatus(ctx.db, SANDBOX_PURGE_JOB), now), sandboxPurgeDays(org), now));
+
   return { now, checks };
+}
+
+/** A sandbox organisation's automatic clean-up (services/sandbox-purge.ts), from its job_status row. */
+function sandboxPurgeCheck(job: ReturnType<typeof toRetentionJobStatusDTO>, days: number, now: number): OpsCheckDTO {
+  const label = 'Sandbox clean-up';
+  const rule = `This sandbox’s exam sessions, images and candidates are deleted ${days} days after their last use.`;
+  if (job.lastStartedAt == null) return { id: 'sandbox_purge', label, status: 'warning', detail: `The clean-up has not run yet. It runs hourly on a server with background jobs enabled (SWEEPER_ENABLED). ${rule}` };
+  if (job.lastError) return { id: 'sandbox_purge', label, status: 'failing', detail: `The last clean-up failed: ${job.lastError}. Check the server log. ${rule}` };
+  if (job.stale) return { id: 'sandbox_purge', label, status: 'warning', detail: `No successful clean-up since ${job.lastSuccessAt ? ago(now, job.lastSuccessAt) : 'the start'}. Make sure at least one server runs background jobs (SWEEPER_ENABLED). ${rule}` };
+  const failures = (job.lastSummary as { failures?: number } | null)?.failures ?? 0;
+  if (failures) return { id: 'sandbox_purge', label, status: 'warning', detail: `Last run ${ago(now, job.lastSuccessAt!)}: ${failures} item(s) could not be deleted and will be retried. Check the evidence storage. ${rule}` };
+  return { id: 'sandbox_purge', label, status: 'ok', detail: `Last run ${ago(now, job.lastSuccessAt!)}. ${rule}` };
 }

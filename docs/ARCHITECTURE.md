@@ -484,13 +484,42 @@ Service-level targets (`settings.reviewSla`: held exams in minutes, flags in hou
 (summary `review.due`) that orders the review queue, marks overdue holds on the dashboard and feeds the
 `sp_cluster_review_*` gauges. The audit log can be exported as CSV.
 
+### Sandbox organisations and quotas (`packages/shared/src/quotas.ts`, `services/quotas.ts`, `services/tenancy.ts`, `services/sandbox-purge.ts`)
+
+* **Kind.** `organizations.kind` is `production` (default; every organisation from before migration 0017) or `sandbox`
+  (CHECK constraint), with operator-set `quotas` (jsonb overrides: a missing key = the kind's default, `null` = no
+  limit) and `sandbox_purge_days` (null = 14). Only the operator CLI changes them (`org:create` / `org:set`,
+  `services/tenancy.ts`, audited as actor `system`); `PUT /settings` ignores them. A sandbox is marked for staff
+  (`GET /api/auth/me` `org: StaffOrgDTO` → a permanent banner), for the candidate (`CandidateSessionState.sandbox` →
+  *Practice environment* on the welcome screen), in alert emails (subject and first line) and webhooks (`sandbox: true`
+  in the envelope, set when the delivery is enqueued).
+* **Quotas** (`effectiveQuotas`): exams not archived, candidate records, exam sessions created per calendar month in
+  UTC (`quotaMonth`; the `org_usage (org_id, month)` counter, incremented as the last write of the creating
+  transaction — a counter rather than a count of rows, so deleting candidates or the sandbox clean-up never gives
+  sessions back). `assertExamQuota` / `assertCandidateQuota` / `assertSessionQuota` are called by every creation path
+  (staff exams create / import / publish-from-archive, staff and `/api/v1` candidate creation, staff and `/api/v1`
+  assignments); with a finite limit they take a per-organisation, per-quota advisory transaction lock, count, and
+  refuse with 409 `quota_exceeded` (`QuotaExceededDetails`, `quotaExceededMessage`) before anything is created —
+  parallel requests cannot exceed a limit. Without a limit no lock is taken. `GET /api/admin/usage` (`OrgUsageDTO`,
+  warning from 80 %) feeds Settings → *Usage and limits*; `quotaPressure` feeds the cluster gauge
+  `sp_cluster_organizations_at_quota{quota,level}` (a count of organisations, not a series per organisation).
+* **Clean-up** (`sandbox-purge` job, hourly, advisory lock 727274013 shared with `sandbox:purge`): per sandbox
+  organisation, sessions whose last use (end, else the latest activity as in `abandonment.ts`) is older than the
+  period and candidates left without sessions are deleted — images first through the evidence helpers
+  (`purgeSessionEvidence`, `purgeCandidateIdPhoto`, `purgeEvidenceRows`, each blob in its row's storage location),
+  then the rows, in one transaction per session / candidate that re-checks the kind under a share lock on the
+  organisation row and the legal hold under the row lock. Legal holds are kept and reported; exams, staff, keys, the
+  privacy register and the audit log are kept. `sandbox.purge` audit entry per organisation and run, `job_status`
+  row `sandbox-purge`, operational check `sandbox_purge` for sandbox organisations.
+
 ## 8. Privacy & retention
 
 Consent recorded before any camera analysis. Identity references and screenshots encrypted at rest,
 accessible only to authenticated staff, audit-logged. Retention job (hourly) purges evidence blobs
 `evidenceRetentionDays` after the session ends (org default, per-exam override) unless staff placed
 the session under `legalHold`; purges leave a metadata tombstone. Event metadata is deleted after
-`eventRetentionDays`. No
+`eventRetentionDays`. A sandbox organisation's data is deleted much earlier: sessions, images and candidates not used
+for its clean-up period (default 14 days; §7 *Sandbox organisations*). No
 continuous video. Candidate references are per-session and never reused across exams.
 
 ### Privacy operations (`packages/shared/src/privacy-ops.ts`, `services/privacy-requests.ts`, `services/privacy-export.ts`, `services/privacy-ops.ts`, `routes/admin/privacy.ts`)
@@ -612,7 +641,8 @@ and SCIM: `SSO_ALLOW_PRIVATE_NETWORKS` (default: the webhook setting; dev only),
   exactly once (unique `(webhook, dedupeKey)`). The `webhooks` job signs
   (`X-SmartProctoring-Signature: t=…,v1=HMAC-SHA256(secret, t.body)`) and POSTs them through an SSRF
   guard (DNS pinned at connect time; private ranges refused in production), retries with backoff up to
-  10 attempts and disables endpoints that keep failing. Payloads never contain images or face data.
+  10 attempts and disables endpoints that keep failing. Payloads never contain images or face data. A sandbox
+  organisation's envelopes carry `sandbox: true`.
 * **Email alerts** (optional SMTP): the same hook queues `email_alerts` rows (holds, pause requests,
   high-severity events per org toggles); the `email-alerts` job sends at most one email per session per
   5 minutes (digest), plain text + simple HTML with a link to the staff app, never images.

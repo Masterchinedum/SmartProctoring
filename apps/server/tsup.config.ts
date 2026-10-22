@@ -20,6 +20,7 @@ const candidates: Record<string, string> = {
   'scripts/storage-move': 'src/scripts/storage-move-cli.ts',
   'scripts/staff-access': 'src/scripts/staff-access-cli.ts',
   'scripts/openapi': 'src/scripts/openapi-cli.ts',
+  'scripts/org': 'src/scripts/org-cli.ts',
   'scripts/identity-eval': 'src/eval/identity-eval-cli.ts',
 };
 const NATIVE = ['onnxruntime-node', 'sharp', 'pg-native', 'bufferutil', 'utf-8-validate', 'pino-pretty'];

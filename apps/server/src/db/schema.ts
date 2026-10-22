@@ -8,6 +8,7 @@ import type { ExternalVerifierStoredSettings } from '../verifiers/settings.js';
 import {
   bigserial,
   boolean,
+  check,
   customType,
   doublePrecision,
   index,
@@ -46,6 +47,8 @@ import type {
   LivenessResultDTO,
   MfaRequirement,
   MonitoringStatus,
+  OrgKind,
+  OrgQuotas,
   PeriodKind,
   PolicyExceptionDTO,
   PrivacyRequestChannel,
@@ -115,13 +118,49 @@ export interface OrgSettings {
   requireSso: boolean;
 }
 
-export const organizations = pgTable('organizations', {
-  id: id(),
-  name: text('name').notNull(),
-  settings: jsonb('settings').$type<Partial<OrgSettings>>().notNull().default({}),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+export const organizations = pgTable(
+  'organizations',
+  {
+    id: id(),
+    name: text('name').notNull(),
+    /**
+     * `production` (default) or `sandbox` (packages/shared/src/quotas.ts): set by the server operator only
+     * (`org:create` / `org:set`), never by staff. A sandbox's data is deleted automatically (services/sandbox-purge.ts).
+     */
+    kind: text('kind').$type<OrgKind>().notNull().default('production'),
+    /**
+     * Operator-set limits (services/quotas.ts): a missing key = the kind's default (production: none; sandbox:
+     * SANDBOX_DEFAULT_QUOTAS), null = no limit.
+     */
+    quotas: jsonb('quotas').$type<Partial<OrgQuotas>>().notNull().default({}),
+    /** Sandbox: days after its last use before data is deleted (null = DEFAULT_SANDBOX_PURGE_DAYS). */
+    sandboxPurgeDays: integer('sandbox_purge_days'),
+    settings: jsonb('settings').$type<Partial<OrgSettings>>().notNull().default({}),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [check('organizations_kind_check', sql`${t.kind} in ('production', 'sandbox')`)],
+);
+
+/**
+ * Exam sessions created per organisation and calendar month (UTC), for the sessionsPerMonth quota and the usage shown
+ * in Settings (services/quotas.ts). A counter, not a count of exam_sessions rows: sessions deleted later (an erased
+ * candidate, the sandbox clean-up) still count for the month they were created in. Incremented in the transaction
+ * that creates the sessions. One row per month is kept (usage history).
+ */
+export const orgUsage = pgTable(
+  'org_usage',
+  {
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** YYYY-MM (UTC). */
+    month: text('month').notNull(),
+    sessionsCreated: integer('sessions_created').notNull().default(0),
+    updatedAt: updatedAt(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.month] })],
+);
 
 export const staffUsers = pgTable(
   'staff_users',
@@ -1280,6 +1319,16 @@ export interface RetentionRunSummary {
   failures: number;
 }
 
+/** Summary of a sandbox clean-up run kept in job_status.last_summary (services/sandbox-purge.ts). */
+export interface SandboxPurgeRunSummary {
+  organisations: number;
+  sessionsDeleted: number;
+  evidenceItemsPurged: number;
+  candidatesDeleted: number;
+  skippedLegalHold: number;
+  failures: number;
+}
+
 /**
  * The last run of a cluster-wide background job, whichever instance ran it (retention: services/retention.ts), so
  * staff and monitoring can see that deletion is actually happening (GET /api/admin/retention/preview, /ops/checks).
@@ -1291,7 +1340,7 @@ export const jobStatus = pgTable('job_status', {
   lastSuccessAt: ts('last_success_at'),
   /** The error of the last run, null when it succeeded. */
   lastError: text('last_error'),
-  lastSummary: jsonb('last_summary').$type<RetentionRunSummary>(),
+  lastSummary: jsonb('last_summary').$type<RetentionRunSummary | SandboxPurgeRunSummary>(),
   updatedAt: updatedAt(),
 });
 export type JobStatusRow = typeof jobStatus.$inferSelect;

@@ -220,6 +220,8 @@ export interface WebhookEnvelope<T = Record<string, unknown>> {
   /** Epoch ms when the notification was created (not when it was sent). */
   createdAt: number;
   orgId: string;
+  /** Present (`true`) only when the organisation is a sandbox: test data, not real candidates (./quotas.ts). */
+  sandbox?: true;
   data: T;
 }
 
@@ -300,7 +302,7 @@ export interface IntegrationStatusDTO {
  */
 
 /** Version of the integration API contract (the OpenAPI document's `info.version`). Bump it with every change. */
-export const INTEGRATION_API_VERSION = '1.1.0';
+export const INTEGRATION_API_VERSION = '1.2.0';
 
 const uuid = (description?: string) => (description ? z.string().uuid().describe(description) : z.string().uuid());
 const epochMs = (description = 'Epoch milliseconds (UTC).') => z.number().int().describe(description);
@@ -814,7 +816,10 @@ export const INTEGRATION_ENDPOINTS: readonly IntegrationEndpoint[] = [
       { status: 201, description: 'Created.', schema: integrationCandidateUpsertDtoSchema },
       { status: 200, description: 'A candidate with this `externalId` existed: updated, or already up to date.', schema: integrationCandidateUpsertDtoSchema },
     ],
-    errors: [{ status: 400, codes: ['validation_failed'] }],
+    errors: [
+      { status: 400, codes: ['validation_failed'] },
+      { status: 409, codes: ['quota_exceeded'] },
+    ],
     idempotent: true,
     audited: true,
   },
@@ -845,7 +850,7 @@ export const INTEGRATION_ENDPOINTS: readonly IntegrationEndpoint[] = [
     errors: [
       { status: 400, codes: ['validation_failed'] },
       { status: 404, codes: ['exam_not_found'] },
-      { status: 409, codes: ['exam_not_published'] },
+      { status: 409, codes: ['exam_not_published', 'quota_exceeded'] },
     ],
     idempotent: true,
     audited: true,

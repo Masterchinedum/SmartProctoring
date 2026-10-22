@@ -10,7 +10,7 @@
  * every SLOW_CLUSTER_TTL_MS.
  */
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from '@prometheus-io/client';
-import { API_KEY_EXPIRY_WARNING_DAYS, DEFAULT_REVIEW_SLA, PRIVACY_REQUEST_KINDS } from '@sp/shared';
+import { API_KEY_EXPIRY_WARNING_DAYS, DEFAULT_REVIEW_SLA, PRIVACY_REQUEST_KINDS, QUOTA_KINDS } from '@sp/shared';
 import { and, count, eq, gt, gte, inArray, isNotNull, isNull, lte, min, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DatabaseObserver } from '../db/index.js';
@@ -18,6 +18,7 @@ import { apiKeys, emailAlerts, events, examSessions, exams, jobStatus, organizat
 import { CAPACITY_REASONS, currentCapacity, samplingPressure } from '../services/capacity.js';
 import { evidenceDueSql } from '../services/privacy-ops.js';
 import { OPEN_PRIVACY_STATUSES } from '../services/privacy-requests.js';
+import { quotaPressure } from '../services/quotas.js';
 import { CALIBRATION } from '../vision/calibration.js';
 import { EMBEDDING_MODEL_CURRENT } from '../vision/embeddings.js';
 import type { VisionObserver, VisionPriority } from '../vision/types.js';
@@ -69,6 +70,7 @@ export class AppMetrics {
   private ctx: Ctx | null = null;
   private cluster: { at: number; snapshot: Promise<ClusterSnapshot | null> } | null = null;
   private slowCluster: { at: number; snapshot: Promise<SlowClusterSnapshot | null> } | null = null;
+  private quotaCluster: { at: number; snapshot: Promise<Awaited<ReturnType<typeof quotaPressure>> | null> } | null = null;
   private defaultsOn = false;
 
   readonly httpRequests = new Counter({ name: 'sp_http_requests_total', help: 'HTTP requests by route pattern and status.', labelNames: ['method', 'route', 'status'] as const, registers: [this.registry] });
@@ -339,12 +341,26 @@ export class AppMetrics {
     slowGauge('sp_cluster_retention_overdue_oldest_seconds', 'How long the oldest overdue session’s images have been past their deletion date (0 when none).', [], (g, s, now) =>
       g.set(ageSec(s.retentionOldestDueAt, now)),
     );
+    // Organisations near / at an operator-set quota (services/quotas.ts): its own small query over the organisations
+    // that have limits, cached like the slow-moving values.
+    new Gauge({
+      name: 'sp_cluster_organizations_at_quota',
+      help: 'Organisations at (level="reached") or near (level="warning": from 80 %) a quota — exams, candidates, exam sessions this month (UTC).',
+      labelNames: ['quota', 'level'] as const,
+      registers: reg,
+      async collect() {
+        const p = await self.quotaClusterSnapshot();
+        this.reset();
+        if (p) for (const q of QUOTA_KINDS) for (const level of ['warning', 'reached'] as const) this.set({ quota: q, level }, p[q][level]);
+      },
+    });
   }
 
   /** Forget the cached sp_cluster_* values (the next scrape reads Postgres). */
   clearClusterCache(): void {
     this.cluster = null;
     this.slowCluster = null;
+    this.quotaCluster = null;
   }
 
   /** Pool observer (createDatabase): connection wait and connection errors. */
@@ -491,6 +507,19 @@ export class AppMetrics {
   }
 
   /** Cached for SLOW_CLUSTER_TTL_MS; a failed read is not cached (the next scrape tries again). */
+  private quotaClusterSnapshot(): Promise<Awaited<ReturnType<typeof quotaPressure>> | null> {
+    const ctx = this.ctx;
+    if (!ctx) return Promise.resolve(null);
+    const now = Date.now();
+    if (this.quotaCluster && now - this.quotaCluster.at < SLOW_CLUSTER_TTL_MS) return this.quotaCluster.snapshot;
+    const snapshot = quotaPressure(ctx.db, ctx.now()).catch((err: unknown) => {
+      ctx.log.warn({ err }, 'metrics: quota query failed');
+      return null;
+    });
+    this.quotaCluster = { at: now, snapshot };
+    return snapshot;
+  }
+
   private slowClusterSnapshot(): Promise<SlowClusterSnapshot | null> {
     const now = Date.now();
     if (this.slowCluster && now - this.slowCluster.at < SLOW_CLUSTER_TTL_MS) return this.slowCluster.snapshot;

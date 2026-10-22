@@ -11,6 +11,8 @@
  *  - resume / reconnect / reverify check frames the whole budget: the rest (1 - IDENTITY_SAMPLE_SHARE) is always
  *    headroom for them, so a long session that stored many samples can still complete the check a genuine
  *    candidate needs to continue.
+ *
+ * Per-organisation quotas (exams, candidates, exam sessions per month; sandbox organisations): services/quotas.ts.
  */
 import { and, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';

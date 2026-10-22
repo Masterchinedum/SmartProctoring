@@ -106,7 +106,11 @@ export interface DigestContext {
   candidate: { name: string; externalId: string | null };
   exam: { title: string };
   staffUrl: string;
+  /** The organisation is a sandbox (test data): the subject and the first line say so. */
+  sandbox?: boolean;
 }
+
+const SANDBOX_EMAIL_NOTE = 'This alert comes from a sandbox organisation: test data, not real candidates.';
 
 /**
  * One email for a session's pending alerts (oldest first). Observational wording, no images. No links except our
@@ -124,9 +128,10 @@ export function composeAlertEmail(c0: DigestContext, items0: Pick<EmailAlert, 't
   };
   const items = items0.map((i) => ({ ...i, title: stripUrls(i.title), observation: stripUrls(i.observation) }));
   const who = `${c.candidate.name} — ${c.exam.title}`;
-  const subject = headerSafe(`[SmartProctoring] ${items.length === 1 ? items[0].title : `${items.length} alerts`}: ${who}`);
+  const subject = headerSafe(`[SmartProctoring${c.sandbox ? ' sandbox' : ''}] ${items.length === 1 ? items[0].title : `${items.length} alerts`}: ${who}`);
   const lines = items.map((i) => `• ${formatUtc(i.occurredAt.getTime())} — ${i.title}: ${i.observation}`);
   const text = [
+    ...(c.sandbox ? [SANDBOX_EMAIL_NOTE, ''] : []),
     `SmartProctoring alert for ${c.orgName}`,
     '',
     `Candidate: ${c.candidate.name}${c.candidate.externalId ? ` (external ID ${c.candidate.externalId})` : ''}`,
@@ -142,6 +147,7 @@ export function composeAlertEmail(c0: DigestContext, items0: Pick<EmailAlert, 't
   ].join('\n');
   const html = [
     '<!doctype html><html><body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;color:#1f2933;line-height:1.5">',
+    ...(c.sandbox ? [`<p style="margin:0 0 12px;padding:8px 12px;background:#fff4d6;border-radius:6px"><strong>Sandbox:</strong> ${escapeHtml(SANDBOX_EMAIL_NOTE.replace('This alert comes from a sandbox organisation: ', 'this alert comes from a sandbox organisation — '))}</p>`] : []),
     `<p style="margin:0 0 12px"><strong>SmartProctoring alert</strong> for ${escapeHtml(c.orgName)}</p>`,
     `<p style="margin:0 0 12px">Candidate: <strong>${escapeHtml(c.candidate.name)}</strong>${c.candidate.externalId ? ` (external ID ${escapeHtml(c.candidate.externalId)})` : ''}<br>Exam: ${escapeHtml(c.exam.title)}</p>`,
     '<ul style="padding-left:18px;margin:0 0 12px">',
@@ -249,6 +255,7 @@ export async function sendDueEmailAlerts(ctx: Ctx): Promise<EmailRunSummary> {
           candidate: { name: info.candidateName, externalId: info.externalId ?? null },
           exam: { title: info.examTitle },
           staffUrl: sessionStaffUrl(ctx.config.publicUrl, sessionId),
+          sandbox: org.kind === 'sandbox',
         },
         enabled,
         settings.alertRecipients,

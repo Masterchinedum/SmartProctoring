@@ -23,7 +23,11 @@
     "rekey": "tsx src/scripts/rekey-cli.ts",
     "storage:move": "tsx src/scripts/storage-move-cli.ts",
     "staff-access": "tsx src/scripts/staff-access-cli.ts",
-    "openapi": "tsx src/scripts/openapi-cli.ts"
+    "openapi": "tsx src/scripts/openapi-cli.ts",
+    "org:create": "tsx src/scripts/org-cli.ts create",
+    "org:set": "tsx src/scripts/org-cli.ts set",
+    "org:list": "tsx src/scripts/org-cli.ts list",
+    "sandbox:purge": "tsx src/scripts/org-cli.ts purge"
   },
   "dependencies": {
     "@aws-sdk/client-rekognition": "^3.1139.0",

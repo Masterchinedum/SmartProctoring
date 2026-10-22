@@ -114,6 +114,14 @@ and deleted there. Data that must stay in one region in full needs the database 
   touch), takes an optional reason (passed to staff in the register entry) and needs an explicit "I understand"
   before it ends the exam. Images still queued in the browser are deleted on the device, not sent. The notice itself
   (version 2026-10-21) tells candidates under "Your choices" that they can withdraw at any time.
+* **Sandbox organisations** (trials and integration testing, not for real candidates; created by the server
+  operator, docs/OPERATIONS.md §9) keep data much more briefly: exam sessions — with their images, face templates,
+  answers and event records — and candidates not used for the organisation's clean-up period (default 14 days) are
+  deleted by an hourly job, whatever the retention settings say. Sessions under legal hold are kept until the hold is
+  lifted. Exams, staff accounts, the privacy register and the audit log are kept. The staff app shows a permanent
+  "not for real candidates" banner and the candidate's welcome screen says it is a practice environment; if real
+  people were nevertheless examined in a sandbox, their data is deleted on the same schedule, so export what must be
+  kept (Privacy → export) or have the operator make the organisation a production one first.
 * **Showing that deletion happens**: Privacy → *Deletion schedule* lists what is due over the next 30 days, what is
   past its date but not yet deleted, the sessions under legal hold, and the retention job's last run (recorded in the
   database whichever server ran it); *Operational checks* turns a failing or stalled job into a warning.

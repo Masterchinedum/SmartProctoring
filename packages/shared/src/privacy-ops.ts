@@ -155,7 +155,8 @@ export const retentionPreviewQuerySchema = z.object({ days: z.coerce.number().in
 export const OPS_CHECK_STATUSES = ['ok', 'warning', 'failing'] as const;
 export type OpsCheckStatus = (typeof OPS_CHECK_STATUSES)[number];
 
-export const OPS_CHECK_IDS = ['retention_job', 'retention_overdue', 'privacy_requests', 'capacity', 'webhooks', 'email_alerts', 'api_keys'] as const;
+/** `sandbox_purge`: sandbox organisations only (the automatic deletion of their data, ./quotas.ts). */
+export const OPS_CHECK_IDS = ['retention_job', 'retention_overdue', 'privacy_requests', 'capacity', 'webhooks', 'email_alerts', 'api_keys', 'sandbox_purge'] as const;
 export type OpsCheckId = (typeof OPS_CHECK_IDS)[number];
 
 export interface OpsCheckDTO {

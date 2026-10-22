@@ -85,7 +85,8 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
         .select({ id: webhooks.id, events: webhooks.events, minSeverity: webhooks.minSeverity })
         .from(webhooks)
         .where(and(eq(webhooks.orgId, orgId), eq(webhooks.active, true)));
-      const settings = orgSettings(await m.org());
+      const org = await m.org();
+      const settings = orgSettings(org);
       const emailOn = !!ctx.mailer && settings.alertRecipients.length > 0 && (settings.emailAlerts.holds || settings.emailAlerts.pauseRequests || settings.emailAlerts.highSeverity);
       if (hooks.length === 0 && !emailOn) return { webhooks: 0, emails: 0 };
 
@@ -194,7 +195,7 @@ export async function enqueueIntegrationNotifications(m: SessionMutation): Promi
           });
         }
       }
-      const w = hooks.length ? await enqueueWebhookNotifications(sp, orgId, notifications, m.now, hooks) : 0;
+      const w = hooks.length ? await enqueueWebhookNotifications(sp, orgId, notifications, m.now, hooks, { sandbox: org?.kind === 'sandbox' }) : 0;
       const e = emailOn ? await enqueueEmailAlerts(sp, orgId, emails, m.now) : 0;
       return { webhooks: w, emails: e };
     });

@@ -27,6 +27,7 @@ import {
 } from '../services/mfa.js';
 import { orgSettings } from '../services/org.js';
 import { notifySecurityChange } from '../services/security-notices.js';
+import { staffOrgDTO } from '../services/tenancy.js';
 
 /** "45 seconds" / "2 minutes" for the per-account backoff message. */
 export function waitText(sec: number): string {
@@ -55,9 +56,14 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     },
   });
 
+  const staffOrg = async (orgId: string) => {
+    const [o] = await ctx.db.select({ id: organizations.id, name: organizations.name, kind: organizations.kind, sandboxPurgeDays: organizations.sandboxPurgeDays }).from(organizations).where(eq(organizations.id, orgId));
+    // kind / sandbox: the staff app shows a sandbox banner (packages/shared/src/quotas.ts).
+    return staffOrgDTO(o ?? { id: orgId, name: '', kind: 'production', sandboxPurgeDays: null });
+  };
   const signedInResponse = async (user: typeof staffUsers.$inferSelect, signInMethod: 'password' | 'sso' = 'password') => ({
     user: toStaffUserDTO(user),
-    org: { id: user.orgId, name: await loadOrgName(ctx, user.orgId) },
+    org: await staffOrg(user.orgId),
     security: await securityDTO(ctx.db, user, signInMethod),
   });
   const auditAuth = (user: { id: string; orgId: string } | null, action: string, meta: Record<string, unknown>, ip: string) =>

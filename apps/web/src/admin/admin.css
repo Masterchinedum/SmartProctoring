@@ -37,6 +37,13 @@
 .live-dot.live-reconnecting { background: #f0a020; animation: pulse 1.2s infinite; }
 .live-banner { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .live-banner .btn { margin-left: auto; }
+.sandbox-banner { margin-bottom: 14px; }
+.brand-sandbox { margin-top: 4px; display: inline-block; }
+.usage-table td.usage-bar-cell { width: 30%; }
+.usage-bar { height: 8px; border-radius: 4px; background: #e6e9ef; overflow: hidden; }
+.usage-bar > span { display: block; height: 100%; background: var(--primary, #2f5bea); }
+.usage-bar.level-warning > span { background: #c27c0e; }
+.usage-bar.level-reached > span { background: #b42318; }
 
 .page-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .page-header h1 { margin: 0 0 4px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

@@ -35,6 +35,10 @@ const REALISTIC: Record<string, unknown> = {
   'events.review_status': 'reviewed',
   'staff_users.role': 'reviewer',
   'privacy_requests.status': 'open',
+  // CHECK organizations_kind_check (0017): production | sandbox.
+  'organizations.kind': 'sandbox',
+  'organizations.quotas': { candidates: 10, sessionsPerMonth: null },
+  'org_usage.month': '2026-01',
 };
 
 /**

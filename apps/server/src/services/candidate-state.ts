@@ -102,6 +102,8 @@ export async function buildCandidateState(ctx: Pick<Ctx, 'now'>, db: DbOrTx, ses
     },
     candidate: { id: candidate.id, name: candidate.name, hasIdPhoto: !!candidate.idPhotoEmbedding },
     accommodations: candidateAccommodationLabels(s.accommodations),
+    // A sandbox organisation (practice / testing): the candidate app says so on the welcome screen.
+    sandbox: org?.kind === 'sandbox',
     consent: {
       accepted: s.consentAcceptedAt != null,
       acceptedAt: ms(s.consentAcceptedAt),

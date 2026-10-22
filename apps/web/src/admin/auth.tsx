@@ -13,7 +13,7 @@ export function roleAtLeast(role: StaffRole | undefined | null, min: StaffRole):
 
 interface AuthValue {
   user: StaffUserDTO;
-  org: { id: string; name: string };
+  org: MeResponse['org'];
   isAdmin: boolean;
   isOwner: boolean;
   security: StaffSecurityDTO;

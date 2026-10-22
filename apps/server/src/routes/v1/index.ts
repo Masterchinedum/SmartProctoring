@@ -66,6 +66,7 @@ import { idempotencyGuard, storeIdempotentResponse } from '../../services/idempo
 import { buildSessionReport } from '../../services/reports.js';
 import { resolveTimeZone } from '../../services/reports-format.js';
 import { loadOrderedSessionEvents } from '../../services/reports-timeline.js';
+import { assertCandidateQuota, assertSessionQuota, recordSessionsCreated } from '../../services/quotas.js';
 import { createExamSession } from '../../services/session-actions.js';
 import { eventFilterCondsFrom } from '../admin/events.js';
 import { blankToUndefined, idParam, isUuid, listParam } from '../admin/common.js';
@@ -253,6 +254,7 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
           return { row: updated, created: false };
         }
       }
+      await assertCandidateQuota(tx, key.orgId, 1, now); // 409 quota_exceeded (services/quotas.ts)
       const [inserted] = await tx
         .insert(candidates)
         .values({ orgId: key.orgId, name: input.name, email: input.email ?? null, externalId: input.externalId ?? null, createdAt: new Date(now), updatedAt: new Date(now) })
@@ -348,6 +350,7 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
       const existing = new Map<string, (typeof current)[number]>();
       for (const s of current) if (!existing.has(s.candidateId)) existing.set(s.candidateId, s);
 
+      await assertSessionQuota(tx, key.orgId, ordered.filter((c) => !existing.has(c.id)).length, now); // 409 quota_exceeded
       const out: IntegrationAssignmentDTO[] = [];
       let created = 0;
       for (const c of ordered) {
@@ -360,6 +363,7 @@ export const integrationApiRoutes: FastifyPluginAsync = async (app) => {
         out.push({ sessionId: s.session.id, candidateId: c.id, candidateName: c.name, externalId: c.externalId ?? null, accessLink: s.accessLink, existing: false, window });
         created++;
       }
+      await recordSessionsCreated(tx, key.orgId, created, now);
       await apiAudit(tx, key, now, 'api.exam.assigned', 'exam', examId, { requested: ordered.length, created, existing: ordered.length - created, ...(window ? { window } : {}) });
       return out;
     });

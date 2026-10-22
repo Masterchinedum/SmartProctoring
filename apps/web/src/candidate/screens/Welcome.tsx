@@ -72,6 +72,12 @@ export function WelcomeScreen() {
       <BrandHeader title={exam.title} />
       <main className="stack" aria-labelledby="welcome-title">
         {(small || noCamera) && <DeviceNotice small={small} noCamera={noCamera} />}
+        {state.sandbox ? (
+          <div className="banner banner-info" role="note" data-testid="practice-notice">
+            <strong>Practice environment.</strong> This exam is set up for trying SmartProctoring out, not for a real exam. What you do here is deleted automatically after a
+            few days.
+          </div>
+        ) : null}
         <section className="card stack">
           <ScreenHeading id="welcome-title" title="Welcome">
             {exam.title}

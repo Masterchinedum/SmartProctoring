@@ -2,7 +2,7 @@
  * Staff API — candidates and approved ID photos.
  *
  *   GET    /candidates?q=&limit=&offset=      -> { items: CandidateDTO[] }       [reviewer]
- *   POST   /candidates  CandidateInput        -> CandidateDTO                    [admin]
+ *   POST   /candidates  CandidateInput        -> CandidateDTO                    [admin]  (409 quota_exceeded at the organisation's limit, services/quotas.ts)
  *   GET    /candidates/:id                    -> CandidateDTO                    [reviewer]
  *   PUT    /candidates/:id  CandidateInput    -> CandidateDTO                    [admin]
  *   DELETE /candidates/:id                    -> { ok }  (409 while a session has not ended)  [admin]
@@ -28,6 +28,7 @@ import { isJpeg } from '../../lib/crypto.js';
 import { conflict, HttpError, notFound, unsupportedMedia } from '../../lib/errors.js';
 import { purgeCandidateIdPhoto, purgeEvidenceRows, storeEvidence, transactionWithEvidence } from '../../services/evidence.js';
 import { eraseCandidate } from '../../services/privacy-requests.js';
+import { assertCandidateQuota } from '../../services/quotas.js';
 import { serializeEmbeddings } from '../../vision/embeddings.js';
 import { processIdPhoto } from '../../vision/id-photo.js';
 import type { IdPhotoCapableVisionService, IdPhotoResult } from '../../vision/types.js';
@@ -133,6 +134,7 @@ export const candidatesRoutes: FastifyPluginAsync = async (app) => {
     const row = await ctx.db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'candidates:' + staff.orgId}))`);
       await assertExternalIdFree(tx, staff.orgId, input.externalId);
+      await assertCandidateQuota(tx, staff.orgId, 1, now);
       const [c] = await tx
         .insert(candidates)
         .values({ orgId: staff.orgId, name: input.name, email: input.email ?? null, externalId: input.externalId ?? null, createdAt: new Date(now), updatedAt: new Date(now) })

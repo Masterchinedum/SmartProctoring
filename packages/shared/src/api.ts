@@ -186,6 +186,8 @@ export interface CandidateSessionState {
   candidate: { id: string; name: string; hasIdPhoto: boolean };
   /** The candidate's approved accommodations for this exam, in plain words (none: empty). */
   accommodations?: string[];
+  /** The exam belongs to a sandbox (practice / testing) organisation (./quotas.ts): the candidate app says so. */
+  sandbox?: boolean;
   consent: { accepted: boolean; acceptedAt: number | null; notice: PrivacyNoticeDTO };
   /** Only present while the exam is active on the verified browser instance, or after submission. Never served while paused/on hold (unmonitored). */
   questions: CandidateQuestionDTO[] | null;
@@ -1054,7 +1056,7 @@ export type { IdentityCheckTrigger };
  *   POST /api/auth/login   {email,password}        -> { user, org, security } | MfaChallengeResponse (two-step sign-in)
  *   POST /api/auth/login/mfa {code}|{recoveryCode}  -> { user, org, security }   (needs the challenge cookie)
  *   POST /api/auth/logout                          -> { ok: true }
- *   GET  /api/auth/me                              -> { user: StaffUserDTO, org: { id, name }, security: StaffSecurityDTO }   (401 if not logged in)
+ *   GET  /api/auth/me                              -> { user: StaffUserDTO, org: StaffOrgDTO, security: StaffSecurityDTO }   (401 if not logged in; org.kind / org.sandbox: ./quotas.ts)
  *   POST /api/auth/mfa/totp/setup                  -> TotpSetupDTO        (allowed while enrolment is required)
  *   POST /api/auth/mfa/totp/confirm {code,currentCode?} -> RecoveryCodesDTO
  *   POST /api/auth/mfa/recovery-codes {code}       -> RecoveryCodesDTO
@@ -1104,6 +1106,8 @@ export type { IdentityCheckTrigger };
  *   GET  /settings                                 -> OrgSettingsDTO                                [admin]
  *   PUT  /settings  Partial<OrgSettingsDTO>        -> OrgSettingsDTO                                [admin; requireMfa and evidenceLocation: owner]
  *   GET  /evidence-storage                         -> EvidenceStorageDTO  (storage locations, the choice, images per location; ./residency.ts) [admin]
+ *   GET  /usage                                    -> OrgUsageDTO  (kind, quotas set by the operator and this month's usage; ./quotas.ts) [admin]
+ *        (POST /exams, /exams/import, /candidates and /exams/:id/assignments answer 409 quota_exceeded with QuotaExceededDetails at a limit)
  *   GET  /users                                    -> { items: StaffUserDTO[] }                     [admin]
  *   POST /users {email,name,role,password}         -> StaffUserDTO                                  [admin; only owner may create owner/admin]
  *   PUT  /users/:id {name?,role?,disabled?,password?} -> StaffUserDTO                               [admin]

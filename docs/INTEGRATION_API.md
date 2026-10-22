@@ -93,11 +93,25 @@ curl -s "$SP/api/v1/exams" -H "Authorization: Bearer $SP_KEY"
   | 404 | `exam_not_found`, `session_not_found` | unknown id — also for ids of another organisation |
   | 409 | `exam_not_published`, `already_started`, `invalid_state` | state conflicts (e.g. rescheduling an exam that started or ended) |
   | 409 | `idempotency_key_in_use` | the first request with this `Idempotency-Key` is still running (retry after `Retry-After` seconds) |
+  | 409 | `quota_exceeded` | creating a candidate or exam sessions would exceed one of the organisation's limits (below) |
   | 422 | `idempotency_key_reused` | the `Idempotency-Key` was used for a different request |
   | 429 | `rate_limited` | too many requests |
 
 * Rate limit: 600 requests per minute per key by default (`API_RATE_LIMIT_PER_MINUTE`). Responses carry
   `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset`; on 429 wait `retry-after` seconds.
+* **Quotas.** Your SmartProctoring operator may set limits for your organisation: candidate records, and exam sessions
+  created per calendar month **in UTC** (a sandbox organisation — for trials and testing, see below — has limits by
+  default: 50 candidates, 100 sessions a month). Creating a candidate or assigning candidates beyond a limit answers
+  `409 quota_exceeded`, nothing is created, and `details` says which limit: `{ "quota": "candidates" |
+  "sessionsPerMonth", "limit": 100, "used": 98, "requested": 5, "resetsAt": 1793491200000 | null, "kind": "sandbox" |
+  "production" }` (`resetsAt`: when the monthly count starts again, 00:00 UTC on the 1st). Do not retry it unchanged:
+  wait for `resetsAt`, assign fewer candidates, or ask for a higher limit. Your administrators see the usage under
+  Settings → *Usage and limits*. Updating an existing candidate, and assignments that return a candidate's existing
+  session (`existing: true`), are never refused.
+* **Sandbox organisations** are for building and testing an integration, not for real candidates: everything works
+  as in production, but their exam sessions, images and candidates are deleted automatically 14 days (by default)
+  after their last use, every webhook carries `"sandbox": true`, and the candidate's exam page says it is a practice
+  environment.
 * Lists accept `limit` (1–500, default 100) and `offset`, and return `{ items, total }`.
 
 ### Idempotency
@@ -166,7 +180,8 @@ curl -s "$SP/api/v1/exams?status=published" -H "Authorization: Bearer $SP_KEY"
 `POST /api/v1/candidates` [`candidates:write`] `{ name, email?, externalId? }` — **upsert by `externalId`**: if a candidate with
 this external id exists, its name (and email, when given) is updated and `200 { candidate, created: false }`
 is returned; otherwise a candidate is created: `201 { candidate, created: true }`. Without `externalId` a new
-candidate is always created. Use your own stable user id (student number, employee id) as `externalId`.
+candidate is always created. Use your own stable user id (student number, employee id) as `externalId`. Creating a
+candidate beyond the organisation's limit answers `409 quota_exceeded` (an update of an existing one never does).
 
 ```bash
 curl -s -X POST "$SP/api/v1/candidates" -H "Authorization: Bearer $SP_KEY" \
@@ -184,6 +199,8 @@ curl -s -X POST "$SP/api/v1/candidates" -H "Authorization: Bearer $SP_KEY" \
 
 * The exam must be **published** (`409 exam_not_published` otherwise).
 * Unknown candidates → `400 validation_failed` naming them (nothing is created).
+* More new sessions than the organisation may still create this month → `409 quota_exceeded` (nothing is created; see
+  *Quotas* above). Candidates who already have a session for the exam do not count.
 * **Idempotent per candidate**: a candidate who already has a not-yet-finished session for this exam keeps
   it — the existing `sessionId` and link are returned with `existing: true`. Retrying a request is safe.
 * `accessLink` is the candidate's personal link (`https://…/take/<token>`). Treat it like a password: send
@@ -354,6 +371,8 @@ X-SmartProctoring-Signature: t=1790244123,v1=5d41402abc4b2a76b9719d911017c592…
  "staffUrl":"https://proctor.example.com/admin/sessions/…?event=…"}}
 ```
 
+* **Sandbox**: deliveries from a sandbox organisation (test data, not real candidates) have `"sandbox": true` next to
+  `orgId`; production deliveries have no `sandbox` field. Use it to keep test notifications out of real records.
 * **Respond with any 2xx within 10 seconds** (do the work asynchronously). Anything else — other status
   codes, redirects (never followed), timeouts, connection errors — is a failed attempt.
 * **Retries**: after 30 s, 1 min, 2 min, 5 min, 15 min, 30 min, 1 h, 2 h and 6 h (10 attempts, about
@@ -514,6 +533,11 @@ identity provider. Set-up runbooks for Microsoft Entra ID, Okta and Google: `doc
 The API version is `info.version` of the OpenAPI document. Within version 1, changes are additive: new endpoints,
 new optional request fields, new response fields and new enumeration values.
 
+* **1.2.0** (October 2026)
+  * **Quotas**: `POST /candidates` (a new candidate) and `POST /exams/{examId}/assignments` (new sessions) answer
+    409 `quota_exceeded` with `details { quota, limit, used, requested, resetsAt, kind }` at one of the organisation's
+    limits (candidates; exam sessions per calendar month in UTC).
+  * **Sandbox organisations**: webhook envelopes of a sandbox carry `"sandbox": true`.
 * **1.1.0** (October 2026)
   * **Scheduling and recovery**: a scheduling `window` on `POST /exams/{examId}/assignments`, on sessions and on
     assignment items; `PUT /sessions/{id}/window` to reschedule an attempt that has not started (409

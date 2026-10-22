@@ -206,6 +206,19 @@ server-side identity match, read other sessions, or change category/severity (th
   and reasons for reschedules and reopenings never leave through webhooks (`session.rescheduled` carries the window,
   `session.reopened` the previous end reason).
 
+### Organisations, sandboxes and quotas
+* An organisation's kind (`production` / `sandbox`), its quotas and a sandbox's clean-up period are changed only by the
+  server operator (`org:create` / `org:set`, server environment required); staff cannot (`PUT /settings` ignores the
+  fields; `GET /usage` is read-only, administrators only). Every operator change is in the organisation's audit log
+  (actor `system`, with the reason). The first owner's temporary password is printed once, never stored in clear,
+  logged or emailed.
+* Quotas are also an abuse control for open trials: limits on candidates and on exam sessions per month (counted when
+  created; deleting candidates or sessions does not give them back, so a create–delete loop cannot get round them)
+  are checked under a per-organisation lock in the creating transaction, for the staff app and the integration API
+  alike, so parallel requests cannot exceed them.
+* The sandbox clean-up selects sandbox organisations only and re-checks the kind under a lock on the organisation
+  row before each deletion; turning a production organisation into a sandbox needs an explicit `--confirm-purge`.
+
 ### Authorisation
 * Every `/api/admin/*` route has `requireStaff(<role>)`; every query is scoped by the staff member's
   organisation (other organisations' ids return 404). Only owners create/modify owners and admins; the last
@@ -307,7 +320,8 @@ server-side identity match, read other sessions, or change category/severity (th
 * Every image fetch (screenshots, check frames, identity references, probes, ID photos — all served only by
   `GET /api/admin/evidence/:id`) writes `evidence.view` to the audit log; so do reviews, notes, holds,
   releases, re-enrolments, settings (incl. external-verifier changes: provider/region/uses, key set/removed — never
-  the key), external-verifier tests, users, API keys, webhooks and retention purges.
+  the key), external-verifier tests, users, API keys, webhooks, retention purges, operator changes to organisations
+  (`organization.created` / `organization.updated`) and sandbox clean-ups (`sandbox.purge`).
 * Webhooks, alert emails and the integration API never contain images, templates or similarity scores.
   Webhooks and alert emails never carry candidate-written text as is: events reported by the browser use the
   catalog title/observation, the pause reason and other user-controlled text are stripped of links

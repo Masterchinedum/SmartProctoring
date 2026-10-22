@@ -23,7 +23,7 @@ describe('staff auth', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.user.role).toBe('reviewer');
-    expect(body.org).toEqual({ id: env.org.id, name: 'Test University' });
+    expect(body.org).toEqual({ id: env.org.id, name: 'Test University', kind: 'production', sandbox: null });
     const c = res.cookies.find((x) => x.name === 'sp_session')!;
     expect(c.httpOnly).toBe(true);
     expect(c.sameSite).toBe('Lax');

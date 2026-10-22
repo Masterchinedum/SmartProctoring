@@ -1,12 +1,13 @@
 /**
  * The last run of a cluster-wide background job, persisted in job_status whichever instance ran it (the per-instance
- * Prometheus gauges only know their own runs). The retention job records every real run (services/retention.ts), so
- * staff see that deletion is actually happening (GET /api/admin/retention/preview, /api/admin/ops/checks).
+ * Prometheus gauges only know their own runs). The retention job (services/retention.ts) and the sandbox clean-up
+ * (services/sandbox-purge.ts) record every real run, so staff see that deletion is actually happening
+ * (GET /api/admin/retention/preview, /api/admin/ops/checks).
  */
 import { RETENTION_STALE_AFTER_MS, type RetentionJobStatusDTO } from '@sp/shared';
 import { eq, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/index.js';
-import { jobStatus, type JobStatusRow, type RetentionRunSummary } from '../db/schema.js';
+import { jobStatus, type JobStatusRow, type RetentionRunSummary, type SandboxPurgeRunSummary } from '../db/schema.js';
 
 export const RETENTION_JOB = 'retention';
 
@@ -23,7 +24,7 @@ export async function recordJobStart(db: DbOrTx, name: string, at: number): Prom
  * A run ended: `error` when it failed as a whole (lastSuccessAt stays at the previous success), otherwise its summary
  * (sessions that could not be purged are counted there; they are retried on the next run).
  */
-export async function recordJobFinish(db: DbOrTx, name: string, at: number, result: { error: string } | { summary: RetentionRunSummary }): Promise<void> {
+export async function recordJobFinish(db: DbOrTx, name: string, at: number, result: { error: string } | { summary: RetentionRunSummary | SandboxPurgeRunSummary }): Promise<void> {
   const when = new Date(at);
   const failed = 'error' in result;
   const set = failed
@@ -50,7 +51,7 @@ export function toRetentionJobStatusDTO(row: JobStatusRow | null, now: number): 
     lastFinishedAt: ms(row?.lastFinishedAt),
     lastSuccessAt,
     lastError: row?.lastError ?? null,
-    lastSummary: row?.lastSummary ?? null,
+    lastSummary: (row?.lastSummary as RetentionRunSummary | null | undefined) ?? null,
     stale: lastSuccessAt == null || now - lastSuccessAt > RETENTION_STALE_AFTER_MS,
   };
 }

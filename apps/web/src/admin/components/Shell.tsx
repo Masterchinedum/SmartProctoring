@@ -7,6 +7,7 @@ import { qk } from '../api/queries';
 import { useLive } from '../api/live';
 import { useAuth } from '../auth';
 import { ROLE_LABELS } from '../lib/labels';
+import { sandboxBannerText } from '../lib/quotas';
 
 interface NavItem {
   to: string;
@@ -93,6 +94,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <div className="brand-org" title={org.name}>
               {org.name}
             </div>
+            {org.kind === 'sandbox' ? <div className="badge badge-warning brand-sandbox">Sandbox</div> : null}
           </div>
         </div>
         <nav aria-label="Main">
@@ -127,6 +129,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <main className="admin-main" id="admin-main" tabIndex={-1}>
+        <SandboxBanner />
         <LiveBanner />
         {children}
       </main>
@@ -143,6 +146,18 @@ function LiveDot() {
       <span className={`live-dot live-${status}`} title={label} aria-hidden />
       <span className="visually-hidden">({label})</span>
     </>
+  );
+}
+
+/** A sandbox organisation (trial / testing; data deleted automatically): on every page, never dismissed. */
+function SandboxBanner() {
+  const { org } = useAuth();
+  const text = sandboxBannerText(org);
+  if (!text) return null;
+  return (
+    <div className="banner banner-warning sandbox-banner no-print" role="note" aria-label="Sandbox organisation" data-testid="sandbox-banner">
+      {text}
+    </div>
   );
 }
 
