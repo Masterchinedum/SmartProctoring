@@ -565,7 +565,19 @@ function fakeCameraInit(cfg: ShimConfig): void {
     return track;
   };
 
-  md.getUserMedia = async (constraints?: MediaStreamConstraints): Promise<MediaStream> => {
+  // Every request and its outcome, for the failure diagnostics (`__spFakeCamera.calls`).
+  const calls: string[] = [];
+  const record = <T,>(what: string, p: Promise<T>): Promise<T> =>
+    p.then(
+      (v) => (calls.push(`${what}: ok`), v),
+      (e: unknown) => {
+        calls.push(`${what}: ${(e as Error)?.name ?? 'error'} ${(e as Error)?.message ?? ''}`.trim());
+        throw e;
+      },
+    );
+  md.getUserMedia = (constraints?: MediaStreamConstraints): Promise<MediaStream> =>
+    record(`getUserMedia(${JSON.stringify(constraints ?? {}).slice(0, 200)})`, getUserMedia(constraints));
+  const getUserMedia = async (constraints?: MediaStreamConstraints): Promise<MediaStream> => {
     const c = constraints ?? {};
     if (!c.video && !c.audio) throw new TypeError("Failed to execute 'getUserMedia': At least one of audio and video must be requested");
     if (c.audio || cfg.mode !== 'video') throw fail('NotFoundError', 'Requested device not found');
@@ -582,6 +594,7 @@ function fakeCameraInit(cfg: ShimConfig): void {
   // Diagnostics for tests (e.g. `page.evaluate(() => __spFakeCamera.frame())`).
   // `lag()`: frames the canvas is behind the clock (0 = on time).
   w.__spFakeCamera = {
+    calls,
     mode: cfg.mode,
     width,
     height,
