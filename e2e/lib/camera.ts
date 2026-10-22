@@ -254,6 +254,7 @@ export async function installCamera(context: BrowserContext): Promise<void> {
     groupId: SHIM_GROUP_ID,
     binding: FRAME_BINDING,
     prefetch: PREFETCH,
+    captureFps: currentBrowser() === 'webkit' ? video.fps : undefined,
   } satisfies ShimConfig);
 }
 
@@ -270,6 +271,11 @@ interface ShimConfig {
   groupId: string;
   binding: string;
   prefetch: number;
+  /**
+   * WebKit: capture the canvas at this frame rate (a timer) and keep the 2 px canvas opaque — with change-driven
+   * capture its <video> stayed on the first frame. Other engines: change-driven capture plus requestFrame().
+   */
+  captureFps?: number;
 }
 
 type Drawable = ImageBitmap | HTMLImageElement;
@@ -470,7 +476,7 @@ function fakeCameraInit(cfg: ShimConfig): void {
       c.height = height;
       c.setAttribute('aria-hidden', 'true');
       c.setAttribute('data-sp-e2e-camera', '');
-      Object.assign(c.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: '0', pointerEvents: 'none' });
+      Object.assign(c.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: cfg.captureFps ? '1' : '0', pointerEvents: 'none' });
       // In the document (not only in memory) and inside the viewport, so that every engine keeps painting it and
       // capturing its frames (engines may skip work for content outside the viewport).
       document.documentElement.appendChild(c);
@@ -498,7 +504,7 @@ function fakeCameraInit(cfg: ShimConfig): void {
   };
 
   const openTrack = (constraints: MediaTrackConstraints): MediaStreamTrack => {
-    const track = dev.canvas!.captureStream().getVideoTracks()[0]!;
+    const track = (cfg.captureFps ? dev.canvas!.captureStream(cfg.captureFps) : dev.canvas!.captureStream()).getVideoTracks()[0]!;
     let current: MediaTrackConstraints = { ...constraints };
     const settings: MediaTrackSettings = { deviceId: cfg.deviceId, groupId: cfg.groupId, width, height, frameRate: fps, aspectRatio: width / height, facingMode: 'user' };
     const stop = track.stop.bind(track);

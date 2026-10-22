@@ -78,11 +78,12 @@ test('happy path: check-in, answers, pause with browser closed, resume, submit, 
     await expect(c.page.getByRole('checkbox', { name: 'Variance' })).toBeChecked();
     await expect(c.page.getByRole('checkbox', { name: 'Range' })).toBeChecked();
     await expect(c.page.getByRole('checkbox', { name: 'Mean' })).not.toBeChecked();
-    console.log(`paused (wall) ${since(pausedAtWall)}; countdown before pause ${beforePause} ms, after resume ${afterResume} ms`);
+    console.log(`paused (wall) ${since(pausedAtWall)}; countdown before pause ${beforePause} ms, at the pause ${onPause} ms, after resume ${afterResume} ms`);
     expect(pausedWallMs).toBeGreaterThan(15_000);
-    // Only the seconds since the resume check passed were used — not the time spent paused/closed/checking.
-    expect(beforePause - afterResume).toBeLessThan(6_000);
-    expect(beforePause - afterResume).toBeGreaterThanOrEqual(0);
+    // Only the seconds since the resume check passed were used — not the time spent paused/closed/checking. (From the
+    // clock at the pause: the seconds the pause itself took are bounded above.)
+    expect(onPause - afterResume).toBeLessThan(6_000);
+    expect(onPause - afterResume).toBeGreaterThanOrEqual(0);
 
     /* ---------------- submit */
     await c.tid('submit-button').click();
