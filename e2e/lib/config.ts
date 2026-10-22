@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
  *   E2E_SKIP_BUILD=1     reuse apps/web/dist if it exists
  *   E2E_WORKERS          parallel workers (default 2; every camera test runs its own Chromium)
  *   E2E_HEADED=1         show the candidate browsers
+ *   E2E_DELEGATE=gpu|cpu the candidate app's MediaPipe delegate (default: the app's choice — CPU on a software renderer)
  *   E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD   owner created via BOOTSTRAP_ADMIN_* (and used by the tests)
  *   E2E_NO_SKIP=1        a test that would be skipped because its face images are missing FAILS instead, and global
  *                        setup stops when a fixture cannot be built (CI: a green run means every scenario ran)
@@ -42,6 +43,8 @@ export const ADMIN_PASSWORD = env.E2E_ADMIN_PASSWORD || 'e2e-owner-password-1';
 export const EVIDENCE_KEY = Buffer.alloc(32, 7).toString('base64');
 export const SESSION_SECRET = 'e2e-session-secret-0123456789abcdefghijklmnopqrstuvwxyz';
 export const HEADED = env.E2E_HEADED === '1';
+/** The candidate app's MediaPipe delegate (its own `sp:delegate` switch); unset = the app's choice. */
+export const DELEGATE: 'gpu' | 'cpu' | null = env.E2E_DELEGATE === 'gpu' || env.E2E_DELEGATE === 'cpu' ? env.E2E_DELEGATE : null;
 export const WORKERS = Number(env.E2E_WORKERS || 2);
 export const NO_SKIP = env.E2E_NO_SKIP === '1';
 /** Where the servers analyse faces: in-process (default) or in one dedicated vision worker process. */

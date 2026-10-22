@@ -130,6 +130,9 @@ jobs:
       # One test at a time: a headed browser rendering through software GL plus the in-page face analysis starve a
       # second candidate browser on a 4-vCPU runner (camera frames seconds late, clicks timing out).
       E2E_WORKERS: "1"
+      # Firefox: MediaPipe on its GPU delegate (WebGL, run by Firefox's GPU process) instead of the app's choice for a
+      # software renderer (CPU: WASM on the page's main thread, which starved the camera shim and the clicks).
+      E2E_DELEGATE: ${{ matrix.browser == 'firefox' && 'gpu' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

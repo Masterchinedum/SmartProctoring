@@ -114,7 +114,10 @@ export class CameraManager {
     this.video.autoplay = true;
     this.video.setAttribute('aria-hidden', 'true');
     this.video.setAttribute('data-sp-analysis', '');
-    Object.assign(this.video.style, { position: 'fixed', left: '-10000px', top: '0', width: '2px', height: '2px', opacity: '0', pointerEvents: 'none' });
+    // Inside the viewport, but 2 px and fully transparent: WebKit (Safari) and Chrome on Android pause a muted video
+    // that plays without a user gesture while it is outside the viewport, and the analysis would then never get a
+    // frame ("Waiting for the camera"). Their visibility test is position-based, not opacity-based.
+    Object.assign(this.video.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: '0', pointerEvents: 'none' });
     document.body.appendChild(this.video);
     navigator.mediaDevices?.addEventListener?.('devicechange', this.onDeviceChange);
     void this.watchPermission();

@@ -466,8 +466,9 @@ function fakeCameraInit(cfg: ShimConfig): void {
       c.height = height;
       c.setAttribute('aria-hidden', 'true');
       c.setAttribute('data-sp-e2e-camera', '');
-      Object.assign(c.style, { position: 'fixed', left: '-10000px', top: '0', width: '2px', height: '2px', opacity: '0', pointerEvents: 'none' });
-      // In the document (not only in memory) so that every engine keeps painting it and capturing its frames.
+      Object.assign(c.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: '0', pointerEvents: 'none' });
+      // In the document (not only in memory) and inside the viewport, so that every engine keeps painting it and
+      // capturing its frames (engines may skip work for content outside the viewport).
       document.documentElement.appendChild(c);
       dev.canvas = c;
       dev.ctx = c.getContext('2d', { alpha: false });

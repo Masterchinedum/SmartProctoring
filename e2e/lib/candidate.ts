@@ -1,5 +1,5 @@
 import { chromium, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
-import { BASE_URL, HEADED } from './config';
+import { BASE_URL, DELEGATE, HEADED } from './config';
 import { requireImages } from './require-images';
 import { fixtureAvailable, fixturePath, type FixtureName } from './fixtures';
 import { cameraMode, cameraPermissions, installCamera, launchShimCamera, launchShimPersistentCamera, shimStats } from './camera';
@@ -192,6 +192,7 @@ export class CandidatePage {
     const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, ...cameraPermissions() }));
     await installCamera(context); // shim mode only; before the tracker below, which wraps whatever getUserMedia is
     await context.addInitScript(TRACK_CAMERA_STREAMS);
+    if (DELEGATE) await context.addInitScript(`try { localStorage.setItem('sp:delegate', ${JSON.stringify(DELEGATE)}); } catch {}`);
     // A/B measurement of the check's pose smoothing (apps/web/src/candidate/check/poseFilter.ts): raw poses.
     if (process.env.E2E_RAW_POSE === '1') await context.addInitScript('window.__spRawPose = true;');
     const page = await context.newPage();
