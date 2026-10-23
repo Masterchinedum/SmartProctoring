@@ -1436,7 +1436,8 @@
               "id_photo_unverifiable",
               "staff_verification",
               "resume_limit",
-              "recovery"
+              "recovery",
+              "additional_display"
             ]
           },
           "since": {
