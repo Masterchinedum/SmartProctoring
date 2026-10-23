@@ -88,6 +88,12 @@ export interface Config {
    * SESSION_MAX_EVIDENCE_ITEMS (1500), SESSION_MAX_EVIDENCE_MB (300), SESSION_MAX_CHECKS_PER_HOUR (30).
    */
   sessionLimits: { maxEvidenceItems: number; maxEvidenceBytes: number; maxChecksPerHour: number };
+  /**
+   * Exam recording (policy.recording; services/recordings.ts), outside the evidence budget above:
+   * RECORDING_MAX_SESSION_MB (3000) caps one session's stored recording; RECORDING_LATE_UPLOAD_HOURS (24) is how long
+   * after the exam ended segments still queued in the candidate's browser are accepted.
+   */
+  recording: { maxSessionBytes: number; lateUploadMs: number };
   /** SMTP server for email alerts (SMTP_*). null = email alerts unavailable. */
   smtp: SmtpConfig | null;
   /** Outgoing webhooks (services/webhooks.ts). */
@@ -526,6 +532,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxEvidenceItems: Math.max(1, int(env.SESSION_MAX_EVIDENCE_ITEMS, 1500)),
       maxEvidenceBytes: Math.max(1, int(env.SESSION_MAX_EVIDENCE_MB, 300)) * 1024 * 1024,
       maxChecksPerHour: Math.max(1, int(env.SESSION_MAX_CHECKS_PER_HOUR, 30)),
+    },
+    recording: {
+      maxSessionBytes: Math.max(1, int(env.RECORDING_MAX_SESSION_MB, 3000)) * 1024 * 1024,
+      lateUploadMs: Math.min(14 * 24, Math.max(0, int(env.RECORDING_LATE_UPLOAD_HOURS, 24))) * 3_600_000,
     },
     smtp,
     webhooks,

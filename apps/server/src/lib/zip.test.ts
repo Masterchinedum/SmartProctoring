@@ -23,6 +23,31 @@ describe('zip writer', () => {
     expect(files.get('empty.txt')!.data.length).toBe(0);
   });
 
+  it('stores recordings uncompressed', async () => {
+    const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(3000, 1)]);
+    const files = readZip(await buffer(zipStream([{ name: 'recordings/a.webm', data: webm }, { name: 'recordings/b.mp4', data: webm }])));
+    expect(files.get('recordings/a.webm')!.method).toBe(0);
+    expect(files.get('recordings/b.mp4')!.method).toBe(0);
+  });
+
+  it('writes ZIP64 positions and counts past the 32-bit limits (lowered here), readable entry by entry', async () => {
+    const big = Buffer.alloc(400, 9);
+    const entries: ZipEntry[] = Array.from({ length: 6 }, (_, i) => ({ name: `recordings/${i}.webm`, data: big }));
+    const zip = await buffer(zipStream(entries, { zip64At: { offset: 1000, entries: 4 } }));
+    // The ZIP64 end record and its locator come before the classic end record, which points to them.
+    expect(zip.indexOf(Buffer.from([0x50, 0x4b, 0x06, 0x06]))).toBeGreaterThan(0);
+    expect(zip.indexOf(Buffer.from([0x50, 0x4b, 0x06, 0x07]))).toBeGreaterThan(0);
+    const eocd = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    expect(zip.readUInt16LE(eocd + 10)).toBe(0xffff);
+    expect(zip.readUInt32LE(eocd + 16)).toBe(0xffffffff);
+    const files = readZip(zip);
+    expect([...files.keys()]).toEqual(entries.map((e) => e.name));
+    for (const f of files.values()) expect(f.data.equals(big)).toBe(true);
+    // Below the limits nothing changes: no ZIP64 records at all.
+    const small = await buffer(zipStream(entries.slice(0, 2)));
+    expect(small.indexOf(Buffer.from([0x50, 0x4b, 0x06, 0x06]))).toBe(-1);
+  });
+
   it('refuses unsafe or duplicate names', async () => {
     for (const name of ['../x', '/abs', 'a//b', 'a\\b', './a', '']) {
       await expect(buffer(zipStream([{ name, data: 'x' }]))).rejects.toThrow(/Invalid ZIP entry name/);

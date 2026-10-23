@@ -123,13 +123,16 @@ export type WithdrawConsentRequest = z.infer<typeof withdrawConsentSchema>;
 
 export interface RetentionPreviewDTO {
   now: number;
-  /** Evidence deletions due per day (UTC dates) over the preview window. */
-  days: { date: string; sessions: number; evidenceItems: number }[];
+  /**
+   * Evidence deletions due per day (UTC dates) over the preview window. `evidenceItems`: images; `recordings`: exam
+   * recording segments (./recording.ts), deleted together with the images.
+   */
+  days: { date: string; sessions: number; evidenceItems: number; recordings: number }[];
   /** Due but not yet deleted (the job is behind or failing), excluding legal holds. */
-  overdue: { sessions: number; evidenceItems: number; oldestDueAt: number | null };
+  overdue: { sessions: number; evidenceItems: number; recordings: number; oldestDueAt: number | null };
   /** Ended sessions whose event records (no images) are deleted in the window. */
   eventMetadataSessions: number;
-  legalHolds: { sessionId: string; candidateName: string; examTitle: string; endedAt: number | null; evidenceItems: number }[];
+  legalHolds: { sessionId: string; candidateName: string; examTitle: string; endedAt: number | null; evidenceItems: number; recordings: number }[];
   job: RetentionJobStatusDTO;
 }
 

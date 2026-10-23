@@ -4,6 +4,7 @@ import type { CheckFrameResponse, CheckPurpose, CompleteCheckResponse, DeviceInf
 import { classifyApiError, type CandidateApi } from '../api';
 import { errorMessage, useController, useSnapshot } from '../context';
 import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
+import { screenInfo } from '../displays';
 import { captureFaceCrop } from '../monitoring/frames';
 import { AdaptiveCheck } from './adaptive';
 import { PoseSmoother } from './poseFilter';
@@ -68,12 +69,11 @@ type Phase = 'starting' | 'frontal' | 'liveness' | 'completing' | 'expired' | 'e
 
 export async function deviceInfo(ctrl: { camera: { state: { info: { label: string; deviceIdHash: string; width: number; height: number } | null } }; }): Promise<DeviceInfo> {
   const info = ctrl.camera.state.info;
-  const scr = window.screen as Screen & { isExtended?: boolean };
   return {
     cameraLabel: (info?.label ?? '').slice(0, 300),
     cameraIdHash: info?.deviceIdHash ?? '',
     userAgent: navigator.userAgent.slice(0, 1000),
-    screen: { width: scr.width, height: scr.height, isExtended: typeof scr.isExtended === 'boolean' ? scr.isExtended : null },
+    screen: screenInfo(),
     videoWidth: info?.width || undefined,
     videoHeight: info?.height || undefined,
   };
@@ -103,7 +103,8 @@ export function VerifyStep({
   onBackToSetup: () => void;
 }) {
   const ctrl = useController();
-  const { camera } = useSnapshot();
+  const { camera, state: sessionState } = useSnapshot();
+  const examRecorded = !!sessionState?.consent.notice.recording;
   const [phase, setPhase] = useState<Phase>('starting');
   const [check, setCheck] = useState<StartCheckResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -593,7 +594,9 @@ export function VerifyStep({
         {check?.liveness
           ? 'Follow the instructions below. We take a few pictures to confirm that a live person is in front of the camera and to compare your face with the identity reference.'
           : 'Look at the screen while we take a few pictures to confirm your identity.'}{' '}
-        Only these pictures are sent; there is no video recording.
+        {examRecorded
+          ? 'Only these pictures are sent for this check. The exam itself is recorded once it starts, as the privacy notice explains.'
+          : 'Only these pictures are sent; there is no video recording.'}
       </p>
       <div className="cand-setup">
         <CameraPreview

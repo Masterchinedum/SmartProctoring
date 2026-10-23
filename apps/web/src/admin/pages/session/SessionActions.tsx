@@ -279,6 +279,12 @@ function ReleaseHoldDialog({ d, onDone, onCancel }: { d: SessionDetailDTO; onDon
             different person.
           </div>
         ) : null}
+        {reason === 'additional_display' ? (
+          <div className="banner banner-info small" data-testid="release-display-note">
+            The candidate was asked to disconnect the additional display. The display check runs again when the exam continues: if more than one display is still connected, the exam
+            is put on hold again.
+          </div>
+        ) : null}
         <label>
           Note (recorded in the timeline and audit log)
           <textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} rows={3} placeholder="e.g. Verified identity by video call with photo ID." />

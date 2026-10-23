@@ -13,6 +13,7 @@ import { reviewSlaSchema, type QueueView, type ReviewDecisionDTO, type ReviewRes
 import type { EventExplanation } from './explain';
 import type { Incident } from './incidents';
 import { evidenceLocationSchema } from './residency';
+import type { SessionRecordingSummaryDTO } from './recording';
 
 /**
  * HTTP API contract. Paths are relative to the server origin.
@@ -36,7 +37,8 @@ export interface ApiError {
 
 export interface EvidenceRefDTO {
   id: string;
-  kind: 'event_screenshot' | 'identity_probe' | 'identity_reference' | 'id_photo' | 'liveness_frame';
+  /** `recording`: a part of the exam recording (only on a recording's own evidence row; never attached to events). */
+  kind: 'event_screenshot' | 'identity_probe' | 'identity_reference' | 'id_photo' | 'liveness_frame' | 'recording';
   capturedAt: number;
   /** false once purged by retention policy */
   available: boolean;
@@ -142,6 +144,8 @@ export interface PrivacyNoticeDTO {
   stored: string[];
   notStored: string[];
   contact: string;
+  /** What the exam records (policy.recording); absent when it records nothing. The notice above says so in words. */
+  recording?: { camera: boolean; audio: boolean; screen: boolean };
 }
 
 /** GET /api/candidate/session */
@@ -197,12 +201,23 @@ export interface CandidateSessionState {
 export const consentRequestSchema = z.object({ noticeVersion: z.string(), accepted: z.literal(true) });
 export type ConsentRequest = z.infer<typeof consentRequestSchema>;
 
+/** `isExtended`: the browser reports more than one display (Window Management API); null where it cannot tell. */
+export const screenInfoSchema = z.object({ width: z.number(), height: z.number(), isExtended: z.boolean().nullable() }).partial();
+export type ScreenInfo = z.infer<typeof screenInfoSchema>;
+
+/** Connected displays as the browser reported them: 'unknown' where it cannot tell (Firefox, Safari). */
+export type DisplayReport = 'single' | 'extended' | 'unknown';
+
+export function displayReport(isExtended: unknown): DisplayReport {
+  return isExtended === true ? 'extended' : isExtended === false ? 'single' : 'unknown';
+}
+
 export const deviceInfoSchema = z.object({
   cameraLabel: z.string().max(300).default(''),
   /** SHA-256 of deviceId (never the raw id). */
   cameraIdHash: z.string().max(128).default(''),
   userAgent: z.string().max(1000).default(''),
-  screen: z.object({ width: z.number(), height: z.number(), isExtended: z.boolean().nullable() }).partial().default({}),
+  screen: screenInfoSchema.default({}),
   videoWidth: z.number().optional(),
   videoHeight: z.number().optional(),
 });
@@ -296,7 +311,16 @@ export interface CompleteCheckResponse {
  * (CHECK_IN_LEAD_MS before the opening) and after the closing.
  * A reconnect check started when the exam's resume policy limit is reached (policy.resume): 409 `resume_limit_reached`
  * after the exam was put on hold or ended (reload the state).
+ * An exam that requires a single display (policy.browser.requireSingleDisplay) is not started while the browser reports
+ * more than one: 409 `single_display_required`.
  */
+
+/**
+ * POST /api/candidate/start body. `screen`: what the browser reports about its displays at the moment of the start;
+ * without it the server goes by what this browser's last check reported.
+ */
+export const startExamRequestSchema = z.object({ screen: screenInfoSchema.optional() });
+export type StartExamRequest = z.infer<typeof startExamRequestSchema>;
 
 /** PUT /api/candidate/answers/:questionId */
 export const saveAnswerRequestSchema = z.object({
@@ -610,6 +634,8 @@ export interface DeviceRecordDTO {
   cameraIdHash: string;
   userAgent: string;
   purpose: CheckPurpose;
+  /** What the browser reported about connected displays at this check. */
+  displays: DisplayReport;
 }
 
 /** GET /api/admin/sessions/:id */
@@ -632,6 +658,8 @@ export interface SessionDetailDTO {
   review: SessionReviewDTO;
   /** Whether staff may reopen the exam for recovery now (POST /sessions/:id/reopen), and why (not). */
   reopen?: ReopenEligibilityDTO;
+  /** What was recorded of the exam (policy.recording; ./recording.ts); null when nothing was. */
+  recording?: SessionRecordingSummaryDTO | null;
 }
 
 export const STAFF_VERIFICATION_METHODS = ['video_call', 'in_person', 'id_document_on_camera', 'other'] as const;
@@ -756,6 +784,8 @@ export interface SessionReportDTO {
   incidents?: Incident[];
   /** Why each notable event was recorded (./explain.ts), by event id. */
   explanations?: Record<string, EventExplanation>;
+  /** What was recorded of the exam (./recording.ts); null when nothing was. Staff only (not in the integration API). */
+  recording?: SessionRecordingSummaryDTO | null;
 }
 
 /* ---- exams, candidates, assignments */

@@ -13,10 +13,12 @@ apps/web  (React + Vite)                     apps/server (Node 24 + Fastify 5 + 
  │   ├─ MediaPipe ObjectDetector (~1 fps)     ├─ vision/  YuNet (face detect) + SFace (face embedding) via onnxruntime-node
  │   ├─ @sp/detection engine (episodes)       │           in a worker-thread pool; liveness verification; quality gate
  │   ├─ browser signals (tab/focus/fs/clip)   ├─ identity engine (decisions, confirmations, holds)
- │   └─ IndexedDB outbox (offline-safe)       ├─ session state machine (clock, pauses, periods, holds)
+ │   ├─ IndexedDB outbox (offline-safe)       ├─ session state machine (clock, pauses, periods, holds)
+ │   └─ exam recorder (opt-in, 30 s parts)    ├─ recording parts (opt-in; stored as encrypted evidence)
  └─ admin app  /admin/*                       ├─ evidence store (AES-256-GCM encrypted blobs, local FS or S3)
      ├─ live dashboard (WS)                   ├─ retention job, audit log, reports
      ├─ session timeline / evidence / compare └─ eval/ offline identity accuracy harness
+     ├─ recording playback (webcam + screen)
      └─ exams, candidates, settings, quality
 packages/shared     types, zod schemas, event catalog, policy, clock math, privacy notice
 packages/detection  pure-TS monitoring engine: FrameObservation stream -> episodes (+ synthetic eval harness)
@@ -25,11 +27,13 @@ apps/server/src/vision-worker   optional dedicated vision worker process: the vi
 ```
 
 Why this split:
-* **Behavioural detection runs in the browser** (cheap, real-time, no video upload, privacy-preserving).
+* **Behavioural detection runs in the browser** (cheap, real-time, no video upload for analysis, privacy-preserving).
 * **Identity decisions run on the server** against a reference the client never sees, so a tampered
   client cannot fake "same person". The client only sends JPEG frames.
-* **Continuous video is never stored.** Only event screenshots, identity probes that did not cleanly
-  match, and the protected reference are stored — encrypted, access-logged, and purged by retention.
+* **By default, continuous video is never stored.** Only event screenshots, identity probes that did not cleanly
+  match, and the protected reference are stored — encrypted, access-logged, and purged by retention. Exams whose
+  rules turn recording on (off by default; §6 *Exam recording*) also store the webcam video with microphone sound
+  and the candidate's entire screen, in 30-second parts kept exactly like those images.
 
 ## 2. Licensing (commercial use)
 
@@ -67,7 +71,11 @@ implementations fail). `pnpm audit --prod` reported no advisory for any of these
 * **start** → **active**, clock starts, `active` period opens. Admission: while the instance is at capacity
   (`services/capacity.ts`) the start is deferred (503 `start_deferred` + Retry-After; the session stays `ready`,
   `startDeferredSince` records the first deferral, the client retries) for at most `EXAM_START_MAX_DEFER_SEC`; the
-  `session_started` event notes the delay (`details.startDeferredMs`).
+  `session_started` event notes the delay (`details.startDeferredMs`). **Single display** (`policy.browser.requireSingleDisplay`,
+  off by default): the start is refused (409 `single_display_required`) while the browser reports more than one display
+  — `screen.isExtended` as sent with the start (`startExamRequestSchema`), else as this browser's last check recorded it
+  (`device_records.screen`). A browser that cannot tell (Firefox, Safari) is not held back; `session_started.details.displays`
+  records `single` / `unknown`, and `unknown` adds a report limitation.
 * **pause**: per policy (reason? approval?). Monitoring stops, `paused` period (unobserved) opens; clock
   stops or continues per `policy.pause.timerBehavior`. Candidate may close the browser.
 * **resume**: candidate reopens link → `requiredCheck='resume'` → same readiness + liveness + identity
@@ -79,6 +87,11 @@ implementations fail). `pnpm audit --prod` reported no advisory for any of these
   un-verified instances is rejected. A second instance supersedes the first (`multiple_instances` event).
 * **on_hold**: clock stopped. Staff release (optionally requiring a fresh check, optionally authorising
   re-enrolment of the reference) or terminate.
+* **additional display** (single-display rule): the browser's `additional_display_detected` event (a `change` of
+  `screen.isExtended` to true, also reported when monitoring starts with two displays) received while the exam is
+  `active` → `on_hold` with reason `additional_display` (`ingest.ts`, after the batch is stored). Without the rule the
+  event stays a neutral observation. A display still connected when monitoring restarts after the release holds the
+  exam again.
 * **expiry**: server sweeper auto-submits when the clock hits zero.
 * **scheduling window** (optional): the exam can be *started* only inside the session's window; the check-in may begin
   30 minutes earlier. Only the start is bounded — an exam in progress is never cut off when the window closes.
@@ -119,7 +132,7 @@ Approved per-candidate exceptions to exam rules, granted and revoked (never edit
 audit-logged without its encrypted note. Every kind only *relaxes* rules and is expressed as overrides of resolved
 policy fields (`applyAccommodations`), so the server, the candidate client and the reports read one consistent
 policy: extra time (added to `duration_ms`), rest breaks (never stricter than the exam), no head-turn challenge,
-assistive technology (no fullscreen / blur recording / clipboard block), behaviour detectors off, a support person
+assistive technology (no fullscreen / blur recording / clipboard block / single-display rule), behaviour detectors off, a support person
 (other people in view not observed), **identity verified by staff** and **no camera**. Those two are policy modes
 (`identity.verification: 'staff'`, `camera.enabled: false`) whose invariants the policy schema enforces (staff mode:
 no live-person or ID-photo check; no camera: every camera detector and screenshot off, staff verification forced).
@@ -371,8 +384,10 @@ Browser support. Nothing in the candidate app is Chromium-only: the camera uses 
 constraints (an HD refusal retries in SD), the Permissions API for the camera is optional, MediaPipe loads its
 self-hosted WASM (SIMD or not) with the GPU delegate and falls back to CPU (CPU first on a software renderer),
 the outbox stores ArrayBuffers in IndexedDB, and fullscreen goes through `candidate/fullscreen.ts` (standard API,
-WebKit-prefixed fallback for Safari 16.0–16.3; "not supported" where neither exists, e.g. iPhone). The e2e suite
-runs every scenario in Chromium and the core ones in Firefox and WebKit with a camera shim (`e2e/README.md`).
+WebKit-prefixed fallback for Safari 16.0–16.3; "not supported" where neither exists, e.g. iPhone). Connected displays
+come from the Window Management API (`screen.isExtended` and its `change` event, `candidate/displays.ts`), which only
+Chrome and Edge implement: elsewhere the display count is `unknown` and the single-display rule blocks nothing. The e2e
+suite runs every scenario in Chromium and the core ones in Firefox and WebKit with a camera shim (`e2e/README.md`).
 
 ## 6. Events, evidence, delivery
 
@@ -419,6 +434,70 @@ runs every scenario in Chromium and the core ones in Firefox and WebKit with a c
   its sweeper decides bursts left incomplete. The frame images of a passed check are purged after COMMIT
   (delete blob, then tombstone the row): a crash in between leaves the row without its blob until retention purges
   the session (`readEvidence` returns null).
+
+### Exam recording (`packages/shared/src/recording.ts`, `services/recordings.ts`, `candidate/monitoring/{recorder,recording,recordingQueue,screen,micLevel}.ts`, `admin/pages/session/RecordingTab.tsx`)
+
+* **Setting and plan**: `policy.recording` {`enabled` false, `audio` true, `screen` true}. `recordingPlan(policy)` says
+  what is recorded: webcam when enabled and the exam uses a camera (`camera.enabled !== false`, so the *no camera*
+  accommodation records neither webcam nor microphone), microphone with the webcam when `audio`, screen when enabled
+  and `screen`. Ingest drops `screen_share_stopped` / `recording_interrupted` for exams that do not record.
+* **Notice and consent**: `noticeFor` builds the recording variant of the notice (`RECORDING_NOTICE_VERSION`) for an
+  exam that records; `consentCoversRecording(plan, version)` decides whether a stored consent counts. When it does not
+  (recording turned on after the candidate agreed), `consent.accepted` is false in the candidate state and `startExam`
+  refuses with 409 `consent_required`, so the candidate sees the notice again; `acceptConsent` records the version the
+  candidate was shown.
+* **Browser, recording** (`ExamRecording`, started by the controller after the monitoring runtime, stopped first by
+  `stopMonitoring` at a pause, hold, end or withdrawal): the webcam part records a **clone** of the camera track scaled
+  with `applyConstraints` to 640×480 at 15 fps (face analysis keeps the full-size track; where a browser would rescale
+  the source too, the original track is recorded) plus a **separate microphone** `getUserMedia` (echo cancellation,
+  noise suppression), so exams without recording never ask for the microphone. `SegmentedRecorder` starts a new
+  `MediaRecorder` every 30 s (`RECORDING_SEGMENT_MS`), the next one before stopping the current, so each part is a
+  complete file with its own header (WebM VP8 + Opus first, then VP9, WebM, MP4 for Safari); bitrates 350 kbps video +
+  32 kbps audio for the webcam, 300 kbps for the screen. A new camera stream (generation) or a new share starts a new
+  part. Parts are numbered per page and stream (`seq`, continued across pauses), timed in server time (clock offset).
+  Recorder failures are `recording_interrupted` events (details `{stream, reason}`), retried three times (the counter
+  resets after a healthy part); a recorder that stops because its source ended is not a failure.
+* **Browser, screen** (`ScreenCapture`): shared on the ready screen before Start (`getDisplayMedia` with
+  `displaySurface: 'monitor'`, ≤ 5 fps, ≤ 1280 px, no audio, `selfBrowserSurface` / `surfaceSwitching` excluded,
+  `monitorTypeSurfaces` included; retried with `{video: true}` when a browser rejects the dictionary). The entire screen
+  is required where the track reports `displaySurface` (Chromium-based browsers; others vary by version): `window` / `browser` are refused and the
+  track stopped; no report (Safari, older builds) is accepted as `unknown` with a reminder. A share that ends (the
+  browser's "Stop sharing" ends the track; some builds fire no `ended` event, so `readyState` is also polled every
+  second) covers the exam (`ScreenShareOverlay`, clock running) and opens a `screen_share_stopped` span, closed when the
+  candidate shares again or the run stops.
+* **Browser, queue** (`RecordingQueue`, IndexedDB `sp-recording-<sessionId>`, memory if unavailable; apart from the
+  outbox so media never delays answers and events): every part is written before it is sent; one upload at a time,
+  oldest first, back-off 1 → 30 s. Outcomes: stored, duplicate or `stored: false` → removed; network / 5xx / 429 →
+  retried; not verified → wait for the check; 413 `recording_limit` → dropped and recording stops; other refusals
+  (closed, not enabled, consent, invalid) → dropped; link invalid or superseded → stop. Above 500 MB the oldest parts
+  are dropped (`recording_interrupted`, `device_storage_full`). The queue keeps running after submit
+  (`canUploadRecording`), the end screen shows "Uploading the recording…", `beforeunload` warns while parts are
+  pending, and a page reopened after the end uploads what the previous one left (`?instance=`); a withdrawal deletes
+  the queue.
+* **Server** (`POST /api/candidate/recordings/segments?stream&seq&startedAt&durationMs[&instance]`, body = the part,
+  16 MB limit): checks in order — the plan records the stream (409 `recording_not_enabled`), container type and
+  signature (415 `invalid_recording`), an existing part with the same (session, stream, instance, seq) (200 duplicate),
+  withdrawn / purged / erased (409 `recording_closed`), consent covers recording (409 `consent_required`), control
+  (during the exam `assertInControl`; after the end only the verified instance, for `RECORDING_LATE_UPLOAD_HOURS`),
+  timing (before the start, after the end or inside an unobserved period → 200 `stored: false`), the session cap
+  (413 `recording_limit`). Then one `transactionWithEvidence`: `storeEvidence` (kind `recording`, reason = stream,
+  content type = container type; AES-256-GCM with AAD `evidence:<id>`, in the organisation's storage location) and the
+  `recording_segments` row (`ON CONFLICT DO NOTHING` on the upload key; a lost race rolls back and answers
+  duplicate). A withdrawal that committed meanwhile is re-checked after the insert and the part purged. The server never
+  decodes the media. Metrics: `sp_recording_segments_total`, `sp_recording_bytes_total`, `sp_recording_refused_total`.
+* **Lifecycle**: a part is an evidence row, so retention, legal holds, the withdrawal purge, erasure (`recording_segments`
+  cascades with the evidence row), `storage:move` and `rekey` handle it with no special case; after a purge the segment
+  row stays as metadata beside the tombstone (the staff app shows "deleted on … because …"). Recordings do not count
+  toward the image budget (`sessionEvidenceUsage`) — they have their own cap. The export writes
+  `recordings/<time>-<stream>-<seq>.webm|mp4` and `recording.json`; `lib/zip.ts` switches to ZIP64 records when the
+  archive passes 4 GiB. The retention preview counts recording parts separately.
+* **Staff playback** (`GET /api/admin/sessions/:id/recordings` → `SessionRecordingDTO`; `GET /api/admin/recordings/:id/media`,
+  Range requests, `recording.view` audit for each request that starts at byte 0): the Recording tab runs one clock in
+  server time from the first part to the last; each player loads the part that covers the clock (fetched once per
+  part into a blob URL, so a viewing is one audit entry; a part starting up to 1 s after the clock still counts, since
+  `MediaRecorder` starts a few ms after the span), seeks inside it (WebM parts from `MediaRecorder` report no duration
+  until seeked to the end once), and holds the clock while buffering; gaps show "not recorded". Event markers come from
+  the timeline; "Watch" on the Timeline / Events tabs opens `?tab=recording&t=` 10 s before the event.
 
 ## 7. Staff side
 
@@ -527,7 +606,8 @@ accessible only to authenticated staff, audit-logged. Retention job (hourly) pur
 the session under `legalHold`; purges leave a metadata tombstone. Event metadata is deleted after
 `eventRetentionDays`. A sandbox organisation's data is deleted much earlier: sessions, images and candidates not used
 for its clean-up period (default 14 days; §7 *Sandbox organisations*). No
-continuous video. Candidate references are per-session and never reused across exams.
+continuous video unless the exam's rules turn recording on (off by default); recording parts are evidence and follow
+every rule above (§6 *Exam recording*). Candidate references are per-session and never reused across exams.
 
 ### Privacy operations (`packages/shared/src/privacy-ops.ts`, `services/privacy-requests.ts`, `services/privacy-export.ts`, `services/privacy-ops.ts`, `routes/admin/privacy.ts`)
 
@@ -544,8 +624,8 @@ continuous video. Candidate references are per-session and never reused across e
 * **Consent withdrawal**: `withdrawConsent` ends the session in one `withSession` transaction
   (`finalizeSession(m, 'candidate_withdrew')`: terminated, no grading, `session_terminated` with reason
   `consent_withdrawn`) and inserts the register row; after commit it purges the session's evidence under the row lock
-  (skipped under legal hold). `uploadEventEvidence` refuses images for a withdrawn or purged session, and purges one
-  stored while the withdrawal raced it.
+  (skipped under legal hold). `uploadEventEvidence` and `uploadRecordingSegment` refuse images and recording parts
+  for a withdrawn or purged session, and purge one stored while the withdrawal raced it.
 * **Deletion evidence**: `runRetention` records each real run in `job_status` (`services/job-status.ts`);
   `retentionPreview` groups due evidence by UTC day with the job's own day SQL (`evidenceDaysSql`); `opsChecks` turns the
   job, overdue deletions, overdue requests, capacity, webhooks and alert emails into ok / warning / failing.
@@ -615,7 +695,8 @@ for face analysis, default CPU count − 1), `VISION_WORKERS`, `VISION_NICE`, `P
 `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` (email alerts),
 `WEBHOOK_ALLOW_PRIVATE_NETWORKS` (dev only), `WEBHOOK_DISABLE_AFTER_FAILURES`, `API_RATE_LIMIT_PER_MINUTE`. Single sign-on
 and SCIM: `SSO_ALLOW_PRIVATE_NETWORKS` (default: the webhook setting; dev only), `SSO_TIMEOUT_MS` (10 000),
-`SCIM_RATE_LIMIT_PER_MINUTE` (600).
+`SCIM_RATE_LIMIT_PER_MINUTE` (600). Exam recording: `RECORDING_MAX_SESSION_MB` (3000; per-session cap),
+`RECORDING_LATE_UPLOAD_HOURS` (24; how long after the end parts are still accepted from the verified browser).
 
 ## 11. Integrations
 

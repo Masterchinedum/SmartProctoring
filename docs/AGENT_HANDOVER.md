@@ -42,6 +42,7 @@ Verification at the end of the roadmap (head `fbf2e28`, the last code change):
 | 18 | Vision worker | `src/vision-worker/`, `vision/remote.ts`, `vision/wire.ts` | — | `E2E_VISION=remote` option |
 | 19 | Resilience | `test/chaos.test.ts`, `test/migration-upgrades.test.ts`, `test/schema-drift.test.ts`, `test/alert-rules.test.ts` | — | 19e (PORT + 12) |
 | 20 | Cross-browser | `e2e/lib/camera.ts`, `e2e/lib/browsers.ts`, `apps/web/src/candidate/fullscreen.ts` | — | `@cross-browser` tag |
+| 22 | Exam recording (optional) | `services/recordings.ts`, `packages/shared/src/recording.ts`, candidate `monitoring/{recorder,recording,recordingQueue,screen,micLevel}.ts`, staff `pages/session/RecordingTab.tsx`, `lib/zip.ts` (ZIP64) | 0018 | 19h (Chromium only) |
 
 Migrations are numbered in the order the items landed, not by item number (13 → 0014, 17 → 0013, 16 → 0016,
 15 → 0017).
@@ -103,6 +104,11 @@ Migrations are numbered in the order the items landed, not by item number (13 �
 * On a 4-vCPU container the full core e2e run (2 workers, dedicated servers starting their own vision workers) can
   starve a candidate browser's in-page monitoring, and timing tests (detection eval, vision latency bounds) can miss
   their limits while other suites run: re-run a single spec / file alone before suspecting the change.
+* Exam recording in tests: jsdom has no `MediaStream`, `MediaRecorder` or `Blob.arrayBuffer` (use
+  `apps/web/src/candidate/test/mediaFakes.ts`; the queue reads blobs through a `FileReader` fallback). A track stopped
+  from script fires no `ended` event, so the screen capture also polls `readyState`. Chromium's fake microphone is a
+  quiet beep: the microphone meter needs its long analyser window to hear it. Headless Chromium shares a screen only
+  with `--auto-select-desktop-capture-source=Entire screen` (`launchCamera(…, { screenCapture: true })`).
 * The container can restart while idle: Postgres and Redis then come back down (`service postgresql start; service
   redis-server start`; the trust config and databases survive on disk).
 * `df` inside the container shows the session's disk allowance; agent worktrees (~2.7 GB each with `node_modules` and

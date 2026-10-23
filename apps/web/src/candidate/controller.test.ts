@@ -154,6 +154,7 @@ class FakeServer {
       cancelPause: fail,
       submit: fail,
       withdrawConsent: fail,
+      uploadRecordingSegment: fail,
     };
   }
 }

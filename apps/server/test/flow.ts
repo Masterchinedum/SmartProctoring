@@ -8,8 +8,11 @@ import type { CandidateClient, TestEnv } from './helpers.js';
 
 export const DEVICE = { cameraLabel: 'Integrated Camera', cameraIdHash: 'cam-hash-a', userAgent: 'vitest', screen: { width: 1920, height: 1080, isExtended: false } };
 
+/** Accept the privacy notice: the version the session shows (the recording notice when the exam records). */
 export async function consent(c: CandidateClient) {
-  const r = await c.req('POST', '/api/candidate/consent', { noticeVersion: PRIVACY_NOTICE_VERSION, accepted: true });
+  const state = await c.req('GET', '/api/candidate/session');
+  const noticeVersion = state.statusCode === 200 ? (state.json().consent?.notice?.version ?? PRIVACY_NOTICE_VERSION) : PRIVACY_NOTICE_VERSION;
+  const r = await c.req('POST', '/api/candidate/consent', { noticeVersion, accepted: true });
   expect(r.statusCode, r.body).toBe(200);
   return r.json();
 }

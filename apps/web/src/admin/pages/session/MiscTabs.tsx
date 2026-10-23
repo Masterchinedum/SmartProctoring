@@ -5,7 +5,7 @@ import { api, errorMessage } from '../../api/client';
 import { applyNote } from '../../api/queries';
 import { useNow } from '../../lib/clock';
 import { formatDateTime, formatDuration } from '../../lib/format';
-import { PERIOD_LABELS } from '../../lib/labels';
+import { DISPLAYS_LABELS, PERIOD_LABELS } from '../../lib/labels';
 import { periodDurationMs } from '../../lib/timeline';
 import { EmptyState, KeyValueTable } from '../../components/Common';
 import { NoteList } from '../../components/EventDetail';
@@ -70,7 +70,8 @@ export function DevicesTab({ d }: { d: SessionDetailDTO }) {
   return (
     <div className="stack">
       <div className="muted small">
-        A camera or browser change is recorded as context and is not a violation by itself. Camera ids are stored only as a hash.
+        A camera or browser change is recorded as context and is not a violation by itself. Camera ids are stored only as a hash. Displays: what the browser reported at the
+        check (only Chrome and Edge report additional displays).
       </div>
       <div className="table-wrap">
         <table className="table">
@@ -81,6 +82,7 @@ export function DevicesTab({ d }: { d: SessionDetailDTO }) {
               <th>Camera</th>
               <th>Browser instance</th>
               <th>User agent</th>
+              <th>Displays</th>
             </tr>
           </thead>
           <tbody>
@@ -118,6 +120,7 @@ export function DevicesTab({ d }: { d: SessionDetailDTO }) {
                       </div>
                     ) : null}
                   </td>
+                  <td className="small">{dev.displays ? DISPLAYS_LABELS[dev.displays] : <span className="muted">—</span>}</td>
                 </tr>
               );
             })}

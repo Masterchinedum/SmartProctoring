@@ -19,11 +19,14 @@ export function TimelineTab({
   filters,
   onFilters,
   onOpenEvent,
+  onWatch,
 }: {
   sessionId: string;
   filters: EventFilterState;
   onFilters: (f: EventFilterState) => void;
   onOpenEvent: (id: string) => void;
+  /** The session has a recording: watch it from just before an event. */
+  onWatch?: (at: number) => void;
 }) {
   const q = useQuery({ queryKey: qk.timeline(sessionId), queryFn: () => api.sessionTimeline(sessionId), retry: shouldRetry });
   const items = q.data?.items;
@@ -49,7 +52,7 @@ export function TimelineTab({
       ) : (
         <div className="timeline">
           {groups.map((g) => (
-            <TimelineSection key={g.key} group={g} onOpenEvent={onOpenEvent} filtered={filtersActive(filters)} />
+            <TimelineSection key={g.key} group={g} onOpenEvent={onOpenEvent} onWatch={onWatch} filtered={filtersActive(filters)} />
           ))}
         </div>
       )}
@@ -71,7 +74,7 @@ function sectionTitle(g: TimelineGroup): string {
   return PERIOD_LABELS[g.period.kind] ?? g.period.kind;
 }
 
-function TimelineSection({ group, onOpenEvent, filtered }: { group: TimelineGroup; onOpenEvent: (id: string) => void; filtered: boolean }) {
+function TimelineSection({ group, onOpenEvent, onWatch, filtered }: { group: TimelineGroup; onOpenEvent: (id: string) => void; onWatch?: (at: number) => void; filtered: boolean }) {
   const p = group.period;
   const observed = p ? p.observed : true;
   const counts = groupCounts(group.entries);
@@ -103,7 +106,7 @@ function TimelineSection({ group, onOpenEvent, filtered }: { group: TimelineGrou
         <ol className="tl-items">
           {group.entries.map((e) =>
             e.kind === 'event' ? (
-              <TimelineEventRow key={`e:${e.event.id}`} event={e.event} onOpen={() => onOpenEvent(e.event.id)} />
+              <TimelineEventRow key={`e:${e.event.id}`} event={e.event} onOpen={() => onOpenEvent(e.event.id)} onWatch={observed && onWatch ? () => onWatch(e.event.startedAt) : undefined} />
             ) : (
               <TimelineCheckRow key={`c:${e.check.id}`} check={e.check} />
             ),
@@ -116,7 +119,7 @@ function TimelineSection({ group, onOpenEvent, filtered }: { group: TimelineGrou
   );
 }
 
-function TimelineEventRow({ event: e, onOpen }: { event: EventDTO; onOpen: () => void }) {
+function TimelineEventRow({ event: e, onOpen, onWatch }: { event: EventDTO; onOpen: () => void; onWatch?: () => void }) {
   // Session changes are context: shown compactly. Policy exceptions keep their badge (they change the rules).
   const neutral = e.category === 'neutral';
   const shot = e.evidence.find((x) => x.kind === 'event_screenshot') ?? e.evidence[0];
@@ -150,6 +153,11 @@ function TimelineEventRow({ event: e, onOpen }: { event: EventDTO; onOpen: () =>
         </span>
         {shot && !neutral ? <EvidenceImage evidence={shot} size="thumb" alt="" /> : null}
       </button>
+      {onWatch && !neutral ? (
+        <button type="button" className="btn btn-sm tl-watch" onClick={onWatch} aria-label={`Watch the recording from 10 seconds before: ${e.title}`} data-testid="watch-recording">
+          ▶ Watch
+        </button>
+      ) : null}
     </li>
   );
 }

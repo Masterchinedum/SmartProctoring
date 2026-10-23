@@ -13,6 +13,7 @@ import { ErrorState, Loading } from '../components/Common';
 import { EvidenceImage } from '../components/EvidenceImage';
 import { OutcomeBadge, ReviewStateBadge } from '../components/ReviewBits';
 import { readableReason } from './session/TimelineTab';
+import { describeRecordingSummary } from '../lib/recording';
 
 export function ReportPage() {
   const { id = '' } = useParams();
@@ -177,6 +178,13 @@ function Report({ r, sessionId, onRefresh, refreshing }: { r: SessionReportDTO; 
           <Total label="Disconnected" value={formatDuration(t.disconnectedMs)} />
           <Total label="On hold" value={formatDuration(t.heldMs)} />
           <Total label="Exam time used" value={formatDuration(t.examTimeUsedMs)} sub={`of ${formatDuration(r.exam.durationSec * 1000)}`} />
+          {r.recording ? (
+            <Total
+              label="Recording"
+              value={r.recording.available > 0 ? describeRecordingSummary(r.recording) : 'Deleted'}
+              sub={`${r.recording.segments} part${r.recording.segments === 1 ? '' : 's'}${r.recording.available > 0 && r.recording.available < r.recording.segments ? `, ${r.recording.segments - r.recording.available} deleted` : ''}`}
+            />
+          ) : null}
           {r.score ? (
             <Total
               label="Score"

@@ -90,7 +90,7 @@ export function retentionJobLine(job: RetentionJobStatusDTO, now: number): strin
   if (job.lastSuccessAt == null) return `Running since ${formatDateTime(job.lastStartedAt)}.`;
   const s = job.lastSummary;
   const what = s
-    ? `${pluralize(s.evidenceItemsPurged, 'image')} of ${pluralize(s.sessionsEvidencePurged, 'session')} deleted${s.failures ? `, ${s.failures} to retry` : ''}`
+    ? `${pluralize(s.evidenceItemsPurged, 'evidence item')} of ${pluralize(s.sessionsEvidencePurged, 'session')} deleted${s.failures ? `, ${s.failures} to retry` : ''}`
     : 'completed';
   return `Last run ${formatRelative(job.lastSuccessAt, now)}: ${what}.${job.stale ? ' No successful run for over 3 hours.' : ''}`;
 }

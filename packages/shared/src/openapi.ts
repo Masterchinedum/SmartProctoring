@@ -307,7 +307,7 @@ export function buildIntegrationOpenApi(opts: IntegrationOpenApiOptions = {}): J
       description: [
         'Connect an LMS, HR system or other back office: list exams, create or update candidates, assign them to exams (you receive their personal exam links), and read attempts, final reports and event lists. Webhooks (notifications we send to you) are described in docs/INTEGRATION_API.md §3.',
         'Conventions: JSON in and out; timestamps are epoch milliseconds (UTC); errors are `{ error, message, details? }` with a specific `error` code; lists take `limit` / `offset`. Responses may gain new fields at any time: ignore fields you do not know.',
-        'Privacy: responses never contain images, face templates or face-similarity scores; evidence stays behind staff sign-in (`staffUrl` links).',
+        'Privacy: responses never contain images, recordings, face templates or face-similarity scores; evidence stays behind staff sign-in (`staffUrl` links).',
       ].join('\n\n'),
     },
     servers: [{ url: opts.serverUrl ?? '/api/v1' }],

@@ -1,7 +1,8 @@
 import { useEffect, useId, useState } from 'react';
-import { formatDuration } from '@sp/shared';
+import { formatDuration, recordedThings, recordingPlan } from '@sp/shared';
 import { errorMessage, useController, useSnapshot } from '../context';
 import { BrandHeader, Page, PrivacyNotice, ScreenHeading, Spinner } from '../components/common';
+import { useDisplays } from '../displays';
 import { checkSystemRequirements, type RequirementResult } from '../sysreq';
 
 /** Viewport narrower than this (on a small device) → "you need a computer with a webcam" notice. */
@@ -39,14 +40,26 @@ export function WelcomeScreen() {
   const consentHintId = useId();
 
   const requireFullscreen = state?.exam.policy.browser.requireFullscreen ?? false;
+  const requireSingleDisplay = state?.exam.policy.browser.requireSingleDisplay ?? false;
   const cameraUsed = state?.exam.policy.camera?.enabled !== false;
+  // Checked again when a display is connected or disconnected (where the browser reports it): no reload needed.
+  const { displays } = useDisplays();
+  // What the exam records (policy.recording): the browser must be able to record it (and share the screen).
+  const plan = state ? recordingPlan(state.exam.policy) : null;
+  const recordsCamera = !!plan?.camera;
+  const recordsScreen = !!plan?.screen;
   useEffect(() => {
     let alive = true;
-    void checkSystemRequirements({ requireFullscreen, camera: cameraUsed }).then((r) => alive && setReqs(r));
+    void checkSystemRequirements({
+      requireFullscreen,
+      camera: cameraUsed,
+      requireSingleDisplay,
+      recording: recordsCamera || recordsScreen ? { camera: recordsCamera, screen: recordsScreen } : null,
+    }).then((r) => alive && setReqs(r));
     return () => {
       alive = false;
     };
-  }, [requireFullscreen, cameraUsed]);
+  }, [requireFullscreen, cameraUsed, requireSingleDisplay, displays, recordsCamera, recordsScreen]);
 
   if (!state) return null;
   const { exam, candidate, consent } = state;
@@ -67,6 +80,7 @@ export function WelcomeScreen() {
   };
 
   const p = exam.policy;
+  const recorded = consent.notice.recording ? recordedThings(consent.notice.recording) : null;
   return (
     <Page>
       <BrandHeader title={exam.title} />
@@ -105,6 +119,12 @@ export function WelcomeScreen() {
               <dt>Fullscreen</dt>
               <dd>{p.browser.requireFullscreen ? 'Required' : 'Not required'}</dd>
             </div>
+            {p.browser.requireSingleDisplay && (
+              <div>
+                <dt>Displays</dt>
+                <dd data-testid="rule-single-display">One display only</dd>
+              </div>
+            )}
           </dl>
           {exam.instructions && (
             <div>
@@ -147,7 +167,7 @@ export function WelcomeScreen() {
           ) : (
             <ul className="cand-checklist" data-testid="requirements">
               {reqs.map((r) => (
-                <li key={r.id} className={r.ok ? 'ok' : r.required ? 'fail' : 'warn'}>
+                <li key={r.id} data-item={r.id} className={r.ok ? 'ok' : r.required ? 'fail' : 'warn'}>
                   <span className="cand-check-icon" aria-hidden="true">
                     {r.ok ? '✓' : r.required ? '✕' : '!'}
                   </span>
@@ -170,7 +190,16 @@ export function WelcomeScreen() {
         </section>
 
         <section className="card stack" aria-labelledby="privacy-title">
-          <h2 id="privacy-title">{cameraUsed ? 'Privacy notice: camera monitoring' : 'Privacy notice: exam monitoring'}</h2>
+          <h2 id="privacy-title">
+            {recorded ? 'Privacy notice: monitoring and recording' : cameraUsed ? 'Privacy notice: camera monitoring' : 'Privacy notice: exam monitoring'}
+          </h2>
+          {recorded && (
+            <div className="banner banner-info" data-testid="recording-notice">
+              <strong>This exam is recorded.</strong> From the moment you start the exam until it ends, {recorded} {recorded.includes(' and ') ? 'are' : 'is'} recorded. The
+              recording is kept with the other evidence and deleted {consent.notice.retentionDays} days after your exam ends (unless it is subject to a legal hold).
+              Authorised exam administrators and reviewers can watch it; every time they do is logged.
+            </div>
+          )}
           <p>
             {!cameraUsed
               ? 'This exam is proctored without a camera. A staff member verifies your identity before you start, and the exam page records events such as leaving the exam tab. Please read what is monitored and what is kept.'
@@ -181,7 +210,11 @@ export function WelcomeScreen() {
           <PrivacyNotice notice={consent.notice} />
           <label className="inline cand-consent">
             <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} data-testid="consent-checkbox" />
-            <span>I have read the privacy notice and I agree to camera monitoring and identity checks for this exam.</span>
+            <span>
+              {recorded
+                ? `I have read the privacy notice and I agree to ${cameraUsed ? 'camera monitoring, identity checks and ' : ''}the recording of my exam (${recorded}).`
+                : 'I have read the privacy notice and I agree to camera monitoring and identity checks for this exam.'}
+            </span>
           </label>
           {error && (
             <div className="banner banner-danger" role="alert">

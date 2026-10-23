@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { Baseline, CheckPurpose, CompleteCheckResponse, StartCheckResponse } from '@sp/shared';
 import { useController, useSnapshot } from '../context';
 import { BrandHeader, ContactLine, Page, ScreenHeading, Toasts } from '../components/common';
+import { useDisplays } from '../displays';
 import { enterFullscreen } from '../screens/exam/ExamScreen';
 import { CalibrationStep } from './CalibrationStep';
 import { ReadinessStep } from './ReadinessStep';
@@ -183,6 +184,9 @@ function CheckResult({
   const ctrl = useController();
   const [busy, setBusy] = useState(false);
   const requireFs = res.state.exam.policy.browser.requireFullscreen;
+  const { displays } = useDisplays();
+  // Continuing with another display connected puts an exam that allows only one on hold at once: say so first.
+  const extraDisplay = res.state.exam.policy.browser.requireSingleDisplay && displays === 'extended';
 
   if (res.outcome === 'passed') {
     const cont = async () => {
@@ -195,6 +199,12 @@ function CheckResult({
         <ScreenHeading>Check complete</ScreenHeading>
         <div className="banner banner-success">{res.message || 'Thank you — you can continue your exam.'}</div>
         <p>Your answers and remaining time are exactly as you left them.{requireFs ? ' The exam continues in fullscreen mode.' : ''}</p>
+        {extraDisplay && (
+          <div className="banner banner-warning" role="alert" data-testid="check-extra-display">
+            More than one display is connected, and this exam allows only one. Disconnect any additional displays before you continue, otherwise your exam is put on hold until
+            the administrator releases it.
+          </div>
+        )}
         <div className="row">
           <button type="button" className="btn btn-primary btn-lg" onClick={cont} disabled={busy} data-testid="check-continue">
             {purpose === 'resume' ? 'Resume exam' : 'Continue exam'}

@@ -15,6 +15,7 @@ import {
   type ProctoringPolicy,
   type SaveAnswerRequest,
   type SaveAnswerResponse,
+  type ScreenInfo,
 } from '@sp/shared';
 import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
@@ -37,11 +38,16 @@ export const OUTBOX_DELAY_MS = 30_000;
 
 /* ------------------------------------------------------------------ consent */
 
-export async function acceptConsent(ctx: Ctx, sessionId: string, body: ConsentRequest, meta: { ip: string; userAgent: string }): Promise<void> {
-  if (body.noticeVersion !== PRIVACY_NOTICE_VERSION) throw conflict('notice_outdated', 'The privacy notice has been updated. Please read the current version.', { currentVersion: PRIVACY_NOTICE_VERSION });
+/**
+ * `noticeVersion`: the version of the notice this session's candidate must accept (services/privacy.ts noticeFor: the
+ * recording notice when the exam records). A candidate who agreed to another version agrees again (staff turned
+ * recording on after they agreed); the record keeps the latest consent.
+ */
+export async function acceptConsent(ctx: Ctx, sessionId: string, body: ConsentRequest, meta: { ip: string; userAgent: string }, noticeVersion: string = PRIVACY_NOTICE_VERSION): Promise<void> {
+  if (body.noticeVersion !== noticeVersion) throw conflict('notice_outdated', 'The privacy notice has been updated. Please read the current version.', { currentVersion: noticeVersion });
   await withSession(ctx, sessionId, async (m) => {
     if (TERMINAL.includes(m.session.status)) throw invalidState('The exam has ended');
-    if (m.session.consentAcceptedAt) return;
+    if (m.session.consentAcceptedAt && m.session.consentNoticeVersion === body.noticeVersion) return;
     m.set({ consentAcceptedAt: new Date(m.now), consentNoticeVersion: body.noticeVersion, consentIp: meta.ip, consentUserAgent: meta.userAgent.slice(0, 500) });
     await audit(m.tx, { orgId: m.session.orgId, actorType: 'candidate', action: 'candidate.consent', targetType: 'session', targetId: m.session.id, meta: { noticeVersion: body.noticeVersion }, ip: meta.ip, at: m.now });
   });
@@ -61,15 +67,17 @@ export const START_RETRY_AFTER_SEC = Object.freeze({ min: 5, max: 30 });
  * first deferral); the start then goes ahead whatever the load. The delay is noted on the "Exam started" timeline entry.
  *
  * Outside the session's scheduling window the start is refused (409 exam_window_not_open / exam_window_closed,
- * services/scheduling.ts); a start the server deferred counts from the first request.
+ * services/scheduling.ts); a start the server deferred counts from the first request. `screen`: what the browser
+ * reports about its displays now (an exam that requires a single display is refused while it reports more than one:
+ * 409 single_display_required, session-state.ts startExam).
  */
-export async function startSession(ctx: Ctx, sessionId: string, instanceId: string): Promise<{ deferred: { retryAfterSec: number } | null }> {
+export async function startSession(ctx: Ctx, sessionId: string, instanceId: string, screen?: ScreenInfo): Promise<{ deferred: { retryAfterSec: number } | null }> {
   return withSession(ctx, sessionId, async (m) => {
     assertInControl(m.session, instanceId);
     if (m.session.status === 'ready') assertWindowAllows(m.session, 'start', m.now, m.session.startDeferredSince?.getTime() ?? m.now);
     const deferred = examStartDeferral(m);
     if (deferred) return { deferred };
-    await startExam(m);
+    await startExam(m, { instanceId, screen });
     return { deferred: null };
   });
 }

@@ -140,11 +140,55 @@ the upgrade end as "unable to verify". Templates from before the upgrade (id 1) 
   instance can read evidence. Background jobs (heartbeat timeouts, clock expiry, retention) use
   Postgres row locks and are safe to run on every instance.
 
+### Exam recording (storage, bandwidth, settings)
+
+Recording is an exam setting, **off by default** (exam rules → *Recording*). Nothing below applies until an
+administrator turns it on for an exam; then every candidate of that exam uploads their webcam (with microphone sound)
+and their entire screen in parts of about 30 seconds, stored in the organisation's evidence storage location like
+images (encrypted, same retention, holds, deletion, `storage:move` and `rekey`).
+
+* **Size**: at most ≈ 1.4 MB per webcam part (350 kbps video + 32 kbps sound) and ≈ 1.1 MB per screen part (300 kbps,
+  ≤ 5 frames/s, ≤ 1280 px): **≈ 300 MB per candidate per hour** with both, ≈ 170 MB webcam only, ≈ 135 MB screen only.
+  These are the encoder's targets: a mostly still screen usually needs much less, never more. Plan storage as
+  candidates × exam hours × 300 MB, kept for the evidence retention period: 1,000 candidates in a 2-hour exam ≈ 600 GB,
+  until it is deleted.
+* **Bandwidth and requests**: each recording candidate sends two parts per 30 s (≈ 0.07 uploads/s) and up to
+  ≈ 85 kB/s (≈ 0.7 Mbit/s) upstream; a slower uplink builds a backlog in the browser that is sent after submitting.
+  1,000 candidates ≈ 70 uploads/s and up to ≈ 85 MB/s (≈ 0.7 Gbit/s) into the servers and on to storage — size the
+  servers' network and the storage endpoint for it. A part costs the server
+  one evidence write (in a transaction, like an image — a slow evidence store slows these too; §7 *Storing images is
+  slow*) and a cheap encryption; it is never decoded. Watching a recording reads each part from storage once per
+  viewing (egress from the bucket to the server, then to the reviewer).
+* **Candidate side**: a part waits in the browser (IndexedDB, at most 500 MB, ≈ 1.5 hours of both streams) until it
+  is uploaded, so a short connection loss loses nothing; beyond 500 MB the oldest parts are dropped and a
+  *Recording interrupted* event says so. After submitting, the end screen asks the candidate to keep the page open
+  until the recording has uploaded.
+* **Settings**:
+
+  | Variable | Default | Purpose |
+  |---|---|---|
+  | `RECORDING_MAX_SESSION_MB` | 3000 | The most one session may store (≈ 10 hours of both streams). Further parts are refused (413 `recording_limit`, metric `sp_recording_refused_total{reason="limit"}`) and the browser stops recording. Raise it for very long exams. |
+  | `RECORDING_LATE_UPLOAD_HOURS` | 24 (max 336) | How long after the end the browser that took the exam may still upload parts it queued (a candidate who closed the laptop right after submitting can reopen the link later). 0 = only until the end. |
+
+  Recordings do not count toward the per-session image budget (1,500 items / 300 MB) and are not limited by
+  organisation quotas.
+* **Cloudflare R2 (or another S3-compatible store)** works as any storage location: `STORAGE_DRIVER=s3` (or
+  `STORAGE_LOCATION_<NAME>_DRIVER=s3`) with `S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com` (an EU
+  jurisdiction bucket: `https://<account-id>.eu.r2.cloudflarestorage.com`), `S3_REGION=auto`, the bucket and an R2 API
+  token's access key with object read / write / delete on that bucket. The server sends no server-side-encryption
+  header (it encrypts every object itself) and writes each part in one request (≤ 16 MB, no multipart upload). R2 does
+  not charge for egress, which suits playback. Give the location a label that says where the data is (the region shown
+  to staff would otherwise be `auto`), and set up backups the provider supports (§4). Not tested against R2 in this
+  repository: try a recorded exam and `storage:move -- --dry-run` on a staging bucket first.
+* **Monitoring**: `sp_recording_segments_total{stream}`, `sp_recording_bytes_total{stream}` (growth of stored
+  recordings) and `sp_recording_refused_total{reason}` (§5). The Privacy → Deletion schedule lists recording parts due
+  for deletion next to images.
+
 ### Evidence storage locations (data residency)
 
-Evidence **images** (check-in and identity photos, screenshots, approved ID photos — encrypted blobs) can be kept
-in more than one place, for example one bucket per region, and each organisation chooses where its new images go.
-**Only images move: the database stays where it is** — candidate records, exams, answers, event records, **face
+Evidence **images** (check-in and identity photos, screenshots, approved ID photos — encrypted blobs) and the parts
+of exam recordings can be kept in more than one place, for example one bucket per region, and each organisation
+chooses where its new images and recordings go. **Only images and recordings move: the database stays where it is** — candidate records, exams, answers, event records, **face
 templates** (the numbers used to compare faces, in Postgres), the audit log and every other table. An organisation
 that needs all of its personal data in one region needs this server's database (and backups, logs, Redis) there too:
 run a separate deployment in that region.
@@ -332,6 +376,8 @@ backups until they expire; align backup retention with the privacy notice.
   | `sp_retention_failures_total` | sessions retention could not purge (retried next hour) |
   | `sp_evidence_storage_errors_total{op,location}` | evidence store put / get / delete failures (disk, S3), per storage location (§2) |
   | `sp_evidence_storage_seconds{op,location}` (histogram) | evidence store latency per operation and storage location (failures included); a check frame or identity sample holds its database transaction while its image is written |
+  | `sp_recording_segments_total{stream}`, `sp_recording_bytes_total{stream}` | exam recording parts stored and their bytes (before encryption), by stream (`camera`, `screen`): the storage the recording feature is adding (§2 *Exam recording*) |
+  | `sp_recording_refused_total{reason}` | recording parts refused: `limit` (a session reached `RECORDING_MAX_SESSION_MB`), `closed` (after the late-upload period, a consent withdrawal or deletion), `invalid` (not a WebM / MP4 file) |
   | `sp_cluster_sessions{status}`, `sp_cluster_sessions_reporting_interrupted` | sessions in progress; how many browsers stopped reporting |
   | `sp_cluster_webhook_deliveries_pending`, `sp_cluster_webhook_oldest_pending_seconds`, `sp_cluster_webhook_deliveries_failed_24h`, `sp_cluster_webhooks_disabled` | webhook backlog, retry age, dead letters, disabled endpoints |
   | `sp_cluster_email_alerts_pending`, `sp_cluster_email_alert_oldest_pending_seconds` | alert-email backlog |
@@ -431,6 +477,13 @@ disconnected). The timeline entry says which limit and the numbers. Contact the 
 outside their control (network, power), *Release hold* (keep the fresh identity check on) — the reconnection allowance
 starts again; otherwise *Terminate* per your process. With *End the exam* in those rules the exam was submitted
 instead (end reason *Ended by the interruption rules*): reopen it for recovery if it should continue.
+
+**An exam is on hold because of an additional display** (hold reason *Additional display connected (the exam allows
+only one)*: the exam's *Require a single display* rule, Chrome and Edge only). The candidate's hold screen asks them to
+disconnect it and shows whether only one display is connected now. Contact them if needed, then *Release hold*. A
+display still connected when the exam continues puts it on hold again. For a
+candidate who needs a second display (a magnifier, for example), grant the *Assistive technology* accommodation before
+the exam starts: it waives the rule for that candidate.
 
 **Reopen an exam for recovery** (power cut at a test centre, an exam terminated or submitted by mistake, time lost to
 a technical problem, an exam closed after inactivity). Session page → *Reopen for recovery…* (admin): the dialog says
@@ -591,10 +644,20 @@ theirs runs or is under legal hold: finish it, or decide whether the hold still 
 longer (a complex request)? Extend the deadline with the reason and tell the person before the first month ends.
 `docs/PRIVACY.md` §5 has the rest.
 
-**A candidate withdrew consent in the exam app.** Their exam has ended and its images are deleted; the register has an
+**A candidate withdrew consent in the exam app.** Their exam has ended and its images (and recording) are deleted; the register has an
 open *Consent withdrawn* request linked to the session. Contact them about an alternative (e.g. the accommodation
 *identity verified by staff*, or *no camera*, and a new assignment), decide whether their approved ID photo is still
 needed, and complete the request with what was agreed.
+
+<a id="runbook-recording"></a>**A recorded exam has gaps or no recording.** The session's *Recording* tab shows
+what arrived ("not recorded" between parts) and the timeline says why: *Screen sharing stopped* (the candidate stopped
+sharing; the exam was covered until they shared again), *Recording interrupted* (details: which stream and why —
+`recorder_unavailable` the browser cannot record, `microphone_unavailable` / `microphone_ended` webcam recorded
+without sound, `device_storage_full` parts dropped on the device after a long connection loss,
+`stopped_unexpectedly` / `recorder_error` the browser stopped a recorder and it was restarted, `session_limit` the
+session reached `RECORDING_MAX_SESSION_MB`), pauses and holds (never recorded). Parts the candidate's browser still holds
+arrive when they reopen the exam link on the same browser within `RECORDING_LATE_UPLOAD_HOURS`; the session page shows
+the parts received so far. Parts refused as `invalid` (not WebM / MP4) point to a modified client.
 
 <a id="runbook-retention-failing"></a>**Operational checks show "Retention job — Failing" or "Deletion on schedule — Failing"**
 (`SmartProctoringRetentionNotRunning`, `SmartProctoringRetentionLastRunFailed`,

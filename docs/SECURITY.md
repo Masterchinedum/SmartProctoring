@@ -9,6 +9,7 @@ Report vulnerabilities privately to the maintainers; do not open public issues f
 ## 1. Threat model
 
 **Assets.** Face images and face templates (biometric data), identity references, event evidence, exam
+recordings (webcam video, microphone sound and the candidate's screen, only for exams that turn recording on), exam
 content and answer keys, candidate personal data, staff accounts, organisation API keys and webhook
 secrets, external face-verifier credentials (AWS access keys, optional), the evidence encryption key, the integrity of the proctoring record (who took the exam, what was
 observed).
@@ -22,7 +23,7 @@ observed).
 | Reviewer / admin / owner | Password + (when on, or required by the organisation) a TOTP / recovery code, **or** single sign-on through the organisation's identity provider (OIDC / SAML) → staff session cookie (`sp_session`) | Their own organisation only, by role (reviewer < admin < owner). |
 | Organisation identity provider (optional) | Its signature on ID tokens / SAML assertions (keys / certificates configured by an owner) | Asserting who a staff member of *its* organisation is, for the email domains the organisation claimed — never accounts of other organisations, never the owner role, never a disabled account. |
 | SCIM client (the identity provider's provisioning) | The organisation's SCIM token (`sp_scim_…`) | Creating, updating and disabling its organisation's reviewer / admin accounts — never owners. |
-| Integration (LMS/HR) | Organisation API key (`sp_live_…`) | Its organisation's exams, candidates, sessions, reports and events — never images or face data. |
+| Integration (LMS/HR) | Organisation API key (`sp_live_…`) | Its organisation's exams, candidates, sessions, reports and events — never images, recordings or face data. |
 | Webhook receiver | Verifies our HMAC signature | Receives notifications only; never images, templates or similarity scores. |
 | External face verifier (optional, e.g. AWS Rekognition) | Our request, signed with the organisation's IAM key or the server's role | Off by default. When an admin enables it: receives face images for the selected identity checks; its answer is advisory — combined by a fixed table, it never records a "possible different person" on its own (`docs/EXTERNAL_VERIFIER.md`). |
 | Other tenants | Their own credentials | Nothing in another organisation (all ids of other orgs are 404). |
@@ -31,7 +32,9 @@ observed).
 **Trust boundaries.** Identity decisions run on the server against a reference the client never sees; the
 browser only uploads JPEG frames. Behavioural detection runs in the browser and is therefore
 *advisory*: a tampered client can suppress its own events (documented limitation), but it cannot forge a
-server-side identity match, read other sessions, or change category/severity (they come from the catalog).
+server-side identity match, read other sessions, or change category/severity (they come from the catalog). The same
+holds for the single-display rule: the server refuses the start and holds the exam on what the browser reports
+(`screen.isExtended`), so a tampered client can hide a second display, as any browser can that does not report it.
 
 ## 2. Controls
 
@@ -225,6 +228,18 @@ server-side identity match, read other sessions, or change category/severity (th
   owner cannot be removed. Access links are returned only to admins, only on detail views.
 * Candidate routes resolve the session from the token; check, evidence, event and question ids are scoped to
   that session.
+* Exam recordings (`docs/ARCHITECTURE.md` §6 *Exam recording*): `POST /api/candidate/recordings/segments` stores a part only when
+  the exam's rules record that stream (else 409 `recording_not_enabled`), the candidate's consent covers the recording
+  notice (else 409 `consent_required`; a consent to the notice without recording never counts), the session is not
+  withdrawn, erased or purged (409 `recording_closed`), and the request comes from the browser in control
+  (`assertInControl`). After the end, late parts are accepted only from the browser that was verified
+  (`X-Client-Instance`, or `?instance=` after a reload, compared with the session's verified instance id — never any
+  other) for `RECORDING_LATE_UPLOAD_HOURS` (default 24 h). Parts whose time falls before the start, after the end or
+  in a pause or hold are answered `stored: false` and discarded; re-sending a part (same stream, browser instance and
+  sequence number, a unique key) stores nothing new. Staff watch recordings only through
+  `GET /api/admin/sessions/:id/recordings` (metadata) and `GET /api/admin/recordings/:id/media` (reviewer role,
+  organisation-scoped like every staff route); a part's evidence id also works on `GET /api/admin/evidence/:id`
+  (audited there as `evidence.view` on every request).
 
 ### CSRF, clickjacking, browser hardening
 * State-changing cookie requests and WebSocket upgrades must come from `PUBLIC_URL`'s origin (or the request's
@@ -239,9 +254,11 @@ server-side identity match, read other sessions, or change category/severity (th
 * Response headers on every response: `Content-Security-Policy` (`default-src 'self'`, `script-src 'self'
   'wasm-unsafe-eval'` for self-hosted MediaPipe, `object-src 'none'`, `frame-ancestors 'none'`),
   `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` (the candidate URL contains the token),
-  `Permissions-Policy: camera=(self), microphone=()…`, `X-Content-Type-Options: nosniff`,
+  `Permissions-Policy: camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=(), usb=()`
+  (the microphone and screen capture are used only by exams that record, after the notice), `X-Content-Type-Options: nosniff`,
   `Cross-Origin-Opener-Policy: same-origin`, HSTS when `COOKIE_SECURE` is on. `/api/*` responses are
-  `Cache-Control: no-store`; evidence is `private, no-store` + `Cross-Origin-Resource-Policy: same-origin`.
+  `Cache-Control: no-store`; evidence and recording parts are `private, no-store` +
+  `Cross-Origin-Resource-Policy: same-origin`.
 * The web app renders all user-supplied text as text (no `dangerouslySetInnerHTML`, no markdown), keeps no
   credentials in `localStorage`, and only redirects to in-app `/admin` paths after login.
 
@@ -250,7 +267,14 @@ server-side identity match, read other sessions, or change category/severity (th
 * Body limits: JSON 2 MB; candidate JPEG 1 MB; ID photo 5 MB; offline-evaluation JSON 10 MB (admin).
   Candidate JPEGs must start with a JPEG signature and declare at most 4096 px per side / 3840×2160 px
   (checked from the frame header before decoding); the decoder additionally refuses > 50 MP.
-* Per-session caps: 1,500 evidence items / 300 MB, 30 checks per hour, 5,000 events, 16 KB event details.
+* Recording parts: at most 16 MB each (body limit of that route only), a declared `video/webm` or `video/mp4` type
+  that must match the container signature (EBML header / `ftyp` box, else 415 `invalid_recording`), a declared
+  length of at most 10 minutes, 120 uploads per minute per access token, and per session at most
+  `RECORDING_MAX_SESSION_MB` (default 3,000 MB, then 413 `recording_limit`; the browser stops sending). The server
+  never decodes or transcodes the media: it encrypts the bytes as received and serves them back only to staff, with
+  the stored type, `nosniff` and an `inline` attachment name.
+* Per-session caps: 1,500 evidence items / 300 MB (recordings are counted separately, above), 30 checks per hour,
+  5,000 events, 16 KB event details.
 * SQL via drizzle with bound parameters only; `LIKE` wildcards escaped; storage keys built from UUIDs and
   validated (no traversal); CSV export neutralises formula prefixes (`= + - @` tab CR) and quotes cells.
 
@@ -318,11 +342,14 @@ server-side identity match, read other sessions, or change category/severity (th
 
 ### Privacy and audit
 * Every image fetch (screenshots, check frames, identity references, probes, ID photos — all served only by
-  `GET /api/admin/evidence/:id`) writes `evidence.view` to the audit log; so do reviews, notes, holds,
+  `GET /api/admin/evidence/:id`) writes `evidence.view` to the audit log. Every part of a recording a staff member
+  opens writes `recording.view` (stream, part, evidence id; one entry per request that starts at byte 0, so the
+  staff app's single fetch per part is one entry, and Range requests that continue it are not repeated); reviews, notes, holds,
   releases, re-enrolments, settings (incl. external-verifier changes: provider/region/uses, key set/removed — never
   the key), external-verifier tests, users, API keys, webhooks, retention purges, operator changes to organisations
   (`organization.created` / `organization.updated`) and sandbox clean-ups (`sandbox.purge`).
-* Webhooks, alert emails and the integration API never contain images, templates or similarity scores.
+* Webhooks, alert emails and the integration API never contain images, recordings, templates or similarity
+  scores (the integration report omits the recording summary).
   Webhooks and alert emails never carry candidate-written text as is: events reported by the browser use the
   catalog title/observation, the pause reason and other user-controlled text are stripped of links
   (URLs, `www.`, bare host names, IP literals), and alert emails contain no link except the staff app's.

@@ -12,9 +12,12 @@
  *    headroom for them, so a long session that stored many samples can still complete the check a genuine
  *    candidate needs to continue.
  *
+ * Exam recording segments (evidence kind `recording`) are not part of this budget: they have their own per-session cap
+ * (config.recording.maxSessionBytes, services/recordings.ts), so a long recorded exam never takes room from the images.
+ *
  * Per-organisation quotas (exams, candidates, exam sessions per month; sandbox organisations): services/quotas.ts.
  */
-import { and, eq, gte, isNull, sql } from 'drizzle-orm';
+import { and, eq, gte, isNull, ne, sql } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
 import type { DbOrTx } from '../db/index.js';
 import { checks, evidence } from '../db/schema.js';
@@ -37,7 +40,7 @@ export async function sessionEvidenceUsage(db: DbOrTx, sessionId: string): Promi
   const [row] = await db
     .select({ items: sql<number>`count(*)::int`, bytes: sql<number>`coalesce(sum(${evidence.byteSize}), 0)::bigint` })
     .from(evidence)
-    .where(and(eq(evidence.sessionId, sessionId), isNull(evidence.purgedAt)));
+    .where(and(eq(evidence.sessionId, sessionId), isNull(evidence.purgedAt), ne(evidence.kind, 'recording')));
   return { items: Number(row?.items ?? 0), bytes: Number(row?.bytes ?? 0) };
 }
 

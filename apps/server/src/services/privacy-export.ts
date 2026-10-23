@@ -10,14 +10,17 @@
  *   sessions/<nn> <exam>/events.json   the event timeline (with the file name of each image)
  *   sessions/<nn> <exam>/identity-checks.json
  *   sessions/<nn> <exam>/images/*.jpg  the session's images, decrypted
+ *   sessions/<nn> <exam>/recording.json        the exam recording's parts (when the exam was recorded: policy.recording)
+ *   sessions/<nn> <exam>/recordings/*.webm|mp4 the recording, one playable file per part (camera / screen), decrypted
  *
- * Records are read up front (small); images are decrypted one at a time while the archive streams (lib/zip.ts), so
- * memory stays bounded however many there are. An image that cannot be read is listed in README.txt, not fatal.
+ * Records are read up front (small); images and recording parts are decrypted one at a time while the archive streams
+ * (lib/zip.ts, ZIP64 past 4 GiB), so memory stays bounded however many there are. A file that cannot be read is listed
+ * in README.txt, not fatal.
  */
-import type { AccommodationDTO, EventDTO, IdentityCheckDTO, SessionReportDTO } from '@sp/shared';
+import { recordingFileExtension, type AccommodationDTO, type EventDTO, type IdentityCheckDTO, type SessionReportDTO } from '@sp/shared';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { Ctx } from '../context.js';
-import { accommodations, answers, candidates, evidence, examSessions, exams, privacyRequests, type EvidenceRow } from '../db/schema.js';
+import { accommodations, answers, candidates, evidence, examSessions, exams, privacyRequests, recordingSegments, type EvidenceRow, type RecordingSegmentRow } from '../db/schema.js';
 import { notFound } from '../lib/errors.js';
 import { zipPathSegment, type ZipEntry } from '../lib/zip.js';
 import { toAccommodationDTOs } from './accommodations.js';
@@ -29,8 +32,8 @@ import { buildSessionReport } from './reports.js';
 export interface CandidateExport {
   filename: string;
   entries: AsyncIterable<ZipEntry>;
-  /** What the archive holds (for the audit record). */
-  counts: { sessions: number; images: number; imagesAlreadyDeleted: number };
+  /** What the archive holds (for the audit record). Recording parts are counted apart from images. */
+  counts: { sessions: number; images: number; imagesAlreadyDeleted: number; recordingParts: number; recordingPartsAlreadyDeleted: number };
 }
 
 const iso = (t: number) => new Date(t).toISOString();
@@ -42,10 +45,20 @@ const KIND_LABEL: Record<EvidenceRow['kind'], string> = {
   identity_reference: 'identity-reference',
   id_photo: 'id-photo',
   liveness_frame: 'check-frame',
+  recording: 'recording',
 };
 
+const stamp = (t: number) => iso(t).replace(/[:.]/g, '-');
+
 function imageName(row: EvidenceRow): string {
-  return `images/${iso(row.capturedAt.getTime()).replace(/[:.]/g, '-')}-${KIND_LABEL[row.kind] ?? row.kind}-${row.id.slice(0, 8)}.jpg`;
+  return `images/${stamp(row.capturedAt.getTime())}-${KIND_LABEL[row.kind] ?? row.kind}-${row.id.slice(0, 8)}.jpg`;
+}
+
+/** recordings/<start>-camera-0007.webm: sorts by time; the extension matches what the browser recorded (WebM / MP4). */
+function recordingName(row: EvidenceRow, seg: RecordingSegmentRow | undefined): string {
+  const stream = seg?.stream ?? row.reason ?? 'recording';
+  const seq = seg ? String(seg.seq).padStart(4, '0') : row.id.slice(0, 8);
+  return `recordings/${stamp(row.capturedAt.getTime())}-${stream}-${seq}.${recordingFileExtension(seg?.mimeType ?? row.contentType)}`;
 }
 
 /** The report without what only staff use: the access link (a credential) and the decision-configuration versions. */
@@ -58,6 +71,16 @@ function evidenceRef(byId: Map<string, EvidenceRow>, id: string) {
   const row = byId.get(id);
   if (!row) return { id, file: null, note: 'not recorded' };
   return row.purgedAt ? { id, file: null, deletedAt: iso(row.purgedAt.getTime()), deletedBecause: row.purgeReason } : { id, file: imageName(row) };
+}
+
+/** The recording's parts in time order: stream, timing and the file holding each (or when and why it was deleted). */
+function recordingIndex(segments: RecordingSegmentRow[], byId: Map<string, EvidenceRow>, name: (row: EvidenceRow) => string) {
+  return segments.map((g) => {
+    const row = byId.get(g.evidenceId);
+    const base = { stream: g.stream, part: g.seq, startedAt: iso(g.startedAt.getTime()), durationMs: g.durationMs, mediaType: g.mimeType, bytes: g.byteSize };
+    if (!row) return { ...base, file: null, note: 'not recorded' };
+    return row.purgedAt ? { ...base, file: null, deletedAt: iso(row.purgedAt.getTime()), deletedBecause: row.purgeReason } : { ...base, file: name(row) };
+  });
 }
 
 export async function buildCandidateExport(ctx: Ctx, orgId: string, candidateId: string, meta: { requestId: string; generatedBy: string }): Promise<CandidateExport> {
@@ -87,13 +110,15 @@ export async function buildCandidateExport(ctx: Ctx, orgId: string, candidateId:
   interface SessionPart {
     folder: string;
     files: ZipEntry[];
-    images: EvidenceRow[];
+    /** Images and recording parts still stored, with their file names in the session folder. */
+    images: { row: EvidenceRow; name: string }[];
+    recordings: { row: EvidenceRow; name: string }[];
     deleted: EvidenceRow[];
   }
   const parts: SessionPart[] = [];
   for (const [i, { session: s, examTitle }] of sessions.entries()) {
     const folder = `sessions/${String(i + 1).padStart(2, '0')} ${zipPathSegment(examTitle, 'exam', 50)} (${iso(s.createdAt.getTime()).slice(0, 10)})`;
-    const [report, events, checks, devices, rows, answerRows, content] = await Promise.all([
+    const [report, events, checks, devices, rows, answerRows, content, segments] = await Promise.all([
       buildSessionReport(ctx, s.id, orgId),
       loadSessionEventDTOs(ctx.db, s.id),
       loadIdentityCheckDTOs(ctx.db, s.id),
@@ -101,8 +126,11 @@ export async function buildCandidateExport(ctx: Ctx, orgId: string, candidateId:
       ctx.db.select().from(evidence).where(eq(evidence.sessionId, s.id)).orderBy(asc(evidence.capturedAt), asc(evidence.id)),
       ctx.db.select().from(answers).where(eq(answers.sessionId, s.id)),
       sessionExamContent(ctx.db, s),
+      ctx.db.select().from(recordingSegments).where(eq(recordingSegments.sessionId, s.id)).orderBy(asc(recordingSegments.startedAt), asc(recordingSegments.stream), asc(recordingSegments.seq)),
     ]);
     const byId = new Map(rows.map((r) => [r.id, r]));
+    const segmentByEvidence = new Map(segments.map((g) => [g.evidenceId, g]));
+    const fileName = (row: EvidenceRow) => (row.kind === 'recording' ? recordingName(row, segmentByEvidence.get(row.id)) : imageName(row));
     const answerBy = new Map(answerRows.map((a) => [a.questionId, a]));
     const perQuestion = new Map((s.score?.perQuestion ?? []).map((p) => [p.questionId, p]));
     const answersOut = content.snapshot.questions.map((q, n) => {
@@ -135,8 +163,10 @@ export async function buildCandidateExport(ctx: Ctx, orgId: string, candidateId:
         { name: `${folder}/answers.json`, data: json(answersOut) },
         { name: `${folder}/events.json`, data: json(eventsOut) },
         { name: `${folder}/identity-checks.json`, data: json(checksOut) },
+        ...(segments.length ? [{ name: `${folder}/recording.json`, data: json(recordingIndex(segments, byId, fileName)) }] : []),
       ],
-      images: rows.filter((r) => !r.purgedAt),
+      images: rows.filter((r) => !r.purgedAt && r.kind !== 'recording').map((row) => ({ row, name: fileName(row) })),
+      recordings: rows.filter((r) => !r.purgedAt && r.kind === 'recording').map((row) => ({ row, name: fileName(row) })),
       deleted: rows.filter((r) => r.purgedAt),
     });
   }
@@ -151,20 +181,26 @@ export async function buildCandidateExport(ctx: Ctx, orgId: string, candidateId:
   };
 
   const images = parts.reduce((n, p) => n + p.images.length, 0) + (idPhoto ? 1 : 0);
-  const alreadyDeleted = parts.reduce((n, p) => n + p.deleted.length, 0);
+  const recordingParts = parts.reduce((n, p) => n + p.recordings.length, 0);
+  const alreadyDeleted = parts.reduce((n, p) => n + p.deleted.filter((r) => r.kind !== 'recording').length, 0);
+  const recordingsDeleted = parts.reduce((n, p) => n + p.deleted.filter((r) => r.kind === 'recording').length, 0);
   const date = iso(now).slice(0, 10);
 
   async function* entries(): AsyncGenerator<ZipEntry> {
     const unreadable: string[] = [];
+    let unreadableImages = 0;
+    let unreadableRecordings = 0;
     const image = async (row: EvidenceRow, name: string): Promise<ZipEntry | null> => {
       try {
         const data = await readEvidence(ctx, row);
         if (data) return { name, data, date: row.capturedAt };
         unreadable.push(`${name} (no longer in storage)`);
       } catch (err) {
-        ctx.log.error({ err, evidenceId: row.id }, 'export: evidence image could not be read');
+        ctx.log.error({ err, evidenceId: row.id }, 'export: evidence file could not be read');
         unreadable.push(`${name} (could not be decrypted)`);
       }
+      if (row.kind === 'recording') unreadableRecordings++;
+      else unreadableImages++;
       return null;
     };
     yield { name: 'candidate.json', data: json(candidateOut) };
@@ -174,12 +210,14 @@ export async function buildCandidateExport(ctx: Ctx, orgId: string, candidateId:
     }
     for (const p of parts) {
       for (const f of p.files) yield f;
-      for (const row of p.images) {
-        const e = await image(row, `${p.folder}/${imageName(row)}`);
+      for (const { row, name } of [...p.images, ...p.recordings]) {
+        const e = await image(row, `${p.folder}/${name}`);
         if (e) yield e;
       }
     }
-    const deletedLines = parts.flatMap((p) => p.deleted.map((r) => `  ${p.folder}: ${KIND_LABEL[r.kind] ?? r.kind} captured ${iso(r.capturedAt.getTime())}, deleted ${iso(r.purgedAt!.getTime())} (${r.purgeReason ?? 'deleted'})`));
+    const what = (r: EvidenceRow) => (r.kind === 'recording' ? `recording part (${r.reason ?? 'recording'})` : (KIND_LABEL[r.kind] ?? r.kind));
+    const deletedLines = parts.flatMap((p) => p.deleted.map((r) => `  ${p.folder}: ${what(r)} captured ${iso(r.capturedAt.getTime())}, deleted ${iso(r.purgedAt!.getTime())} (${r.purgeReason ?? 'deleted'})`));
+    const recorded = recordingParts + recordingsDeleted > 0;
     const readme = [
       `Personal data held about ${cand.name}`,
       `Exported ${iso(now)} for privacy request ${meta.requestId} by ${meta.generatedBy}.`,
@@ -193,12 +231,18 @@ export async function buildCandidateExport(ctx: Ctx, orgId: string, candidateId:
       '    events.json          everything recorded during the session; "file" names the image in images/ when there is one',
       '    identity-checks.json each identity comparison and its result',
       '    images/              screenshots and identity images taken during the session',
+      ...(recorded
+        ? [
+            '    recording.json       the parts of the exam recording (camera with sound / screen): when each started and how long it lasted',
+            '    recordings/          the exam recording, one video file per part of about 30 seconds (WebM or MP4: they open in a web browser or VLC)',
+          ]
+        : []),
       '',
-      `Sessions: ${sessions.length}. Images included: ${images - unreadable.length}.`,
+      `Sessions: ${sessions.length}. Images included: ${images - unreadableImages}.${recorded ? ` Recording parts included: ${recordingParts - unreadableRecordings}.` : ''}`,
       '',
-      deletedLines.length ? 'Images already deleted (only their record remains):' : 'No image of these sessions has been deleted yet.',
+      deletedLines.length ? `${recorded ? 'Images and recording parts' : 'Images'} already deleted (only their record remains):` : `No image${recorded ? ' or recording' : ''} of these sessions has been deleted yet.`,
       ...deletedLines,
-      ...(unreadable.length ? ['', 'Images that could not be included:', ...unreadable.map((u) => `  ${u}`)] : []),
+      ...(unreadable.length ? ['', `${recorded ? 'Files' : 'Images'} that could not be included:`, ...unreadable.map((u) => `  ${u}`)] : []),
       '',
       'Face templates (numeric descriptions of a face used for comparison) are not included: they are derived from the images above and are not readable by people.',
       'Before sending: check the archive, and send it to the person through a secure channel.',
@@ -210,6 +254,6 @@ export async function buildCandidateExport(ctx: Ctx, orgId: string, candidateId:
   return {
     filename: `personal-data-${zipPathSegment(cand.name, 'candidate', 40).replace(/\s+/g, '-')}-${date}.zip`,
     entries: entries(),
-    counts: { sessions: sessions.length, images, imagesAlreadyDeleted: alreadyDeleted },
+    counts: { sessions: sessions.length, images, imagesAlreadyDeleted: alreadyDeleted, recordingParts, recordingPartsAlreadyDeleted: recordingsDeleted },
   };
 }

@@ -50,6 +50,7 @@ export const EVENT_TYPES = [
   'fullscreen_exited',
   'clipboard_attempt',
   'multiple_instances',
+  'screen_share_stopped',
   // ---- uncertain observations
   'identity_unverifiable',
   'face_obstructed',
@@ -60,6 +61,7 @@ export const EVENT_TYPES = [
   'camera_frozen',
   'reporting_interrupted',
   'monitoring_degraded',
+  'recording_interrupted',
   // ---- neutral session changes
   'session_started',
   'checkin_completed',
@@ -252,6 +254,16 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
     sources: ['server_system'],
     span: false,
   },
+  screen_share_stopped: {
+    category: 'integrity',
+    severity: 'low',
+    title: 'Screen sharing stopped',
+    observation: 'The candidate’s screen stopped being shared while the exam recorded the screen.',
+    reviewerNote:
+      'The exam page was covered until the screen was shared again, so the candidate could not work on the exam meanwhile; the screen was not recorded during this time. Sharing can stop by accident (for example the browser’s “Stop sharing” button, or the computer going to sleep).',
+    sources: ['client_browser'],
+    span: true,
+  },
   identity_unverifiable: {
     category: 'uncertain',
     severity: 'medium',
@@ -324,6 +336,16 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
     sources: ['client_vision'],
     span: true,
   },
+  recording_interrupted: {
+    category: 'technical',
+    severity: 'low',
+    title: 'Recording interrupted',
+    observation: 'Part of the exam recording could not be made or kept in the candidate’s browser.',
+    reviewerNote:
+      'Details name what was affected (camera, microphone or screen) and why — for example the browser stopped recording, the microphone was unavailable, or recording parts waiting for a connection had to be dropped. The recording has a gap for this time; other monitoring continued.',
+    sources: ['client_browser'],
+    span: true,
+  },
   session_started: { category: 'neutral', severity: 'info', title: 'Exam started', observation: 'The exam was started.', reviewerNote: '', sources: ['server_system'], span: false },
   checkin_completed: { category: 'neutral', severity: 'info', title: 'Readiness check passed', observation: 'The camera readiness and live-person checks were completed.', reviewerNote: '', sources: ['server_system'], span: false },
   reference_created: {
@@ -381,7 +403,8 @@ export const EVENT_CATALOG: Record<EventType, EventCatalogEntry> = {
     severity: 'info',
     title: 'Additional display connected',
     observation: 'The browser reports that more than one display is connected.',
-    reviewerNote: 'The system cannot observe activity on other displays.',
+    reviewerNote:
+      'The system cannot observe activity on other displays. If the exam requires a single display, the exam is put on hold until staff release it. Only Chrome and Edge report additional displays.',
     sources: ['client_browser'],
     span: false,
   },

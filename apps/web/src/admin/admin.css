@@ -565,3 +565,26 @@ fieldset.stack.tight { border: 1px solid var(--border, #d0d5dd); border-radius: 
 .incident-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .decide-together { border-top: 1px solid var(--border); padding-top: 8px; }
 @media print { .resolution-options, .decide-together, [data-testid='bulk-decision'] { display: none; } }
+
+/* ---- exam recording (session page, Recording tab) */
+.rec-players { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.rec-player { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.rec-player-label { font-weight: 600; font-size: 13px; }
+.rec-video-wrap { position: relative; background: #11151c; border-radius: var(--radius); overflow: hidden; aspect-ratio: 16 / 10; }
+.rec-video-wrap video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.rec-gap { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 12px; text-align: center; color: #e8ebf0; background: rgba(17, 21, 28, 0.85); font-size: 14px; }
+.rec-controls { align-items: center; gap: 8px; flex-wrap: wrap; }
+.rec-clock { font-variant-numeric: tabular-nums; }
+.rec-timeline { position: relative; padding: 6px 0 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); cursor: pointer; }
+.rec-timeline:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.rec-lane { position: relative; margin: 0 8px 0 70px; padding-bottom: 6px; }
+.rec-track { position: relative; height: 18px; margin: 4px 0; background: var(--surface); border-radius: 3px; }
+.rec-track-label { position: absolute; right: calc(100% + 8px); top: 1px; white-space: nowrap; }
+.rec-seg { position: absolute; top: 2px; bottom: 2px; background: var(--primary); opacity: 0.75; border-radius: 2px; }
+.rec-seg-deleted { background: var(--border-strong); opacity: 0.5; }
+.rec-seg-gap { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0, 0, 0, 0.08) 4px, rgba(0, 0, 0, 0.08) 8px); }
+.rec-marker { position: absolute; bottom: 0; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; border: 1px solid #fff; padding: 0; cursor: pointer; }
+.rec-marker:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+.rec-cursor { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #c62828; pointer-events: none; }
+.rec-event-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.tl-watch { align-self: center; margin-right: 8px; white-space: nowrap; }

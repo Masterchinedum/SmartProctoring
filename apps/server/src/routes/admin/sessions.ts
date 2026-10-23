@@ -68,6 +68,7 @@ import {
   toScoreDTO,
 } from '../../services/dto.js';
 import { toSessionAccommodationsDTO } from '../../services/accommodations.js';
+import { recordingSummary } from '../../services/recordings.js';
 import { buildSessionReport } from '../../services/reports.js';
 import { eventsToCsv } from '../../services/reports-csv.js';
 import { resolveTimeZone } from '../../services/reports-format.js';
@@ -202,7 +203,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     const id = idParam(req, 'id', 'Session', 'session_not_found');
     const { session, exam } = await loadScopedSession(ctx.db, staff.orgId, id);
     const org = await loadOrgRow(ctx, staff.orgId);
-    const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices, staffVerifications, reviewRows] = await Promise.all([
+    const [[summary], periods, identityChecks, references, pauseReqs, noteList, devices, staffVerifications, reviewRows, recording] = await Promise.all([
       // The access link (a bearer credential) only for admins, only on this explicit detail response.
       loadSessionSummaries(ctx, ctx.db, { orgId: staff.orgId, sessionIds: [id], includeAccessLink: roleAtLeast(staff.role, 'admin') }),
       loadPeriodDTOs(ctx.db, id),
@@ -213,6 +214,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       loadDeviceRecordDTOs(ctx.db, id),
       loadStaffVerifications(ctx.db, id),
       loadSessionReviewRows(ctx.db, [id]),
+      recordingSummary(ctx.db, id),
     ]);
     if (!summary) throw notFound('Session not found', 'session_not_found');
     const policy = effectivePolicy(session, exam, org);
@@ -233,6 +235,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       score: toScoreDTO(session.score),
       review,
       reopen,
+      recording,
     };
   });
 
