@@ -17,7 +17,7 @@ face size/position, lighting, sharpness, virtual-camera warning) → randomized 
 fails) → a **protected identity reference** (face templates + images, encrypted, never replaced
 automatically) → optional comparison with the candidate's **approved ID photo**.
 
-**During the exam** (in-browser analysis, no video upload) — candidate missing, more than one person,
+**During the exam** (in-browser analysis, no video upload for it) — candidate missing, more than one person,
 possible person swap (server-side face verification in bursts of 3 frames: immediately when the exam
 starts or resumes, every 6 s for the first 3 minutes, every 15 s after that, and whenever the face track breaks or
 the face's appearance changes, the face returns, the camera reconnects, or another person was in view; a per-exam
@@ -65,8 +65,13 @@ document, idempotent POSTs) to create candidates, issue invite links and pull re
 outbox with retries) for flags, holds, pause requests and submissions; optional SMTP email alerts
 with per-session throttling. See [docs/INTEGRATION_API.md](docs/INTEGRATION_API.md).
 
-**Privacy** — explicit notice + consent, no continuous video, encrypted evidence, role-based access
-with audit logging, automatic retention purge with legal hold. See [docs/PRIVACY.md](docs/PRIVACY.md).
+**Optional exam recording** (an exam setting, off by default) — webcam with microphone sound and the
+candidate's entire screen, recorded from start to end in 30-second parts that survive connection loss, stored as
+encrypted evidence under the same retention, legal hold and deletion rules; a separate notice and consent before the
+exam; staff watch both streams on one clock next to the timeline, every viewing audit-logged.
+
+**Privacy** — explicit notice + consent, no continuous video unless the exam records (off by default), encrypted
+evidence, role-based access with audit logging, automatic retention purge with legal hold. See [docs/PRIVACY.md](docs/PRIVACY.md).
 
 **Accessibility** — WCAG 2.1 AA target for both apps: full keyboard operation, screen-reader
 announcements (polite / assertive only for blocking states), focus management, contrast-checked

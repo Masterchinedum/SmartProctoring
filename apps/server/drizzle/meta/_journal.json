@@ -127,6 +127,13 @@
       "when": 1792633738309,
       "tag": "0017_sandbox_quotas",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792710256875,
+      "tag": "0018_recording",
+      "breakpoints": true
     }
   ]
 }
