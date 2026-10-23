@@ -7,8 +7,10 @@ import type {
   IdentitySampleRequestDTO,
   MonitoringStatus,
   PauseResponse,
+  RecordingStream,
   SessionStatus,
 } from '@sp/shared';
+import { recordingPlan } from '@sp/shared';
 import type { AttentionState } from '@sp/detection';
 import {
   busyRetryDelayMs,
@@ -16,21 +18,27 @@ import {
   classifyApiError,
   createCandidateApi,
   getPageInstanceId,
+  uuid as uuidv4,
   type CandidateApi,
   type RequestTiming,
 } from './api';
 import { AnswerStore } from './answers';
+import { screenInfo } from './displays';
 import { isFullscreen } from './fullscreen';
 import { ClockSync, Countdown } from './clock';
 import { Outbox, type OutboxStats } from './outbox';
 import { CameraManager, type CameraSnapshot } from './monitoring/camera';
 import { MonitoringRuntime, type RuntimeDebug } from './monitoring/runtime';
+import { ExamRecording } from './monitoring/recording';
+import { RecordingQueue, type QueuedSegment, type RecordingQueueStats } from './monitoring/recordingQueue';
+import { ScreenCapture, type ScreenSnapshot } from './monitoring/screen';
 import { TraceRecorder, traceEnabled } from './monitoring/trace';
 import { DebugStore, debugEnabled } from './debug';
 
 /**
  * CandidateController — long-lived, non-React state for one exam session in this page:
- * API client, clock sync, outbox, answers, camera, monitoring runtime and heartbeat.
+ * API client, clock sync, outbox, answers, camera, monitoring runtime and heartbeat — and, for exams that record
+ * (policy.recording), the shared screen, the exam recording and its upload queue.
  * React screens subscribe to its snapshot and call its actions.
  */
 
@@ -98,6 +106,14 @@ export interface ControllerSnapshot {
   awaitingContinue: AwaitingContinue | null;
   /** Answers that could not be saved because the exam had ended (shown on the ended screen). */
   answerNotice: string | null;
+  /** The shared screen (exams that record the screen). */
+  screen: ScreenSnapshot;
+  /** The exam recording runs (with monitoring) and needs the screen shared, if the exam records it. */
+  recordingActive: boolean;
+  /** Recording parts waiting on this device for upload (null: the exam does not record). */
+  recordingUpload: RecordingQueueStats | null;
+  /** Shown to the candidate when nothing at all can be recorded (the exam continues; staff decide). */
+  recordingProblem: string | null;
 }
 
 type Listener = () => void;
@@ -139,6 +155,16 @@ export class CandidateController {
   readonly debug = new DebugStore(debugEnabled());
   outbox: Outbox | null = null;
   answers: AnswerStore | null = null;
+  /** The shared screen, kept from the ready screen through the exam (exams that record the screen). */
+  readonly screen = new ScreenCapture();
+  /** Finished recording parts waiting for upload (IndexedDB; exams that record). */
+  recordingQueue: RecordingQueue | null = null;
+  private recordingQueueOpening: Promise<RecordingQueue> | null = null;
+  private recording: ExamRecording | null = null;
+  /** Recording sequence numbers of this page: the server keys segments by (stream, page, seq), so they never restart. */
+  private readonly recordingSeq: Record<RecordingStream, number> = { camera: 0, screen: 0 };
+  /** The session reached its recording cap: nothing more is recorded (and the screen is no longer required). */
+  private recordingLimitReached = false;
   private runtime: MonitoringRuntime | null = null;
   private runtimeStarting = false;
   /** A server identity-sample request that arrived before monitoring runs (e.g. exam_start with /start). */
@@ -199,8 +225,13 @@ export class CandidateController {
       answersReady: false,
       awaitingContinue: null,
       answerNotice: null,
+      screen: this.screen.state,
+      recordingActive: false,
+      recordingUpload: null,
+      recordingProblem: null,
     };
     this.camera.subscribe((c) => this.patch({ camera: c }));
+    this.screen.subscribe((sc) => this.patch({ screen: sc }));
     window.addEventListener('online', this.onOnline);
     window.addEventListener('offline', this.onOffline);
     window.addEventListener('pagehide', this.onPageHide);
@@ -271,6 +302,8 @@ export class CandidateController {
     this.stopPolling();
     void this.stopMonitoring('superseded', { flush: false, stopCamera: true });
     this.outbox?.stop();
+    this.recordingQueue?.stop();
+    this.screen.stop();
     this.patch({ fatal: { kind, message }, loading: false });
   }
 
@@ -342,6 +375,8 @@ export class CandidateController {
     if (state.session.status === 'active') this.serverSampleRequest(state.session.identitySample);
 
     await this.ensureOutbox(sid);
+    // Exams that record: the upload queue (also after the end, to finish uploading what this device still holds).
+    if (recordingPlan(state.exam.policy).any) await this.ensureRecordingQueue(sid);
     if (state.questions && (state.session.status === 'active' || state.session.status === 'paused' || state.session.status === 'on_hold')) {
       await this.ensureAnswers(state, prev);
     }
@@ -390,6 +425,97 @@ export class CandidateController {
       });
     }
     return this.outboxOpening;
+  }
+
+  private async ensureRecordingQueue(sessionId: string): Promise<RecordingQueue> {
+    if (this.recordingQueue) return this.recordingQueue;
+    if (!this.recordingQueueOpening) {
+      this.recordingQueueOpening = RecordingQueue.open({
+        namespace: sessionId,
+        onDropped: (seg, reason, detail) => this.onRecordingDropped(seg, reason, detail),
+        onLimit: () => void this.onRecordingLimit(),
+        onFatal: (kind) => this.setFatal(kind),
+      }).then((q) => {
+        this.recordingQueue = q;
+        q.subscribe((stats) => this.patch({ recordingUpload: stats }));
+        q.start(
+          (seg, body) => this.api.uploadRecordingSegment(body, { stream: seg.stream, seq: seg.seq, startedAt: seg.startedAt, durationMs: seg.durationMs, instance: seg.instanceId, mimeType: seg.mimeType }),
+          () => this.canUploadRecording(),
+        );
+        this.patch({ recordingUpload: q.stats() });
+        return q;
+      });
+    }
+    return this.recordingQueueOpening;
+  }
+
+  /**
+   * Recording parts may be uploaded by the verified browser of the session — and, once the exam has ended, by any
+   * page holding them (a page reopened after submitting): the server accepts after the end only what the last
+   * verified browser recorded, for a limited time.
+   */
+  private canUploadRecording(): boolean {
+    const s = this.snap.state;
+    if (!s || this.snap.fatal) return false;
+    if (s.session.status === 'submitted' || s.session.status === 'terminated') return true;
+    return this.canDeliver();
+  }
+
+  /** A recording part that will never reach the server: a gap reviewers should see when it was lost on this device. */
+  private onRecordingDropped(seg: QueuedSegment, reason: string, detail?: string): void {
+    console.warn(`[recording] dropped ${seg.stream} part ${seg.seq}: ${reason}${detail ? ` (${detail})` : ''}`);
+    if (reason !== 'device_storage_full') return;
+    void this.outbox
+      ?.putEvent({
+        id: uuidv4(),
+        type: 'recording_interrupted',
+        phase: 'close',
+        startedAt: Math.round(seg.startedAt),
+        endedAt: Math.round(seg.startedAt + seg.durationMs),
+        confidence: 1,
+        observation: 'A part of the recording waiting for the connection had to be deleted on the candidate’s device (not enough space).',
+        details: { stream: seg.stream, reason: 'device_storage_full' },
+        version: 1,
+        clientInstanceId: this.instanceId,
+      })
+      .catch(() => undefined);
+  }
+
+  /** The session's recording cap was reached: stop recording (the exam continues) and say so once. */
+  private async onRecordingLimit(): Promise<void> {
+    if (this.recordingLimitReached) return;
+    this.recordingLimitReached = true;
+    const rec = this.recording;
+    this.recording = null;
+    await rec?.stop();
+    this.screen.stop();
+    this.patch({ recordingActive: false });
+    const t = Math.round(this.clock.now());
+    await this.outbox
+      ?.putEvent({
+        id: uuidv4(),
+        type: 'recording_interrupted',
+        phase: 'close',
+        startedAt: t,
+        endedAt: t,
+        confidence: 1,
+        observation: 'The recording limit for this exam session was reached, so recording stopped. Monitoring continued.',
+        details: { stream: 'camera', reason: 'session_limit' },
+        version: 1,
+        clientInstanceId: this.instanceId,
+      })
+      .catch(() => undefined);
+  }
+
+  /** Ask the candidate to share their entire screen (from a click: ready screen, or the exam's "share again" cover). */
+  shareScreen(): ReturnType<ScreenCapture['request']> {
+    return this.screen.request();
+  }
+
+  /** Whether the exam must be covered until the screen is shared (it records the screen and recording runs). */
+  screenShareRequired(): boolean {
+    const s = this.snap.state;
+    return !!s && recordingPlan(s.exam.policy).screen && !this.recordingLimitReached;
   }
 
   /** Delivery is allowed once this instance is the verified one (the server rejects others). */
@@ -545,11 +671,40 @@ export class CandidateController {
       const pending = this.pendingServerSample;
       this.pendingServerSample = null;
       if (pending && this.runtime === rt) rt.serverSampleRequest(pending);
+      if (this.runtime === rt) await this.startRecording();
     } catch (e) {
       console.error('[controller] monitoring failed to start', e);
     } finally {
       this.runtimeStarting = false;
     }
+  }
+
+  /**
+   * The exam recording runs with monitoring (exams that record): from the start of the exam and again after every
+   * resume / reconnect / release, until monitoring stops (pause, hold, end, camera release).
+   */
+  private async startRecording(): Promise<void> {
+    const s = this.snap.state;
+    if (!s || this.recording || this.recordingLimitReached || !this.outbox) return;
+    const plan = recordingPlan(s.exam.policy);
+    if (!plan.any) return;
+    const queue = await this.ensureRecordingQueue(s.session.id);
+    if (!this.runtime) return; // monitoring stopped meanwhile
+    const outbox = this.outbox;
+    const rec = new ExamRecording({
+      plan,
+      camera: this.camera,
+      screen: this.screen,
+      queue,
+      instanceId: this.instanceId,
+      now: () => this.clock.now(),
+      putEvent: (e) => outbox.putEvent(e),
+      sequence: this.recordingSeq,
+      onProblem: (message) => this.patch({ recordingProblem: message }),
+    });
+    this.recording = rec;
+    this.patch({ recordingActive: true });
+    await rec.start();
   }
 
   /**
@@ -562,6 +717,8 @@ export class CandidateController {
   releaseIdleCamera(): void {
     if (this.runtime || this.runtimeStarting) return;
     if (this.camera.state.wanted || this.camera.state.stream) this.camera.stop();
+    // Nor is the screen shared any longer (e.g. shared on the ready screen, then the exam was put on hold).
+    this.screen.stop();
   }
 
   /** Stop monitoring: close open episodes, queue them and try to deliver them (bounded wait). */
@@ -569,6 +726,16 @@ export class CandidateController {
     const rt = this.runtime;
     this.runtime = null;
     this.pendingServerSample = null;
+    // The recording first: its last segments end now, before the camera is released.
+    const recording = this.recording;
+    this.recording = null;
+    if (recording) {
+      await recording.stop().catch((e) => console.warn('[controller] recording did not stop cleanly', e));
+      this.recordingQueue?.kick();
+    }
+    // Leaving the exam (pause, hold, end): the screen is no longer shared. A check in this browser keeps it.
+    if (opts.stopCamera) this.screen.stop();
+    if (recording || this.snap.recordingActive) this.patch({ recordingActive: false });
     if (rt) {
       await rt.stop(reason, { stopCamera: opts.stopCamera });
       try {
@@ -805,7 +972,8 @@ export class CandidateController {
   async startExam(onDeferred?: () => void): Promise<void> {
     for (;;) {
       try {
-        const { data, timing } = await this.api.start();
+        // What the browser reports about its displays right now (an exam that allows only one display checks it).
+        const { data, timing } = await this.api.start({ screen: screenInfo() });
         await this.applyState(data, timing);
         return;
       } catch (e) {
@@ -896,6 +1064,8 @@ export class CandidateController {
       }
       await this.stopMonitoring('consent_withdrawn', { flush: false, stopCamera: true });
       await this.outbox?.discardImages();
+      // The recording still on this device is deleted, not sent.
+      await this.recordingQueue?.discardAll();
       await this.applyState(next);
     } finally {
       this.transitioning = false;
@@ -919,7 +1089,10 @@ export class CandidateController {
   private readonly onBeforeUnload = (e: BeforeUnloadEvent) => {
     void this.answers?.flushPending();
     const unsaved = (this.outbox?.stats().pendingAnswers ?? 0) > 0 || this.answers?.hasUnsavedEdits();
-    if (unsaved && this.snap.state?.session.status === 'active') {
+    const status = this.snap.state?.session.status;
+    // Recording parts still on this device: closing now would lose them (also after submitting).
+    const recordingPending = (this.recordingQueue?.stats().pending ?? 0) > 0 && !this.snap.fatal;
+    if ((unsaved && status === 'active') || (recordingPending && (status === 'active' || status === 'submitted' || status === 'terminated'))) {
       e.preventDefault();
       e.returnValue = '';
     }
@@ -932,9 +1105,13 @@ export class CandidateController {
     if (this.uiTimer) clearInterval(this.uiTimer);
     void this.runtime?.stop('dispose', { stopCamera: true });
     this.runtime = null;
+    void this.recording?.stop();
+    this.recording = null;
+    this.screen.stop();
     this.camera.dispose();
     this.answers?.dispose();
     this.outbox?.close();
+    this.recordingQueue?.close();
     window.removeEventListener('online', this.onOnline);
     window.removeEventListener('offline', this.onOffline);
     window.removeEventListener('pagehide', this.onPageHide);

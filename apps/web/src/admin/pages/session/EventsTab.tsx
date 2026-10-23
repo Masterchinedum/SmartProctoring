@@ -16,11 +16,14 @@ export function EventsTab({
   filters,
   onFilters,
   onOpenEvent,
+  onWatch,
 }: {
   sessionId: string;
   filters: EventFilterState;
   onFilters: (f: EventFilterState) => void;
   onOpenEvent: (id: string) => void;
+  /** The session has a recording: watch it from just before an event. */
+  onWatch?: (at: number) => void;
 }) {
   const q = useQuery({ queryKey: qk.sessionEvents(sessionId), queryFn: () => api.sessionEvents(sessionId), retry: shouldRetry });
   const [sort, setSort] = useState<{ key: EventSortKey; dir: 'asc' | 'desc' }>({ key: 'time', dir: 'asc' });
@@ -103,7 +106,23 @@ export function EventsTab({
                     {isFlagCategory(e.category) ? <ReviewBadge status={e.review.status} resolution={e.review.resolution} /> : <span className="muted small">n/a</span>}
                     {e.notesCount ? <div className="muted small">{e.notesCount} note(s)</div> : null}
                   </td>
-                  <td>{e.evidence.length ? <EvidenceImage evidence={e.evidence[0]} size="thumb" alt="" /> : <span className="muted small">—</span>}</td>
+                  <td>
+                    {e.evidence.length ? <EvidenceImage evidence={e.evidence[0]} size="thumb" alt="" /> : !onWatch ? <span className="muted small">—</span> : null}
+                    {onWatch ? (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          onWatch(e.startedAt);
+                        }}
+                        aria-label={`Watch the recording from 10 seconds before: ${e.title}`}
+                        data-testid="watch-recording"
+                      >
+                        ▶ Watch
+                      </button>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>

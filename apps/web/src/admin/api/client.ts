@@ -23,6 +23,7 @@ import type {
   EventDTO,
   EvidenceStorageDTO,
   ExamDTO,
+  SessionRecordingDTO,
   ExamExport,
   ExamVersionDTO,
   ExamVersionSummaryDTO,
@@ -235,6 +236,9 @@ export const api = {
   sessionTimeline: (id: string) => request<{ items: TimelineItemDTO[] }>('GET', `${A}/sessions/${enc(id)}/timeline`),
   sessionReport: (id: string) => request<SessionReportDTO>('GET', `${A}/sessions/${enc(id)}/report`),
   sessionCsvUrl: (id: string) => `${A}/sessions/${enc(id)}/events.csv`,
+  /** The exam recording's segments (metadata); each segment's media is recordingMediaUrl (audited when opened). */
+  sessionRecording: (id: string) => request<SessionRecordingDTO>('GET', `${A}/sessions/${enc(id)}/recordings`),
+  recordingMediaUrl: (segmentId: string) => `${A}/recordings/${enc(segmentId)}/media`,
   addSessionNote: (id: string, text: string) => request<NoteDTO>('POST', `${A}/sessions/${enc(id)}/notes`, { body: { text } }),
   decidePause: (id: string, requestId: string, approve: boolean, note?: string) =>
     request<SessionSummaryDTO>('POST', `${A}/sessions/${enc(id)}/pause-requests/${enc(requestId)}/decision`, { body: { approve, note: note || undefined } }),

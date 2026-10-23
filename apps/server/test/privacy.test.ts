@@ -300,9 +300,9 @@ describe('retention preview and job health', () => {
 
       let p = json<RetentionPreviewDTO>(await a2.get('/retention/preview', { days: 31 }));
       const dueDate = new Date(endedAt + 30 * DAY_MS).toISOString().slice(0, 10);
-      expect(p.days).toEqual([{ date: dueDate, sessions: 1, evidenceItems: expect.any(Number) }]);
+      expect(p.days).toEqual([{ date: dueDate, sessions: 1, evidenceItems: expect.any(Number), recordings: 0 }]);
       expect(p.days[0].evidenceItems).toBeGreaterThan(1);
-      expect(p.overdue).toEqual({ sessions: 0, evidenceItems: 0, oldestDueAt: null });
+      expect(p.overdue).toEqual({ sessions: 0, evidenceItems: 0, recordings: 0, oldestDueAt: null });
       expect(p.legalHolds).toEqual([expect.objectContaining({ sessionId: held.session.id, candidateName: 'Lena LegalHold', examTitle: 'Sample Exam' })]);
       expect(p.job).toMatchObject({ lastStartedAt: null, lastSuccessAt: null, stale: true });
       expect(json<OpsChecksDTO>(await a2.get('/ops/checks')).checks.find((c) => c.id === 'retention_job')).toMatchObject({ status: 'warning' });

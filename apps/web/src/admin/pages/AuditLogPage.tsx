@@ -53,6 +53,7 @@ const COMMON_ACTIONS = [
   'privacy_request.rejected',
   'privacy_request.reopened',
   'privacy_request.updated',
+  'recording.view',
   'reference.re_enrolled',
   'retention.purge',
   'scim.token_created',

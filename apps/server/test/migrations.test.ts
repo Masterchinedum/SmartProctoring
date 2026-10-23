@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, findMigrationsDir, migrate, type Database } from '../src/db/index.js';
-import { API_KEY_SCOPES, DEFAULT_IDENTITY_THRESHOLDS, resolvePolicy } from '@sp/shared';
+import { API_KEY_SCOPES, DEFAULT_IDENTITY_THRESHOLDS, recordingPlan, resolvePolicy } from '@sp/shared';
 import {
   apiIdempotencyKeys,
   apiKeys,
@@ -25,6 +25,7 @@ import {
   organizations,
   orgUsage,
   privacyRequests,
+  recordingSegments,
   staffSessions,
   staffSsoIdentities,
   staffUsers,
@@ -455,5 +456,63 @@ describe('0017_sandbox_quotas', () => {
     await expect(sql(`UPDATE organizations SET kind = 'trial' WHERE id = $1`, [org])).rejects.toThrow(/organizations_kind_check/);
     const fresh = (await one(`INSERT INTO organizations (name) VALUES ('New Org') RETURNING kind, quotas, sandbox_purge_days`));
     expect(fresh).toEqual({ kind: 'production', quotas: {}, sandbox_purge_days: null });
+  });
+});
+
+describe('0018_recording', () => {
+  it('adds the recording segments table beside existing evidence: old exams record nothing, existing data is untouched', async () => {
+    const database = await databaseAt('0017_sandbox_quotas');
+    const sql = (text: string, values: unknown[] = []) => database.pool.query(text, values);
+    const one = async (text: string, values: unknown[] = []) => (await sql(text, values)).rows[0];
+    const org = (await one(`INSERT INTO organizations (name) VALUES ('Old Org') RETURNING id`)).id;
+    const cand = (await one(`INSERT INTO candidates (org_id, name) VALUES ($1, 'Old Candidate') RETURNING id`, [org])).id;
+    const exam = (await one(`INSERT INTO exams (org_id, title, duration_sec, status, policy) VALUES ($1, 'Old', 600, 'published', '{"browser": {"requireFullscreen": false}}') RETURNING id`, [org])).id;
+    const session = (
+      await one(`INSERT INTO exam_sessions (org_id, exam_id, candidate_id, access_token_hash, duration_ms, status, started_at) VALUES ($1, $2, $3, 'h18', 600000, 'active', now()) RETURNING id`, [org, exam, cand])
+    ).id;
+    const shot = randomUUID();
+    await sql(`INSERT INTO evidence (id, org_id, session_id, candidate_id, kind, captured_at, storage_key, byte_size, sha256, key_id) VALUES ($1, $2, $3, $4, 'event_screenshot', now(), 'k', 3, 'x', 'kid')`, [
+      shot,
+      org,
+      session,
+      cand,
+    ]);
+
+    await migrate(database);
+
+    // An exam from before stays without recording (the setting's default is off), so its candidates see the notice they saw.
+    const [e] = await database.db.select().from(exams).where(eq(exams.id, exam));
+    const policy = resolvePolicy(e.policy);
+    expect(policy.recording).toEqual({ enabled: false, audio: true, screen: true });
+    expect(recordingPlan(policy).any).toBe(false);
+    expect(await database.db.select().from(recordingSegments)).toEqual([]);
+    expect((await database.db.select().from(evidence).where(eq(evidence.id, shot)))[0].kind).toBe('event_screenshot');
+
+    // A segment: one per (session, stream, recording instance, seq); its row goes with the evidence row and the session.
+    const recordingEvidence = async (key: string) => {
+      const id = randomUUID();
+      await sql(
+        `INSERT INTO evidence (id, org_id, session_id, candidate_id, kind, captured_at, storage_key, byte_size, sha256, key_id, content_type) VALUES ($1, $2, $3, $4, 'recording', now(), $5, 10, 'y', 'kid', 'video/webm')`,
+        [id, org, session, cand, key],
+      );
+      return id;
+    };
+    const insert = (evidenceId: string, seq: number, stream = 'camera') =>
+      sql(
+        `INSERT INTO recording_segments (org_id, session_id, evidence_id, stream, seq, started_at, duration_ms, mime_type, byte_size, client_instance_id) VALUES ($1, $2, $3, $4, $5, now(), 30000, 'video/webm', 10, 'inst-12345678')`,
+        [org, session, evidenceId, stream, seq],
+      );
+    const rec = await recordingEvidence('r1');
+    await insert(rec, 0);
+    await expect(insert(rec, 0)).rejects.toThrow(/recording_segments_upload_uq/);
+    await expect(insert(rec, 1, 'microphone')).rejects.toThrow(/recording_segments_stream_check/);
+    await insert(rec, 0, 'screen');
+    const indexes = (await sql(`SELECT indexname FROM pg_indexes WHERE tablename = 'recording_segments'`)).rows.map((r) => r.indexname);
+    expect(indexes).toEqual(expect.arrayContaining(['recording_segments_upload_uq', 'recording_segments_session_idx', 'recording_segments_evidence_idx']));
+    await sql(`DELETE FROM evidence WHERE id = $1`, [rec]);
+    expect(await database.db.select().from(recordingSegments)).toEqual([]);
+    await insert(await recordingEvidence('r2'), 3);
+    await sql(`DELETE FROM exam_sessions WHERE id = $1`, [session]);
+    expect(await database.db.select().from(recordingSegments)).toEqual([]);
   });
 });

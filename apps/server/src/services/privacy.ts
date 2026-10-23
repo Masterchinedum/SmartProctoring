@@ -1,4 +1,4 @@
-import { buildPrivacyNotice, type PrivacyNoticeDTO, type ProctoringPolicy } from '@sp/shared';
+import { buildPrivacyNotice, recordingPlan, type PrivacyNoticeDTO, type ProctoringPolicy } from '@sp/shared';
 import type { Candidate, ExamSession, Organization } from '../db/schema.js';
 import { externalVerifierNoticeNameFor } from '../verifiers/settings.js';
 import { orgSettings } from './org.js';
@@ -15,5 +15,7 @@ export function noticeFor(org: Organization | null, policy: ProctoringPolicy, ca
     externalVerifier: externalVerifierNoticeNameFor(settings.externalVerifier),
     camera: policy.camera.enabled,
     identityVerification: policy.identity.verification,
+    // An exam that records gets the recording notice (its own version: a consent to the other notice does not cover it).
+    recording: recordingPlan(policy),
   });
 }

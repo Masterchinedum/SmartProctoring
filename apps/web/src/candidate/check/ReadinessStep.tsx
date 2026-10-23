@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isVirtualCameraLabel } from '@sp/detection';
+import { recordingPlan } from '@sp/shared';
 import { useController, useSnapshot } from '../context';
 import { CameraPreview, ScreenHeading, Spinner } from '../components/common';
 import { allRequiredPass, evaluateReadiness, ReadinessSmoother, warnings, type ReadinessItem } from './readiness';
 import { useFrameAnalysis } from './useFrameAnalysis';
+import { MicCheckItem, useMicCheck } from './MicCheck';
 
 /**
  * Camera setup: camera picker, live (mirrored) preview and a checklist that updates live.
@@ -14,7 +16,11 @@ import { useFrameAnalysis } from './useFrameAnalysis';
  */
 export function ReadinessStep({ onReady, intro, cameraOnly = false }: { onReady: () => void; intro?: string; cameraOnly?: boolean }) {
   const ctrl = useController();
-  const { camera } = useSnapshot();
+  const { camera, state: sessionState } = useSnapshot();
+  // Exams that record sound: the microphone is checked here too (silence is a warning; no microphone blocks).
+  const recordsAudio = !!sessionState && recordingPlan(sessionState.exam.policy).audio;
+  const mic = useMicCheck(recordsAudio);
+  const micBlocks = mic.state === 'blocked';
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [items, setItems] = useState<ReadinessItem[] | null>(null);
   const smoother = useRef(new ReadinessSmoother());
@@ -53,7 +59,7 @@ export function ReadinessStep({ onReady, intro, cameraOnly = false }: { onReady:
       ? evaluateReadiness({ cameraState: camera.state, framesFlowing: false, faces: [], frame: null, faceRegion: null, virtualCamera: virtual })
       : items;
   const analysisUnavailable = !vs.loading && !vs.vision?.face;
-  const ready = camera.state === 'live' && (analysisUnavailable || cameraOnly ? true : allRequiredPass(shown));
+  const ready = camera.state === 'live' && (analysisUnavailable || cameraOnly ? true : allRequiredPass(shown)) && !micBlocks;
   const firstFailing = shown.find((i) => i.required && !i.ok);
   // Borderline picture: the candidate may continue (the server judges usability and guides live), with advice.
   const warn = ready && !analysisUnavailable ? warnings(shown).filter((w) => w.id !== 'real_camera') : [];
@@ -119,6 +125,7 @@ export function ReadinessStep({ onReady, intro, cameraOnly = false }: { onReady:
               </li>
             ))}
           </ul>
+          {mic.state && <MicCheckItem state={mic.state} message={mic.message} onRetry={mic.retry} />}
           {analysisUnavailable && (
             <div className="banner banner-info">
               The automatic camera check could not start in this browser. You can continue — the image will be checked when you verify your identity.
@@ -128,6 +135,8 @@ export function ReadinessStep({ onReady, intro, cameraOnly = false }: { onReady:
           <div role="status" aria-atomic="true" className="cand-live-slot" data-testid="readiness-status">
             {firstFailing && !analysisUnavailable ? (
               <p className="cand-guidance">{firstFailing.guidance}</p>
+            ) : micBlocks ? (
+              <p className="cand-guidance">{mic.message}</p>
             ) : ready && !analysisUnavailable && warn.length > 0 ? (
               <p className="cand-guidance" data-testid="readiness-warning">
                 You can continue. For the best result: {warn[0].guidance}

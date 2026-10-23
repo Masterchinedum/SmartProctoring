@@ -5,6 +5,7 @@
 import {
   ACCESS_LINK_PATH,
   clockRemainingMs,
+  displayReport,
   type EventDTO,
   type EvidenceRefDTO,
   type ExamClock,
@@ -159,6 +160,7 @@ export function toDeviceRecordDTO(d: DeviceRecord): DeviceRecordDTO {
     cameraIdHash: d.cameraIdHash,
     userAgent: d.userAgent,
     purpose: d.purpose,
+    displays: displayReport(d.screen?.isExtended),
   };
 }
 

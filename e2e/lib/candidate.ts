@@ -46,15 +46,26 @@ export function skipUnlessFixtures(...names: FixtureName[]): void {
   );
 }
 
-export async function launchCamera(fixture: FixtureName): Promise<Browser> {
-  return launchCameraFile(fixturePath(fixture));
+/**
+ * Launch options. `screenCapture`: the browser may share a screen without a picker (Chromium picks "Entire screen"
+ * itself) — for exams that record the screen (19h). Off by default: no other scenario shares a screen.
+ */
+export interface LaunchOptions {
+  screenCapture?: boolean;
+}
+
+/** Chromium flags that let getDisplayMedia share the entire screen without a picker (automation). */
+export const SCREEN_CAPTURE_ARGS = ['--auto-select-desktop-capture-source=Entire screen', '--enable-usermedia-screen-capturing'];
+
+export async function launchCamera(fixture: FixtureName, opts: LaunchOptions = {}): Promise<Browser> {
+  return launchCameraFile(fixturePath(fixture), opts);
 }
 
 /**
  * A browser whose fake camera plays the given Y4M file (e.g. a realistic fixture, lib/realistic.ts): Chromium's
  * fake capture device, or in shim mode the project's browser with the camera shim (lib/camera.ts).
  */
-export async function launchCameraFile(y4m: string): Promise<Browser> {
+export async function launchCameraFile(y4m: string, opts: LaunchOptions = {}): Promise<Browser> {
   if (cameraMode() === 'shim') return launchShimCamera(y4m);
   return chromium.launch({
     headless: !HEADED,
@@ -68,6 +79,7 @@ export async function launchCameraFile(y4m: string): Promise<Browser> {
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
       '--disable-backgrounding-occluded-windows',
+      ...(opts.screenCapture ? SCREEN_CAPTURE_ARGS : []),
     ],
   });
 }
@@ -123,6 +135,22 @@ export const TRACK_CAMERA_STREAMS = `(() => {
 })();`;
 
 /** Every CandidatePage of the running test (lib/test.ts attaches their API logs when a test fails). */
+/**
+ * Init script: remember every shared-screen track the page obtains (`__spScreenTracks`), so a test can stop sharing
+ * as the browser's "Stop sharing" button would (exam recording, 19h).
+ */
+export const TRACK_SCREEN_STREAMS = `(() => {
+  const md = navigator.mediaDevices;
+  if (!md || !md.getDisplayMedia || window.__spScreenTracks) return;
+  window.__spScreenTracks = [];
+  const orig = md.getDisplayMedia.bind(md);
+  md.getDisplayMedia = async (o) => {
+    const s = await orig(o);
+    window.__spScreenTracks.push(...s.getVideoTracks());
+    return s;
+  };
+})();`;
+
 export const OPEN_CANDIDATE_PAGES = new Set<CandidatePage>();
 
 const hhmmss = (t: number) => new Date(t).toISOString().slice(11, 23);
@@ -198,6 +226,7 @@ export class CandidatePage {
     const context = opts.context ?? (await browser!.newContext({ baseURL: BASE_URL, viewport: { width: 1280, height: 900 }, ...cameraPermissions() }));
     await installCamera(context); // shim mode only; before the tracker below, which wraps whatever getUserMedia is
     await context.addInitScript(TRACK_CAMERA_STREAMS);
+    await context.addInitScript(TRACK_SCREEN_STREAMS);
     if (DELEGATE) await context.addInitScript(`try { localStorage.setItem('sp:delegate', ${JSON.stringify(DELEGATE)}); } catch {}`);
     // A/B measurement of the check's pose smoothing (apps/web/src/candidate/check/poseFilter.ts): raw poses.
     if (process.env.E2E_RAW_POSE === '1') await context.addInitScript('window.__spRawPose = true;');
@@ -370,7 +399,8 @@ export class CandidatePage {
 
   /** Welcome screen: privacy notice visible, system requirements pass, consent. */
   async consent(): Promise<void> {
-    await expect(this.page.getByRole('heading', { name: 'Privacy notice: camera monitoring' })).toBeVisible();
+    // "… monitoring and recording" for an exam that records (19h).
+    await expect(this.page.getByRole('heading', { name: /^Privacy notice: (camera monitoring|monitoring and recording)$/ })).toBeVisible();
     await expect(this.tid('requirements')).toBeVisible();
     await expect(this.tid('consent-continue')).toBeDisabled();
     await this.tid('consent-checkbox').check();

@@ -233,7 +233,8 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     reply.header('Referrer-Policy', 'no-referrer');
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Cross-Origin-Opener-Policy', 'same-origin');
-    reply.header('Permissions-Policy', 'camera=(self), microphone=(), geolocation=(), payment=(), usb=()');
+    // The microphone and screen capture are used only by exams that record (policy.recording); the browser still asks.
+    reply.header('Permissions-Policy', 'camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=(), usb=()');
     reply.header('Content-Security-Policy', CSP);
     if (config.cookieSecure) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     if (req.url.startsWith('/api/') && !reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');

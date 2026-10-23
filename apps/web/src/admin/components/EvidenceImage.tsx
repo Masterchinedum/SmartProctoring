@@ -8,6 +8,7 @@ const KIND_LABELS: Record<EvidenceRefDTO['kind'], string> = {
   identity_reference: 'Identity reference',
   id_photo: 'ID photo',
   liveness_frame: 'Liveness frame',
+  recording: 'Recording',
 };
 
 export function evidenceKindLabel(kind: EvidenceRefDTO['kind']): string {
@@ -20,6 +21,7 @@ const ALT_KIND: Record<EvidenceRefDTO['kind'], string> = {
   identity_reference: 'Identity reference image',
   id_photo: 'ID photo',
   liveness_frame: 'Live-person check frame',
+  recording: 'Part of the exam recording',
 };
 
 /**

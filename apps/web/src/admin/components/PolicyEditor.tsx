@@ -39,6 +39,11 @@ export function PolicyEditor({
         const body = (
           <>
             <p className="muted small policy-group-desc">{g.description}</p>
+            {g.note ? (
+              <div className="banner banner-info small policy-group-note" data-testid={`policy-note-${g.id}`}>
+                {g.note}
+              </div>
+            ) : null}
             <div className="policy-fields">
               {g.fields.map((f) => (
                 <PolicyFieldRow

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { displayReport } from './api';
 import { burstSizeFor, DEFAULT_POLICY, resolvePolicy, SAMPLING_PROFILES, samplingProfileOf } from './policy';
 
 describe('identity sampling profiles', () => {
@@ -40,5 +41,21 @@ describe('detection policy: looking away while working', () => {
     expect(() => resolvePolicy({ detection: { attentionReference: 'camera' } })).toThrow();
     expect(() => resolvePolicy({ detection: { typingExcuseSec: 11 } })).toThrow();
     expect(() => resolvePolicy({ detection: { lookUpPitchDeg: 5 } })).toThrow();
+  });
+});
+
+describe('browser policy: single display', () => {
+  it('is off by default, and stored policies from before it stay valid', () => {
+    expect(DEFAULT_POLICY.browser.requireSingleDisplay).toBe(false);
+    const old = resolvePolicy({ browser: { requireFullscreen: false, blockClipboard: true } });
+    expect(old.browser).toMatchObject({ requireFullscreen: false, blockClipboard: true, requireSingleDisplay: false });
+    expect(resolvePolicy({ browser: { requireSingleDisplay: true } }).browser.requireSingleDisplay).toBe(true);
+    expect(() => resolvePolicy({ browser: { requireSingleDisplay: 'yes' } })).toThrow();
+  });
+
+  it('reads what the browser reported: unknown where it cannot tell', () => {
+    expect(displayReport(true)).toBe('extended');
+    expect(displayReport(false)).toBe('single');
+    for (const v of [null, undefined, 'true', 1]) expect(displayReport(v)).toBe('unknown');
   });
 });

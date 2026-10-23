@@ -29,6 +29,7 @@ Status of the October 2026 roadmap carried by Masterchinedum/SmartProctoring#1 (
 | 19 | Chaos tests, upgrade tests from every migration, schema drift check, metrics | Shipped | `8cc8d45` | HANDOVER §3c, OPERATIONS §5, §7 |
 | 20 | Cross-browser e2e (Firefox, WebKit) | Shipped — Firefox (Linux) and WebKit (macOS) green in CI | `b00c7c0`, CI follow-ups `6191103`…`8dcc359` (app fixes `61c8eb7`, `e2afb6c`; Playwright 1.64.1 `f3125f2`) | HANDOVER §3c and §4 item 3, e2e README |
 | 21 | This document, final verification, PR description | Done | (this commit) | §5 below |
+| 22 | Optional exam recording (webcam, microphone, entire screen; off by default) | Shipped — Chromium e2e (19h); Firefox / Safari not tried | `035f2fd` (server), `d5d2646` (candidate), `5159c06` (staff playback, e2e), docs (the commit after) | HANDOVER §3c, PRIVACY §2a, OPERATIONS §2, ARCHITECTURE §6 |
 
 ## 2. Deferred, and why
 
@@ -59,6 +60,12 @@ liveness scope, phone detection) are in `HANDOVER.md` §4 and are unchanged by t
 | 20 Cross-browser | Dedicated-instance scenarios and the realistic accuracy scenarios (20–24) in Firefox / WebKit | They test server behaviour; the browser only drives it |
 | 20 Cross-browser | Real Safari and Firefox with a real webcam (their camera prompts) | Playwright's WebKit is Safari's engine, not Safari; the CI camera is a canvas shim. One manual pass per browser before launch (HANDOVER §4 item 3) |
 | 20 Cross-browser | WebKit on Linux (WebKitGTK) in CI | Playwright's WebKitGTK shows the camera shim's canvas in the app's video only for a while, then one frozen frame while the canvas keeps changing and the video keeps playing; change-driven and timer-driven capture both freeze, in WebKit 26.0 (4–6 of 10 passed) and 27.2 (3 of 10). The same app code passes on macOS, so it is the test camera's path, not the app; WebKit runs on macOS (§3) |
+| 22 Recording | Recording e2e in Firefox / WebKit | Playwright cannot share a screen without the browser's picker there (Chromium has a launch flag); one manual pass per browser before an exam records on it (HANDOVER §4 item 3) |
+| 22 Recording | One file per session (server-side joining or transcoding) | The server never decodes media (no ffmpeg, no CPU cost, nothing to exploit); the staff player plays the 30-second parts back to back and the export contains the parts with an index |
+| 22 Recording | Watching while the exam runs | Parts arrive about 30 s late; the live dashboard shows the flags. The Recording tab already works on a running session (refresh for new parts) |
+| 22 Recording | A download button for staff | Every viewing is audited per part; a downloaded file is not. Candidates' copies go through the privacy export (audited request) |
+| 22 Recording | A storage quota per organisation | Only the per-session cap (`RECORDING_MAX_SESSION_MB`) and metrics; whether recording storage is billed or capped is a business decision |
+| 22 Recording | Recording the identity check | Recording covers the exam only (start to end, not pauses or holds), which keeps what the notice promises simple |
 | 20 Cross-browser | Fullscreen on iPhone | iPhone Safari has no element fullscreen, so an exam that requires fullscreen cannot be taken there; the welcome-screen system check says so |
 
 ## 3. Decisions made on your behalf
@@ -156,6 +163,60 @@ All are documented where the feature is, and all can be changed. These are the o
 * `01-happy-path` now bounds the exam time used after a resume by the wall time since the server restarted the clock
   (its `session_resumed` event) instead of a fixed 6 s, which a slow browser reached without any clock error.
 
+**Browser rules**
+* **Single-display rule (after the roadmap):** per exam, off by default (the owner's decision). Decided on your behalf:
+  a second display only *warns* on the welcome screen (consent and the check-in go ahead) and blocks the start on the
+  ready screen and in the server; a browser that cannot tell (Firefox, Safari) is never blocked — the start, the report
+  and the Devices tab record the unknown display count; the *Assistive technology* accommodation waives the rule (as it
+  waives fullscreen); a display still connected when a released exam continues holds it again (no "allow for the rest
+  of this exam" option); after a pause or reconnection the check-complete screen only warns before monitoring restarts.
+  The candidate privacy notice is unchanged (it never listed the display count, recorded before as a neutral event);
+  adding it needs a new notice version.
+
+**Exam recording (22)**
+* **Off by default**, per exam (exam rules → *Recording*: "Record the exam", "Record the microphone", "Record the
+  screen"; the last two on once the first is). Exams that do not record are unchanged, wording included.
+* **30-second parts.** Each part is a complete file (a new `MediaRecorder` starts before the previous one stops, so there
+  is no gap and no part depends on another): a lost upload loses 30 s, not the recording, and a part is small enough to
+  upload on a poor connection. Shorter parts mean more requests (two per candidate per 30 s already); longer ones mean
+  more lost per failure.
+* **Bitrates.** Webcam 640×480 at 15 fps, 350 kbps video + 32 kbps Opus sound (enough to see the room and the person
+  and to understand speech; identity analysis keeps its own full-size frames). Screen at most 1280 px wide, at most
+  5 fps, 300 kbps (text stays legible; a mostly still screen needs far less). Together about 300 MB per candidate per
+  hour.
+* **Codec order.** WebM VP8 + Opus first (cheapest to encode in software on older laptops, plays in every current
+  browser), then VP9, then MP4 (Safari's recorder).
+* **Webcam from a clone, microphone separately.** The recording scales a clone of the camera track, so face analysis is
+  untouched, and opens the microphone with its own request, so exams that do not record never ask for it.
+* **500 MB buffer on the device** (about 1.5 hours of both streams): a long connection loss loses nothing until then;
+  beyond it the **oldest** parts are dropped and a `recording_interrupted` event (`device_storage_full`) says so, so the
+  most recent part of the exam is kept.
+* **24 hours for late parts** (`RECORDING_LATE_UPLOAD_HOURS`), only from the browser that was verified for the exam (its
+  instance id, never another browser): a candidate who closes the laptop right after submitting can reopen the link the
+  next day; after that the review is likely under way.
+* **3,000 MB per session** (`RECORDING_MAX_SESSION_MB`, ≈ 10 hours of both streams), outside the image budget (1,500
+  items / 300 MB), which recordings would otherwise exhaust in an hour.
+* **Entire screen required where the browser says what was shared.** A window or a tab is refused (it would hide
+  everything else). A browser that does not report it is accepted with a reminder: refusing it would lock those
+  candidates out for a check the app cannot make.
+* **Stopping the share covers the exam, the clock keeps running** (like "Return to fullscreen"), and records
+  `screen_share_stopped` as a *potential integrity issue*, **low** severity, with the note that it can be accidental.
+  It does not hold the exam.
+* **Microphone check**: "heard" at ≥ 0.01 RMS (normal speech; the room's hum stays below); after 8 s of silence a
+  warning ("We could not hear anything from your microphone yet…"), never a block; only no microphone or refused access blocks. A quiet room or a soft
+  voice must not lock a candidate out, and a working microphone records sound either way.
+* **No-camera arrangement**: no webcam and no microphone recording (the candidate was promised no camera); the screen
+  is still recorded when the exam records it.
+* **Its own notice version** (`2026-10-22-recording`): a consent to the notice without recording never covers a
+  recording, so turning recording on after candidates agreed asks them again before they can start.
+* **Recording stops at a pause and a hold** and starts again after the resume, like the camera.
+* **Technical problems never block the exam**: they are `recording_interrupted` events (technical, low), retried three
+  times; the candidate is told only when nothing at all can be recorded.
+* **Audit per part opened from its start** (`recording.view`); the staff player fetches each part once, so a viewing
+  is one entry per part, not one per seek.
+* **Integrations get nothing**: no recordings, links or recording summary in webhooks or the integration API.
+* **ZIP64** in the export writer, because an export with recordings can pass 4 GiB.
+
 ## 4. Open questions for the owner
 
 1. **Dark rooms: the same guidance twice.** In a dark room the candidate can see the darkness guidance and "We couldn't
@@ -166,6 +227,10 @@ All are documented where the feature is, and all can be changed. These are the o
 3. **Refuse to start vs degrade** when a storage location in use is missing (17, above).
 4. **Owners and single sign-on** (16, above): allow, or password + two-step sign-in only for owners?
 5. **Counsel review** of the privacy notice and the consent-withdrawal wording (HANDOVER §4 item 6).
+6. **Counsel review of the recording notice** (version `2026-10-22-recording`) before any exam records (HANDOVER §4
+   item 6).
+7. **Recording choices** (22, above): is 24 hours right for late parts; should a no-camera candidate's screen be
+   recorded; should a share that stays stopped for long hold the exam instead of only covering it?
 
 ## 5. Verification at the end of the roadmap
 

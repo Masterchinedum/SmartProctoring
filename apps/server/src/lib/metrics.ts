@@ -160,6 +160,24 @@ export class AppMetrics {
     help: 'Exam starts deferred because this instance was at capacity (the candidate app retries; the exam clock has not started).',
     registers: [this.registry],
   });
+  readonly recordingSegments = new Counter({
+    name: 'sp_recording_segments_total',
+    help: 'Exam recording segments stored on this instance, by stream (camera / screen); re-uploads of a stored segment are not counted.',
+    labelNames: ['stream'] as const,
+    registers: [this.registry],
+  });
+  readonly recordingBytes = new Counter({
+    name: 'sp_recording_bytes_total',
+    help: 'Bytes of exam recording stored on this instance (before encryption), by stream (camera / screen).',
+    labelNames: ['stream'] as const,
+    registers: [this.registry],
+  });
+  readonly recordingRefused = new Counter({
+    name: 'sp_recording_refused_total',
+    help: 'Exam recording segments refused, by reason (limit: the per-session cap; closed: after the grace period, a consent withdrawal or deletion; invalid: not a WebM / MP4 file).',
+    labelNames: ['reason'] as const,
+    registers: [this.registry],
+  });
   readonly staffSockets = new Gauge({ name: 'sp_staff_websockets', help: 'Open staff dashboard WebSockets on this instance.', registers: [this.registry] });
 
   constructor() {

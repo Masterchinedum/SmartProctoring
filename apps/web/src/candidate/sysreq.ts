@@ -1,3 +1,5 @@
+import type { DisplayReport } from '@sp/shared';
+import { readDisplays } from './displays';
 import { fullscreenSupported } from './fullscreen';
 
 /**
@@ -6,7 +8,7 @@ import { fullscreenSupported } from './fullscreen';
  */
 
 export interface RequirementResult {
-  id: 'secure_context' | 'camera_api' | 'webassembly' | 'indexeddb' | 'browser' | 'camera_present' | 'fullscreen' | 'single_display';
+  id: 'secure_context' | 'camera_api' | 'webassembly' | 'indexeddb' | 'browser' | 'camera_present' | 'fullscreen' | 'single_display' | 'recording_api' | 'screen_capture';
   label: string;
   ok: boolean;
   required: boolean;
@@ -60,8 +62,66 @@ async function indexedDbWorks(): Promise<boolean> {
   });
 }
 
-/** `camera: false` — an exam without a camera (an approved arrangement): no camera requirements are checked. */
-export async function checkSystemRequirements(opts: { requireFullscreen: boolean; camera?: boolean }): Promise<RequirementResult[]> {
+/**
+ * The display item. Without the single-display rule: a warning only when the browser reports more than one display
+ * (nothing otherwise). With it: always shown — met with one display; more than one is a warning here because the exam
+ * cannot be started until it is disconnected (the ready screen and the server refuse the start); a browser that cannot
+ * tell (Firefox, Safari) is told the check is not available there. Never `required`: consent and the check-in can go
+ * ahead, and the item updates when a display is connected or disconnected.
+ */
+export function displayRequirement(displays: DisplayReport, requireSingleDisplay: boolean): RequirementResult | null {
+  const base = { id: 'single_display', label: 'Single display', required: false } as const;
+  if (!requireSingleDisplay) {
+    return displays === 'extended'
+      ? { ...base, ok: false, help: 'More than one display is connected. This is recorded for the exam administrator; consider disconnecting additional displays.' }
+      : null;
+  }
+  if (displays === 'single') return { ...base, ok: true, help: '' };
+  if (displays === 'extended') {
+    return {
+      ...base,
+      ok: false,
+      help: 'More than one display is connected. This exam allows only one display: disconnect any additional displays before you start the exam. This check updates by itself.',
+    };
+  }
+  return {
+    ...base,
+    ok: false,
+    help: 'The display check is not available in this browser. This exam allows only one display, so disconnect any additional displays. To have this checked, use Chrome or Edge.',
+  };
+}
+
+/** The browser can record media (MediaRecorder with at least one video type). */
+export function recordingSupported(): boolean {
+  if (typeof MediaRecorder !== 'function') return false;
+  const probe = (MediaRecorder as unknown as { isTypeSupported?: (t: string) => boolean }).isTypeSupported;
+  if (typeof probe !== 'function') return true;
+  return ['video/webm', 'video/mp4'].some((t) => {
+    try {
+      return probe.call(MediaRecorder, t);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** The browser can share a screen (desktop browsers; not phones or tablets). */
+export function screenCaptureSupported(): boolean {
+  return typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+}
+
+/**
+ * `camera: false` — an exam without a camera (an approved arrangement): no camera requirements are checked.
+ * `requireSingleDisplay` — the exam allows only one display (displayRequirement).
+ * `recording` — what the exam records (policy.recording): the browser must be able to record it, and to share the
+ * screen when the screen is recorded; both block (the exam cannot run as configured without them).
+ */
+export async function checkSystemRequirements(opts: {
+  requireFullscreen: boolean;
+  camera?: boolean;
+  requireSingleDisplay?: boolean;
+  recording?: { camera: boolean; screen: boolean } | null;
+}): Promise<RequirementResult[]> {
   const browser = detectBrowser(navigator.userAgent);
   const camera = opts.camera !== false;
   const results: RequirementResult[] = [];
@@ -116,6 +176,24 @@ export async function checkSystemRequirements(opts: { requireFullscreen: boolean
       help: 'No camera was detected. Connect a webcam before you continue.',
     });
   }
+  if (opts.recording && (opts.recording.camera || opts.recording.screen)) {
+    results.push({
+      id: 'recording_api',
+      label: 'Recording supported',
+      ok: recordingSupported(),
+      required: true,
+      help: 'This exam is recorded, and this browser cannot record. Use a current version of Chrome, Edge or Firefox on a computer.',
+    });
+  }
+  if (opts.recording?.screen) {
+    results.push({
+      id: 'screen_capture',
+      label: 'Screen sharing supported',
+      ok: screenCaptureSupported(),
+      required: true,
+      help: 'This exam records your screen, which needs a browser on a computer: use a current version of Chrome, Edge or Firefox. Phones and tablets cannot share their screen.',
+    });
+  }
   if (opts.requireFullscreen) {
     results.push({
       id: 'fullscreen',
@@ -125,15 +203,7 @@ export async function checkSystemRequirements(opts: { requireFullscreen: boolean
       help: 'This exam requires fullscreen mode, which your browser does not appear to support. Use a current desktop browser.',
     });
   }
-  const extended = (window.screen as Screen & { isExtended?: boolean }).isExtended;
-  if (extended === true) {
-    results.push({
-      id: 'single_display',
-      label: 'Single display',
-      ok: false,
-      required: false,
-      help: 'More than one display is connected. This is recorded for the exam administrator; consider disconnecting additional displays.',
-    });
-  }
+  const display = displayRequirement(readDisplays(), opts.requireSingleDisplay === true);
+  if (display) results.push(display);
   return results;
 }
