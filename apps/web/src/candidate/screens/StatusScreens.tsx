@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { formatDuration, type CandidateEndReason } from '@sp/shared';
+import { formatDuration, recordedThings, recordingPlan, type CandidateEndReason } from '@sp/shared';
 import { CandidateApiError } from '../api';
 import { errorMessage, formatDateTime, formatTime, useController, useNow, useSnapshot } from '../context';
 import { formatWhen, startOpensAt, windowScreenText } from '../window';
@@ -7,6 +7,7 @@ import { useDisplays } from '../displays';
 import { exitFullscreen } from '../fullscreen';
 import { BrandHeader, CameraPreview, ContactLine, CountdownDisplay, Page, PrivacyNoticeDialog, ReportingBanner, ScreenHeading, Spinner, Toasts, TraceDownload } from '../components/common';
 import { enterFullscreen } from './exam/ExamScreen';
+import { ScreenShareStep } from './ScreenShare';
 
 /* ------------------------------------------------------------------ ready */
 
@@ -28,6 +29,10 @@ export function ReadyScreen() {
   const singleDisplay = p.browser.requireSingleDisplay;
   const displayBlocked = singleDisplay && displays === 'extended';
   useEffect(() => setError(null), [displays]); // a refused start's message is stale once a display changed
+  // Exams that record: what is recorded, and the screen must be shared (entire screen) before the start.
+  const plan = recordingPlan(p);
+  const needsScreen = ctrl.screenShareRequired();
+  const screenMissing = needsScreen && !snap.screen.live;
 
   // Keep the camera on so monitoring can start immediately with the exam (never for an exam without a camera).
   const cameraOn = p.camera?.enabled !== false;
@@ -46,8 +51,9 @@ export function ReadyScreen() {
       setError(errorMessage(e));
       setBusy(false);
       setDeferred(false);
-      // Outside the scheduling window: the state shows when it opens / that it closed.
-      if (e instanceof CandidateApiError && (e.code === 'exam_window_not_open' || e.code === 'exam_window_closed')) void ctrl.load();
+      // Outside the scheduling window: the state shows when it opens / that it closed. The exam now records and the
+      // candidate agreed to the notice without recording: the state shows the new notice to agree to.
+      if (e instanceof CandidateApiError && (e.code === 'exam_window_not_open' || e.code === 'exam_window_closed' || e.code === 'consent_required')) void ctrl.load();
       if (e instanceof CandidateApiError && e.code === 'single_display_required') recheck();
     }
   };
@@ -82,6 +88,11 @@ export function ReadyScreen() {
                 {p.browser.requireFullscreen && <li>The exam runs in fullscreen mode. Leaving fullscreen is recorded.</li>}
                 {singleDisplay && <li>Only one display may be connected. If another display is connected during the exam, your exam is put on hold until the administrator releases it.</li>}
                 {p.browser.blockClipboard && <li>Copy and paste are disabled during the exam.</li>}
+                {plan.any && (
+                  <li data-testid="ready-recording-note">
+                    The exam is recorded from the start to the end: {recordedThings(plan)}. Recording stops while the exam is paused.
+                  </li>
+                )}
                 {p.pause.allowed ? (
                   <li>
                     You can pause the exam{p.pause.requireApproval ? ' with the administrator’s approval' : ''}; the clock {p.pause.timerBehavior === 'stop' ? 'stops' : 'keeps running'}{' '}
@@ -128,8 +139,9 @@ export function ReadyScreen() {
               {error}
             </div>
           )}
+          {screenMissing && <p className="muted small">Share your screen below to start the exam.</p>}
           <div className="row">
-            <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy || opensAt != null || displayBlocked} data-testid="start-exam">
+            <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy || opensAt != null || displayBlocked || screenMissing} data-testid="start-exam">
               {busy ? (deferred ? 'Waiting to start…' : 'Starting…') : 'Start exam'}
             </button>
           </div>
@@ -138,6 +150,7 @@ export function ReadyScreen() {
             {deferred ? 'Many candidates are starting at the same time. Your exam will start by itself in a moment — your exam time has not started yet.' : ''}
           </p>
         </section>
+        {needsScreen && <ScreenShareStep />}
       </main>
       {showNotice && <PrivacyNoticeDialog notice={state.consent.notice} onClose={() => setShowNotice(false)} canWithdraw={state.consent.accepted} />}
       <Toasts />
@@ -302,6 +315,8 @@ export function EndedScreen() {
   const state = snap.state!;
   const terminated = state.session.status === 'terminated';
   const pending = snap.outbox?.size ?? 0;
+  // Recording parts still on this device keep uploading after the end (closing the page would lose them).
+  const recordingPending = snap.recordingUpload?.pending ?? 0;
   useEffect(() => {
     void exitFullscreen().catch(() => undefined);
     // "Your camera is off": also when the exam ended while no monitoring ran (e.g. terminated from the ready screen).
@@ -314,7 +329,7 @@ export function EndedScreen() {
         <section className="card stack" data-testid="ended-screen" data-status={state.session.status}>
           <ScreenHeading>{terminated ? 'Your exam has ended' : 'Your exam has been submitted'}</ScreenHeading>
           <p className="cand-lead">{endText(state.session.endReason, terminated)}</p>
-          {!terminated && <p>Thank you. Monitoring has stopped and your camera is off. You can close this window.</p>}
+          {!terminated && <p>Thank you. Monitoring has stopped and your camera is off.{recordingPending > 0 ? '' : ' You can close this window.'}</p>}
           {terminated && <p>Monitoring has stopped and your camera is off. If you have questions about this, contact your exam administrator.</p>}
           {snap.answerNotice && (
             <p className="muted" role="status" data-testid="answers-not-saved">
@@ -326,6 +341,19 @@ export function EndedScreen() {
               Finishing sending {pending} monitoring item{pending === 1 ? '' : 's'}… You may keep this page open for a moment.
             </p>
           )}
+          <div role="status">
+            {recordingPending > 0 ? (
+              <div className="banner banner-warning" data-testid="recording-uploading">
+                <strong>Uploading the recording… do not close this page.</strong> {recordingPending} part{recordingPending === 1 ? '' : 's'} of the exam recording{' '}
+                {recordingPending === 1 ? 'is' : 'are'} still being sent
+                {snap.recordingUpload?.failingSince ? ' — waiting for the connection; keep this page open and check your internet connection' : ''}.
+              </div>
+            ) : snap.recordingUpload && state.consent.notice.recording ? (
+              <p className="muted small" data-testid="recording-uploaded">
+                The recording of your exam has been sent.
+              </p>
+            ) : null}
+          </div>
           <ContactLine />
           {ctrl.trace && <TraceDownload />}
         </section>

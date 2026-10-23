@@ -113,7 +113,8 @@ export function PrivacyNotice({ notice, compact }: { notice: PrivacyNoticeDTO; c
         </section>
       ))}
       <p className="muted small">
-        Screenshots and identity data are deleted {notice.retentionDays} days after your exam ends. Questions or concerns: <strong>{notice.contact}</strong>. Notice version{' '}
+        {notice.recording ? 'Screenshots, identity data and the recording of your exam' : 'Screenshots and identity data'} are deleted {notice.retentionDays} days after your
+        exam ends. Questions or concerns: <strong>{notice.contact}</strong>. Notice version{' '}
         {notice.version}.
       </p>
     </div>

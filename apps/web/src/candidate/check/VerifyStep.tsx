@@ -103,7 +103,8 @@ export function VerifyStep({
   onBackToSetup: () => void;
 }) {
   const ctrl = useController();
-  const { camera } = useSnapshot();
+  const { camera, state: sessionState } = useSnapshot();
+  const examRecorded = !!sessionState?.consent.notice.recording;
   const [phase, setPhase] = useState<Phase>('starting');
   const [check, setCheck] = useState<StartCheckResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -593,7 +594,9 @@ export function VerifyStep({
         {check?.liveness
           ? 'Follow the instructions below. We take a few pictures to confirm that a live person is in front of the camera and to compare your face with the identity reference.'
           : 'Look at the screen while we take a few pictures to confirm your identity.'}{' '}
-        Only these pictures are sent; there is no video recording.
+        {examRecorded
+          ? 'Only these pictures are sent for this check. The exam itself is recorded once it starts, as the privacy notice explains.'
+          : 'Only these pictures are sent; there is no video recording.'}
       </p>
       <div className="cand-setup">
         <CameraPreview

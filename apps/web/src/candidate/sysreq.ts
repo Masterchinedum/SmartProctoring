@@ -8,7 +8,7 @@ import { fullscreenSupported } from './fullscreen';
  */
 
 export interface RequirementResult {
-  id: 'secure_context' | 'camera_api' | 'webassembly' | 'indexeddb' | 'browser' | 'camera_present' | 'fullscreen' | 'single_display';
+  id: 'secure_context' | 'camera_api' | 'webassembly' | 'indexeddb' | 'browser' | 'camera_present' | 'fullscreen' | 'single_display' | 'recording_api' | 'screen_capture';
   label: string;
   ok: boolean;
   required: boolean;
@@ -91,11 +91,37 @@ export function displayRequirement(displays: DisplayReport, requireSingleDisplay
   };
 }
 
+/** The browser can record media (MediaRecorder with at least one video type). */
+export function recordingSupported(): boolean {
+  if (typeof MediaRecorder !== 'function') return false;
+  const probe = (MediaRecorder as unknown as { isTypeSupported?: (t: string) => boolean }).isTypeSupported;
+  if (typeof probe !== 'function') return true;
+  return ['video/webm', 'video/mp4'].some((t) => {
+    try {
+      return probe.call(MediaRecorder, t);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** The browser can share a screen (desktop browsers; not phones or tablets). */
+export function screenCaptureSupported(): boolean {
+  return typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+}
+
 /**
  * `camera: false` — an exam without a camera (an approved arrangement): no camera requirements are checked.
  * `requireSingleDisplay` — the exam allows only one display (displayRequirement).
+ * `recording` — what the exam records (policy.recording): the browser must be able to record it, and to share the
+ * screen when the screen is recorded; both block (the exam cannot run as configured without them).
  */
-export async function checkSystemRequirements(opts: { requireFullscreen: boolean; camera?: boolean; requireSingleDisplay?: boolean }): Promise<RequirementResult[]> {
+export async function checkSystemRequirements(opts: {
+  requireFullscreen: boolean;
+  camera?: boolean;
+  requireSingleDisplay?: boolean;
+  recording?: { camera: boolean; screen: boolean } | null;
+}): Promise<RequirementResult[]> {
   const browser = detectBrowser(navigator.userAgent);
   const camera = opts.camera !== false;
   const results: RequirementResult[] = [];
@@ -148,6 +174,24 @@ export async function checkSystemRequirements(opts: { requireFullscreen: boolean
       ok: cameraPresent,
       required: false,
       help: 'No camera was detected. Connect a webcam before you continue.',
+    });
+  }
+  if (opts.recording && (opts.recording.camera || opts.recording.screen)) {
+    results.push({
+      id: 'recording_api',
+      label: 'Recording supported',
+      ok: recordingSupported(),
+      required: true,
+      help: 'This exam is recorded, and this browser cannot record. Use a current version of Chrome, Edge or Firefox on a computer.',
+    });
+  }
+  if (opts.recording?.screen) {
+    results.push({
+      id: 'screen_capture',
+      label: 'Screen sharing supported',
+      ok: screenCaptureSupported(),
+      required: true,
+      help: 'This exam records your screen, which needs a browser on a computer: use a current version of Chrome, Edge or Firefox. Phones and tablets cannot share their screen.',
     });
   }
   if (opts.requireFullscreen) {

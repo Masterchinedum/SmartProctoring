@@ -12,6 +12,8 @@ import type {
   IdentityCheckTrigger,
   IdentitySampleResponse,
   PauseResponse,
+  RecordingSegmentUploadResponse,
+  RecordingStream,
   SaveAnswerRequest,
   SaveAnswerResponse,
   StartCheckRequest,
@@ -147,6 +149,18 @@ export interface IdentitySampleQuery {
 
 export type JpegBody = Blob | ArrayBuffer | Uint8Array;
 
+/** A recording segment upload (POST /api/candidate/recordings/segments; packages/shared/src/recording.ts). */
+export interface RecordingSegmentQuery {
+  stream: RecordingStream;
+  seq: number;
+  startedAt: number;
+  durationMs: number;
+  /** The browser instance that recorded it (this page, or the page before a reload). */
+  instance: string;
+  /** What the browser produced (sent as Content-Type). */
+  mimeType: string;
+}
+
 export interface CandidateApi {
   readonly instanceId: string;
   getState(): Promise<Timed<CandidateSessionState>>;
@@ -166,6 +180,8 @@ export interface CandidateApi {
   submit(): Promise<Timed<CandidateSessionState>>;
   /** Withdraw consent: the exam ends and its face images are deleted (POST /api/candidate/consent/withdraw). */
   withdrawConsent(req: WithdrawConsentRequest): Promise<CandidateSessionState>;
+  /** One segment of the exam recording (raw WebM / MP4 body). */
+  uploadRecordingSegment(body: Blob, q: RecordingSegmentQuery): Promise<RecordingSegmentUploadResponse>;
 }
 
 export interface CandidateApiOptions {
@@ -176,6 +192,8 @@ export interface CandidateApiOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   uploadTimeoutMs?: number;
+  /** Recording segments (up to a few MB on a slow connection). */
+  mediaTimeoutMs?: number;
   /**
    * Called for errors that end the candidate's ability to use this page (invalid link, superseded).
    * Invoked in addition to the promise rejecting.
@@ -217,8 +235,9 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
   const doFetch = opts.fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
   const timeoutMs = opts.timeoutMs ?? 20_000;
   const uploadTimeoutMs = opts.uploadTimeoutMs ?? 45_000;
+  const mediaTimeoutMs = opts.mediaTimeoutMs ?? 180_000;
 
-  async function request<T>(method: string, path: string, body?: unknown, kind: 'json' | 'jpeg' = 'json', firstPartyPath = path): Promise<Timed<T>> {
+  async function request<T>(method: string, path: string, body?: unknown, kind: 'json' | 'jpeg' | 'media' = 'json', firstPartyPath = path, mediaType = 'video/webm'): Promise<Timed<T>> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${opts.token}`,
       [CLIENT_INSTANCE_HEADER]: opts.instanceId,
@@ -229,6 +248,9 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
       if (kind === 'jpeg') {
         headers['Content-Type'] = 'image/jpeg';
         payload = body instanceof Blob ? body : new Blob([body as ArrayBuffer | Uint8Array<ArrayBuffer>], { type: 'image/jpeg' });
+      } else if (kind === 'media') {
+        headers['Content-Type'] = mediaType;
+        payload = body as Blob;
       } else {
         headers['Content-Type'] = 'application/json';
         payload = JSON.stringify(body);
@@ -239,7 +261,7 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
       payload = '{}';
     }
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), kind === 'jpeg' ? uploadTimeoutMs : timeoutMs);
+    const timer = setTimeout(() => ctrl.abort(), kind === 'media' ? mediaTimeoutMs : kind === 'jpeg' ? uploadTimeoutMs : timeoutMs);
     const sentAt = Date.now();
     let res: Response;
     try {
@@ -328,6 +350,10 @@ export function createCandidateApi(opts: CandidateApiOptions): CandidateApi {
     cancelPause: () => request<CandidateSessionState>('POST', '/api/candidate/pause/cancel'),
     submit: () => request<CandidateSessionState>('POST', '/api/candidate/submit'),
     withdrawConsent: (req) => json<CandidateSessionState>('POST', '/api/candidate/consent/withdraw', req),
+    uploadRecordingSegment: async (body, q) => {
+      const path = `/api/candidate/recordings/segments${qs({ stream: q.stream, seq: q.seq, startedAt: Math.round(q.startedAt), durationMs: Math.round(q.durationMs), instance: q.instance })}`;
+      return (await request<RecordingSegmentUploadResponse>('POST', path, body, 'media', path, q.mimeType || 'video/webm')).data;
+    },
   };
 }
 

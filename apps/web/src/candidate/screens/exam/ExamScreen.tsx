@@ -5,6 +5,7 @@ import { useController, useSnapshot } from '../../context';
 import { CameraPreview, CountdownDisplay, PrivacyNoticeDialog, ReportingBanner, Spinner, Toasts, TraceDownload } from '../../components/common';
 import { isFullscreen, onFullscreenChange, requestFullscreen } from '../../fullscreen';
 import { PauseDialog, pauseAvailability, SubmitDialog } from './Dialogs';
+import { ScreenShareOverlay } from '../ScreenShare';
 import { QuestionView } from './QuestionView';
 
 function useFullscreen(): boolean {
@@ -73,7 +74,9 @@ export function ExamScreen() {
   const mon = snap.monitoring;
   const monState = !snap.monitoringActive ? 'off' : (mon?.state ?? 'off');
   const cameraProblem = snap.camera.state !== 'live' && snap.monitoringActive ? (snap.camera.problem ?? 'The camera is not available. We are trying to reconnect it.') : null;
-  const hasBanners = snap.reportingInterrupted || !!cameraProblem || snap.prompts.length > 0 || snap.timeUp;
+  const hasBanners = snap.reportingInterrupted || !!cameraProblem || snap.prompts.length > 0 || snap.timeUp || !!snap.recordingProblem;
+  // The exam records the screen and it is not shared: the exam is covered until the candidate shares it again.
+  const screenCover = snap.recordingActive && ctrl.screenShareRequired() && !snap.screen.live;
 
   return (
     <div className="cand-exam" data-testid="exam-screen">
@@ -98,6 +101,12 @@ export function ExamScreen() {
               <span className={`cand-dot cand-dot-${monState}`} aria-hidden="true" />
               {STATUS_TEXT[monState] ?? 'Monitoring active'}
             </span>
+            {snap.recordingActive && (
+              <span className="cand-mon-status small" data-testid="recording-status">
+                <span className="cand-dot cand-dot-recording" aria-hidden="true" />
+                Recording
+              </span>
+            )}
             <button type="button" className="cand-link" aria-haspopup="dialog" onClick={() => setDialog('privacy')} data-testid="what-is-monitored">
               Monitoring active — what is monitored?
             </button>
@@ -124,6 +133,11 @@ export function ExamScreen() {
             </div>
           ))}
           {snap.timeUp && <div className="banner banner-info">Time is up. Your answers are being submitted…</div>}
+          {snap.recordingProblem && (
+            <div className="banner banner-warning" data-testid="recording-problem">
+              {snap.recordingProblem}
+            </div>
+          )}
         </div>
       </div>
 
@@ -187,7 +201,7 @@ export function ExamScreen() {
         </footer>
       )}
 
-      {requireFs && !fullscreen && !dialog && <FullscreenOverlay />}
+      {screenCover && !dialog ? <ScreenShareOverlay /> : requireFs && !fullscreen && !dialog && <FullscreenOverlay />}
 
       {dialog === 'pause' && <PauseDialog state={state} onClose={() => setDialog(null)} />}
       {dialog === 'submit' && <SubmitDialog total={questions.length} answered={answeredCount} onClose={() => setDialog(null)} />}
