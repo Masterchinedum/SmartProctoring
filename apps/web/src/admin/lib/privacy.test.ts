@@ -42,7 +42,7 @@ describe('privacy helpers', () => {
     const base = { lastStartedAt: null, lastFinishedAt: null, lastSuccessAt: null, lastError: null, lastSummary: null, stale: true };
     expect(retentionJobLine(base, NOW)).toBe('The retention job has not run yet.');
     const ran = { ...base, lastStartedAt: NOW - 600_000, lastFinishedAt: NOW - 600_000, lastSuccessAt: NOW - 600_000, stale: false, lastSummary: { sessionsEvidencePurged: 2, evidenceItemsPurged: 14, sessionsEventMetadataPurged: 0, skippedLegalHold: 1, failures: 0 } };
-    expect(retentionJobLine(ran, NOW)).toBe('Last run 10m ago: 14 images of 2 sessions deleted.');
+    expect(retentionJobLine(ran, NOW)).toBe('Last run 10m ago: 14 evidence items of 2 sessions deleted.');
     expect(retentionJobLine({ ...ran, lastSummary: { ...ran.lastSummary, failures: 1 } }, NOW)).toContain('1 to retry');
     expect(retentionJobLine({ ...ran, lastError: 'database unavailable' }, NOW)).toContain('failed: database unavailable');
     expect(retentionJobLine({ ...ran, lastSuccessAt: NOW - 4 * 3600_000, stale: true }, NOW)).toContain('No successful run for over 3 hours.');

@@ -22,6 +22,7 @@ export const qk = {
   session: (id: string) => ['session', id] as const,
   timeline: (id: string) => ['session', id, 'timeline'] as const,
   sessionEvents: (id: string) => ['session', id, 'events'] as const,
+  sessionRecording: (id: string) => ['session', id, 'recording'] as const,
   report: (id: string) => ['session', id, 'report'] as const,
   event: (id: string) => ['event', id] as const,
   eventNotes: (id: string) => ['event', id, 'notes'] as const,

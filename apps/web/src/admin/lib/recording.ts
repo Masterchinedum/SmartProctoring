@@ -33,6 +33,9 @@ export function recordingSpan(rec: Pick<SessionRecordingDTO, 'segments'>): { sta
 
 export type Located = { kind: 'segment'; index: number; offsetMs: number } | { kind: 'gap'; nextIndex: number | null; until: number | null };
 
+/** A moment this close before a segment starts plays that segment from its start (the two streams start a little apart). */
+export const SEGMENT_LEAD_TOLERANCE_MS = 1000;
+
 /**
  * Where time `t` falls in a stream: inside segment `index` at `offsetMs`, or in a gap before segment `nextIndex`
  * (null: after the last one). A deleted segment is a gap too (nothing to play), ending where the next playable one starts.
@@ -40,6 +43,9 @@ export type Located = { kind: 'segment'; index: number; offsetMs: number } | { k
 export function locate(segments: readonly RecordingSegmentDTO[], t: number): Located {
   for (let i = 0; i < segments.length; i++) {
     const s = segments[i];
+    if (s.available && t < s.startedAt && t >= s.startedAt - SEGMENT_LEAD_TOLERANCE_MS && (i === 0 || segments[i - 1].endedAt <= t || !segments[i - 1].available)) {
+      return { kind: 'segment', index: i, offsetMs: 0 };
+    }
     if (t < s.startedAt) {
       const next = nextPlayable(segments, i);
       return { kind: 'gap', nextIndex: next, until: next == null ? null : segments[next].startedAt };

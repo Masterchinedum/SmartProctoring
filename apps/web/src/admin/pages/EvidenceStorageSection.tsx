@@ -20,7 +20,7 @@ export function EvidenceStorageSection() {
       <h2 id="storage-title">Where evidence images are stored</h2>
       <p className="small muted">
         Evidence images — check-in and identity photos, screenshots taken when something was observed, and approved ID photos — are stored, encrypted, in the location chosen
-        here.
+        here, and so are exam recordings (for exams that record). The counts below include the parts of recordings.
       </p>
       <p className="small muted">
         <strong>Not stored there:</strong> everything else stays where this server’s database is — candidate names and email addresses, exams and answers, event records, face

@@ -41,6 +41,10 @@ describe('recording in the staff app', () => {
     expect(locate(cam, T + 80_000)).toEqual({ kind: 'gap', nextIndex: 3, until: T + 100_000 });
     expect(locate(cam, T + 130_000)).toEqual({ kind: 'gap', nextIndex: null, until: null });
     expect(locate(cam, T - 5000)).toEqual({ kind: 'gap', nextIndex: 0, until: T });
+    // Just before a segment (the streams start a little apart): that segment, from its start.
+    expect(locate(cam, T - 500)).toEqual({ kind: 'segment', index: 0, offsetMs: 0 });
+    expect(locate(cam, T + 99_500)).toEqual({ kind: 'segment', index: 3, offsetMs: 0 });
+    expect(locate(cam, T + 69_500)).toEqual({ kind: 'gap', nextIndex: 3, until: T + 100_000 });
     const span = recordingSpan({ segments })!;
     expect(span).toEqual({ start: T, end: T + 130_000 });
     expect(notRecorded(cam, span)).toEqual([{ from: T + 60_000, to: T + 100_000 }]);

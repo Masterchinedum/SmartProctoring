@@ -546,13 +546,14 @@ function RetentionSection() {
           </div>
           {q.data.overdue.sessions > 0 ? (
             <div className="banner banner-warning" role="status" data-testid="retention-overdue">
-              {pluralize(q.data.overdue.evidenceItems, 'image')} of {pluralize(q.data.overdue.sessions, 'session')} are past their
+              {pluralize(q.data.overdue.evidenceItems, 'image')}
+              {q.data.overdue.recordings ? ` and ${pluralize(q.data.overdue.recordings, 'recording part')}` : ''} of {pluralize(q.data.overdue.sessions, 'session')} are past their
               deletion date (since {formatDate(q.data.overdue.oldestDueAt)}).
             </div>
           ) : null}
           <h3>Next 30 days</h3>
           {q.data.days.length === 0 ? (
-            <p className="small muted">No images are due for deletion in the next 30 days.</p>
+            <p className="small muted">No images or recordings are due for deletion in the next 30 days.</p>
           ) : (
             <table className="table compact" data-testid="retention-days">
               <thead>
@@ -560,6 +561,7 @@ function RetentionSection() {
                   <th>Date</th>
                   <th>Sessions</th>
                   <th>Images</th>
+                  <th>Recording parts</th>
                 </tr>
               </thead>
               <tbody>
@@ -568,6 +570,7 @@ function RetentionSection() {
                     <td>{d.date}</td>
                     <td>{d.sessions}</td>
                     <td>{d.evidenceItems}</td>
+                    <td>{d.recordings}</td>
                   </tr>
                 ))}
               </tbody>
@@ -587,6 +590,7 @@ function RetentionSection() {
                   <th>Exam</th>
                   <th>Ended</th>
                   <th>Images kept</th>
+                  <th>Recording parts kept</th>
                 </tr>
               </thead>
               <tbody>
@@ -598,6 +602,7 @@ function RetentionSection() {
                     <td>{h.examTitle}</td>
                     <td>{h.endedAt ? formatDate(h.endedAt) : 'Not ended'}</td>
                     <td>{h.evidenceItems}</td>
+                    <td>{h.recordings}</td>
                   </tr>
                 ))}
               </tbody>

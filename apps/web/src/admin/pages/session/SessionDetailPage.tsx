@@ -23,10 +23,13 @@ import { EventsTab } from './EventsTab';
 import { IdentityTab } from './IdentityTab';
 import { DevicesTab, NotesTab, PeriodsTab } from './MiscTabs';
 import { ReviewTab } from './ReviewTab';
+import { RecordingTab } from './RecordingTab';
+import { describeRecordingSummary } from '../../lib/recording';
 
 const TABS = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'events', label: 'Events' },
+  { id: 'recording', label: 'Recording' },
   { id: 'identity', label: 'Identity' },
   { id: 'review', label: 'Review' },
   { id: 'periods', label: 'Periods' },
@@ -34,7 +37,6 @@ const TABS = [
   { id: 'notes', label: 'Notes' },
 ] as const;
 type TabId = (typeof TABS)[number]['id'];
-const TAB_IDS = TABS.map((t) => t.id);
 
 export function SessionDetailPage() {
   const { id = '' } = useParams();
@@ -82,6 +84,24 @@ export function SessionDetailPage() {
   // Seed the drawer from whatever list already holds the event.
   const initialEvent = openEventId ? findCachedEvent(qc.getQueryData(qk.timeline(id)), qc.getQueryData(qk.sessionEvents(id)), openEventId) : undefined;
   const notesCount = d.notes.length;
+  // The Recording tab exists only for a session with recording segments (policy.recording).
+  const recording = d.recording ?? null;
+  const tabs = TABS.filter((t) => t.id !== 'recording' || recording);
+  const shownTab: TabId = tab === 'recording' && !recording ? 'timeline' : tab;
+  const seekParam = Number(params.get('t'));
+  const seekTo = shownTab === 'recording' && Number.isFinite(seekParam) && seekParam > 0 ? seekParam : null;
+  // From an event (Timeline / Events tab): the Recording tab, 10 s before it.
+  const watchRecording =
+    recording && recording.available > 0
+      ? (at: number) =>
+          setParams((prev) => {
+            const next = new URLSearchParams(prev);
+            next.set('tab', 'recording');
+            next.set('t', String(Math.round(at)));
+            next.delete('event');
+            return next;
+          })
+      : undefined;
   const tabCount: Partial<Record<TabId, number>> = {
     identity: d.identityChecks.length,
     periods: d.periods.length,
@@ -98,8 +118,19 @@ export function SessionDetailPage() {
       <SessionActions d={d} />
       {/* WAI-ARIA tabs: ←/→/Home/End move between tabs (automatic activation); Tab moves into the panel. */}
       <div className="tabs" role="tablist" aria-label="Session details">
-        {TABS.map((t) => (
-          <button key={t.id} type="button" className={`tab${tab === t.id ? ' active' : ''}`} {...tabProps('session', TAB_IDS, t.id, tab, (id) => setParam('tab', id))}>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`tab${shownTab === t.id ? ' active' : ''}`}
+            {...tabProps(
+              'session',
+              tabs.map((x) => x.id),
+              t.id,
+              shownTab,
+              (id) => setParam('tab', id),
+            )}
+          >
             {t.label}
             {tabCount[t.id] ? (
               <span className="tab-count">
@@ -111,14 +142,15 @@ export function SessionDetailPage() {
           </button>
         ))}
       </div>
-      <div className="tab-panel" role="tabpanel" id="session-panel" aria-labelledby={`session-tab-${tab}`} tabIndex={0}>
-        {tab === 'timeline' ? <TimelineTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} /> : null}
-        {tab === 'events' ? <EventsTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} /> : null}
-        {tab === 'identity' ? <IdentityTab d={d} onOpenEvent={openEvent} /> : null}
-        {tab === 'review' ? <ReviewTab d={d} onOpenEvent={openEvent} focusIncidentId={params.get('incident')} /> : null}
-        {tab === 'periods' ? <PeriodsTab d={d} /> : null}
-        {tab === 'devices' ? <DevicesTab d={d} /> : null}
-        {tab === 'notes' ? <NotesTab d={d} onOpenEvent={openEvent} /> : null}
+      <div className="tab-panel" role="tabpanel" id="session-panel" aria-labelledby={`session-tab-${shownTab}`} tabIndex={0}>
+        {shownTab === 'timeline' ? <TimelineTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} onWatch={watchRecording} /> : null}
+        {shownTab === 'events' ? <EventsTab sessionId={id} filters={filters} onFilters={setFilters} onOpenEvent={openEvent} onWatch={watchRecording} /> : null}
+        {shownTab === 'recording' && recording ? <RecordingTab sessionId={id} summary={recording} seekTo={seekTo} onOpenEvent={openEvent} /> : null}
+        {shownTab === 'identity' ? <IdentityTab d={d} onOpenEvent={openEvent} /> : null}
+        {shownTab === 'review' ? <ReviewTab d={d} onOpenEvent={openEvent} focusIncidentId={params.get('incident')} /> : null}
+        {shownTab === 'periods' ? <PeriodsTab d={d} /> : null}
+        {shownTab === 'devices' ? <DevicesTab d={d} /> : null}
+        {shownTab === 'notes' ? <NotesTab d={d} onOpenEvent={openEvent} /> : null}
       </div>
       {openEventId ? <EventDrawer key={openEventId} eventId={openEventId} sessionId={id} initial={initialEvent} onClose={closeEvent} onOpenIncident={openIncident} /> : null}
     </div>
@@ -222,6 +254,11 @@ function SessionHeader({ d, receivedAt }: { d: SessionDetailDTO; receivedAt: num
             <span className="muted">—</span>
           )}
         </Fact>
+        {d.recording ? (
+          <Fact label="Recording">
+            <span data-testid="session-recording">{d.recording.available > 0 ? describeRecordingSummary(d.recording) : 'Deleted'}</span>
+          </Fact>
+        ) : null}
         <Fact label="Consent">
           {d.consent.acceptedAt ? (
             <>
