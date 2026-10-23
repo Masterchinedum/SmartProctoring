@@ -11,7 +11,7 @@ office in two directions:
 
 An administrator sets both up in the staff app under **Integrations** (Settings → Integrations).
 
-> Privacy: neither the API nor webhooks ever carry images, face templates or face-similarity scores.
+> Privacy: neither the API nor webhooks ever carry images, exam recordings, face templates or face-similarity scores.
 > Evidence stays behind staff sign-in; responses contain links into the staff app instead
 > (`staffUrl`). Wording is observational ("more than one person was visible"), never a verdict.
 
@@ -537,6 +537,11 @@ new optional request fields, new response fields and new enumeration values.
 * **1.3.0** (October 2026)
   * Hold reason **`additional_display`**: the candidate's browser reported an additional display during an exam whose
     rules require a single display (exam setting *Require a single display*); also as `reason` of `session.held`.
+  * **Exam recording** (an exam setting, off by default): two new event types, `screen_share_stopped` (category
+    `integrity`, severity `low`: the candidate stopped sharing their screen in an exam that records it; a span closed
+    when they share again) and `recording_interrupted` (category `technical`, severity `low`: part of the recording
+    could not be made or kept), in the events list, reports and the event webhooks like any other type. Recordings
+    themselves, links to them and the staff app's recording summary are never part of the API or webhooks.
 * **1.2.0** (October 2026)
   * **Quotas**: `POST /candidates` (a new candidate) and `POST /exams/{examId}/assignments` (new sessions) answer
     409 `quota_exceeded` with `details { quota, limit, used, requested, resetsAt, kind }` at one of the organisation's

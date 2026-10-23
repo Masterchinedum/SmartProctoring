@@ -68,13 +68,20 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
   It also shows approved arrangements (accommodations) and a full privacy notice: what is monitored, what is stored,
   what is not stored, and for how long. The candidate must tick a box and press "Agree and continue". Choosing "I do
   not agree" records nothing.
+- **Recording notice** (only exams that record; recording is off by default). Before consent, a box says "This exam is
+  recorded." with what is recorded (webcam, microphone, entire screen), that the recording is deleted with the other
+  evidence after the retention period, and that authorised staff can watch it (every viewing is logged). The notice is
+  titled "Privacy notice: monitoring and recording" and the consent box names the recording. If recording is turned
+  on after a candidate agreed, they are asked again.
 - **System check.** Checks for a secure connection, camera support, WebAssembly, local storage (for offline safety),
   a supported browser, a connected camera, fullscreen support and a single display. It updates by itself when a
   display is connected or disconnected. When the exam requires a single display and the browser cannot tell (Firefox,
-  Safari), it says "The display check is not available in this browser" and recommends Chrome or Edge.
+  Safari), it says "The display check is not available in this browser" and recommends Chrome or Edge. Exams that record also need
+  "Recording supported" and "Screen sharing supported" (a computer, not a phone or tablet).
 - **Camera check.** Shows a live preview and lets the candidate pick a camera. A checklist confirms: camera
   delivering video, exactly one face visible, face close enough and centred, good lighting, sharp image, and a
-  physical (not virtual) camera.
+  physical (not virtual) camera. Exams that record sound add "Microphone is working" ("Say a few words…"): silence is
+  only a warning; no microphone, or refused access, blocks with what to do.
 - **Calibration.** "Hold still and look at the screen": learns the candidate's normal sitting position, so their
   own posture is never flagged.
 - **Live-person check.** "Slowly turn your head to your LEFT / RIGHT", in a random order (optionally also up and
@@ -87,6 +94,9 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
 - **Single display** (per exam, off by default). While a second display is connected, "Start exam" stays disabled
   with "More than one display is connected." and a "Check again" button; it becomes available by itself once the
   display is disconnected. Only Chrome and Edge report extra displays; other browsers are not blocked.
+- **Share your screen** (only exams that record the screen). "Start exam" stays disabled until the candidate shares
+  their **entire screen**. A window or a browser tab is refused with an explanation (in browsers that report what was
+  shared; otherwise the share is accepted with a reminder).
 - **Busy-server protection.** When many candidates start at once, starts are queued for up to 5 minutes and the
   clock does not run while waiting.
 
@@ -99,7 +109,7 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
 - **Navigation.** Numbered question buttons, "← Previous", "Next →", and "Review and submit".
 - **Countdown.** Turns red under 5 minutes. When time is up, answers are submitted automatically.
 - **Self-view and monitoring status.** "Monitoring active", "please check the camera view", "Monitoring limited".
-- **Camera monitoring in the browser** (no video is uploaded). One event per issue, with a start and an end:
+- **Camera monitoring in the browser** (no video is uploaded for it). One event per issue, with a start and an end:
 
   | What | Event after (default) | Message to the candidate |
   |---|---|---|
@@ -123,6 +133,11 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
   fullscreen" overlay), copy/paste attempts (blocked, right-click disabled), extra display connected (Chrome and Edge
   only; when the exam requires a single display, the exam is put on hold for staff), and the exam opened in another
   browser.
+- **Exam recording** (optional, off by default). When the exam's rules turn it on: the webcam with microphone sound
+  and the entire screen are recorded from "Start exam" to the end, never during a pause or a hold; "Recording" shows in
+  the header. The recording is sent in 30-second parts and kept on the device while the connection is down. If screen
+  sharing stops, the exam is covered by "Share your screen again to continue" (the clock keeps running) and "Screen
+  sharing stopped" is recorded for staff. Technical problems ("Recording interrupted") never stop the exam.
 - **Continuous identity checks.** Small bursts of face pictures are checked on the server: at the start, every 6 s for
   the first 3 minutes, then every 15 s. Extra checks happen when the face leaves and returns, the camera reconnects,
   another person was visible, or the face changes suddenly. If a different person takes over, the exam is put on hold
@@ -139,9 +154,11 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
   kept on the device and sent later with their original times, without duplicates.
 - **Hold screen.** "Your exam is on hold", with "Verify again" when staff allow it. After an extra display was
   connected, it asks the candidate to disconnect it and says when only one display is connected.
-- **Withdraw consent.** From "what is monitored?" → "Withdraw my consent…". The exam ends and the images are deleted.
+- **Withdraw consent.** From "what is monitored?" → "Withdraw my consent…". The exam ends and the images (and the
+  recording, if any) are deleted.
 - **Submit.** "Submit your exam?" shows how many questions are unanswered, then the "Your exam has been submitted"
-  screen.
+  screen. For a recorded exam it says "Uploading the recording… do not close this page." until the last parts are
+  sent, then "The recording of your exam has been sent."
 - **Scheduling window.** "This exam is not open yet" / "This exam is closed", shown in the candidate's own time zone.
   Check-in opens 30 minutes before the start.
 - **Practice banner** for sandbox (trial) organisations.
@@ -168,6 +185,9 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
   - **Events** table (sortable, filterable).
   - **Identity** tab: reference images, live-person check results, ID-photo result and every identity check.
   - **Review** tab, **Periods**, **Devices** (camera or browser changes as context), and **Notes**.
+  - **Recording** tab (recorded exams only): the webcam and the screen side by side on one clock ("Play" / "Pause"),
+    "Not recorded at this time" for gaps, a bar with the flagged events as markers; click one, or "▶ Watch" on a
+    Timeline or Events row, to jump to 10 seconds before it. Every part watched is in the audit log.
 - **Event details drawer.** Screenshots, duration, confidence, source, "Why this was recorded" (the rule and the
   measured values), "Compare with the start of the exam", incident grouping, a decision and notes.
 - **Compare images.** For a possible different person: the original reference next to the later images, a
@@ -185,16 +205,18 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
   - Escalate, reopen, and review-time targets.
 - **Review queue.** Assigned to me / Unassigned / Escalated / Overdue / All waiting / Resolved, plus "Assign to me".
 - **Printable report.** Summary, observed and unobserved time, every period, identity summary, events by category and
-  type, notable events with images, reviewer notes and limitations. "Print / Save as PDF".
+  type, notable events with images, reviewer notes and limitations (and, for recorded exams, how much was recorded).
+  "Print / Save as PDF".
 
 ## C. Staff app — setting things up
 
 - **Exams.**
   - Create, edit, import (`.exam.json`), export, publish and archive.
   - Questions editor for the 5 types, with answer keys and points.
-  - **Proctoring policy editor** with about 68 settings: identity and live-person check, ID photo, sampling intensity
+  - **Proctoring policy editor** with about 70 settings: identity and live-person check, ID photo, sampling intensity
     (Maximum accuracy / Balanced), pausing rules, connection, interruption limits, browser rules (including "Require a
-    single display"), each detector on or off, detection thresholds, screenshots and retention.
+    single display"), each detector on or off, detection thresholds, screenshots and retention, and **Recording** ("Record the exam", "Record the
+    microphone", "Record the screen"; off by default, with a note on consent and storage).
 - **Exam versions.** Every publish, and every edit of a published exam, creates a version. Each attempt keeps the
   version it started with. You can view versions, see what changed, export them, and **Regrade** finished attempts
   with a corrected answer key (with a preview).
@@ -234,9 +256,9 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
   - **Operational checks** (is the retention job running, deletions on time, …).
   - **Request register:** access, erasure, rectification, restriction, objection and other requests, with legal
     deadlines and extensions.
-  - **Personal-data export (ZIP).**
+  - **Personal-data export (ZIP)**, including the recording of recorded exams as video files.
   - **Erasure.**
-  - **Deletion schedule and legal holds.**
+  - **Deletion schedule and legal holds** (images and recording parts counted separately).
 - **Detection quality ("Quality").** How reliable each detector is, based on reviewer decisions; identity decisions
   by lighting, camera, browser and operating system; drift between recent and earlier weeks; versioned identity
   thresholds with **four-eyes approval** and **rollback**; upload of an offline evaluation report.
@@ -254,11 +276,11 @@ That's why the checklist uses a second exam with fullscreen off for tests where 
   - `staff-access` — break-glass account recovery.
   - `retention` — run the retention purge once.
   - `rekey` — re-encrypt after a key change.
-  - `storage-move` — move images between storage locations.
+  - `storage-move` — move images and recordings between storage locations.
   - `openapi` — write or check the API document.
   - `migrate` — database migrations.
-- **Security:** encrypted evidence (AES-256-GCM), rate limits, CSRF protection, SSRF guard for outgoing requests,
-  audit of every evidence view.
+- **Security:** encrypted evidence and recordings (AES-256-GCM), rate limits, CSRF protection, SSRF guard for outgoing
+  requests, audit of every evidence view and every recording part watched.
 - **Scaling:** optional separate vision workers and Redis for several servers.
 
 ---
@@ -754,6 +776,54 @@ the Edge window records "Exam window lost focus" on the candidate side — expec
   **Do:** give a new candidate "No camera" and assign them.
   **Expect:** the exam runs without ever asking for the camera.
 
+## Stage 14b — Exam recording (Chrome on a computer, one more candidate, about 5 minutes)
+
+Recording is off by default. These tests use a fourth exam and a new candidate, so the other stages are unaffected.
+Each minute of a recorded exam stores up to about 5 MB in your R2 bucket.
+
+- [ ] **T14b.1 Turn recording on.**
+  **Do:** import `test-exams/practice-exam.exam.json` again → "Edit" → Title "Feature test — recorded" → Proctoring
+  policy → **Recording** → **Record the exam: On** (microphone and screen stay on) → "Save changes" → "Publish…".
+  **Expect:** the Recording section shows a note about what candidates agree to and the storage (about 300 MB per
+  candidate per hour). The exam page shows Recording "Webcam, microphone and screen". Exams A–C still show "Off".
+- [ ] **T14b.2 Notice before consent.**
+  **Do:** add "Tester 7" and assign them to the recorded exam; open the link in Chrome.
+  **Expect:** "Privacy notice: monitoring and recording" and a box "This exam is recorded." that says what is recorded,
+  how long it is kept and who can watch it. The system check lists "Recording supported" and "Screen sharing
+  supported". The consent box mentions "the recording of my exam". (Exam A's notice still says "camera monitoring" and
+  "No continuous video or audio recording.")
+- [ ] **T14b.3 Microphone check.**
+  **Do:** agree → allow the camera **and the microphone** → say a few words.
+  **Expect:** the checklist has "Microphone is working", which turns ✓ when you speak. If you block the microphone in
+  Chrome's address bar and reload, it is not ticked, says what to do and offers "Try again"; "Continue" stays
+  disabled.
+- [ ] **T14b.4 Share your screen.**
+  **Do:** finish the checks. On "You are ready to start", look at "Start exam"; then "Share your screen" → choose a
+  **window** (not the entire screen) → "Share".
+  **Expect:** "Start exam" is disabled; sharing a window is refused: "You shared a window or a browser tab…". Then
+  "Share your screen" → **Entire screen** → "Share": "Your screen is shared." and "Start exam" is enabled.
+- [ ] **T14b.5 Recording during the exam.**
+  **Do:** "Start exam", answer two questions, wait 1 minute.
+  **Expect:** "Recording" in the header next to the monitoring status.
+- [ ] **T14b.6 Stop sharing.**
+  **Do:** press Chrome's "Stop sharing" bar at the bottom of the screen; wait 5 s; "Share your screen" → Entire screen.
+  **Expect:** the exam is covered by "Share your screen again to continue" (the countdown keeps running); after sharing
+  again the exam is back where it was.
+- [ ] **T14b.7 Upload after submit.**
+  **Do:** turn Wi-Fi off for 30 s, turn it back on, then submit.
+  **Expect:** "Uploading the recording… do not close this page." while parts are still being sent, then "The recording
+  of your exam has been sent."
+- [ ] **T14b.8 Watch it (Edge).**
+  **Do:** open Tester 7's session → **Recording** tab → "Play". Then Timeline → the "Screen sharing stopped" row →
+  "▶ Watch".
+  **Expect:** webcam (with sound) and screen play together; the stopped-sharing time shows "Not recorded at this
+  time" on the screen side; "▶ Watch" opens the Recording tab 10 s before the event. The session facts show
+  "Recording" with the minutes of webcam and screen; the report says "The exam was recorded: …".
+- [ ] **T14b.9 Audit and privacy.**
+  **Do:** Audit log → filter "recording.view"; Privacy → Deletion schedule.
+  **Expect:** an entry per part you watched, with your name; the deletion schedule counts recording parts next to
+  images. (Optional: Privacy → export Tester 7's data — the ZIP has a `recordings/` folder with playable `.webm` files.)
+
 ## Stage 15 — Review queue (needs held or flagged exams from Stages 11–12)
 
 - [ ] **T15.1 Views.**
@@ -991,6 +1061,8 @@ the Edge window records "Exam window lost focus" on the candidate side — expec
 | Prometheus metrics (`/metrics`) | `METRICS_TOKEN` not set | Set `METRICS_TOKEN` (24+ characters), then `curl -H "Authorization: Bearer <token>" http://localhost:8080/metrics`. |
 | Busy-server protection, separate vision workers | Needs many simultaneous candidates | `e2e/scripts/load-test.ts` and `docker-compose.vision.yml` (`docs/PERFORMANCE.md`). |
 | Safari and Firefox candidates with a real webcam | Not covered by the automatic tests | Repeat Stage 5–8 once in each browser. |
+| Exam recording in Safari and Firefox | The automatic recording test runs in Chrome only | Repeat Stage 14b once in each browser before an exam records on it (screen-sharing prompt, "Stop sharing", playback). |
+| Exam recording at scale | Storage and upload bandwidth for many candidates (≈ 300 MB per candidate per hour) | Size your R2 bucket and connection first (`docs/OPERATIONS.md` §2 *Exam recording*); counsel should review the recording notice before real candidates (`docs/HANDOVER.md` §4). |
 
 ## Small issues noticed while writing this guide
 

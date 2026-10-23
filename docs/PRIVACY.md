@@ -1,6 +1,7 @@
 # Privacy, data protection and retention
 
-SmartProctoring processes biometric data (face images and face templates). This document describes
+SmartProctoring processes biometric data (face images and face templates) and, only for exams that turn it on, a
+recording of the exam (webcam video, microphone sound and the candidate's screen). This document describes
 exactly what is collected, why, where it is stored, who can access it and when it is deleted. It is
 written to support your Data Protection Impact Assessment (GDPR Art. 35), biometric-privacy notices
 (e.g. Illinois BIPA, Texas CUBI, Washington), and candidate-facing transparency. It is not legal
@@ -10,12 +11,12 @@ advice — review it with counsel for your jurisdictions.
 
 | Principle | How it is implemented |
 |---|---|
-| Transparency | Before any camera analysis the candidate sees a notice listing what is monitored, what is stored, what is **not** stored, the retention period and a contact. The notice is versioned (`PRIVACY_NOTICE_VERSION`) and the candidate's consent is recorded with timestamp and version. A “what is monitored?” link stays visible during the exam. |
-| Data minimisation | Behavioural analysis runs **in the candidate's browser**; video never leaves the device. **No continuous video, audio or screen recording.** Only (a) screenshots at the moment something was observed, (b) identity-check frames that did not cleanly match (plus check-in/resume frames), and (c) the protected identity reference are uploaded. Clipboard contents are never read. Exam-page interaction is used as **timing only** (when a key was last pressed, the pointer last moved, the page last scrolled, an answer last changed), in the browser, to learn where the candidate looks while working; keys, typed text and pointer positions are never read or recorded, and the timing is never uploaded. |
+| Transparency | Before any camera analysis the candidate sees a notice listing what is monitored, what is stored, what is **not** stored, the retention period and a contact. The notice is versioned and the candidate's consent is recorded with timestamp and version: exams without recording show notice `2026-10-21` (`PRIVACY_NOTICE_VERSION`); exams that record show notice `2026-10-22-recording` (`RECORDING_NOTICE_VERSION`), which adds — before consent, in a highlighted box and in the notice itself — what is recorded, that it is kept with the other evidence for the retention period, and that authorised staff can watch it (every viewing logged). A consent to the notice without recording never covers a recording: if staff turn recording on after a candidate agreed, the candidate is asked again before the exam can start. A “what is monitored?” link stays visible during the exam, and a “Recording” indicator while the exam records. |
+| Data minimisation | Behavioural analysis runs **in the candidate's browser**. **By default nothing is recorded continuously**: no video, audio or screen recording — only (a) screenshots at the moment something was observed, (b) identity-check frames that did not cleanly match (plus check-in/resume frames), and (c) the protected identity reference are uploaded. **Exam recording is an exam setting, off by default** (§2a): when an administrator turns it on for an exam, the webcam video, the microphone and the candidate's entire screen are recorded from the start of that exam to its end — never before the start, during a pause or a hold, or after the end — at conservative quality (about 300 MB per candidate per hour). Clipboard contents are never read. Exam-page interaction is used as **timing only** (when a key was last pressed, the pointer last moved, the page last scrolled, an answer last changed), in the browser, to learn where the candidate looks while working; keys, typed text and pointer positions are never read or logged as such, and the timing is never uploaded (a screen recording does show what appeared on the screen). |
 | Purpose limitation | The identity reference is created per exam session and used only to check that the same person continues that session. It is never reused for another exam, another candidate, or any other purpose, and is never used for identification (1:N search). |
-| Security | Images and face templates are encrypted at rest with AES-256-GCM (per-object IV, key id for rotation). Keys come from the environment/KMS, never the database. Access requires an authenticated staff account; every view of an image is written to the audit log. |
+| Security | Images, recordings and face templates are encrypted at rest with AES-256-GCM (per-object IV, key id for rotation). Keys come from the environment/KMS, never the database. Access requires an authenticated staff account; every view of an image, and every part of a recording a staff member opens, is written to the audit log. |
 | Human oversight | The system reports *observations* with confidence and evidence; it never declares misconduct. “Unable to verify” (poor image) is always kept distinct from “possible different person”. Holds are resolved by people. |
-| Storage limitation | Evidence is deleted automatically after the retention period (see §4). |
+| Storage limitation | Evidence — recordings included — is deleted automatically after the retention period (see §4). |
 
 ## 2. Data inventory
 
@@ -29,6 +30,7 @@ advice — review it with counsel for your jurisdictions.
 | Identity-sample probe images (only when not a clean match, unless configured) | During exam | Evidence store | Yes | Evidence retention period |
 | Identity-sample burst frames: per-frame face template while the burst (3 frames within ~1 s) is being decided, then per-frame metadata (similarity, quality measurements, face box / landmarks); images of the burst's representative frame only | During exam | `identity_sample_frames` (+ evidence store for the one kept image pair) | Template: yes, cleared as soon as the burst is decided — or, for a burst that will never be decided, when the exam is paused, put on hold or ended (at the latest ~30 s later, by the background job, for any session); images of the burst's other frames are deleted when it is decided | Face box / landmarks: evidence retention period; the rest: event retention period |
 | Event screenshots (moment of observation) | During exam | Evidence store | Yes | Evidence retention period |
+| **Exam recording (only exams that turn it on; off by default)**: webcam video with microphone sound, and the shared entire screen, in parts of about 30 seconds, plus per part its stream, start time, length, media type and the browser instance that recorded it | Candidate's browser, from the start of the exam to its end (not during pauses or holds) | Evidence store (the media) + `recording_segments` (the per-part metadata) | Yes (each part encrypted like an image) | Evidence retention period, legal hold and erasure exactly as images; deleted at once after a consent withdrawal. Parts waiting for the connection stay encrypted only by the browser's own storage protection, in the browser's IndexedDB on the candidate's device, until uploaded (at most 500 MB; deleted on the device after a withdrawal) |
 | Copy of the approved ID photo attached to an ID-photo identity event (the exact photo compared, for review) | Check-in | Evidence store | Yes | Evidence retention period of that session (also after the photo on file is replaced or removed; kept under legal hold) |
 | Event metadata (type, times, confidence, measurements) | During exam | Postgres `events`, `identity_checks` | — | Event retention period (default 365 days) |
 | Answers, timing, pauses, periods | During exam | Postgres | — | Your exam-records policy |
@@ -45,22 +47,60 @@ advice — review it with counsel for your jurisdictions.
 | Accommodations: what was granted (e.g. extra time, identity verified by staff), a **broad basis only** (accessibility / technical / other — never a diagnosis), scope, dates, who granted / revoked it, and an optional administrators' note | Administrator | `accommodations`; a copy of what applied (without basis or note) on each session | Note: yes (AES-256-GCM); visible to administrators only, never in the audit log, reports or integrations | Until revoked records are deleted with the candidate |
 | Staff identity verification (method, optional note, who, when) — when identity is verified by staff instead of the automated face check | Staff | `events` (`identity_verified_by_staff`), `audit_log` | — | Event retention period |
 | Privacy requests (the register of data-subject requests): kind, who it is from (as given), linked candidate and session, channel, received / due dates, extension and its reason, what was asked, assignee, how it was answered, when the candidate's data was exported / erased | Administrator; consent withdrawal: the candidate in the exam app | `privacy_requests`, `audit_log` | What was asked: yes (AES-256-GCM); administrators and owners only | Kept as the record that requests were answered (they outlive an erased candidate: the candidate link becomes empty). Delete per your records policy |
-| Personal-data exports (ZIP: candidate record, accommodations, sessions with report, answers, events, identity checks, decrypted images) | Generated on request by an administrator | **Not stored on the server**: streamed to the administrator's browser; the request records when, the audit log who | In transit (TLS); handle the file as personal data | Yours: send it securely, then delete your copy |
+| Personal-data exports (ZIP: candidate record, accommodations, sessions with report, answers, events, identity checks, decrypted images, and the recording of recorded exams as video files) | Generated on request by an administrator | **Not stored on the server**: streamed to the administrator's browser; the request records when, the audit log who | In transit (TLS); handle the file as personal data | Yours: send it securely, then delete your copy |
 | Retention job runs (start, end, counts, last error) | Server | `job_status` | — | The last run only |
 | **Staff** single sign-on links: the identity provider's subject identifier (OIDC `sub` / SAML NameID) and the email it asserted at the last sign-in, per account and provider | The organisation's identity provider | `staff_sso_identities` | — | Until an administrator unlinks the account, the provider is re-pointed or deleted, or the account is deleted |
 | **Staff** sign-in attempts in progress (provider, browser binding hash, state hash / nonce / PKCE verifier or SAML request id, return path, IP address, the identity asserted for SAML until the browser completes) and used SAML assertion IDs | Sign-in | `sso_login_attempts`, `sso_saml_assertions` | Only hashes of the state and browser binding | Deleted by the hourly job once expired (10 minutes; assertion IDs until the assertion would have expired) |
 | **Staff** accounts created or updated by SCIM / at a first single sign-on: email, name, role, the SCIM client's external id, active state, how the account was created | The organisation's identity provider | `staff_users`, `audit_log` (actor `scim` / system) | — | Like other staff accounts (SCIM "delete" disables and hides the account; the record stays for the audit trail) |
 | Identity provider configuration (issuer / entity ID, client id, signing certificates, claimed email domains) and the OIDC client secret | Owner | `identity_providers`, `sso_domains` | Client secret: yes (AES-256-GCM, write-only) | Until the provider is deleted |
 
-Not collected: continuous video/audio, screen contents, other applications, other monitors (only whether more
-than one is connected, where the browser reports it) or devices, clipboard contents, keystrokes (which keys; only the time of the last key press is used, in the
-browser — see the interaction-timing row above), pointer positions, location.
+Not collected: continuous video, audio or screen contents **unless the exam records** (§2a: then the webcam video,
+microphone sound and the one screen the candidate shares, during the exam only); other monitors (only whether more than one is connected, where the browser reports it) or devices; other
+applications except as they appear on a recorded screen; clipboard contents; keystrokes (which keys; only the time of
+the last key press is used, in the browser — see the interaction-timing row above) and pointer positions as data of
+their own (a screen recording shows what appeared on the screen); location.
+
+### 2a. Exam recording (off by default)
+
+* **Setting.** Per exam, in the exam rules (*Recording*): *Record the exam* (off by default), *Record the microphone*
+  and *Record the screen* (both on once recording is on). Webcam video is recorded whenever recording is on and the
+  exam uses a camera; a candidate with the *no camera* arrangement has no webcam or microphone recording (the screen is
+  still recorded if the exam records it). Exam versions, the version diff and exam export / import carry the setting.
+* **What the candidate sees before consenting.** The welcome screen says in a highlighted box that the exam is
+  recorded, what (webcam, microphone, entire screen), for how long it is kept (the evidence retention period) and that
+  authorised staff can watch it with every viewing logged; the notice (version `2026-10-22-recording`) lists it under
+  what is monitored and stored and says what is not recorded. The consent checkbox names the recording. The system
+  check requires a browser that can record and share a screen (a computer, not a phone). The camera check adds
+  *Microphone is working* (say a few words; silence is a warning, no microphone or refused access blocks with what to
+  do). Before the start the candidate shares their **entire screen** (where the browser reports what was shared, as
+  Chrome and Edge do, a window or a tab is refused with an explanation; where it does not, the share is accepted and
+  the candidate reminded to share the entire screen).
+* **During the exam.** A "Recording" indicator is shown. If screen sharing stops, the exam is covered until the
+  candidate shares again ("Share your screen again to continue"; the clock keeps running) and a
+  `screen_share_stopped` event is recorded for reviewers (category *potential integrity issue*, low severity, with the
+  note that it can be accidental). Recording stops at a pause, a hold and the end; it starts again after a resume.
+  Technical problems (the browser cannot record, the microphone is unavailable, parts dropped on the device for lack
+  of space) are `recording_interrupted` technical events and never block the exam.
+* **Where and how long.** Each part is encrypted (AES-256-GCM, the evidence key, the part's evidence id as associated
+  data) and stored in the organisation's evidence storage location (*Settings → Where evidence images are stored*;
+  e.g. an S3-compatible bucket such as Cloudflare R2 in the chosen region). Retention, legal holds, the deletion
+  schedule, consent withdrawal (deleted at once; parts still on the device are deleted there, not sent), erasure, the
+  personal-data export (`recordings/*.webm` or `.mp4` plus `recording.json` with each part's timing), `storage:move`
+  and `rekey` treat recordings exactly like images. A session's recording is capped (`RECORDING_MAX_SESSION_MB`,
+  default 3,000 MB).
+* **Who can watch it.** Staff with access to the session (reviewers, administrators, owners of the organisation) on
+  the session page's *Recording* tab; each part opened from its start writes a `recording.view` audit entry (staff
+  member, session, stream, part). Integrations (webhooks, the integration API) never receive recordings or links to
+  them.
+* **Before turning it on**: have counsel review the recording notice (`docs/HANDOVER.md` §4) — recording a person's
+  room, voice and screen is more intrusive than screenshots; document the necessity and proportionality in your DPIA,
+  offer an alternative arrangement, and choose a retention period no longer than needed.
 
 **Where it is stored (data residency).** "Evidence store" above means the storage location the organisation
 chose under *Settings → Where evidence images are stored*, among the locations the server operator configured (for
-example one bucket per region; `docs/OPERATIONS.md` §2). **Only the images** live there: event screenshots,
-identity reference images, check frames, probe images and approved ID photos (and their event-linked copies),
-encrypted. **Everything else stays where the server's database is** — candidate names, emails and external ids,
+example one bucket per region; `docs/OPERATIONS.md` §2). **Only the images and recordings** live there: event
+screenshots, identity reference images, check frames, probe images and approved ID photos (and their event-linked
+copies), and the parts of exam recordings, encrypted. **Everything else stays where the server's database is** — candidate names, emails and external ids,
 exams and answers, event records, **face templates** (identity references, ID-photo and check-frame templates are
 database columns), consent records, the audit log, privacy requests — and so do database backups, logs and Redis.
 Images stored before the choice changed stay in their previous location until the operator moves them
@@ -74,15 +114,16 @@ and deleted there. Data that must stay in one region in full needs the database 
 * Staff roles: **owner / admin** (configure exams, candidates, retention, users) and **reviewer**
   (view sessions and evidence, review events, add notes, manage holds). There is no public or
   unauthenticated evidence URL; evidence responses are `Cache-Control: no-store`.
-* Every evidence view, review decision, hold/release/termination, re-enrolment, settings change and
-  retention purge is written to `audit_log` (Audit log page). Administrators can download it as CSV for an audit
+* Every evidence view (each image, and each part of a recording opened from its start: `recording.view`), review
+  decision, hold/release/termination, re-enrolment, settings change and retention purge is written to `audit_log`
+  (Audit log page). Administrators can download it as CSV for an audit
   or a data-subject request (it contains staff names and the notes recorded with decisions; the download is
   itself audit-logged).
 
 ## 4. Retention and deletion
 
-* **Evidence** (screenshots, identity references, check frames, probe images, reference templates):
-  deleted `evidenceRetentionDays` (organisation default 30; per-exam override
+* **Evidence** (screenshots, identity references, check frames, probe images, reference templates, and exam
+  recordings): deleted `evidenceRetentionDays` (organisation default 30; per-exam override
   `policy.retention.evidenceDays`) after the session ends. A retention job runs hourly (and via
   `pnpm --filter @sp/server retention:run`). The blob is deleted from storage, the template bytes are
   cleared, and a tombstone (“deleted under the retention policy on …”) remains so reports stay
@@ -104,8 +145,9 @@ and deleted there. Data that must stay in one region in full needs the database 
 * Deleting a candidate removes their ID photo and template immediately.
 * **Withdrawal of consent** (`POST /api/candidate/consent/withdraw`, from the exam app): the exam ends at once
   (status terminated, end reason `candidate_withdrew`, no score; answers and the event timeline are kept), the
-  session's images, face templates and face geometry are deleted right away (not at the end of the retention
-  period), images still in the candidate's browser are refused when they arrive, and a consent-withdrawal request is
+  session's images, recording, face templates and face geometry are deleted right away (not at the end of the
+  retention period), images and recording parts still in the candidate's browser are deleted there (and refused if
+  they arrive), and a consent-withdrawal request is
   added to the register so staff arrange an alternative assessment. A session under legal hold keeps its images
   (the request says so). The approved ID photo belongs to the candidate record and is kept unless staff remove it.
   In the exam app it is reached from the privacy notice ("What is monitored?" on the start screen and in the exam):
@@ -145,7 +187,8 @@ report. The notice directs candidates to the privacy contact configured in Setti
    operational checks.
 2. Link it to the candidate record when there is one. **Access**: *Export the candidate's data (ZIP)* — records and
    decrypted images of every session (answer keys and face templates are not included; images already deleted are
-   listed in its README). Check the archive, send it securely. **Erasure**: *Erase the candidate…* deletes the
+   listed in its README; a recorded exam adds its recording as playable video files with an index). Check the
+   archive, send it securely. **Erasure**: *Erase the candidate…* deletes the
    candidate, their sessions and images — refused while an exam of theirs is running or under legal hold (lift the
    hold first, or reject the request with the reason, e.g. an open appeal). **Rectification**: correct the record on
    the Candidates page. **Restriction**: place their sessions under legal hold. **Objection**: offer an accommodation.
@@ -170,8 +213,8 @@ launch.
 
 None by default: all analysis runs in the candidate's browser and on your own server. If you enable
 S3-compatible storage or managed Postgres/Redis, list those providers as sub-processors. **Per region:** each evidence
-storage location (Settings → Where evidence images are stored) is a sub-processor of the images stored there, in that
-location's region — list, for each organisation, the provider and region of its chosen location (and of any location
+storage location (Settings → Where evidence images are stored) is a sub-processor of the images — and, for exams that
+record, the recordings — stored there, in that location's region — list, for each organisation, the provider and region of its chosen location (and of any location
 still holding its earlier images until they are moved), next to the provider and region of the database, which holds
 the face templates and all other records whatever location is chosen.
 
